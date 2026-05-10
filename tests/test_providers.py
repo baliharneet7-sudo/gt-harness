@@ -237,9 +237,9 @@ def test_openai_provider_translates_tool_schema_to_openai_format():
     assert sent_tool["function"]["parameters"]["required"] == ["command"]
 
 
-def test_normalize_assistant_for_openai_round_trips_tool_calls():
-    from nano.providers import _normalize_assistant_for_openai
-    out = _normalize_assistant_for_openai({
+def test_normalize_for_openai_round_trips_assistant_tool_calls():
+    from nano.providers import _normalize_for_openai
+    out = _normalize_for_openai({
         "role": "assistant",
         "content": [{"type": "text", "text": "I'll list."},
                     {"type": "tool_use", "id": "tu_1", "name": "bash",
@@ -247,6 +247,29 @@ def test_normalize_assistant_for_openai_round_trips_tool_calls():
         "tool_calls": [{"id": "tu_1", "name": "bash",
                         "arguments": {"command": "ls"}}],
     })
-    assert out["content"] == "I'll list."  # tool_use block dropped from content
-    assert out["tool_calls"][0]["function"]["name"] == "bash"
-    assert out["tool_calls"][0]["function"]["arguments"] == '{"command": "ls"}'
+    assert len(out) == 1
+    assert out[0]["content"] == "I'll list."
+    assert out[0]["tool_calls"][0]["function"]["name"] == "bash"
+    assert out[0]["tool_calls"][0]["function"]["arguments"] == '{"command": "ls"}'
+
+
+def test_normalize_for_openai_splits_tool_results_into_role_tool_messages():
+    from nano.providers import _normalize_for_openai
+    out = _normalize_for_openai({
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "tu_1",
+             "content": "hello\n", "is_error": False},
+            {"type": "tool_result", "tool_use_id": "tu_2",
+             "content": "ERROR: bad", "is_error": True},
+        ],
+    })
+    assert len(out) == 2
+    assert out[0] == {"role": "tool", "tool_call_id": "tu_1", "content": "hello\n"}
+    assert out[1] == {"role": "tool", "tool_call_id": "tu_2", "content": "ERROR: bad"}
+
+
+def test_normalize_for_openai_passes_plain_user_through():
+    from nano.providers import _normalize_for_openai
+    out = _normalize_for_openai({"role": "user", "content": "what"})
+    assert out == [{"role": "user", "content": "what"}]

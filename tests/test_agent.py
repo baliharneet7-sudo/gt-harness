@@ -92,3 +92,32 @@ def test_agent_token_cap_stops_loop():
                   max_input_tokens=80_000)
     result = agent.run("burn budget")
     assert result.stop_reason == "max_tokens"
+
+
+def test_agent_reports_tool_error_back_to_model():
+    """When dispatch raises ToolError, the loop continues with is_error=True
+    in the tool_result, and the model gets to retry."""
+    from nano.tools import ToolError
+
+    fp = FakeProvider([
+        StepResult(
+            text="trying", tool_calls=[ToolCall(
+                id="t1", name="read_file", arguments={"path": "no/such/file"})],
+            stop_reason="tool_use", usage=_u(10, 5),
+        ),
+        StepResult(text="gave up", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("read missing file")
+
+    assert result.stop_reason == "end_turn"
+    assert result.iterations == 2
+    second_call_msgs = fp.calls[1]["messages"]
+    last_user = [m for m in second_call_msgs if m["role"] == "user"][-1]
+    content = last_user["content"]
+    assert isinstance(content, list)
+    tr = content[0]
+    assert tr["type"] == "tool_result"
+    assert tr["is_error"] is True
+    assert "ERROR" in tr["content"]

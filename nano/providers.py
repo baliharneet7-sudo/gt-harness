@@ -114,28 +114,52 @@ _OAI_FINISH_REASON = {
 }
 
 
-def _normalize_assistant_for_openai(msg: dict[str, Any]) -> dict[str, Any]:
-    """Convert our internal assistant message (which may carry tool_calls in
-    Anthropic-style dict form) to OpenAI's expected shape. Tool messages stay
-    role='tool' with tool_call_id."""
-    if msg["role"] != "assistant":
-        return msg
+def _normalize_for_openai(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert one internal message into one or more OpenAI chat.completions
+    messages. Assistant messages may carry both content blocks and tool_calls;
+    user messages may carry tool_result blocks that must split into role='tool'
+    messages, one per tool result."""
+    role = msg["role"]
     content = msg.get("content")
-    tool_calls = msg.get("tool_calls")
-    out: dict[str, Any] = {"role": "assistant"}
-    if isinstance(content, list):
-        out["content"] = "\n".join(
-            b["text"] for b in content if b.get("type") == "text"
-        ) or None
-    else:
-        out["content"] = content
-    if tool_calls:
-        out["tool_calls"] = [{
-            "id": tc["id"],
-            "type": "function",
-            "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])},
-        } for tc in tool_calls]
-    return out
+
+    if role == "assistant":
+        out: dict[str, Any] = {"role": "assistant"}
+        if isinstance(content, list):
+            out["content"] = "\n".join(
+                b["text"] for b in content if b.get("type") == "text"
+            ) or None
+        else:
+            out["content"] = content
+        tool_calls = msg.get("tool_calls")
+        if tool_calls:
+            out["tool_calls"] = [{
+                "id": tc["id"],
+                "type": "function",
+                "function": {"name": tc["name"],
+                             "arguments": json.dumps(tc["arguments"])},
+            } for tc in tool_calls]
+        return [out]
+
+    if role == "user" and isinstance(content, list) and any(
+            b.get("type") == "tool_result" for b in content):
+        # Split tool_result blocks into individual role="tool" messages.
+        # Any plain text blocks become a separate role="user" message.
+        out_msgs: list[dict[str, Any]] = []
+        text_parts: list[str] = []
+        for b in content:
+            if b.get("type") == "tool_result":
+                out_msgs.append({
+                    "role": "tool",
+                    "tool_call_id": b["tool_use_id"],
+                    "content": b["content"],
+                })
+            elif b.get("type") == "text":
+                text_parts.append(b["text"])
+        if text_parts:
+            out_msgs.insert(0, {"role": "user", "content": "\n".join(text_parts)})
+        return out_msgs
+
+    return [msg]
 
 
 @dataclass
@@ -157,9 +181,11 @@ class OpenAIProvider:
         tools: list[dict[str, Any]],
         system: str,
     ) -> StepResult:
-        oai_messages = [{"role": "system", "content": system}] + [
-            _normalize_assistant_for_openai(m) for m in messages
+        oai_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system}
         ]
+        for m in messages:
+            oai_messages.extend(_normalize_for_openai(m))
         oai_tools = [{
             "type": "function",
             "function": {
