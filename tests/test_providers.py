@@ -119,3 +119,22 @@ def test_anthropic_provider_applies_cache_control_to_system_and_last_user():
     assert last_user["role"] == "user"
     last_block = last_user["content"][-1]
     assert last_block["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_provider_caches_last_user_not_last_message():
+    # Mid-conversation: last message is assistant. Cache should still go on the
+    # most recent user turn, not the assistant turn.
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _fake_anthropic_response_with_tool()
+    p = AnthropicProvider(model="claude-opus-4-7", client=fake_client)
+    p.step(
+        messages=[
+            {"role": "user", "content": "do thing"},
+            {"role": "assistant", "content": "thinking"},
+        ],
+        tools=[], system="s",
+    )
+    sent = fake_client.messages.create.call_args.kwargs["messages"]
+    assert sent[0]["role"] == "user"
+    assert sent[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in sent[1]["content"][-1]
