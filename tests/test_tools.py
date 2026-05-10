@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from nano.tools import BashTool, ToolError, edit_file, read_file
+from nano.tools import TOOLS, BashTool, ToolError, dispatch, edit_file, read_file
 
 
 @pytest.fixture
@@ -119,3 +119,23 @@ def test_edit_file_no_match_raises(tmp_workdir):
     with pytest.raises(ToolError) as exc:
         edit_file(str(p), old="nope", new="something")
     assert "not found" in str(exc.value).lower() or "no match" in str(exc.value).lower()
+
+
+def test_registry_has_three_tools():
+    assert {t["name"] for t in TOOLS} == {"bash", "read_file", "edit_file"}
+    for t in TOOLS:
+        assert "description" in t and t["description"]
+        assert t["input_schema"]["type"] == "object"
+
+
+def test_dispatch_runs_read_file(tmp_workdir, bash):
+    p = tmp_workdir / "f.txt"
+    p.write_text("hello\n")
+    out = dispatch("read_file", {"path": str(p)}, bash=bash)
+    assert "hello" in out
+
+
+def test_dispatch_unknown_tool(bash):
+    with pytest.raises(ToolError) as exc:
+        dispatch("nope", {}, bash=bash)
+    assert "unknown tool" in str(exc.value).lower()

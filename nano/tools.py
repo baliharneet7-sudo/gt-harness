@@ -174,3 +174,68 @@ def edit_file(path: str, old: str, new: str) -> str:
         )
     p.write_text(text.replace(old, new, 1), encoding="utf-8")
     return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."
+
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "bash",
+        "description": (
+            "Run a shell command in a persistent session. cwd, env, and shell "
+            "state are preserved across calls. Use for running tests, listing "
+            "files, building, anything stateful."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer", "default": 30,
+                            "description": "Seconds before kill. Default 30."},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": (
+            "Read a UTF-8 text file. Returns 1-indexed lines prefixed with "
+            "'<n>\\t'. Use line_start/line_end to slice large files."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "line_start": {"type": "integer", "minimum": 1},
+                "line_end": {"type": "integer", "minimum": 1},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Replace exactly one occurrence of `old` with `new` in the file. "
+            "Fails if `old` is missing or matches more than one location. "
+            "Pass old='' to create a new file with `new` as content."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old": {"type": "string"},
+                "new": {"type": "string"},
+            },
+            "required": ["path", "old", "new"],
+        },
+    },
+]
+
+
+def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
+    if name == "bash":
+        return bash.run(arguments["command"], timeout=arguments.get("timeout", 30))
+    if name == "read_file":
+        return read_file(arguments["path"],
+                         arguments.get("line_start"), arguments.get("line_end"))
+    if name == "edit_file":
+        return edit_file(arguments["path"], arguments["old"], arguments["new"])
+    raise ToolError(f"Unknown tool: {name}")
