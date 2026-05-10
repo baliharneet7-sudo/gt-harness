@@ -145,3 +145,32 @@ def read_file(path: str, line_start: int | None = None,
     selected = lines[start:end]
     return _truncate("\n".join(f"{i + start + 1}\t{ln}"
                                for i, ln in enumerate(selected)) + "\n")
+
+
+def edit_file(path: str, old: str, new: str) -> str:
+    p = Path(path)
+    if old == "":
+        if p.exists():
+            raise ToolError(
+                f"edit_file with old='' creates a new file but {path} already exists. "
+                f"Read it first, then call with the exact text to replace."
+            )
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(new, encoding="utf-8")
+        return f"Created {path} ({len(new)} chars)."
+
+    if not p.exists():
+        raise ToolError(f"File not found: {path}")
+    text = p.read_text(encoding="utf-8")
+    count = text.count(old)
+    if count == 0:
+        raise ToolError(
+            f"old string not found in {path}. Re-read the file and try again."
+        )
+    if count > 1:
+        raise ToolError(
+            f"old string matches {count} places in {path} - must be unique. "
+            f"Add surrounding context to disambiguate."
+        )
+    p.write_text(text.replace(old, new, 1), encoding="utf-8")
+    return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."

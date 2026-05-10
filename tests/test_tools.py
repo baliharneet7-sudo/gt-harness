@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from nano.tools import BashTool, ToolError, read_file
+from nano.tools import BashTool, ToolError, edit_file, read_file
 
 
 @pytest.fixture
@@ -87,3 +87,35 @@ def test_read_file_binary_rejected(tmp_workdir):
     with pytest.raises(ToolError) as exc:
         read_file(str(p))
     assert "binary" in str(exc.value).lower() or "decode" in str(exc.value).lower()
+
+
+def test_edit_file_replaces_unique(tmp_workdir):
+    p = tmp_workdir / "x.py"
+    p.write_text("a = 1\nb = 2\n")
+    out = edit_file(str(p), old="b = 2", new="b = 99")
+    assert "edited" in out.lower()
+    assert p.read_text() == "a = 1\nb = 99\n"
+
+
+def test_edit_file_creates_when_old_empty(tmp_workdir):
+    p = tmp_workdir / "new.py"
+    out = edit_file(str(p), old="", new="print('hi')\n")
+    assert p.read_text() == "print('hi')\n"
+    assert "created" in out.lower()
+
+
+def test_edit_file_non_unique_raises(tmp_workdir):
+    p = tmp_workdir / "y.py"
+    p.write_text("x = 1\nx = 1\n")
+    with pytest.raises(ToolError) as exc:
+        edit_file(str(p), old="x = 1", new="x = 2")
+    assert "non-unique" in str(exc.value).lower() or "matches 2" in str(exc.value).lower()
+    assert p.read_text() == "x = 1\nx = 1\n"  # unchanged
+
+
+def test_edit_file_no_match_raises(tmp_workdir):
+    p = tmp_workdir / "z.py"
+    p.write_text("hello\n")
+    with pytest.raises(ToolError) as exc:
+        edit_file(str(p), old="nope", new="something")
+    assert "not found" in str(exc.value).lower() or "no match" in str(exc.value).lower()
