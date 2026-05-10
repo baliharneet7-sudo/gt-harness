@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -34,9 +36,6 @@ class Provider(Protocol):
         tools: list[dict[str, Any]],
         system: str,
     ) -> StepResult: ...
-
-
-from dataclasses import dataclass
 
 
 def _ensure_block_list(content: Any) -> list[dict[str, Any]]:
@@ -104,5 +103,101 @@ class AnthropicProvider:
             text="\n".join(text_parts) if text_parts else None,
             tool_calls=tool_calls,
             stop_reason=resp.stop_reason,
+            usage=usage,
+        )
+
+
+_OAI_FINISH_REASON = {
+    "stop": "end_turn",
+    "tool_calls": "tool_use",
+    "length": "max_tokens",
+}
+
+
+def _normalize_assistant_for_openai(msg: dict[str, Any]) -> dict[str, Any]:
+    """Convert our internal assistant message (which may carry tool_calls in
+    Anthropic-style dict form) to OpenAI's expected shape. Tool messages stay
+    role='tool' with tool_call_id."""
+    if msg["role"] != "assistant":
+        return msg
+    content = msg.get("content")
+    tool_calls = msg.get("tool_calls")
+    out: dict[str, Any] = {"role": "assistant"}
+    if isinstance(content, list):
+        out["content"] = "\n".join(
+            b["text"] for b in content if b.get("type") == "text"
+        ) or None
+    else:
+        out["content"] = content
+    if tool_calls:
+        out["tool_calls"] = [{
+            "id": tc["id"],
+            "type": "function",
+            "function": {"name": tc["name"], "arguments": json.dumps(tc["arguments"])},
+        } for tc in tool_calls]
+    return out
+
+
+@dataclass
+class OpenAIProvider:
+    model: str
+    client: Any = None
+    base_url: str | None = None
+    max_tokens: int = 4096
+
+    def __post_init__(self) -> None:
+        if self.client is None:
+            import openai
+            self.client = openai.OpenAI(base_url=self.base_url) if self.base_url \
+                else openai.OpenAI()
+
+    def step(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        system: str,
+    ) -> StepResult:
+        oai_messages = [{"role": "system", "content": system}] + [
+            _normalize_assistant_for_openai(m) for m in messages
+        ]
+        oai_tools = [{
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t["description"],
+                "parameters": t["input_schema"],
+            },
+        } for t in tools]
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": oai_messages,
+            "max_tokens": self.max_tokens,
+        }
+        if oai_tools:
+            kwargs["tools"] = oai_tools
+
+        resp = self.client.chat.completions.create(**kwargs)
+        choice = resp.choices[0]
+        msg = choice.message
+
+        tool_calls: list[ToolCall] = []
+        for tc in (msg.tool_calls or []):
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": tc.function.arguments}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+
+        usage = Usage(
+            input_tokens=getattr(resp.usage, "prompt_tokens", 0),
+            output_tokens=getattr(resp.usage, "completion_tokens", 0),
+            cache_read_tokens=0,
+        )
+
+        return StepResult(
+            text=msg.content,
+            tool_calls=tool_calls,
+            stop_reason=_OAI_FINISH_REASON.get(choice.finish_reason, choice.finish_reason),
             usage=usage,
         )

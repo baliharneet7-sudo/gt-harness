@@ -138,3 +138,100 @@ def test_anthropic_provider_caches_last_user_not_last_message():
     assert sent[0]["role"] == "user"
     assert sent[0]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in sent[1]["content"][-1]
+
+
+import json as _json
+
+from nano.providers import OpenAIProvider
+
+
+def _fake_openai_response_with_tool():
+    return MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(
+                content="I'll list.",
+                tool_calls=[MagicMock(
+                    id="call_1",
+                    function=MagicMock(name="bash",
+                                       arguments=_json.dumps({"command": "ls"})),
+                )],
+            ),
+            finish_reason="tool_calls",
+        )],
+        usage=MagicMock(prompt_tokens=50, completion_tokens=20),
+    )
+
+
+def test_openai_provider_translates_tool_calls():
+    # MagicMock auto-sets `.name`; force it to the literal string we want.
+    resp = _fake_openai_response_with_tool()
+    resp.choices[0].message.tool_calls[0].function.name = "bash"
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    result = p.step(
+        messages=[{"role": "user", "content": "list"}],
+        tools=[{"name": "bash", "description": "shell",
+                "input_schema": {"type": "object",
+                                 "properties": {"command": {"type": "string"}},
+                                 "required": ["command"]}}],
+        system="sys",
+    )
+
+    assert result.text == "I'll list."
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].name == "bash"
+    assert result.tool_calls[0].arguments == {"command": "ls"}
+    assert result.stop_reason == "tool_use"  # normalized from "tool_calls"
+    assert result.usage.input_tokens == 50
+
+
+def test_openai_provider_end_turn():
+    resp = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="done", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    result = p.step(messages=[{"role": "user", "content": "hi"}], tools=[], system="s")
+
+    assert result.text == "done"
+    assert result.tool_calls == []
+    assert result.stop_reason == "end_turn"  # normalized from "stop"
+
+
+def test_openai_provider_translates_tool_schema_to_openai_format():
+    resp = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="hi", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="gpt-5", client=fake_client)
+
+    p.step(
+        messages=[{"role": "user", "content": "x"}],
+        tools=[{"name": "bash", "description": "shell",
+                "input_schema": {"type": "object",
+                                 "properties": {"command": {"type": "string"}},
+                                 "required": ["command"]}}],
+        system="SYS",
+    )
+
+    kwargs = fake_client.chat.completions.create.call_args.kwargs
+    assert kwargs["messages"][0] == {"role": "system", "content": "SYS"}
+    sent_tool = kwargs["tools"][0]
+    assert sent_tool["type"] == "function"
+    assert sent_tool["function"]["name"] == "bash"
+    assert sent_tool["function"]["parameters"]["required"] == ["command"]
