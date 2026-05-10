@@ -121,3 +121,42 @@ def test_agent_reports_tool_error_back_to_model():
     assert tr["type"] == "tool_result"
     assert tr["is_error"] is True
     assert "ERROR" in tr["content"]
+
+
+def test_agent_truncates_oldest_tool_result_when_history_grows():
+    # Five tool_use rounds then a final end_turn. Truncation budget set so
+    # the oldest tool_result must be replaced with a placeholder before the
+    # last step is sent to the provider.
+    big = "x" * 5000
+    rounds = []
+    for i in range(5):
+        rounds.append(StepResult(
+            text=f"step{i}",
+            tool_calls=[ToolCall(id=f"t{i}", name="bash",
+                                 arguments={"command": "echo " + big})],
+            stop_reason="tool_use", usage=_u(100, 10)))
+    rounds.append(StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                             usage=_u(100, 10)))
+    fp = FakeProvider(rounds)
+
+    class _RecordingBash:
+        def run(self, command, timeout=30):
+            return command.removeprefix("echo ")
+
+    agent = Agent(provider=fp, system="sys",
+                  max_iterations=20, max_input_tokens=10**9,
+                  bash=_RecordingBash())
+    agent.truncation_char_budget = 8000  # forces truncation by step 4+
+    result = agent.run("loop")
+
+    assert result.stop_reason == "end_turn"
+    truncations = [t for t in result.transcript if t.get("type") == "truncation"]
+    assert truncations, "expected at least one truncation event"
+    last_call_messages = fp.calls[-1]["messages"]
+    seen_placeholder = any(
+        isinstance(m.get("content"), list)
+        and any(b.get("content", "").startswith("[truncated")
+                for b in m["content"] if b.get("type") == "tool_result")
+        for m in last_call_messages
+    )
+    assert seen_placeholder

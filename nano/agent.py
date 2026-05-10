@@ -25,6 +25,7 @@ class Agent:
     system: str
     max_iterations: int = 30
     max_input_tokens: int = 200_000
+    truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
@@ -52,6 +53,7 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
 
+            self._truncate_if_needed(messages, transcript)
             sr: StepResult = self.provider.step(messages, TOOLS, self.system)
             total_in += sr.usage.input_tokens
             total_out += sr.usage.output_tokens
@@ -87,6 +89,37 @@ class Agent:
 
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
             messages.append({"role": "user", "content": tool_results})
+
+    def _truncate_if_needed(self, messages: list[dict[str, Any]],
+                            transcript: list[dict[str, Any]]) -> None:
+        def total_chars() -> int:
+            n = 0
+            for m in messages:
+                c = m.get("content")
+                if isinstance(c, str):
+                    n += len(c)
+                elif isinstance(c, list):
+                    for b in c:
+                        n += len(b.get("text", "")) + len(b.get("content", ""))
+            return n
+
+        if total_chars() <= self.truncation_char_budget:
+            return
+
+        # Drop oldest tool_result block content first; keep the message and id.
+        for m in messages:
+            if not isinstance(m.get("content"), list):
+                continue
+            for b in m["content"]:
+                if b.get("type") == "tool_result" and not str(
+                        b.get("content", "")).startswith("[truncated"):
+                    original_len = len(b.get("content", ""))
+                    b["content"] = f"[truncated - {original_len} chars dropped]"
+                    transcript.append({"type": "truncation",
+                                       "tool_use_id": b.get("tool_use_id"),
+                                       "dropped_chars": original_len})
+                    if total_chars() <= self.truncation_char_budget:
+                        return
 
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:
         # Internal canonical shape: assistant carries text + structured tool_calls.
