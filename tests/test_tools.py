@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from nano.tools import BashTool, ToolError
+from nano.tools import BashTool, ToolError, read_file
 
 
 @pytest.fixture
@@ -54,3 +54,36 @@ def test_bash_strips_cmd_prompt_artifacts_on_windows(bash):
     assert out.startswith("clean") or out.lstrip().startswith("clean"), \
         f"prompt artifacts leaked: {out!r}"
     assert ">" not in out.split("clean", 1)[0], f"leading '>' present: {out!r}"
+
+
+def test_read_file_full(tmp_workdir):
+    p = tmp_workdir / "a.txt"
+    p.write_text("line1\nline2\nline3\n")
+    out = read_file(str(p))
+    assert "1\tline1" in out
+    assert "2\tline2" in out
+    assert "3\tline3" in out
+
+
+def test_read_file_range(tmp_workdir):
+    p = tmp_workdir / "a.txt"
+    p.write_text("\n".join(f"row{i}" for i in range(1, 11)) + "\n")
+    out = read_file(str(p), line_start=3, line_end=5)
+    assert "3\trow3" in out
+    assert "5\trow5" in out
+    assert "row1" not in out
+    assert "row6" not in out
+
+
+def test_read_file_missing_raises(tmp_workdir):
+    with pytest.raises(ToolError) as exc:
+        read_file(str(tmp_workdir / "no.txt"))
+    assert "not found" in str(exc.value).lower()
+
+
+def test_read_file_binary_rejected(tmp_workdir):
+    p = tmp_workdir / "blob.bin"
+    p.write_bytes(b"\x00\x01\x02\x03BINARY\xff")
+    with pytest.raises(ToolError) as exc:
+        read_file(str(p))
+    assert "binary" in str(exc.value).lower() or "decode" in str(exc.value).lower()
