@@ -1,0 +1,40 @@
+from unittest.mock import MagicMock, patch
+
+from nano.cli import build_provider, main
+
+
+def test_build_provider_anthropic_by_default(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-x")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    p = build_provider(model="claude-opus-4-7", base_url=None)
+    assert p.__class__.__name__ == "AnthropicProvider"
+
+
+def test_build_provider_openai_for_gpt_model(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
+    p = build_provider(model="gpt-5", base_url=None)
+    assert p.__class__.__name__ == "OpenAIProvider"
+
+
+def test_build_provider_openai_with_base_url():
+    p = build_provider(model="local/llama3", base_url="http://localhost:8000/v1")
+    assert p.__class__.__name__ == "OpenAIProvider"
+    assert p.base_url == "http://localhost:8000/v1"
+
+
+def test_main_runs_agent_and_prints(monkeypatch, capsys):
+    fake_agent = MagicMock()
+    fake_agent.run.return_value = MagicMock(
+        final_text="DONE",
+        stop_reason="end_turn",
+        iterations=2,
+        total_input_tokens=100,
+        total_output_tokens=20,
+        total_cache_read_tokens=80,
+    )
+    with patch("nano.cli.Agent", return_value=fake_agent), \
+         patch("nano.cli.build_provider", return_value=MagicMock(model="m")):
+        rc = main(["run", "do the thing", "--model", "m"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DONE" in out
