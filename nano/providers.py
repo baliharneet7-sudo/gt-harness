@@ -143,7 +143,7 @@ class OpenAIProvider:
     model: str
     client: Any = None
     base_url: str | None = None
-    max_tokens: int = 4096
+    max_completion_tokens: int = 4096
 
     def __post_init__(self) -> None:
         if self.client is None:
@@ -172,7 +172,7 @@ class OpenAIProvider:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": oai_messages,
-            "max_tokens": self.max_tokens,
+            "max_completion_tokens": self.max_completion_tokens,
         }
         if oai_tools:
             kwargs["tools"] = oai_tools

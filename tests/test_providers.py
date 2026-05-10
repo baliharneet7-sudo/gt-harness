@@ -235,3 +235,18 @@ def test_openai_provider_translates_tool_schema_to_openai_format():
     assert sent_tool["type"] == "function"
     assert sent_tool["function"]["name"] == "bash"
     assert sent_tool["function"]["parameters"]["required"] == ["command"]
+
+
+def test_normalize_assistant_for_openai_round_trips_tool_calls():
+    from nano.providers import _normalize_assistant_for_openai
+    out = _normalize_assistant_for_openai({
+        "role": "assistant",
+        "content": [{"type": "text", "text": "I'll list."},
+                    {"type": "tool_use", "id": "tu_1", "name": "bash",
+                     "input": {"command": "ls"}}],
+        "tool_calls": [{"id": "tu_1", "name": "bash",
+                        "arguments": {"command": "ls"}}],
+    })
+    assert out["content"] == "I'll list."  # tool_use block dropped from content
+    assert out["tool_calls"][0]["function"]["name"] == "bash"
+    assert out["tool_calls"][0]["function"]["arguments"] == '{"command": "ls"}'
