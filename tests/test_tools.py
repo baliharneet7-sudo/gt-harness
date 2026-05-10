@@ -46,3 +46,11 @@ def test_bash_truncates_huge_output(bash):
     out = bash.run(cmd, timeout=10)
     assert len(out) < 200000
     assert "truncated" in out.lower()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe prompt artifacts are Windows-only")
+def test_bash_strips_cmd_prompt_artifacts_on_windows(bash):
+    out = bash.run("echo clean", timeout=5)
+    assert out.startswith("clean") or out.lstrip().startswith("clean"), \
+        f"prompt artifacts leaked: {out!r}"
+    assert ">" not in out.split("clean", 1)[0], f"leading '>' present: {out!r}"

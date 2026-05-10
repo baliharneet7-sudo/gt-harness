@@ -26,6 +26,22 @@ def _truncate(text: str, limit: int = _OUTPUT_LIMIT) -> str:
     return f"{head}\n... [truncated {dropped} chars] ...\n{tail}"
 
 
+def _strip_cmd_prompt(text: str) -> str:
+    """Remove cmd.exe '>' prompt artifacts from captured shell output (Windows)."""
+    out_lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(">"):
+            stripped = stripped[1:]
+            # Drop the line entirely if it's now blank.
+            if not stripped.strip():
+                continue
+            out_lines.append(stripped)
+        else:
+            out_lines.append(line)
+    return "".join(out_lines)
+
+
 class BashTool:
     """Persistent shell. Each `run()` writes the command followed by a sentinel
     echo, then reads stdout until the sentinel appears. Cwd, env, and shell
@@ -86,7 +102,10 @@ class BashTool:
                 break
             out_lines.append(line)
 
-        return _truncate("".join(out_lines).rstrip("\r\n") + "\n")
+        joined = "".join(out_lines).rstrip("\r\n") + "\n"
+        if sys.platform == "win32":
+            joined = _strip_cmd_prompt(joined)
+        return _truncate(joined)
 
     def _kill(self) -> None:
         if self._proc and self._proc.poll() is None:
@@ -95,6 +114,12 @@ class BashTool:
             except ProcessLookupError:
                 pass
         self._proc = None
+
+    def __del__(self) -> None:
+        try:
+            self._kill()
+        except Exception:
+            pass
 
     def close(self) -> None:
         self._kill()
