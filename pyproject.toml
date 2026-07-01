@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6"]
-eval = ["terminal-bench", "swebench"]
+eval = ["harbor", "swebench"]
 
 [project.scripts]
 nano = "nano.cli:main"
