@@ -68,7 +68,7 @@ class BashTool:
             env={**os.environ, "PS1": "", "PROMPT_COMMAND": ""},
         )
 
-    def run(self, command: str, timeout: int = 30) -> str:
+    def run(self, command: str, timeout: int = 60) -> str:
         if self._proc is None or self._proc.poll() is not None:
             self._spawn()
         sentinel = f"__NANO_DONE_{uuid.uuid4().hex}__"
@@ -87,7 +87,9 @@ class BashTool:
                 self._kill()
                 raise ToolError(
                     f"Command exceeded timeout of {timeout}s and was killed: "
-                    f"{command!r}"
+                    f"{command!r}. The shell was restarted: cwd, env vars, and "
+                    f"background processes are reset. Re-establish state if "
+                    f"needed; pass a larger timeout for long commands."
                 )
             line = self._proc.stdout.readline()
             if not line:
@@ -188,8 +190,9 @@ TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "timeout": {"type": "integer", "default": 30,
-                            "description": "Seconds before kill. Default 30."},
+                "timeout": {"type": "integer", "default": 60,
+                            "description": "Seconds before kill. Default 60. "
+                            "Set generously for builds, installs, and tests."},
             },
             "required": ["command"],
         },
@@ -232,7 +235,7 @@ TOOLS: list[dict[str, Any]] = [
 
 def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
     if name == "bash":
-        return bash.run(arguments["command"], timeout=arguments.get("timeout", 30))
+        return bash.run(arguments["command"], timeout=arguments.get("timeout", 60))
     if name == "read_file":
         return read_file(arguments["path"],
                          arguments.get("line_start"), arguments.get("line_end"))
