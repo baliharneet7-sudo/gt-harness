@@ -54,7 +54,7 @@ def test_agent_executes_tool_then_completes(tmp_workdir):
         StepResult(text="done", tool_calls=[], stop_reason="end_turn",
                    usage=_u(70, 4)),
     ])
-    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False)
     result = agent.run("read it")
 
     assert result.iterations == 2
@@ -114,7 +114,7 @@ def test_agent_cumulative_spend_does_not_kill_long_tasks():
                             usage=_u(50_000, 50)))
     fp = FakeProvider(steps)
     agent = Agent(provider=fp, system="sys", max_iterations=10,
-                  max_input_tokens=80_000)
+                  max_input_tokens=80_000, verify=False)
     result = agent.run("long task")
     assert result.stop_reason == "end_turn"
     assert result.total_input_tokens == 150_000
@@ -134,7 +134,7 @@ def test_agent_reports_tool_error_back_to_model():
         StepResult(text="gave up", tool_calls=[], stop_reason="end_turn",
                    usage=_u(10, 5)),
     ])
-    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False)
     result = agent.run("read missing file")
 
     assert result.stop_reason == "end_turn"
@@ -171,7 +171,7 @@ def test_agent_truncates_oldest_tool_result_when_history_grows():
 
     agent = Agent(provider=fp, system="sys",
                   max_iterations=20, max_input_tokens=10**9,
-                  bash=_RecordingBash())
+                  bash=_RecordingBash(), verify=False)
     agent.truncation_char_budget = 8000  # forces truncation by step 4+
     result = agent.run("loop")
 
@@ -205,3 +205,52 @@ def test_agent_nudges_continuation_when_output_truncated():
     second_call_msgs = fp.calls[1]["messages"]
     last_user = [m for m in second_call_msgs if m["role"] == "user"][-1]
     assert "cut off" in str(last_user["content"])
+
+
+def test_agent_verify_pass_challenges_first_done():
+    # After the model first claims done (having used tools), the loop injects
+    # one verification nudge; the second end_turn is accepted.
+    fp = FakeProvider([
+        StepResult(text="fixing", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+        StepResult(text="verified done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(30, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("fix the bug")
+
+    assert result.stop_reason == "end_turn"
+    assert result.iterations == 3
+    assert result.final_text == "verified done"
+    third_call_msgs = fp.calls[2]["messages"]
+    last_user = [m for m in third_call_msgs if m["role"] == "user"][-1]
+    assert "re-read the original task" in str(last_user["content"])
+
+
+def test_agent_verify_pass_skipped_without_tool_use():
+    # Pure text answer, no tools touched: nothing to verify, no extra step.
+    fp = FakeProvider([
+        StepResult(text="answer", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("what is 2+2")
+    assert result.iterations == 1
+    assert result.final_text == "answer"
+
+
+def test_agent_verify_pass_can_be_disabled():
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False)
+    result = agent.run("fix it")
+    assert result.iterations == 2
+    assert result.final_text == "done"

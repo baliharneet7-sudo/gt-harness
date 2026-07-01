@@ -26,6 +26,7 @@ class Agent:
     max_iterations: int = 30
     max_input_tokens: int = 200_000
     truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
+    verify: bool = True  # challenge the first "done" once before accepting it
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
@@ -42,6 +43,8 @@ class Agent:
         transcript: list[dict[str, Any]] = [{"type": "user", "content": task}]
         total_in = total_out = total_cache = 0
         iteration = 0
+        used_tools = False
+        verify_pending = self.verify
 
         while True:
             iteration += 1
@@ -92,6 +95,19 @@ class Agent:
                 continue
 
             if sr.stop_reason == "end_turn" or not sr.tool_calls:
+                # Verify pass: models grade their own work generously. Push
+                # back on the first "done" once - cheap insurance against
+                # unmet requirements. Skipped when no tool was ever used.
+                if verify_pending and used_tools:
+                    verify_pending = False
+                    nudge = ("Before finishing: re-read the original task and "
+                             "check that each stated requirement is met. Run "
+                             "the relevant tests or code to confirm. If "
+                             "anything is unverified or broken, fix it now; "
+                             "otherwise finish with your summary.")
+                    messages.append({"role": "user", "content": nudge})
+                    transcript.append({"type": "user", "content": nudge})
+                    continue
                 return AgentResult(
                     final_text=sr.text, stop_reason="end_turn",
                     iterations=iteration,
@@ -99,6 +115,7 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
 
+            used_tools = True
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
             messages.append({"role": "user", "content": tool_results})
 
