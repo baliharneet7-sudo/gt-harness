@@ -79,19 +79,45 @@ def test_agent_iteration_cap_stops_loop():
     assert result.stop_reason == "max_iterations"
 
 
-def test_agent_token_cap_stops_loop():
+def test_agent_token_cap_stops_when_context_outgrows_budget():
+    # The cap is on per-step context size (what one request sends), not on
+    # cumulative spend. First step fits; second step's context exceeds cap.
     huge = [
         StepResult(text=None,
                    tool_calls=[ToolCall(id="t1", name="bash",
                                         arguments={"command": "echo x"})],
                    stop_reason="tool_use", usage=_u(50_000, 100)),
-        StepResult(text="ok", tool_calls=[], stop_reason="end_turn", usage=_u(50_000, 50)),
+        StepResult(text=None,
+                   tool_calls=[ToolCall(id="t2", name="bash",
+                                        arguments={"command": "echo x"})],
+                   stop_reason="tool_use", usage=_u(90_000, 100)),
     ]
     fp = FakeProvider(huge)
     agent = Agent(provider=fp, system="sys", max_iterations=10,
                   max_input_tokens=80_000)
     result = agent.run("burn budget")
     assert result.stop_reason == "max_tokens"
+    assert result.iterations == 2
+
+
+def test_agent_cumulative_spend_does_not_kill_long_tasks():
+    # Regression: cumulative input across steps (150k) exceeds the cap, but
+    # each individual step's context (50k) fits — the task must complete.
+    steps = [
+        StepResult(text=None,
+                   tool_calls=[ToolCall(id=f"t{i}", name="bash",
+                                        arguments={"command": "echo x"})],
+                   stop_reason="tool_use", usage=_u(50_000, 100))
+        for i in range(2)
+    ]
+    steps.append(StepResult(text="ok", tool_calls=[], stop_reason="end_turn",
+                            usage=_u(50_000, 50)))
+    fp = FakeProvider(steps)
+    agent = Agent(provider=fp, system="sys", max_iterations=10,
+                  max_input_tokens=80_000)
+    result = agent.run("long task")
+    assert result.stop_reason == "end_turn"
+    assert result.total_input_tokens == 150_000
 
 
 def test_agent_reports_tool_error_back_to_model():

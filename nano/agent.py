@@ -69,9 +69,11 @@ class Agent:
 
             messages.append(self._assistant_message(sr))
 
-            # Token cap takes priority over natural completion: if we breached
-            # the budget on this step, surface that even if the model said end_turn.
-            if total_in >= self.max_input_tokens:
+            # The cap is on per-step context size, not cumulative spend: every
+            # step resends the whole conversation, so capping the sum would
+            # silently end long tasks after a handful of steps. Cap breach takes
+            # priority over natural completion even if the model said end_turn.
+            if sr.usage.input_tokens >= self.max_input_tokens:
                 return AgentResult(
                     final_text=sr.text, stop_reason="max_tokens",
                     iterations=iteration,
