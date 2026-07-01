@@ -81,6 +81,16 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
 
+            # Output cut off mid-response (often mid-tool-call JSON): nudge a
+            # continuation instead of misreporting success.
+            if sr.stop_reason == "max_tokens" and not sr.tool_calls:
+                nudge = ("Your previous response was cut off by the output "
+                         "token limit. Continue: re-issue the incomplete tool "
+                         "call in full, or finish your answer.")
+                messages.append({"role": "user", "content": nudge})
+                transcript.append({"type": "user", "content": nudge})
+                continue
+
             if sr.stop_reason == "end_turn" or not sr.tool_calls:
                 return AgentResult(
                     final_text=sr.text, stop_reason="end_turn",

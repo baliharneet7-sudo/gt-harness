@@ -186,3 +186,22 @@ def test_agent_truncates_oldest_tool_result_when_history_grows():
         for m in last_call_messages
     )
     assert seen_placeholder
+
+
+def test_agent_nudges_continuation_when_output_truncated():
+    # A response cut off by the output limit (stop_reason=max_tokens, no tool
+    # calls) must not be reported as success — the loop nudges a continuation.
+    fp = FakeProvider([
+        StepResult(text="half a thou", tool_calls=[], stop_reason="max_tokens",
+                   usage=_u(10, 4096)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("long answer")
+
+    assert result.stop_reason == "end_turn"
+    assert result.iterations == 2
+    second_call_msgs = fp.calls[1]["messages"]
+    last_user = [m for m in second_call_msgs if m["role"] == "user"][-1]
+    assert "cut off" in str(last_user["content"])
