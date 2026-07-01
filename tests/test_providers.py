@@ -273,3 +273,67 @@ def test_normalize_for_openai_passes_plain_user_through():
     from nano.providers import _normalize_for_openai
     out = _normalize_for_openai({"role": "user", "content": "what"})
     assert out == [{"role": "user", "content": "what"}]
+
+
+# --- retry behavior ---
+
+from nano.providers import _call_with_retry
+
+
+class _FlakyError(Exception):
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def test_retry_recovers_from_transient_errors(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _FlakyError(429)
+        return "ok"
+
+    assert _call_with_retry(flaky) == "ok"
+    assert calls["n"] == 3
+
+
+def test_retry_gives_up_after_max_attempts(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+
+    def always_529():
+        raise _FlakyError(529)
+
+    import pytest
+    with pytest.raises(_FlakyError):
+        _call_with_retry(always_529)
+
+
+def test_retry_does_not_retry_client_errors():
+    calls = {"n": 0}
+
+    def bad_request():
+        calls["n"] += 1
+        raise _FlakyError(400)
+
+    import pytest
+    with pytest.raises(_FlakyError):
+        _call_with_retry(bad_request)
+    assert calls["n"] == 1
+
+
+def test_anthropic_provider_retries_through_client(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    fake_client.messages.create.side_effect = [
+        _FlakyError(529),
+        _fake_anthropic_response_with_tool(),
+    ]
+    p = AnthropicProvider(model="claude-opus-4-7", client=fake_client)
+    sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
+    assert sr.stop_reason == "tool_use"
+    assert fake_client.messages.create.call_count == 2

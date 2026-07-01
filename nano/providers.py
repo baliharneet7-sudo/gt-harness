@@ -1,10 +1,29 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 529}
+
+
+def _call_with_retry(fn, attempts: int = 3):
+    """Retry transient API failures (rate limits, overload, dropped
+    connections) with exponential backoff. Non-transient errors and the
+    final attempt raise. One unlucky 429 must not zero out a whole task."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            transient = (status in _RETRYABLE_STATUS
+                         or "Connection" in type(e).__name__)
+            if not transient or attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
 
 
 class ToolCall(BaseModel):
@@ -75,13 +94,13 @@ class AnthropicProvider:
                 m["content"][-1]["cache_control"] = {"type": "ephemeral"}
                 break
 
-        resp = self.client.messages.create(
+        resp = _call_with_retry(lambda: self.client.messages.create(
             model=self.model,
             system=sys_param,
             messages=msgs,
             tools=tools,
             max_tokens=self.max_tokens,
-        )
+        ))
 
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -203,7 +222,7 @@ class OpenAIProvider:
         if oai_tools:
             kwargs["tools"] = oai_tools
 
-        resp = self.client.chat.completions.create(**kwargs)
+        resp = _call_with_retry(lambda: self.client.chat.completions.create(**kwargs))
         choice = resp.choices[0]
         msg = choice.message
 
