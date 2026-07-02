@@ -14,11 +14,11 @@
 
 ## Results (after harness hardening)
 
-| Task | claude4_5_haiku ($1.10/$5.50) | gpt-oss-120b ($0.15/$0.60) | claude4_8_opus ($5/$25) |
-|------|-------------------------------|----------------------------|-------------------------|
-| t1 | PASS · 30 it (cap) · 84s | PASS · 10 it · 30s | PASS · 8 it · 47s |
-| t2 | PASS · 30 it (cap) · 85s | PASS · 12 it · 54s | PASS · 30 it (cap) · 212s * |
-| t3 | PASS · 30 it (cap) · 132s | PASS · 13 it · 62s | PASS · 9 it · 90s |
+| Task | claude4_5_haiku ($1.10/$5.50) | gpt-oss-120b ($0.15/$0.60) | claude4_8_opus ($5/$25) | gpt5_4_thinking ($2.50/$15) |
+|------|-------------------------------|----------------------------|-------------------------|------------------------------|
+| t1 | PASS · 30 it (cap) · 84s | PASS · 10 it · 30s | PASS · 8 it · 47s | PASS · 7 it · 22s |
+| t2 | PASS · 30 it (cap) · 85s | PASS · 12 it · 54s | PASS · 30 it (cap) · 212s * | PASS · 9 it · 31s |
+| t3 | PASS · 30 it (cap) · 132s | PASS · 13 it · 62s | PASS · 9 it · 90s | PASS · 15 it · 46s |
 
 \* opus t2 was high-variance across three runs: cmd.exe crash → wander-and-fail → pass-but-looped. Ambiguous task wording made even the frontier model thrash.
 
@@ -27,6 +27,7 @@
 - **opus** — most senior. `pytest.approx` for float totals (avoids equality trap), `tmp_path` fixture, minimal and idiomatic. Fewest lines, best judgment. Missed `raise ... from e`.
 - **gpt-oss-120b** — most professional-looking. Full Args/Returns/Raises docstrings, proper exception chaining (`from e`), defensive `.get("items", [])` beyond spec. Slightly less idiomatic tests (float `==`).
 - **haiku** — correct but junior. Most test cases (6) but hand-rolled `tempfile` + `os.unlink` instead of `tmp_path`; float `==` asserts. Works, reads like a bootcamp grad.
+- **gpt5_4_thinking** (added 2026-07-02) — best tests of the four: `pytest.raises(match=re.escape(...))`, `pytest.approx`, `tmp_path`, and a mixed missing-fields case asserting a non-zero total (stricter than everyone else's all-zero check). Code terse with proper `from exc` chaining. Fastest wall-clock on every task; clean exits on all three, including t2 where opus thrashed. Caveat: higher input tokens (thinking models resend more).
 
 ## Findings
 
