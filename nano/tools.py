@@ -233,12 +233,28 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def _require(arguments: dict[str, Any], name: str, *keys: str) -> None:
+    """A malformed tool call (missing required arg, often from a weaker model
+    or a truncated JSON blob) must come back as a ToolError the model can fix,
+    never an exception that kills the run."""
+    missing = [k for k in keys if k not in arguments]
+    if missing:
+        raise ToolError(
+            f"Tool {name!r} called without required argument(s) "
+            f"{', '.join(missing)}. Provided: {sorted(arguments)}. "
+            f"Re-issue the call with all required arguments."
+        )
+
+
 def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
     if name == "bash":
+        _require(arguments, name, "command")
         return bash.run(arguments["command"], timeout=arguments.get("timeout", 60))
     if name == "read_file":
+        _require(arguments, name, "path")
         return read_file(arguments["path"],
                          arguments.get("line_start"), arguments.get("line_end"))
     if name == "edit_file":
+        _require(arguments, name, "path", "old", "new")
         return edit_file(arguments["path"], arguments["old"], arguments["new"])
     raise ToolError(f"Unknown tool: {name}")

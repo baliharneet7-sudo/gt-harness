@@ -139,3 +139,14 @@ def test_dispatch_unknown_tool(bash):
     with pytest.raises(ToolError) as exc:
         dispatch("nope", {}, bash=bash)
     assert "unknown tool" in str(exc.value).lower()
+
+
+def test_dispatch_missing_required_arg_raises_toolerror(bash):
+    # A malformed tool call (weak model, truncated JSON) must surface as a
+    # ToolError the loop feeds back, never an uncaught KeyError.
+    with pytest.raises(ToolError) as exc:
+        dispatch("bash", {}, bash=bash)
+    assert "command" in str(exc.value)
+
+    with pytest.raises(ToolError):
+        dispatch("edit_file", {"path": "x"}, bash=bash)
