@@ -38,3 +38,15 @@ def test_main_runs_agent_and_prints(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "DONE" in out
+
+
+def test_print_event_shows_tool_call_inputs(capsys):
+    from nano.cli import _print_event
+    from nano.providers import ToolCall
+
+    _print_event({"type": "assistant", "text": None,
+                  "tool_calls": [ToolCall(id="t1", name="bash",
+                                          arguments={"command": "ls -la"})]})
+    out = capsys.readouterr().out
+    assert "bash(" in out
+    assert "ls -la" in out

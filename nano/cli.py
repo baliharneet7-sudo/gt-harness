@@ -31,8 +31,16 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
 
 def _print_event(event: dict) -> None:
     et = event["type"]
-    if et == "assistant" and event.get("text"):
-        _console.print(Panel(event["text"], title="assistant", border_style="cyan"))
+    if et == "assistant":
+        if event.get("text"):
+            _console.print(Panel(event["text"], title="assistant", border_style="cyan"))
+        # Log the tool calls themselves, not just their output. Without the
+        # inputs a transcript is unreadable: you see what came back but never
+        # what the model actually ran.
+        for tc in event.get("tool_calls") or []:
+            args = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
+            _console.print(Panel(f"{tc.name}({args})", title="tool_call",
+                                 border_style="yellow"))
     elif et == "tool_result":
         title = "tool_result" + (" (error)" if event.get("is_error") else "")
         _console.print(Panel(event["output"][:2000], title=title,
