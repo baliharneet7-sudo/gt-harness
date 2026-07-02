@@ -1,0 +1,1 @@
+RESULT openai/gpt5_4_thinking t3 PASS agent_exit=0 46s stop: end_turn  iterations=15  in=28726  out=1302  cache_read=0

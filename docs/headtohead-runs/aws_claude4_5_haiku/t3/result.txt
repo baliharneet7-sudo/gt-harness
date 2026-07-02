@@ -1,0 +1,1 @@
+RESULT aws/claude4_5_haiku t3 PASS agent_exit=1 132s stop: max_iterations  iterations=30  in=4200  out=1581  cache_read=0

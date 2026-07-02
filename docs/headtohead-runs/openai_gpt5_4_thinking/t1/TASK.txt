@@ -1,0 +1,1 @@
+average() in calc.py crashes on an empty list. Fix it to return 0.0 for empty input, then run the tests with 'PYEXE -m pytest test_calc.py -q' and make them pass.

@@ -1,0 +1,5 @@
+{"items": [
+  {"name": "bolt", "price": 0.10, "qty": 500},
+  {"name": "nut", "price": 0.05, "qty": 800},
+  {"name": "gear", "price": 4.50, "qty": 20}
+]}

@@ -1,0 +1,1 @@
+RESULT aws/claude4_5_haiku t2 PASS agent_exit=1 85s 
