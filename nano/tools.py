@@ -1,13 +1,32 @@
 from __future__ import annotations
 
 import os
+import queue
 import shlex
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+
+def _resolve_shell() -> tuple[list[str], bool]:
+    """Pick the persistent shell. Models emit POSIX/bash commands (pipes, &&,
+    heredocs, `;`), so we use bash everywhere it exists — including Windows,
+    where Git ships bash.exe. cmd.exe is a last resort only; it cannot run the
+    commands models actually write. Returns (argv, is_cmd)."""
+    if sys.platform != "win32":
+        return ["bash", "--norc", "--noprofile"], False
+    bash = shutil.which("bash") or next(
+        (p for p in (r"C:\Program Files\Git\bin\bash.exe",
+                     r"C:\Program Files (x86)\Git\bin\bash.exe")
+         if os.path.exists(p)), None)
+    if bash:
+        return [bash, "--norc", "--noprofile"], False
+    return ["cmd.exe", "/Q", "/K", "prompt $G"], True
 
 
 class ToolError(Exception):
@@ -54,10 +73,7 @@ class BashTool:
         self._spawn()
 
     def _spawn(self) -> None:
-        if sys.platform == "win32":
-            cmd = ["cmd.exe", "/Q", "/K", "prompt $G"]
-        else:
-            cmd = ["bash", "--norc", "--noprofile", "-i"]
+        cmd, self._is_cmd = _resolve_shell()
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -67,23 +83,32 @@ class BashTool:
             bufsize=1,
             env={**os.environ, "PS1": "", "PROMPT_COMMAND": ""},
         )
+        # A reader thread drains stdout into a queue so run() can enforce the
+        # timeout even when a command produces no output for a long time
+        # (a blocking readline() would otherwise sail past the deadline).
+        self._lines: queue.Queue[str] = queue.Queue()
+        self._reader = threading.Thread(target=self._pump, args=(self._proc,),
+                                        daemon=True)
+        self._reader.start()
+
+    def _pump(self, proc: subprocess.Popen) -> None:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            self._lines.put(line)
 
     def run(self, command: str, timeout: int = 60) -> str:
         if self._proc is None or self._proc.poll() is not None:
             self._spawn()
         sentinel = f"__NANO_DONE_{uuid.uuid4().hex}__"
-        if sys.platform == "win32":
-            payload = f"{command}\r\necho {sentinel}\r\n"
-        else:
-            payload = f"{command}\necho {sentinel}\n"
-        assert self._proc and self._proc.stdin and self._proc.stdout
-        self._proc.stdin.write(payload)
+        nl = "\r\n" if self._is_cmd else "\n"
+        assert self._proc and self._proc.stdin
+        self._proc.stdin.write(f"{command}{nl}echo {sentinel}{nl}")
         self._proc.stdin.flush()
 
         deadline = time.monotonic() + timeout
         out_lines: list[str] = []
         while True:
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 self._kill()
                 raise ToolError(
                     f"Command exceeded timeout of {timeout}s and was killed: "
@@ -91,13 +116,13 @@ class BashTool:
                     f"background processes are reset. Re-establish state if "
                     f"needed; pass a larger timeout for long commands."
                 )
-            line = self._proc.stdout.readline()
-            if not line:
+            try:
+                line = self._lines.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
                 if self._proc.poll() is not None:
                     raise ToolError("Shell process exited unexpectedly.")
                 continue
             if sentinel in line:
-                # Drop the sentinel echo line itself.
                 pre = line.split(sentinel, 1)[0]
                 if pre.strip():
                     out_lines.append(pre)
@@ -105,7 +130,7 @@ class BashTool:
             out_lines.append(line)
 
         joined = "".join(out_lines).rstrip("\r\n") + "\n"
-        if sys.platform == "win32":
+        if self._is_cmd:
             joined = _strip_cmd_prompt(joined)
         return _truncate(joined)
 

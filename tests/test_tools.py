@@ -21,23 +21,32 @@ def test_bash_runs_simple_command(bash):
 def test_bash_cwd_persists_across_calls(bash, tmp_workdir):
     sub = tmp_workdir / "sub"
     sub.mkdir()
-    bash.run(f"cd {sub}", timeout=5)
-    out = bash.run("pwd" if sys.platform != "win32" else "cd", timeout=5)
+    bash.run(f'cd "{sub}"', timeout=5)
+    out = bash.run("cd" if bash._is_cmd else "pwd", timeout=5)
     assert "sub" in out
 
 
 def test_bash_env_persists_across_calls(bash):
-    bash.run("export NANO_TEST=42" if sys.platform != "win32"
-             else "set NANO_TEST=42", timeout=5)
-    out = bash.run("echo $NANO_TEST" if sys.platform != "win32"
-                   else "echo %NANO_TEST%", timeout=5)
+    bash.run("set NANO_TEST=42" if bash._is_cmd
+             else "export NANO_TEST=42", timeout=5)
+    out = bash.run("echo %NANO_TEST%" if bash._is_cmd
+                   else "echo $NANO_TEST", timeout=5)
     assert "42" in out
+
+
+def test_bash_handles_posix_compound_commands(bash):
+    # Models write bash: pipes, &&, ; . These must work on every platform
+    # (the t2 head-to-head failure was cmd.exe choking on exactly this).
+    if bash._is_cmd:
+        pytest.skip("no bash available; cmd.exe fallback cannot run POSIX")
+    out = bash.run("echo one && echo two ; echo three | cat", timeout=5)
+    assert "one" in out and "two" in out and "three" in out
 
 
 def test_bash_timeout_raises_or_reports(bash):
     with pytest.raises(ToolError) as exc:
-        bash.run("sleep 5" if sys.platform != "win32"
-                 else "ping -n 6 127.0.0.1 > nul", timeout=1)
+        bash.run("ping -n 6 127.0.0.1 > nul" if bash._is_cmd
+                 else "sleep 5", timeout=1)
     assert "timeout" in str(exc.value).lower()
 
 
@@ -48,12 +57,11 @@ def test_bash_truncates_huge_output(bash):
     assert "truncated" in out.lower()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe prompt artifacts are Windows-only")
-def test_bash_strips_cmd_prompt_artifacts_on_windows(bash):
+def test_bash_output_has_no_prompt_or_command_echo(bash):
+    # Output must be just the command's stdout - no shell prompt, no echoed
+    # stdin. A leaked prompt or echo would confuse the model every turn.
     out = bash.run("echo clean", timeout=5)
-    assert out.startswith("clean") or out.lstrip().startswith("clean"), \
-        f"prompt artifacts leaked: {out!r}"
-    assert ">" not in out.split("clean", 1)[0], f"leading '>' present: {out!r}"
+    assert out.strip() == "clean", f"prompt or echo leaked: {out!r}"
 
 
 def test_read_file_full(tmp_workdir):
