@@ -40,6 +40,11 @@ def _print_event(event: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles and pipes default to cp1252; model output is full of
+    # unicode. Never let the printer kill a finished run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(prog="nano")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="Run the agent on a task description.")
