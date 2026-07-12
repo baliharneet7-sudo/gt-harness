@@ -207,27 +207,53 @@ def test_agent_nudges_continuation_when_output_truncated():
     assert "cut off" in str(last_user["content"])
 
 
-def test_agent_verify_pass_challenges_first_done():
-    # After the model first claims done (having used tools), the loop injects
-    # one verification nudge; the second end_turn is accepted.
+def test_agent_verify_pass_accepts_done_backed_by_tool_evidence():
+    # First done is challenged; the model then RUNS something (tool evidence)
+    # and its next done is accepted.
     fp = FakeProvider([
         StepResult(text="fixing", tool_calls=[ToolCall(
             id="t1", name="bash", arguments={"command": "echo hi"})],
             stop_reason="tool_use", usage=_u(10, 5)),
         StepResult(text="done", tool_calls=[], stop_reason="end_turn",
                    usage=_u(20, 5)),
+        StepResult(text="verifying", tool_calls=[ToolCall(
+            id="t2", name="bash", arguments={"command": "pytest -q"})],
+            stop_reason="tool_use", usage=_u(30, 5)),
         StepResult(text="verified done", tool_calls=[], stop_reason="end_turn",
-                   usage=_u(30, 5)),
+                   usage=_u(40, 5)),
     ])
     agent = Agent(provider=fp, system="sys", max_iterations=10)
     result = agent.run("fix the bug")
 
     assert result.stop_reason == "end_turn"
-    assert result.iterations == 3
+    assert result.iterations == 4
     assert result.final_text == "verified done"
     third_call_msgs = fp.calls[2]["messages"]
     last_user = [m for m in third_call_msgs if m["role"] == "user"][-1]
     assert "re-read the original task" in str(last_user["content"])
+
+
+def test_agent_pushes_back_on_toolless_done_up_to_cap():
+    # A model that keeps declaring done WITHOUT running anything gets pushed
+    # back max_pushbacks times, then the loop accepts to avoid infinite nudging.
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+    ] + [
+        StepResult(text=f"done {i}", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20 + i, 5))
+        for i in range(4)  # 3 pushbacks consumed, 4th done accepted
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=20)
+    result = agent.run("hard task")
+
+    assert result.stop_reason == "end_turn"
+    assert result.iterations == 5
+    assert result.final_text == "done 3"
+    # each pushback mentions the remaining iteration budget
+    last_user = [m for m in fp.calls[-1]["messages"] if m["role"] == "user"][-1]
+    assert "iterations" in str(last_user["content"])
 
 
 def test_agent_verify_pass_skipped_without_tool_use():

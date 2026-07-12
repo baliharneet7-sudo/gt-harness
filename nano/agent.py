@@ -26,7 +26,8 @@ class Agent:
     max_iterations: int = 30
     max_input_tokens: int = 200_000
     truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
-    verify: bool = True  # challenge the first "done" once before accepting it
+    verify: bool = True  # gate "done" behind tool evidence (see max_pushbacks)
+    max_pushbacks: int = 3  # toolless "done"s challenged before giving in
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
 
@@ -44,7 +45,9 @@ class Agent:
         total_in = total_out = total_cache = 0
         iteration = 0
         used_tools = False
-        verify_pending = self.verify
+        pushbacks_left = self.max_pushbacks if self.verify else 0
+        challenged = False  # has any "done" been pushed back yet?
+        tools_since_nudge = False  # tool evidence since the last pushback
 
         while True:
             iteration += 1
@@ -99,16 +102,24 @@ class Agent:
                 continue
 
             if sr.stop_reason == "end_turn" or not sr.tool_calls:
-                # Verify pass: models grade their own work generously. Push
-                # back on the first "done" once - cheap insurance against
-                # unmet requirements. Skipped when no tool was ever used.
-                if verify_pending and used_tools:
-                    verify_pending = False
-                    nudge = ("Before finishing: re-read the original task and "
-                             "check that each stated requirement is met. Run "
-                             "the relevant tests or code to confirm. If "
-                             "anything is unverified or broken, fix it now; "
-                             "otherwise finish with your summary.")
+                # Verify pass: models grade their own work generously, and
+                # some end a turn merely *describing* their next action. A
+                # "done" is only accepted when backed by tool evidence since
+                # the last challenge; toolless dones get pushed back until
+                # max_pushbacks runs out. Skipped when no tool was ever used.
+                if used_tools and pushbacks_left > 0 and (
+                        not challenged or not tools_since_nudge):
+                    pushbacks_left -= 1
+                    challenged = True
+                    tools_since_nudge = False
+                    remaining = self.max_iterations - iteration
+                    nudge = ("Your turn ended without a completed, verified "
+                             f"result. You have {remaining} iterations left - "
+                             "do not stop to describe what you plan to do; do "
+                             "it now with tool calls, then re-read the original "
+                             "task and prove each requirement is met by "
+                             "running the relevant code or tests. Only when "
+                             "everything passes, finish with your summary.")
                     messages.append({"role": "user", "content": nudge})
                     transcript.append({"type": "user", "content": nudge})
                     continue
@@ -120,6 +131,7 @@ class Agent:
                 )
 
             used_tools = True
+            tools_since_nudge = True
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
             messages.append({"role": "user", "content": tool_results})
 

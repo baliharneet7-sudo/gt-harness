@@ -23,6 +23,8 @@ edit_file.
 `old` unique. Never weaken the match.
 - Prefer small, surgical edits. Do not rewrite a file when an edit_file will \
 do.
+- Never end your turn to describe what you plan to do next - do it in the \
+same turn with tool calls. A turn without a tool call means the task is done.
 
 Code quality:
 - Match the repository's existing style: naming, formatting, idioms, comment \
