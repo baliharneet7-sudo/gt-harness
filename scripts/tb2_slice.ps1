@@ -5,8 +5,9 @@
 #   .\scripts\tb2_slice.ps1 -Model openai/gpt5_4_thinking -NTasks 10
 #   .\scripts\tb2_slice.ps1 -Resume nano-tb2-haiku-10   # continue an interrupted job
 param(
-    [string]$Model = "aws/claude4_5_haiku",
+    [string]$Model = "aws/claude4_8_opus",
     [int]$NTasks = 10,
+    [double]$AgentTimeoutMult = 2.0,  # match the 100-iteration budget; 1.0 = TB2 default clock
     [string]$JobName = "",
     [string]$Resume = ""
 )
@@ -40,6 +41,7 @@ if (-not $JobName) {
     -l $NTasks `
     -o results\terminal-bench `
     --job-name $JobName `
+    --agent-timeout-multiplier $AgentTimeoutMult `
     -n 2 `
     -y
 
