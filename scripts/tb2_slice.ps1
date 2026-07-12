@@ -29,7 +29,8 @@ if ($Resume) {
 
 if (-not $JobName) {
     $safe = $Model -replace '[/.]', '-'
-    $JobName = "nano-tb2-$safe-$NTasks"
+    $stamp = Get-Date -Format "MMdd-HHmm"
+    $JobName = "nano-tb2-$safe-$NTasks-$stamp"
 }
 
 & .venv\Scripts\harbor.exe run `
