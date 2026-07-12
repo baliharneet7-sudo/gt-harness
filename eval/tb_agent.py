@@ -78,8 +78,12 @@ class NanoAgent(BaseInstalledAgent):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         # Harbor model names look like "anthropic/claude-opus-4-7"; nano's
-        # provider routing wants the bare model name.
-        model = (self.model_name or "anthropic/claude-opus-4-7").split("/", 1)[-1]
+        # provider routing wants the bare model name. Exception: when routing
+        # through an OpenAI-compatible gateway (OPENAI_BASE_URL set), the full
+        # "provider/name" string IS the gateway's model id - pass it through.
+        model = self.model_name or "anthropic/claude-opus-4-7"
+        if not os.environ.get("OPENAI_BASE_URL"):
+            model = model.split("/", 1)[-1]
         env = {
             k: v
             for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
