@@ -45,6 +45,9 @@ def _print_event(event: dict) -> None:
         title = "tool_result" + (" (error)" if event.get("is_error") else "")
         _console.print(Panel(event["output"][:2000], title=title,
                              border_style="red" if event.get("is_error") else "green"))
+    elif et == "stats":
+        _console.print(f"[dim]iter={event['iteration']} "
+                       f"in={event['input_tokens']} out={event['output_tokens']}[/dim]")
 
 
 def main(argv: list[str] | None = None) -> int:

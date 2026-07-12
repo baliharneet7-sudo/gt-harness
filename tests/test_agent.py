@@ -254,3 +254,24 @@ def test_agent_verify_pass_can_be_disabled():
     result = agent.run("fix it")
     assert result.iterations == 2
     assert result.final_text == "done"
+
+
+def test_agent_emits_running_stats_each_step():
+    # Token totals must survive an external kill - emitted every step,
+    # not only in the final summary.
+    events = []
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(100, 20)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(150, 10)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False,
+                  on_event=events.append)
+    agent.run("task")
+    stats = [e for e in events if e["type"] == "stats"]
+    assert len(stats) == 2
+    assert stats[0] == {"type": "stats", "iteration": 1,
+                        "input_tokens": 100, "output_tokens": 20}
+    assert stats[1]["input_tokens"] == 250

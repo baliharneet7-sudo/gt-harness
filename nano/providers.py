@@ -69,7 +69,7 @@ def _ensure_block_list(content: Any) -> list[dict[str, Any]]:
 class AnthropicProvider:
     model: str
     client: Any = None  # injectable for tests; defaults to anthropic.Anthropic()
-    max_tokens: int = 4096
+    max_tokens: int = 8192  # big file writes get cut at 4096 and waste a continuation turn
 
     def __post_init__(self) -> None:
         if self.client is None:
@@ -186,7 +186,7 @@ class OpenAIProvider:
     model: str
     client: Any = None
     base_url: str | None = None
-    max_completion_tokens: int = 4096
+    max_completion_tokens: int = 8192  # match AnthropicProvider; fewer mid-write cuts
 
     def __post_init__(self) -> None:
         if self.client is None:

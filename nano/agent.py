@@ -69,6 +69,10 @@ class Agent:
             })
             self._emit({"type": "assistant", "text": sr.text,
                         "tool_calls": sr.tool_calls})
+            # Running totals every step: a run killed from outside (timeout)
+            # must not take its token accounting down with it.
+            self._emit({"type": "stats", "iteration": iteration,
+                        "input_tokens": total_in, "output_tokens": total_out})
 
             messages.append(self._assistant_message(sr))
 
