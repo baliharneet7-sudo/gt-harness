@@ -271,14 +271,30 @@ def _require(arguments: dict[str, Any], name: str, *keys: str) -> None:
         )
 
 
+def _int_arg(arguments: dict[str, Any], key: str, default: int | None = None) -> int | None:
+    """Weak models pass numbers as strings ('5' not 5). Coerce; a value that
+    won't parse comes back as a ToolError, never a TypeError that kills the run."""
+    value = arguments.get(key, default)
+    if value is None or isinstance(value, int):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ToolError(
+            f"Argument {key!r} must be an integer, got {value!r}. "
+            f"Re-issue the call with an integer value."
+        )
+
+
 def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
     if name == "bash":
         _require(arguments, name, "command")
-        return bash.run(arguments["command"], timeout=arguments.get("timeout", 60))
+        return bash.run(arguments["command"], timeout=_int_arg(arguments, "timeout", 60))
     if name == "read_file":
         _require(arguments, name, "path")
         return read_file(arguments["path"],
-                         arguments.get("line_start"), arguments.get("line_end"))
+                         _int_arg(arguments, "line_start"),
+                         _int_arg(arguments, "line_end"))
     if name == "edit_file":
         _require(arguments, name, "path", "old", "new")
         return edit_file(arguments["path"], arguments["old"], arguments["new"])

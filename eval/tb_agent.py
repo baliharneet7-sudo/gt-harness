@@ -94,7 +94,7 @@ class NanoAgent(BaseInstalledAgent):
         await self.exec_as_agent(
             environment,
             f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
-            f"--model {shlex.quote(model)} --max-iterations 50 "
+            f"--model {shlex.quote(model)} --max-iterations 100 "
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true",
             env=env,
         )

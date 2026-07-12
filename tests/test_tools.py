@@ -158,3 +158,21 @@ def test_dispatch_missing_required_arg_raises_toolerror(bash):
 
     with pytest.raises(ToolError):
         dispatch("edit_file", {"path": "x"}, bash=bash)
+
+
+def test_dispatch_coerces_string_numbers(tmp_workdir, bash):
+    # Weak models pass numbers as strings ("5" not 5). A TypeError here
+    # killed a whole benchmark task - coerce, don't crash.
+    p = tmp_workdir / "n.txt"
+    p.write_text("\n".join(f"row{i}" for i in range(1, 11)) + "\n")
+    out = dispatch("read_file", {"path": str(p), "line_start": "3",
+                                 "line_end": "5"}, bash=bash)
+    assert "3\trow3" in out and "row6" not in out
+    out = dispatch("bash", {"command": "echo hi", "timeout": "5"}, bash=bash)
+    assert "hi" in out
+
+
+def test_dispatch_unparseable_number_is_toolerror(bash):
+    with pytest.raises(ToolError) as exc:
+        dispatch("read_file", {"path": "x", "line_start": "abc"}, bash=bash)
+    assert "line_start" in str(exc.value)
