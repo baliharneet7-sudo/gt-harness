@@ -9,7 +9,8 @@ param(
     [int]$NTasks = 10,
     [double]$AgentTimeoutMult = 2.0,  # match the 100-iteration budget; 1.0 = TB2 default clock
     [string]$JobName = "",
-    [string]$Resume = ""
+    [string]$Resume = "",
+    [switch]$RetryErrors
 )
 
 Set-Location $PSScriptRoot\..
@@ -29,7 +30,15 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
 if ($Resume) {
-    & .venv\Scripts\harbor.exe job resume results\terminal-bench\$Resume
+    $args = @('job','resume','--job-path',"results\terminal-bench\$Resume")
+    if ($RetryErrors) {
+        # Re-run trials that failed on infra/transient causes (storm-slowed
+        # timeouts, container-start hiccups, interruptions), not model errors.
+        foreach ($e in 'AgentTimeoutError','EnvironmentStartTimeoutError','CancelledError') {
+            $args += @('--filter-error-type', $e)
+        }
+    }
+    & .venv\Scripts\harbor.exe @args
     exit $LASTEXITCODE
 }
 
