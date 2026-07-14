@@ -22,6 +22,11 @@ Get-Content .env | ForEach-Object {
 }
 $env:OPENAI_API_KEY  = $env:ASU_AIML_TOKEN
 $env:OPENAI_BASE_URL = "https://api-main.aiml.asu.edu/v1"
+# Force UTF-8 for all Python file writes. Harbor writes trial result.json with
+# pathlib.write_text(), which defaults to Windows cp1252 and crashes the whole
+# job on any unicode in a trial result. This makes those writes UTF-8 safe.
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 
 if ($Resume) {
     & .venv\Scripts\harbor.exe job resume results\terminal-bench\$Resume
