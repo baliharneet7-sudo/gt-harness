@@ -337,3 +337,30 @@ def test_anthropic_provider_retries_through_client(monkeypatch):
     sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
     assert sr.stop_reason == "tool_use"
     assert fake_client.messages.create.call_count == 2
+
+
+class _OaiMsg:
+    def __init__(self, tool_calls):
+        self.content = None
+        self.tool_calls = tool_calls
+
+
+class _OaiTC:
+    def __init__(self, args):
+        self.id = "c1"
+        self.type = "function"
+        self.function = type("F", (), {"name": "bash", "arguments": args})()
+
+
+def test_openai_wrong_type_tool_args_wrapped(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    fake_client = MagicMock()
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=_OaiMsg([_OaiTC("null")]), finish_reason="tool_calls")]
+    resp.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(model="x", client=fake_client)
+    sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
+    # 'null' parses to None (not a dict) -> must be wrapped, not crash Pydantic
+    assert sr.tool_calls[0].arguments == {"_raw": "null"}

@@ -204,3 +204,34 @@ def test_bash_grep_no_match_is_visible(bash):
     # grep with no match exits 1 - the agent must see that, not think it passed.
     out = bash.run("echo apple | grep zebra", timeout=5)
     assert "exit" in out.lower() and "1" in out
+
+
+def test_bash_timeout_does_not_contaminate_next_command(bash):
+    # A timed-out command's leftover output must NOT leak into the next run.
+    # (Old reader thread writing into the respawned shell's queue.)
+    if bash._is_cmd:
+        pytest.skip("posix subshell timing")
+    with pytest.raises(ToolError):
+        bash.run("(sleep 2; echo LATE_LEAK) & wait", timeout=1)
+    out = bash.run("echo FRESH", timeout=5)
+    assert "FRESH" in out
+    assert "LATE_LEAK" not in out
+    assert "NANO_DONE" not in out  # no stale sentinel from the killed shell
+
+
+def test_edit_file_preserves_lf_newlines(tmp_workdir):
+    # A one-char edit in an LF file must NOT rewrite the whole file to CRLF.
+    p = tmp_workdir / "lf.py"
+    p.write_bytes(b"a = 1\nb = 2\nc = 3\n")
+    edit_file(str(p), old="b = 2", new="b = 99")
+    raw = p.read_bytes()
+    assert b"\r\n" not in raw, "edit introduced CRLF"
+    assert raw == b"a = 1\nb = 99\nc = 3\n"
+
+
+def test_edit_file_rejects_non_string_args(tmp_workdir):
+    p = tmp_workdir / "x.py"
+    p.write_text("a = 1\n")
+    with pytest.raises(ToolError):
+        edit_file(str(p), old=None, new="y")
+    assert p.read_text() == "a = 1\n"  # untouched

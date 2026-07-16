@@ -20,10 +20,18 @@ def _resolve_shell() -> tuple[list[str], bool]:
     commands models actually write. Returns (argv, is_cmd)."""
     if sys.platform != "win32":
         return ["bash", "--norc", "--noprofile"], False
-    bash = shutil.which("bash") or next(
-        (p for p in (r"C:\Program Files\Git\bin\bash.exe",
-                     r"C:\Program Files (x86)\Git\bin\bash.exe")
-         if os.path.exists(p)), None)
+    # Prefer Git Bash. `shutil.which("bash")` on Windows usually resolves to
+    # C:\Windows\System32\bash.exe — the WSL launcher, which runs in a separate
+    # /mnt/c filesystem namespace and breaks the Windows paths our file tools
+    # use. Only accept a `which` result that is not that WSL shim.
+    candidates = [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ]
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        candidates.insert(0, found)
+    bash = next((p for p in candidates if os.path.exists(p)), None)
     if bash:
         return [bash, "--norc", "--noprofile"], False
     return ["cmd.exe", "/Q", "/K", "prompt $G"], True
@@ -207,7 +215,24 @@ def read_file(path: str, line_start: int | None = None,
                                for i, ln in enumerate(selected)) + "\n")
 
 
+def _write_exact(p: Path, text: str) -> None:
+    """Write text verbatim: no newline translation (a one-char edit in an
+    LF repo must not rewrite the whole file to CRLF), and atomically via a
+    temp file + replace so a crash or disk-full can't leave a truncated file."""
+    if not isinstance(text, str):
+        raise ToolError(f"'new' must be a string, got {type(text).__name__}.")
+    tmp = p.with_name(f"{p.name}.nano-{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8", newline="")
+        os.replace(tmp, p)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def edit_file(path: str, old: str, new: str) -> str:
+    if not isinstance(old, str):
+        raise ToolError(f"'old' must be a string, got {type(old).__name__}.")
     p = Path(path)
     if old == "":
         if p.exists():
@@ -216,7 +241,7 @@ def edit_file(path: str, old: str, new: str) -> str:
                 f"Read it first, then call with the exact text to replace."
             )
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(new, encoding="utf-8")
+        _write_exact(p, new)
         return f"Created {path} ({len(new)} chars)."
 
     if not p.exists():
@@ -232,7 +257,7 @@ def edit_file(path: str, old: str, new: str) -> str:
             f"old string matches {count} places in {path} - must be unique. "
             f"Add surrounding context to disambiguate."
         )
-    p.write_text(text.replace(old, new, 1), encoding="utf-8")
+    _write_exact(p, text.replace(old, new, 1))
     return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."
 
 

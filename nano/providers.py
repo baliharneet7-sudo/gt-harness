@@ -232,6 +232,11 @@ class OpenAIProvider:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {"_raw": tc.function.arguments}
+            # Valid JSON of the wrong shape (null, a list, a bare string) would
+            # blow up ToolCall's dict field. Wrap it so dispatch can return a
+            # fixable error instead of crashing the run.
+            if not isinstance(args, dict):
+                args = {"_raw": tc.function.arguments}
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
         usage = Usage(
