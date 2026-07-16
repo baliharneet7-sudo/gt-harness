@@ -241,6 +241,7 @@ def test_agent_pushback_skipped_on_final_iteration():
     # A "done" landing exactly on the last iteration must be accepted as-is:
     # a pushback here can never be answered, so it would turn a finished run
     # into max_iterations and throw away the summary the model just wrote.
+    # With successful tool evidence behind it, it still counts as end_turn.
     fp = FakeProvider([
         StepResult(text="working", tool_calls=[ToolCall(
             id="t1", name="bash", arguments={"command": "echo hi"})],
@@ -260,9 +261,30 @@ def test_agent_pushback_skipped_on_final_iteration():
     assert result.iterations == 2
 
 
+def test_agent_unverified_when_no_evidence_and_no_pushback_room():
+    # Failed-only tool round, then "done" on the final iteration: the loop
+    # can't push back, but it must not report success either. The text is
+    # kept, the stop reason says what actually happened.
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="read_file",
+            arguments={"path": "definitely_missing_file_xyz"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=2)
+    result = agent.run("task")
+
+    assert result.stop_reason == "unverified"
+    assert result.final_text == "done"
+    assert result.iterations == 2
+
+
 def test_agent_pushes_back_on_toolless_done_up_to_cap():
     # A model that keeps declaring done WITHOUT running anything gets pushed
-    # back max_pushbacks times, then the loop accepts to avoid infinite nudging.
+    # back max_pushbacks times. Giving in must not masquerade as success:
+    # the result is kept but flagged "unverified".
     fp = FakeProvider([
         StepResult(text="working", tool_calls=[ToolCall(
             id="t1", name="bash", arguments={"command": "echo hi"})],
@@ -275,7 +297,7 @@ def test_agent_pushes_back_on_toolless_done_up_to_cap():
     agent = Agent(provider=fp, system="sys", max_iterations=20)
     result = agent.run("hard task")
 
-    assert result.stop_reason == "end_turn"
+    assert result.stop_reason == "unverified"
     assert result.iterations == 5
     assert result.final_text == "done 3"
     # each pushback mentions the remaining iteration budget

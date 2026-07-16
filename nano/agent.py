@@ -10,7 +10,7 @@ from .tools import TOOLS, BashTool, ToolError, dispatch
 @dataclass
 class AgentResult:
     final_text: str | None
-    stop_reason: str  # end_turn | max_iterations | max_tokens | error
+    stop_reason: str  # end_turn | unverified | max_iterations | max_tokens | error
     iterations: int
     total_input_tokens: int
     total_output_tokens: int
@@ -128,8 +128,16 @@ class Agent:
                     messages.append({"role": "user", "content": nudge})
                     transcript.append({"type": "user", "content": nudge})
                     continue
+                # Accepting a "done" the gate couldn't (or didn't need to)
+                # challenge: if it has successful tool evidence behind it,
+                # that's a genuine end_turn. If the gate simply ran out of
+                # pushbacks or iterations, don't fail open - keep the text
+                # but report "unverified" so the caller knows.
+                verified = (not self.verify or not used_tools
+                            or tools_since_nudge)
                 return AgentResult(
-                    final_text=sr.text, stop_reason="end_turn",
+                    final_text=sr.text,
+                    stop_reason="end_turn" if verified else "unverified",
                     iterations=iteration,
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
