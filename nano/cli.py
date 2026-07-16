@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="Run the agent on a task description.")
     run.add_argument("task", help="Plain-English task description.")
-    run.add_argument("--model", default="claude-opus-4-7")
+    run.add_argument("--model", default="claude-opus-4-8")
     run.add_argument("--base-url", default=None,
                      help="OpenAI-compatible base URL (Together, vLLM, etc.).")
     run.add_argument("--max-iterations", type=int, default=30)

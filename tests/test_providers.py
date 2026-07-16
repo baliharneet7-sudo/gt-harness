@@ -364,3 +364,24 @@ def test_openai_wrong_type_tool_args_wrapped(monkeypatch):
     sr = p.step([{"role": "user", "content": "hi"}], [], "sys")
     # 'null' parses to None (not a dict) -> must be wrapped, not crash Pydantic
     assert sr.tool_calls[0].arguments == {"_raw": "null"}
+
+
+def test_openai_truncated_tool_input_not_reinflated():
+    # A tool_use block whose input was truncated in history must serialize to
+    # OpenAI with the truncated value - not a stale full copy. Regression for
+    # the dual-storage divergence.
+    from nano.providers import _normalize_for_openai
+    assistant = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "writing"},
+            {"type": "tool_use", "id": "t1", "name": "edit_file",
+             "input": {"path": "big.py", "old": "",
+                       "new": "[truncated - 5000 chars dropped]"}},
+        ],
+    }
+    out = _normalize_for_openai(assistant)
+    args = out[0]["tool_calls"][0]["function"]["arguments"]
+    assert "truncated" in args
+    assert "5000 chars dropped" in args
+    assert len(args) < 200  # the giant value is gone

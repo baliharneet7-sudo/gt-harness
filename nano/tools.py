@@ -246,8 +246,16 @@ def edit_file(path: str, old: str, new: str) -> str:
 
     if not p.exists():
         raise ToolError(f"File not found: {path}")
-    text = p.read_text(encoding="utf-8")
-    count = text.count(old)
+    # Preserve the file's line-ending style: read raw (newline=""), match on an
+    # LF-normalized copy so `old` matches whether the model sent LF or CRLF, then
+    # restore CRLF on write if the file used it. Editing one line must not flip
+    # the whole file's newlines - in either direction.
+    with p.open(encoding="utf-8", newline="") as f:  # newline="" preserves \r\n
+        raw = f.read()
+    crlf = "\r\n" in raw
+    work = raw.replace("\r\n", "\n")
+    old_n, new_n = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+    count = work.count(old_n)
     if count == 0:
         raise ToolError(
             f"old string not found in {path}. Re-read the file and try again."
@@ -257,7 +265,10 @@ def edit_file(path: str, old: str, new: str) -> str:
             f"old string matches {count} places in {path} - must be unique. "
             f"Add surrounding context to disambiguate."
         )
-    _write_exact(p, text.replace(old, new, 1))
+    result = work.replace(old_n, new_n, 1)
+    if crlf:
+        result = result.replace("\n", "\r\n")
+    _write_exact(p, result)
     return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."
 
 

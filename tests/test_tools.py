@@ -235,3 +235,14 @@ def test_edit_file_rejects_non_string_args(tmp_workdir):
     with pytest.raises(ToolError):
         edit_file(str(p), old=None, new="y")
     assert p.read_text() == "a = 1\n"  # untouched
+
+
+def test_edit_file_preserves_crlf_newlines(tmp_workdir):
+    # Editing one line in a CRLF file must NOT convert the whole file to LF,
+    # and `old` sent with LF must still match a CRLF file.
+    p = tmp_workdir / "crlf.py"
+    p.write_bytes(b"a = 1\r\nb = 2\r\nc = 3\r\n")
+    edit_file(str(p), old="b = 2", new="b = 99")  # old uses LF
+    raw = p.read_bytes()
+    assert raw == b"a = 1\r\nb = 99\r\nc = 3\r\n", raw
+    assert b"\r\n" in raw and raw.count(b"\r\n") == 3

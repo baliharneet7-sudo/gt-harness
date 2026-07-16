@@ -108,7 +108,11 @@ class Agent:
                 # evidence since the last challenge; toolless (or failed-only)
                 # dones get pushed back until max_pushbacks runs out. Skipped
                 # when no tool was ever used.
+                # Don't spend the last iteration on a pushback - a challenge
+                # the model can't answer would return max_iterations and throw
+                # away the summary it just produced.
                 if used_tools and pushbacks_left > 0 and (
+                        self.max_iterations - iteration) > 0 and (
                         not challenged or not tools_since_nudge):
                     pushbacks_left -= 1
                     challenged = True
@@ -217,19 +221,16 @@ class Agent:
                             return
 
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:
-        # Internal canonical shape: assistant carries text + structured tool_calls.
-        # Each provider re-serializes from this form.
+        # Canonical shape: content blocks are the single source of truth for
+        # both text and tool calls. Each provider re-serializes from these -
+        # no duplicated tool_calls copy to drift out of sync under truncation.
         content_blocks: list[dict[str, Any]] = []
         if sr.text:
             content_blocks.append({"type": "text", "text": sr.text})
         for tc in sr.tool_calls:
             content_blocks.append({"type": "tool_use", "id": tc.id,
                                    "name": tc.name, "input": tc.arguments})
-        return {
-            "role": "assistant",
-            "content": content_blocks,
-            "tool_calls": [tc.model_dump() for tc in sr.tool_calls],
-        }
+        return {"role": "assistant", "content": content_blocks}
 
     def _execute_tool_calls(self, calls: list[ToolCall],
                             transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:

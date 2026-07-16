@@ -147,16 +147,20 @@ def _normalize_for_openai(msg: dict[str, Any]) -> list[dict[str, Any]]:
             out["content"] = "\n".join(
                 b["text"] for b in content if b.get("type") == "text"
             ) or None
+            # Derive tool_calls from the content blocks themselves - the single
+            # source of truth. A separate copy would diverge when history is
+            # mutated (e.g. a giant tool arg truncated), silently re-inflating
+            # this request.
+            tool_uses = [b for b in content if b.get("type") == "tool_use"]
+            if tool_uses:
+                out["tool_calls"] = [{
+                    "id": b["id"],
+                    "type": "function",
+                    "function": {"name": b["name"],
+                                 "arguments": json.dumps(b["input"])},
+                } for b in tool_uses]
         else:
             out["content"] = content
-        tool_calls = msg.get("tool_calls")
-        if tool_calls:
-            out["tool_calls"] = [{
-                "id": tc["id"],
-                "type": "function",
-                "function": {"name": tc["name"],
-                             "arguments": json.dumps(tc["arguments"])},
-            } for tc in tool_calls]
         return [out]
 
     if role == "user" and isinstance(content, list) and any(
