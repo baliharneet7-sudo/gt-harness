@@ -220,6 +220,31 @@ def test_bash_grep_no_match_is_visible(bash):
     assert "exit code 1" in str(exc.value).lower()
 
 
+def test_bash_set_x_does_not_break_sentinel_framing(bash):
+    if bash._is_cmd:
+        pytest.skip("bash tracing")
+    # `set -x` traces every command to stderr (merged into stdout), including
+    # the sentinel echo itself. A substring sentinel match latches onto the
+    # trace line and mis-frames every subsequent call.
+    bash.run("set -x", timeout=5)
+    out = bash.run("printf 'FRESH\\n'", timeout=5)
+    assert "FRESH" in out
+    # No bare sentinel line may leak into the output - trace lines are
+    # prefixed ('+ echo ...') and must not be mistaken for the real sentinel.
+    import re
+    assert not re.search(r"^__NANO_DONE_[0-9a-f]+__:", out, re.M), out
+    bash.run("set +x", timeout=5)
+
+
+def test_bash_output_without_trailing_newline(bash):
+    if bash._is_cmd:
+        pytest.skip("posix printf")
+    # A command whose output lacks a trailing newline must still frame
+    # correctly and return that output intact.
+    out = bash.run("printf 'x'", timeout=5)
+    assert out.strip() == "x"
+
+
 def test_bash_timeout_does_not_contaminate_next_command(bash):
     # A timed-out command's leftover output must NOT leak into the next run.
     # (Old reader thread writing into the respawned shell's queue.)

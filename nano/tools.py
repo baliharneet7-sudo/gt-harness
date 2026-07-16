@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -117,16 +118,24 @@ class BashTool:
         if self._proc is None or self._proc.poll() is not None:
             self._spawn()
         sentinel = f"__NANO_DONE_{uuid.uuid4().hex}__"
-        # The sentinel carries the command's exit status. Without it a failed
-        # command (`false`, a failing test, `grep` with no match) reads as
-        # success, and the agent believes work it never finished. The status
-        # code follows the sentinel: "<sentinel>:<code>".
-        status_expr = "%errorlevel%" if self._is_cmd else "$?"
+        # The sentinel carries the command's exit status ("<sentinel>:<code>").
+        # Without it a failed command (`false`, a failing test, `grep` with no
+        # match) reads as success. The empty echo first guarantees the sentinel
+        # starts a fresh line even when the command's output lacks a trailing
+        # newline; the anchored match below then only accepts a *complete*
+        # sentinel line - `set -x` traces ('+ echo <sentinel>:...') must never
+        # be mistaken for the real thing.
         nl = "\r\n" if self._is_cmd else "\n"
+        if self._is_cmd:
+            # Single parse line: %errorlevel% expands before echo. runs.
+            tail = f"echo.&echo {sentinel}:%errorlevel%"
+        else:
+            tail = f"__nano_rc=$?; echo; echo {sentinel}:$__nano_rc"
         assert self._proc and self._proc.stdin
-        self._proc.stdin.write(f"{command}{nl}echo {sentinel}:{status_expr}{nl}")
+        self._proc.stdin.write(f"{command}{nl}{tail}{nl}")
         self._proc.stdin.flush()
 
+        sentinel_re = re.compile(re.escape(sentinel) + r":(-?\d+)\s*$")
         deadline = time.monotonic() + timeout
         out_lines: list[str] = []
         exit_code = 0
@@ -146,14 +155,9 @@ class BashTool:
                 if self._proc.poll() is not None:
                     raise ToolError("Shell process exited unexpectedly.")
                 continue
-            if sentinel in line:
-                pre, _, post = line.partition(sentinel)
-                if pre.strip():
-                    out_lines.append(pre)
-                try:
-                    exit_code = int(post.lstrip(":").strip())
-                except ValueError:
-                    exit_code = 0  # status unreadable; don't fabricate a failure
+            m = sentinel_re.match(line)
+            if m:
+                exit_code = int(m.group(1))  # anchored: never unparseable
                 break
             out_lines.append(line)
 
