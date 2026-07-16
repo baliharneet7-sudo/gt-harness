@@ -237,6 +237,29 @@ def test_agent_verify_pass_accepts_done_backed_by_tool_evidence():
     assert "re-read the original task" in str(last_user["content"])
 
 
+def test_agent_pushback_skipped_on_final_iteration():
+    # A "done" landing exactly on the last iteration must be accepted as-is:
+    # a pushback here can never be answered, so it would turn a finished run
+    # into max_iterations and throw away the summary the model just wrote.
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="summary", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+
+    class _OkBash:
+        def run(self, command, timeout=30):
+            return "ok\n"
+    agent = Agent(provider=fp, system="sys", max_iterations=2, bash=_OkBash())
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "summary"
+    assert result.iterations == 2
+
+
 def test_agent_pushes_back_on_toolless_done_up_to_cap():
     # A model that keeps declaring done WITHOUT running anything gets pushed
     # back max_pushbacks times, then the loop accepts to avoid infinite nudging.

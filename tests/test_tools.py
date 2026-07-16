@@ -246,3 +246,13 @@ def test_edit_file_preserves_crlf_newlines(tmp_workdir):
     raw = p.read_bytes()
     assert raw == b"a = 1\r\nb = 99\r\nc = 3\r\n", raw
     assert b"\r\n" in raw and raw.count(b"\r\n") == 3
+
+
+def test_edit_file_mixed_newlines_leaves_untouched_lines_alone(tmp_workdir):
+    # A file with BOTH endings (one stray CRLF in an LF file, or vice versa)
+    # must come back byte-identical outside the edited region - editing line 1
+    # must not homogenize every other line's ending.
+    p = tmp_workdir / "mixed.txt"
+    p.write_bytes(b"a = 1\nb = 2\r\nc = 3\nd = 4\n")
+    edit_file(str(p), old="a = 1", new="a = 99")
+    assert p.read_bytes() == b"a = 99\nb = 2\r\nc = 3\nd = 4\n", p.read_bytes()

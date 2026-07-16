@@ -246,28 +246,33 @@ def edit_file(path: str, old: str, new: str) -> str:
 
     if not p.exists():
         raise ToolError(f"File not found: {path}")
-    # Preserve the file's line-ending style: read raw (newline=""), match on an
-    # LF-normalized copy so `old` matches whether the model sent LF or CRLF, then
-    # restore CRLF on write if the file used it. Editing one line must not flip
-    # the whole file's newlines - in either direction.
+    # Preserve the file's line-ending style: read raw (newline="") and prefer
+    # an exact byte match - replacing in place leaves every untouched line's
+    # ending alone, even in a mixed CRLF/LF file. Only when that misses (the
+    # model sent LF for a CRLF file) fall back to LF-normalized matching and
+    # restore CRLF on write. Editing one line must not flip the whole file's
+    # newlines - in either direction.
     with p.open(encoding="utf-8", newline="") as f:  # newline="" preserves \r\n
         raw = f.read()
-    crlf = "\r\n" in raw
-    work = raw.replace("\r\n", "\n")
-    old_n, new_n = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
-    count = work.count(old_n)
-    if count == 0:
-        raise ToolError(
-            f"old string not found in {path}. Re-read the file and try again."
-        )
-    if count > 1:
-        raise ToolError(
-            f"old string matches {count} places in {path} - must be unique. "
-            f"Add surrounding context to disambiguate."
-        )
-    result = work.replace(old_n, new_n, 1)
-    if crlf:
-        result = result.replace("\n", "\r\n")
+    if raw.count(old) == 1:
+        result = raw.replace(old, new, 1)
+    else:
+        crlf = "\r\n" in raw
+        work = raw.replace("\r\n", "\n")
+        old_n, new_n = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+        count = work.count(old_n)
+        if count == 0:
+            raise ToolError(
+                f"old string not found in {path}. Re-read the file and try again."
+            )
+        if count > 1:
+            raise ToolError(
+                f"old string matches {count} places in {path} - must be unique. "
+                f"Add surrounding context to disambiguate."
+            )
+        result = work.replace(old_n, new_n, 1)
+        if crlf:
+            result = result.replace("\n", "\r\n")
     _write_exact(p, result)
     return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."
 
