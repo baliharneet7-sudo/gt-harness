@@ -178,11 +178,16 @@ class BashTool:
         if not proc or proc.poll() is not None:
             return
         # Kill the whole tree, not just the shell - a timed-out build, server,
-        # or `nohup ... &` child must not survive the shell's death.
+        # or `nohup ... &` child must not survive the shell's death. Tree-kill
+        # failure (access denied, race with exit) falls back to killing the
+        # shell itself; the wait reaps it so repeated timeouts can't pile up
+        # zombie processes.
         try:
             if sys.platform == "win32":
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                               capture_output=True, check=False)
+                r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True, check=False)
+                if r.returncode != 0:
+                    proc.kill()
             else:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
@@ -190,6 +195,10 @@ class BashTool:
                 proc.kill()
             except OSError:
                 pass
+        try:
+            proc.wait(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
     def __del__(self) -> None:
         try:

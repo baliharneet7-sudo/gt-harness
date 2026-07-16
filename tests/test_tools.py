@@ -18,6 +18,16 @@ def test_bash_runs_simple_command(bash):
     assert "hello" in out
 
 
+def test_bash_kill_reaps_shell_and_respawns(bash):
+    # After a kill, the old shell must be reaped (not left as a zombie) and
+    # the next run() must transparently respawn a working shell.
+    old = bash._proc
+    bash.close()
+    assert old.poll() is not None, "shell not reaped after kill"
+    out = bash.run("echo back", timeout=5)
+    assert "back" in out
+
+
 def test_bash_cwd_persists_across_calls(bash, tmp_workdir):
     sub = tmp_workdir / "sub"
     sub.mkdir()
