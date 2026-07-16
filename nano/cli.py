@@ -19,11 +19,10 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
         # Local OpenAI-compatible servers (vLLM, ollama, llama.cpp) accept any
         # api_key. The openai SDK requires one to instantiate, so supply a
         # placeholder when none is set in the env.
-        if not os.environ.get("OPENAI_API_KEY"):
-            import openai
-            client = openai.OpenAI(base_url=base_url, api_key="sk-local")
-            return OpenAIProvider(model=model, base_url=base_url, client=client)
-        return OpenAIProvider(model=model, base_url=base_url)
+        import openai
+        key = os.environ.get("OPENAI_API_KEY") or "sk-local"
+        client = openai.OpenAI(base_url=base_url, api_key=key)
+        return OpenAIProvider(model=model, base_url=base_url, client=client)
     if model.startswith(("claude", "anthropic")):
         return AnthropicProvider(model=model)
     return OpenAIProvider(model=model)
@@ -66,9 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--max-iterations", type=int, default=30)
     args = parser.parse_args(argv)
 
-    provider = build_provider(model=args.model, base_url=args.base_url)
-    agent = Agent(provider=provider, system=SYSTEM_PROMPT,
-                  max_iterations=args.max_iterations, on_event=_print_event)
+    # Construction failures (missing SDK/key, no usable shell) happen before
+    # Agent.run()'s error boundary - turn them into a clean nonzero exit.
+    try:
+        provider = build_provider(model=args.model, base_url=args.base_url)
+        agent = Agent(provider=provider, system=SYSTEM_PROMPT,
+                      max_iterations=args.max_iterations, on_event=_print_event)
+    except Exception as e:
+        _console.print(f"[bold red]setup error:[/] {type(e).__name__}: {e}")
+        return 1
     result = agent.run(args.task)
     _console.print(f"\n[bold]stop:[/] {result.stop_reason}  "
                    f"iterations={result.iterations}  "

@@ -40,6 +40,18 @@ def test_main_runs_agent_and_prints(monkeypatch, capsys):
     assert "DONE" in out
 
 
+def test_main_setup_failure_is_clean_exit_not_traceback(capsys):
+    # Provider/agent construction failures (missing SDK, no bash, bad key
+    # config) happen before Agent.run()'s error boundary. The CLI must turn
+    # them into a printed error + exit 1, never an uncaught traceback.
+    with patch("nano.cli.build_provider",
+               side_effect=RuntimeError("no api key configured")):
+        rc = main(["run", "task", "--model", "m"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "no api key configured" in out
+
+
 def test_print_event_shows_tool_call_inputs(capsys):
     from nano.cli import _print_event
     from nano.providers import ToolCall
