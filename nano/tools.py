@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import queue
-import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -74,26 +74,36 @@ class BashTool:
 
     def _spawn(self) -> None:
         cmd, self._is_cmd = _resolve_shell()
+        # Put the shell in its own process group / session so a timeout can kill
+        # the whole tree (the shell AND its children), not just the shell.
+        kw: dict[str, Any] = {}
+        if sys.platform == "win32":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kw["start_new_session"] = True
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",  # binary output must not kill the reader thread
             bufsize=1,
             env={**os.environ, "PS1": "", "PROMPT_COMMAND": ""},
+            **kw,
         )
-        # A reader thread drains stdout into a queue so run() can enforce the
-        # timeout even when a command produces no output for a long time
-        # (a blocking readline() would otherwise sail past the deadline).
+        # Each generation gets its OWN queue, bound to its OWN reader thread.
+        # A thread from a killed shell keeps writing to its now-orphaned queue,
+        # so leftover output can never contaminate the respawned shell's stream.
         self._lines: queue.Queue[str] = queue.Queue()
-        self._reader = threading.Thread(target=self._pump, args=(self._proc,),
-                                        daemon=True)
-        self._reader.start()
+        threading.Thread(target=self._pump, args=(self._proc, self._lines),
+                         daemon=True).start()
 
-    def _pump(self, proc: subprocess.Popen) -> None:
+    @staticmethod
+    def _pump(proc: subprocess.Popen, q: queue.Queue[str]) -> None:
         for line in proc.stdout:  # type: ignore[union-attr]
-            self._lines.put(line)
+            q.put(line)
 
     def run(self, command: str, timeout: int = 60) -> str:
         if self._proc is None or self._proc.poll() is not None:
@@ -147,12 +157,23 @@ class BashTool:
         return _truncate(joined)
 
     def _kill(self) -> None:
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-            except ProcessLookupError:
-                pass
+        proc = self._proc
         self._proc = None
+        if not proc or proc.poll() is not None:
+            return
+        # Kill the whole tree, not just the shell - a timed-out build, server,
+        # or `nohup ... &` child must not survive the shell's death.
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, check=False)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     def __del__(self) -> None:
         try:
