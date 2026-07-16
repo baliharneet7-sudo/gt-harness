@@ -161,7 +161,10 @@ class BashTool:
         if self._is_cmd:
             joined = _strip_cmd_prompt(joined)
         if exit_code != 0:
-            joined += f"[exit code {exit_code}]\n"
+            # Raise, don't return: the loop marks ToolError results
+            # is_error=True, so a failing test run can never count as
+            # verification evidence. The output rides along for diagnosis.
+            raise ToolError(_truncate(joined) + f"[exit code {exit_code}]")
         return _truncate(joined)
 
     def _kill(self) -> None:

@@ -179,17 +179,30 @@ def test_dispatch_unparseable_number_is_toolerror(bash):
 
 
 def test_bash_surfaces_nonzero_exit(bash):
-    # A failed command must not read as success. The whole harness rests on
-    # the agent being able to tell a test/command failed.
-    out = bash.run("false", timeout=5)
-    assert "exit code 1" in out.lower() or "exit status 1" in out.lower()
+    # A failed command must not read as success. It must raise ToolError so
+    # the loop records is_error=True and the verify gate never counts a
+    # failing test run as evidence of completed work.
+    with pytest.raises(ToolError) as exc:
+        bash.run("false", timeout=5)
+    assert "exit code 1" in str(exc.value).lower()
 
 
 def test_bash_reports_specific_exit_code(bash):
     if bash._is_cmd:
         pytest.skip("cmd.exe subshell exit differs")
-    out = bash.run("(exit 7)", timeout=5)
-    assert "7" in out and "exit" in out.lower()
+    with pytest.raises(ToolError) as exc:
+        bash.run("(exit 7)", timeout=5)
+    assert "exit code 7" in str(exc.value).lower()
+
+
+def test_bash_failed_command_output_still_visible(bash):
+    if bash._is_cmd:
+        pytest.skip("posix echo")
+    # The model needs the failing command's output to diagnose it - the error
+    # must carry what was printed before the nonzero exit.
+    with pytest.raises(ToolError) as exc:
+        bash.run("echo the reason; false", timeout=5)
+    assert "the reason" in str(exc.value)
 
 
 def test_bash_clean_output_on_success(bash):
@@ -202,8 +215,9 @@ def test_bash_grep_no_match_is_visible(bash):
     if bash._is_cmd:
         pytest.skip("grep semantics")
     # grep with no match exits 1 - the agent must see that, not think it passed.
-    out = bash.run("echo apple | grep zebra", timeout=5)
-    assert "exit" in out.lower() and "1" in out
+    with pytest.raises(ToolError) as exc:
+        bash.run("echo apple | grep zebra", timeout=5)
+    assert "exit code 1" in str(exc.value).lower()
 
 
 def test_bash_timeout_does_not_contaminate_next_command(bash):
