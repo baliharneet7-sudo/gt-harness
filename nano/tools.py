@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import stat
 import shutil
 import signal
 import subprocess
@@ -222,15 +223,34 @@ def read_file(path: str, line_start: int | None = None,
                                for i, ln in enumerate(selected)) + "\n")
 
 
+def _raw_span(raw: str, n_start: int, n_end: int) -> tuple[int, int]:
+    """Map a [start, end) span in the LF-normalized view of `raw` back to raw
+    indices. Each \\r\\n in raw collapses to one \\n in the normalized view."""
+    spans = []
+    r = n = 0
+    for target in (n_start, n_end):
+        while n < target:
+            r += 2 if raw.startswith("\r\n", r) else 1
+            n += 1
+        spans.append(r)
+    return spans[0], spans[1]
+
+
 def _write_exact(p: Path, text: str) -> None:
     """Write text verbatim: no newline translation (a one-char edit in an
     LF repo must not rewrite the whole file to CRLF), and atomically via a
-    temp file + replace so a crash or disk-full can't leave a truncated file."""
+    temp file + replace so a crash or disk-full can't leave a truncated file.
+    The replacement inherits the original's permission bits - editing
+    deploy.sh must not strip its executable bit."""
     if not isinstance(text, str):
         raise ToolError(f"'new' must be a string, got {type(text).__name__}.")
     tmp = p.with_name(f"{p.name}.nano-{uuid.uuid4().hex}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8", newline="")
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(p).st_mode))
+        except OSError:
+            pass  # new file: keep the default mode
         os.replace(tmp, p)
     finally:
         if tmp.exists():
@@ -253,18 +273,21 @@ def edit_file(path: str, old: str, new: str) -> str:
 
     if not p.exists():
         raise ToolError(f"File not found: {path}")
+    # Edit through symlinks: replacing the link itself would silently turn it
+    # into a regular file and leave the real target untouched.
+    p = p.resolve()
     # Preserve the file's line-ending style: read raw (newline="") and prefer
     # an exact byte match - replacing in place leaves every untouched line's
     # ending alone, even in a mixed CRLF/LF file. Only when that misses (the
-    # model sent LF for a CRLF file) fall back to LF-normalized matching and
-    # restore CRLF on write. Editing one line must not flip the whole file's
+    # model sent LF for a CRLF file) fall back to LF-normalized matching,
+    # splice into the matched RAW span only, and give the replacement the
+    # span's own ending style. Editing one line must never flip other lines'
     # newlines - in either direction.
     with p.open(encoding="utf-8", newline="") as f:  # newline="" preserves \r\n
         raw = f.read()
     if raw.count(old) == 1:
         result = raw.replace(old, new, 1)
     else:
-        crlf = "\r\n" in raw
         work = raw.replace("\r\n", "\n")
         old_n, new_n = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
         count = work.count(old_n)
@@ -277,9 +300,17 @@ def edit_file(path: str, old: str, new: str) -> str:
                 f"old string matches {count} places in {path} - must be unique. "
                 f"Add surrounding context to disambiguate."
             )
-        result = work.replace(old_n, new_n, 1)
-        if crlf:
-            result = result.replace("\n", "\r\n")
+        i = work.index(old_n)
+        start, end = _raw_span(raw, i, i + len(old_n))
+        span = raw[start:end]
+        if "\r\n" in span:
+            use_crlf = True
+        elif "\n" in span:
+            use_crlf = False
+        else:  # single-line span: fall back to the file's overall style
+            use_crlf = "\r\n" in raw and "\n" not in raw.replace("\r\n", "")
+        insert = new_n.replace("\n", "\r\n") if use_crlf else new_n
+        result = raw[:start] + insert + raw[end:]
     _write_exact(p, result)
     return f"Edited {path} (1 replacement, {len(old)}->{len(new)} chars)."
 

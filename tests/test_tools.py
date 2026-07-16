@@ -295,3 +295,36 @@ def test_edit_file_mixed_newlines_leaves_untouched_lines_alone(tmp_workdir):
     p.write_bytes(b"a = 1\nb = 2\r\nc = 3\nd = 4\n")
     edit_file(str(p), old="a = 1", new="a = 99")
     assert p.read_bytes() == b"a = 99\nb = 2\r\nc = 3\nd = 4\n", p.read_bytes()
+
+
+def test_edit_file_mixed_newlines_fallback_touches_only_matched_span(tmp_workdir):
+    # LF-sent `old` spanning CRLF lines forces the normalized fallback path.
+    # Even there, lines outside the matched span must keep their endings,
+    # and the replacement adopts the endings of the span it replaces.
+    p = tmp_workdir / "mix2.txt"
+    p.write_bytes(b"a\r\nb\r\nKEEP_LF\nc\r\n")
+    edit_file(str(p), old="a\nb", new="A\nB")
+    assert p.read_bytes() == b"A\r\nB\r\nKEEP_LF\nc\r\n", p.read_bytes()
+
+
+def test_edit_file_preserves_unix_mode(tmp_workdir):
+    if sys.platform == "win32":
+        pytest.skip("unix file modes")
+    p = tmp_workdir / "deploy.sh"
+    p.write_text("#!/bin/sh\necho hi\n")
+    p.chmod(0o755)
+    edit_file(str(p), old="echo hi", new="echo bye")
+    assert (p.stat().st_mode & 0o777) == 0o755, oct(p.stat().st_mode)
+
+
+def test_edit_file_edits_through_symlink(tmp_workdir):
+    target = tmp_workdir / "shared.txt"
+    target.write_text("v = 1\n")
+    link = tmp_workdir / "link.txt"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable (needs privilege on Windows)")
+    edit_file(str(link), old="v = 1", new="v = 2")
+    assert target.read_text() == "v = 2\n"
+    assert link.is_symlink(), "edit replaced the symlink with a regular file"
