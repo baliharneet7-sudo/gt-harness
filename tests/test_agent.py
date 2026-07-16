@@ -377,3 +377,48 @@ def test_agent_run_never_raises_on_provider_error():
     agent = Agent(provider=_BoomProvider(), system="sys", max_iterations=10)
     result = agent.run("task")
     assert result.stop_reason == "error"
+
+
+def test_agent_truncates_huge_tool_use_input():
+    # A giant edit_file `new` arg lives under tool_use.input and must be counted
+    # AND truncated, or it re-inflates every request forever.
+    big = "x" * 5000
+    fp = FakeProvider([
+        StepResult(text="writing", tool_calls=[ToolCall(
+            id="t1", name="edit_file",
+            arguments={"path": "big.py", "old": "", "new": big})],
+            stop_reason="tool_use", usage=_u(100, 10)),
+        StepResult(text="more", tool_calls=[ToolCall(
+            id="t2", name="bash", arguments={"command": "echo done"})],
+            stop_reason="tool_use", usage=_u(100, 10)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(100, 10)),
+    ])
+
+    class _OkBash:
+        def run(self, command, timeout=30):
+            return "ok\n"
+
+    agent = Agent(provider=fp, system="sys", max_iterations=10,
+                  max_input_tokens=10**9, bash=_OkBash(), verify=False)
+    agent.truncation_char_budget = 2000  # below the 5000-char input
+    # edit_file writes a real file; point it at a tmp dir and let it run.
+    import os as _os
+    import tempfile
+    fp.scripted[0].tool_calls[0].arguments["path"] = _os.path.join(
+        tempfile.mkdtemp(), "big.py")
+    result = agent.run("write big")
+    assert result.stop_reason == "end_turn"
+    truncs = [t for t in result.transcript if t.get("type") == "truncation"]
+    assert any(t["dropped_chars"] >= 5000 for t in truncs), \
+        "huge tool_use input was not truncated"
+    # the giant input must be gone from the final request
+    last = fp.calls[-1]["messages"]
+    seen_big = any(
+        isinstance(m.get("content"), list)
+        and any(len(str(v)) >= 5000
+                for b in m["content"] if b.get("type") == "tool_use"
+                for v in (b.get("input") or {}).values())
+        for m in last
+    )
+    assert not seen_big

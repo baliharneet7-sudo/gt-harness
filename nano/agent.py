@@ -170,12 +170,19 @@ class Agent:
                 elif isinstance(c, list):
                     for b in c:
                         n += len(b.get("text", "")) + len(b.get("content", ""))
+                        # A tool_use block's args live under `input` - a huge
+                        # edit_file `new` value hides here and re-inflates every
+                        # request unless it is counted (and dropped) too.
+                        for v in (b.get("input") or {}).values():
+                            if isinstance(v, str):
+                                n += len(v)
             return n
 
         if total_chars() <= self.truncation_char_budget:
             return
 
-        # Drop oldest tool_result block content first; keep the message and id.
+        # Drop oldest tool_result content first, then oversized tool_use inputs;
+        # keep the block and its id so the tool_use/tool_result pairing survives.
         for m in messages:
             if not isinstance(m.get("content"), list):
                 continue
@@ -189,6 +196,25 @@ class Agent:
                                        "dropped_chars": original_len})
                     if total_chars() <= self.truncation_char_budget:
                         return
+        # Still over budget: shrink the largest string args of past tool_use
+        # blocks (e.g. a giant edit_file `new`). The tool already ran; its
+        # result is elsewhere in history, so the full input is no longer needed.
+        for m in messages:
+            if not isinstance(m.get("content"), list):
+                continue
+            for b in m["content"]:
+                if b.get("type") != "tool_use":
+                    continue
+                inp = b.get("input") or {}
+                for k, v in list(inp.items()):
+                    if isinstance(v, str) and len(v) > 200 and not v.startswith(
+                            "[truncated"):
+                        inp[k] = f"[truncated - {len(v)} chars dropped]"
+                        transcript.append({"type": "truncation",
+                                           "tool_use_id": b.get("id"),
+                                           "dropped_chars": len(v)})
+                        if total_chars() <= self.truncation_char_budget:
+                            return
 
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:
         # Internal canonical shape: assistant carries text + structured tool_calls.
