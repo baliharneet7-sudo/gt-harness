@@ -8,3 +8,11 @@ dist/
 build/
 .env
 results/**/raw/
+
+# local-only artifacts (benchmark runs, editor config, scratch notes)
+results/
+.vscode/
+nul
+harness.txt
+textstats.py
+test_textstats.py
