@@ -99,13 +99,19 @@ class BashTool:
         if self._proc is None or self._proc.poll() is not None:
             self._spawn()
         sentinel = f"__NANO_DONE_{uuid.uuid4().hex}__"
+        # The sentinel carries the command's exit status. Without it a failed
+        # command (`false`, a failing test, `grep` with no match) reads as
+        # success, and the agent believes work it never finished. The status
+        # code follows the sentinel: "<sentinel>:<code>".
+        status_expr = "%errorlevel%" if self._is_cmd else "$?"
         nl = "\r\n" if self._is_cmd else "\n"
         assert self._proc and self._proc.stdin
-        self._proc.stdin.write(f"{command}{nl}echo {sentinel}{nl}")
+        self._proc.stdin.write(f"{command}{nl}echo {sentinel}:{status_expr}{nl}")
         self._proc.stdin.flush()
 
         deadline = time.monotonic() + timeout
         out_lines: list[str] = []
+        exit_code = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -123,15 +129,21 @@ class BashTool:
                     raise ToolError("Shell process exited unexpectedly.")
                 continue
             if sentinel in line:
-                pre = line.split(sentinel, 1)[0]
+                pre, _, post = line.partition(sentinel)
                 if pre.strip():
                     out_lines.append(pre)
+                try:
+                    exit_code = int(post.lstrip(":").strip())
+                except ValueError:
+                    exit_code = 0  # status unreadable; don't fabricate a failure
                 break
             out_lines.append(line)
 
         joined = "".join(out_lines).rstrip("\r\n") + "\n"
         if self._is_cmd:
             joined = _strip_cmd_prompt(joined)
+        if exit_code != 0:
+            joined += f"[exit code {exit_code}]\n"
         return _truncate(joined)
 
     def _kill(self) -> None:

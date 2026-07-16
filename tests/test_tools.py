@@ -176,3 +176,31 @@ def test_dispatch_unparseable_number_is_toolerror(bash):
     with pytest.raises(ToolError) as exc:
         dispatch("read_file", {"path": "x", "line_start": "abc"}, bash=bash)
     assert "line_start" in str(exc.value)
+
+
+def test_bash_surfaces_nonzero_exit(bash):
+    # A failed command must not read as success. The whole harness rests on
+    # the agent being able to tell a test/command failed.
+    out = bash.run("false", timeout=5)
+    assert "exit code 1" in out.lower() or "exit status 1" in out.lower()
+
+
+def test_bash_reports_specific_exit_code(bash):
+    if bash._is_cmd:
+        pytest.skip("cmd.exe subshell exit differs")
+    out = bash.run("(exit 7)", timeout=5)
+    assert "7" in out and "exit" in out.lower()
+
+
+def test_bash_clean_output_on_success(bash):
+    # Exit 0 stays clean - no exit-code noise appended to good output.
+    out = bash.run("echo hi", timeout=5)
+    assert out.strip() == "hi"
+
+
+def test_bash_grep_no_match_is_visible(bash):
+    if bash._is_cmd:
+        pytest.skip("grep semantics")
+    # grep with no match exits 1 - the agent must see that, not think it passed.
+    out = bash.run("echo apple | grep zebra", timeout=5)
+    assert "exit" in out.lower() and "1" in out
