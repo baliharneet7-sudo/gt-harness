@@ -217,12 +217,16 @@ def test_agent_verify_pass_accepts_done_backed_by_tool_evidence():
         StepResult(text="done", tool_calls=[], stop_reason="end_turn",
                    usage=_u(20, 5)),
         StepResult(text="verifying", tool_calls=[ToolCall(
-            id="t2", name="bash", arguments={"command": "pytest -q"})],
+            id="t2", name="bash", arguments={"command": "run tests"})],
             stop_reason="tool_use", usage=_u(30, 5)),
         StepResult(text="verified done", tool_calls=[], stop_reason="end_turn",
                    usage=_u(40, 5)),
     ])
-    agent = Agent(provider=fp, system="sys", max_iterations=10)
+
+    class _OkBash:
+        def run(self, command, timeout=30):
+            return "ok\n"
+    agent = Agent(provider=fp, system="sys", max_iterations=10, bash=_OkBash())
     result = agent.run("fix the bug")
 
     assert result.stop_reason == "end_turn"
@@ -301,3 +305,75 @@ def test_agent_emits_running_stats_each_step():
     assert stats[0] == {"type": "stats", "iteration": 1,
                         "input_tokens": 100, "output_tokens": 20}
     assert stats[1]["input_tokens"] == 250
+
+
+def test_agent_refusal_not_reported_as_success():
+    # A provider stop_reason other than end_turn, with no tool calls (refusal,
+    # content_filter, unknown), must NOT be reported as end_turn success.
+    fp = FakeProvider([
+        StepResult(text="I can't help with that.", tool_calls=[],
+                   stop_reason="refusal", usage=_u(10, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    result = agent.run("do a thing")
+    assert result.stop_reason == "refusal"
+    assert result.stop_reason != "end_turn"
+
+
+def test_agent_failed_tool_does_not_satisfy_verify_gate():
+    # After a real 'done', the verify nudge fires. If the model then only runs
+    # a FAILING tool and says done again, that must not count as evidence -
+    # push back again (up to the cap).
+    fp = FakeProvider([
+        StepResult(text="working", tool_calls=[ToolCall(
+            id="t1", name="bash", arguments={"command": "echo hi"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),  # first done -> nudged
+        StepResult(text="trying", tool_calls=[ToolCall(
+            id="t2", name="read_file", arguments={"path": "no/such/file"})],
+            stop_reason="tool_use", usage=_u(30, 5)),  # FAILS
+        StepResult(text="done again", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(40, 5)),  # should be pushed back, not accepted
+        StepResult(text="really done", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(50, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=20)
+    result = agent.run("fix it")
+    # The failing-tool 'done' was challenged, so more than 2 pushbacks happened.
+    challenges = sum(1 for m in fp.calls[-1]["messages"]
+                     if m["role"] == "user"
+                     and "without a completed" in str(m["content"]))
+    assert challenges >= 2
+
+
+def test_agent_tool_exception_becomes_recoverable_error(tmp_workdir):
+    # A tool that raises a NON-ToolError (edit_file old=None on an EXISTING
+    # file -> text.count(None) TypeError) must come back as a recoverable
+    # tool_result error, never crash the run.
+    p = tmp_workdir / "x.py"
+    p.write_text("a = 1\n")
+    fp = FakeProvider([
+        StepResult(text="editing", tool_calls=[ToolCall(
+            id="t1", name="edit_file",
+            arguments={"path": str(p), "old": None, "new": "y"})],
+            stop_reason="tool_use", usage=_u(10, 5)),
+        StepResult(text="ok", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(20, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10, verify=False)
+    result = agent.run("edit")  # must not raise
+    assert result.stop_reason == "end_turn"
+    tr = [m for m in fp.calls[1]["messages"] if m["role"] == "user"][-1]
+    assert tr["content"][0]["is_error"] is True
+
+
+def test_agent_run_never_raises_on_provider_error():
+    # A provider that raises must yield stop_reason='error', not a traceback.
+    class _BoomProvider:
+        model = "boom"
+        def step(self, messages, tools, system):
+            raise RuntimeError("api exploded")
+    agent = Agent(provider=_BoomProvider(), system="sys", max_iterations=10)
+    result = agent.run("task")
+    assert result.stop_reason == "error"

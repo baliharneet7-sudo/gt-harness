@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -47,9 +46,10 @@ class Agent:
         used_tools = False
         pushbacks_left = self.max_pushbacks if self.verify else 0
         challenged = False  # has any "done" been pushed back yet?
-        tools_since_nudge = False  # tool evidence since the last pushback
+        tools_since_nudge = False  # successful tool evidence since last pushback
 
-        while True:
+        try:
+          while True:
             iteration += 1
             if iteration > self.max_iterations:
                 return AgentResult(
@@ -101,12 +101,13 @@ class Agent:
                 transcript.append({"type": "user", "content": nudge})
                 continue
 
-            if sr.stop_reason == "end_turn" or not sr.tool_calls:
+            if sr.stop_reason == "end_turn":
                 # Verify pass: models grade their own work generously, and
                 # some end a turn merely *describing* their next action. A
-                # "done" is only accepted when backed by tool evidence since
-                # the last challenge; toolless dones get pushed back until
-                # max_pushbacks runs out. Skipped when no tool was ever used.
+                # "done" is only accepted when backed by *successful* tool
+                # evidence since the last challenge; toolless (or failed-only)
+                # dones get pushed back until max_pushbacks runs out. Skipped
+                # when no tool was ever used.
                 if used_tools and pushbacks_left > 0 and (
                         not challenged or not tools_since_nudge):
                     pushbacks_left -= 1
@@ -130,10 +131,33 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
 
+            # Stopped with no tool calls but not a clean end_turn: refusal,
+            # content_filter, or an unmapped provider reason. Never report that
+            # as success - surface the reason so the caller (and CLI exit code)
+            # knows the run did not complete.
+            if not sr.tool_calls:
+                return AgentResult(
+                    final_text=sr.text, stop_reason=sr.stop_reason,
+                    iterations=iteration,
+                    total_input_tokens=total_in, total_output_tokens=total_out,
+                    total_cache_read_tokens=total_cache, transcript=transcript,
+                )
+
             used_tools = True
-            tools_since_nudge = True
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
+            # Only a *successful* tool counts as verification evidence - a
+            # failed-only round must not satisfy the verify gate.
+            if any(not r["is_error"] for r in tool_results):
+                tools_since_nudge = True
             messages.append({"role": "user", "content": tool_results})
+        except Exception as e:  # noqa: BLE001 - any failure becomes a result, not a crash
+            transcript.append({"type": "error", "message": f"{type(e).__name__}: {e}"})
+            return AgentResult(
+                final_text=f"agent error: {type(e).__name__}: {e}",
+                stop_reason="error", iterations=iteration,
+                total_input_tokens=total_in, total_output_tokens=total_out,
+                total_cache_read_tokens=total_cache, transcript=transcript,
+            )
 
     def _truncate_if_needed(self, messages: list[dict[str, Any]],
                             transcript: list[dict[str, Any]]) -> None:
@@ -190,6 +214,11 @@ class Agent:
                 is_error = False
             except ToolError as e:
                 output = f"ERROR: {e}"
+                is_error = True
+            except Exception as e:  # noqa: BLE001 - a bad tool arg (e.g. wrong
+                # type from a weak model) must come back as a fixable error,
+                # not crash the whole run.
+                output = f"ERROR: {type(e).__name__}: {e}"
                 is_error = True
             transcript.append({"type": "tool_result", "id": call.id,
                                "name": call.name, "output": output,
