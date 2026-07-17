@@ -19,8 +19,12 @@ def _call_with_retry(fn, attempts: int = 3):
             return fn()
         except Exception as e:
             status = getattr(e, "status_code", None)
+            # Client-side timeouts (APITimeoutError) carry no status_code and
+            # no "Connection" in their concrete class name - same transient
+            # class of failure, same retry.
+            name = type(e).__name__
             transient = (status in _RETRYABLE_STATUS
-                         or "Connection" in type(e).__name__)
+                         or "Connection" in name or "Timeout" in name)
             if not transient or attempt == attempts - 1:
                 raise
             time.sleep(2 ** attempt)

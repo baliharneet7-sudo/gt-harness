@@ -395,8 +395,10 @@ def _require(arguments: dict[str, Any], name: str, *keys: str) -> None:
 def _int_arg(arguments: dict[str, Any], key: str, default: int | None = None) -> int | None:
     """Weak models pass numbers as strings ('5' not 5). Coerce; a value that
     won't parse comes back as a ToolError, never a TypeError that kills the run."""
-    value = arguments.get(key, default)
-    if value is None or isinstance(value, int):
+    value = arguments.get(key)
+    if value is None:  # missing OR an explicit JSON null: use the default
+        return default
+    if isinstance(value, int):
         return value
     try:
         return int(value)

@@ -188,6 +188,15 @@ def test_dispatch_unparseable_number_is_toolerror(bash):
     assert "line_start" in str(exc.value)
 
 
+def test_dispatch_explicit_null_optional_arg_uses_default(bash):
+    # Weak models send '"timeout": null' instead of omitting the key.
+    # dict.get only defaults on a MISSING key, so an explicit None must be
+    # mapped to the default - not passed through to `time.monotonic() + None`.
+    out = dispatch("bash", {"command": "echo nulled", "timeout": None},
+                   bash=bash)
+    assert "nulled" in out
+
+
 def test_bash_surfaces_nonzero_exit(bash):
     # A failed command must not read as success. It must raise ToolError so
     # the loop records is_error=True and the verify gate never counts a

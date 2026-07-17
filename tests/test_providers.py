@@ -325,6 +325,27 @@ def test_retry_does_not_retry_client_errors():
     assert calls["n"] == 1
 
 
+def test_retry_covers_client_side_timeouts(monkeypatch):
+    # SDK timeout errors (anthropic/openai APITimeoutError) carry no
+    # status_code and their concrete class name lacks "Connection" - they
+    # must still be classified transient and retried.
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    class APITimeoutError(Exception):
+        pass
+
+    def slow_then_ok():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise APITimeoutError("request timed out")
+        return "ok"
+
+    assert _call_with_retry(slow_then_ok) == "ok"
+    assert calls["n"] == 2
+
+
 def test_anthropic_provider_retries_through_client(monkeypatch):
     import nano.providers as providers
     monkeypatch.setattr(providers.time, "sleep", lambda s: None)
