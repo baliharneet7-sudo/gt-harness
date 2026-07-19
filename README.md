@@ -1,5 +1,7 @@
 # nano-harness
 
+![nano-harness — a tight agent loop: bash, read_file, edit_file. ~970 lines, 59.6% on Terminal-Bench 2.0](docs/assets/hero-whiteboard.png)
+
 > Smallest readable coding-agent loop that scores on benchmarks.
 
 nano-harness is a minimal, single-purpose **coding agent** — the code that wraps an
@@ -68,6 +70,8 @@ repository; it reads code, runs commands, edits files, runs tests, and reports b
 
 Terminal-Bench 2.0, full 89-task suite, self-run through Harbor (each task in its own
 Docker container, the exact shipping harness installed per container):
+
+![Terminal-Bench 2.0 scorecard — nano-harness at 59.6%, field average 60%](docs/benchmarks/tb2-scorecard.png)
 
 | Harness | Model | Tasks | Score |
 |---------|-------|-------|-------|
@@ -301,3 +305,7 @@ ruff check .    # lint (line length 100, py312 target)
   `claude-opus-4-8`.
 - `docs/superpowers/` holds the formal design spec and implementation plan; `docs/reviews/`
   keeps the external review artifacts referenced above.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
