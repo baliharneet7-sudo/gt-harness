@@ -71,18 +71,20 @@ Docker container, the exact shipping harness installed per container):
 
 | Harness | Model | Tasks | Score |
 |---------|-------|-------|-------|
-| nano-harness | Claude Opus 4.8 | 89 (full) | **59.6% (53/89)** |
+| nano-harness | Claude Opus 4.8 | 89 (full) | **57–60% (51–53/89 across runs)** |
 
 Self-run through Harbor, every task in its own Docker container, the exact shipping
-harness installed per container. Errored trials (11: agent wall-clock timeouts on the
-heaviest tasks plus one container OOM-kill) are counted as failures — the conservative
-scoring. Measured on commit `0903552`; 16 h 25 m total runtime.
+harness installed per container (commit `0903552`). Two full passes landed at 53/89
+(59.6%) and 51/89 (57.3%); the ±2-task swing comes entirely from a handful of heavy,
+flaky tasks (in-container QEMU VMs, MIPS-Doom, CIFAR training) that intermittently hit
+the agent wall-clock timeout or OOM the container. Errored trials are counted as
+failures — the conservative scoring. ~16 h per full run.
 
 An earlier build scored **53.9% (48/89)**. That run predates the correctness hardening
-below — the same harness, same model, same suite went from 53.9% to 59.6% while ~20
+below — same model, same suite, the score moved up into the high-50s while ~20
 correctness/safety bugs were fixed and the test suite grew from 52 to 86. The point
-isn't the 5.7-point gain; it's that the gain came from making the harness *correct*
-(a failing command now actually reads as a failure), not from benchmark-chasing.
+isn't the few-point gain; it's that it came from making the harness *correct* (a failing
+command now actually reads as a failure), not from benchmark-chasing.
 
 ### How it got here (honest version)
 
