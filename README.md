@@ -76,7 +76,8 @@ Docker container, the exact shipping harness installed per container):
 Self-run through Harbor, every task in its own Docker container, the exact shipping
 harness installed per container. Errored trials (agent wall-clock timeouts on the
 heaviest tasks plus one container OOM-kill) are counted as failures — the conservative
-scoring. Measured on commit `0903552`; 16 h 25 m total runtime.
+scoring. Measured on commit `0903552`; 16 h 25 m total runtime. Full task-by-task
+breakdown and reproduce steps: [`docs/benchmarks/2026-07-18-tb2-89.md`](docs/benchmarks/2026-07-18-tb2-89.md).
 
 An earlier build scored **53.9% (48/89)**. That run predates the correctness hardening
 below — the same harness, same model, same suite went from 53.9% to 59.6% while ~20
@@ -99,19 +100,45 @@ point of publishing this isn't that the harness is flawless — it's that the pa
 
 The harness is a small file tree under `nano/`, orchestrated by a single loop.
 
+```mermaid
+flowchart TD
+    T["task (plain English)"] --> R["Agent.run()"]
+    R --> TR["truncate history<br/>if over char budget"]
+    TR --> STEP["provider.step()<br/>Anthropic | OpenAI-compatible"]
+    STEP --> CAP{"step tokens ≥<br/>max_input_tokens?"}
+    CAP -- yes --> SMAX(["stop: max_tokens"])
+    CAP -- no --> STOP{"stop_reason?"}
+
+    STOP -- "max_tokens<br/>(cut off mid-output)" --> NUDGE["nudge: continue"] --> TR
+    STOP -- "end_turn" --> VER{"verified?<br/>successful tool<br/>evidence since<br/>last challenge"}
+    STOP -- "tool calls present" --> EXEC["dispatch tools"]
+    STOP -- "other<br/>(refusal / filter)" --> SREASON(["stop: that reason"])
+
+    EXEC --> BASH["bash<br/>persistent shell"]
+    EXEC --> READ["read_file"]
+    EXEC --> EDIT["edit_file"]
+    BASH --> APP["append tool_results"]
+    READ --> APP
+    EDIT --> APP
+    APP --> ITER{"iteration ≤<br/>max_iterations?"}
+    ITER -- yes --> TR
+    ITER -- no --> SITER(["stop: max_iterations"])
+
+    VER -- yes --> DONE(["stop: end_turn ✔"])
+    VER -- "no, room left" --> PUSH["push back:<br/>prove it with tools"] --> TR
+    VER -- "no, out of room" --> UNV(["stop: unverified"])
+
+    DONE --> RES["AgentResult<br/>final_text · stop_reason · iterations · token totals · transcript"]
+    SITER --> RES
+    SMAX --> RES
+    UNV --> RES
+    SREASON --> RES
 ```
-task ──▶ Agent.run()
-            │  while iteration <= max_iterations:
-            │    1. truncate history if over char budget
-            │    2. provider.step(messages, TOOLS, system)  ──▶  Provider (Anthropic | OpenAI)
-            │    3. accumulate token usage
-            │    4. if over max_input_tokens          ──▶ stop "max_tokens"
-            │    5. if end_turn or no tool calls       ──▶ stop "end_turn"
-            │    6. execute tool calls (dispatch)      ──▶ Tools (bash | read_file | edit_file)
-            │    7. append tool_results, loop
-            ▼
-        AgentResult(final_text, stop_reason, iterations, token totals, transcript)
-```
+
+The load-bearing detail is the **verify gate**: a model that says "done" without a
+successful tool call behind it gets pushed back to prove the work with real
+commands; if it can't before the loop runs out of room, the result is returned as
+`unverified` rather than reported as success.
 
 Key design choices:
 
