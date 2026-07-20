@@ -1,6 +1,6 @@
 # nano-harness
 
-![nano-harness — a tight agent loop: bash, read_file, edit_file. ~970 lines, 59.6% on Terminal-Bench 2.0](docs/assets/hero-whiteboard.png)
+![nano-harness — a coding agent in ~970 lines](docs/assets/banner.png)
 
 > Smallest readable coding-agent loop that scores on benchmarks.
 
@@ -101,6 +101,8 @@ point of publishing this isn't that the harness is flawless — it's that the pa
 4/10 to here is visible, tested, and in the commit history.
 
 ## Architecture
+
+![The loop at a glance — bash, read_file, edit_file around a tight agent loop](docs/assets/hero-whiteboard.png)
 
 The harness is a small file tree under `nano/`, orchestrated by a single loop.
 
