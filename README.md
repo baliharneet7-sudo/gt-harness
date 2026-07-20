@@ -109,16 +109,18 @@ The harness is a small file tree under `nano/`, orchestrated by a single loop.
 ```mermaid
 flowchart TD
     T["task (plain English)"] --> R["Agent.run()"]
-    R --> TR["truncate history<br/>if over char budget"]
+    R --> ITER{"iteration ≤<br/>max_iterations?"}
+    ITER -- no --> SITER(["stop: max_iterations"])
+    ITER -- yes --> TR["truncate history<br/>if over char budget"]
     TR --> STEP["provider.step()<br/>Anthropic | OpenAI-compatible"]
-    STEP --> CAP{"step tokens ≥<br/>max_input_tokens?"}
+    STEP --> CAP{"input tokens this step ≥<br/>max_input_tokens?"}
     CAP -- yes --> SMAX(["stop: max_tokens"])
-    CAP -- no --> STOP{"stop_reason?"}
+    CAP -- no --> KIND{"response?"}
 
-    STOP -- "max_tokens<br/>(cut off mid-output)" --> NUDGE["nudge: continue"] --> TR
-    STOP -- "end_turn" --> VER{"verified?<br/>successful tool<br/>evidence since<br/>last challenge"}
-    STOP -- "tool calls present" --> EXEC["dispatch tools"]
-    STOP -- "other<br/>(refusal / filter)" --> SREASON(["stop: that reason"])
+    KIND -- "cut off mid-output,<br/>no tool calls" --> NUDGE["nudge: continue"] --> ITER
+    KIND -- "end_turn" --> VER{"verify gate<br/>(skipped if no tool<br/>was ever used)"}
+    KIND -- "tool calls" --> EXEC["dispatch tools"]
+    KIND -- "no tool calls, other reason<br/>(refusal / filter)" --> SREASON(["stop: that reason"])
 
     EXEC --> BASH["bash<br/>persistent shell"]
     EXEC --> READ["read_file"]
@@ -126,25 +128,28 @@ flowchart TD
     BASH --> APP["append tool_results"]
     READ --> APP
     EDIT --> APP
-    APP --> ITER{"iteration ≤<br/>max_iterations?"}
-    ITER -- yes --> TR
-    ITER -- no --> SITER(["stop: max_iterations"])
+    APP --> ITER
 
-    VER -- yes --> DONE(["stop: end_turn ✔"])
-    VER -- "no, room left" --> PUSH["push back:<br/>prove it with tools"] --> TR
-    VER -- "no, out of room" --> UNV(["stop: unverified"])
+    VER -- "evidence-backed<br/>(or toolless run)" --> DONE(["stop: end_turn ✔"])
+    VER -- "no evidence,<br/>pushbacks + room left" --> PUSH["push back:<br/>prove it with tools"] --> ITER
+    VER -- "no evidence,<br/>out of pushbacks or room" --> UNV(["stop: unverified"])
+
+    EX["any uncaught exception<br/>(provider, tools)"] -.-> SERR(["stop: error"])
 
     DONE --> RES["AgentResult<br/>final_text · stop_reason · iterations · token totals · transcript"]
     SITER --> RES
     SMAX --> RES
     UNV --> RES
     SREASON --> RES
+    SERR --> RES
 ```
 
-The load-bearing detail is the **verify gate**: a model that says "done" without a
-successful tool call behind it gets pushed back to prove the work with real
-commands; if it can't before the loop runs out of room, the result is returned as
-`unverified` rather than reported as success.
+The load-bearing detail is the **verify gate**: when the model has used tools, a
+"done" is only accepted with a successful tool call behind it since the last
+challenge — otherwise it's pushed back to prove the work with real commands, and
+if it can't before pushbacks or iterations run out, the result is returned as
+`unverified` rather than reported as success. A run that never touched a tool
+(a pure question) finishes normally; nothing to verify.
 
 Key design choices:
 
