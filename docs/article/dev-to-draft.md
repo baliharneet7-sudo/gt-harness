@@ -10,7 +10,7 @@ cover_image: # upload docs/assets/banner (or hero-social-square.png) after repo 
 
 ## Why build a harness at all?
 
-Every popular agent framework competes on features: plugins, orchestration graphs, UI dashboards, memory systems. Almost none of them publish benchmark scores. That struck me as backwards — the harness is the part of an agent you can actually engineer, so it's the part you should be able to measure.
+Most agent projects I was following led with features: plugins, orchestration graphs, UI dashboards, memory systems. I had a harder time finding small, readable harnesses paired with a reproducible full-suite benchmark score. That struck me as backwards — the harness is the part of an agent you can actually engineer, so it's the part you should be able to measure.
 
 So the thesis of nano-harness is **score-per-line-of-code**: the smallest readable harness that still puts up a real number on a real benchmark. Think nanoGPT, but for agent harnesses — small enough to read end-to-end in one sitting, honest enough that the number means something.
 
@@ -26,7 +26,7 @@ That's it. No embeddings, no planner, no sub-agents. `bash` subsumes ls, grep, b
 
 "Alive" means: retry transient API failures, truncate history before the context window dies, nudge a continuation when output gets cut mid-tool-call, kill and respawn the shell on a hang, and turn every exception into a structured result instead of a crash.
 
-"Honest" means: a failing command must *read* as a failure, and "done" must be earned. The load-bearing piece is a **verify gate** — when the model declares it's finished, the harness only accepts it if there's a successful tool call backing it since the last challenge. No evidence? It gets pushed back: *re-read the task, run the tests, prove it.* If it can't before the loop runs out of room, the result is returned as `unverified` — not dressed up as success.
+"Honest" means: a failing command must *read* as a failure, and "done" must be earned. The load-bearing piece is a **verify gate**. Once a run has used tools, the first "done" is challenged: *re-read the task, run the relevant checks, prove it.* A later completion is accepted only when successful tool evidence has appeared since that challenge. If the pushback or iteration budget runs out without that evidence, the result is returned as `unverified` — not dressed up as success. Tool-free tasks (a pure question) are allowed to finish normally; there's nothing to verify.
 
 ## The benchmark arc: 20% → 80% → 53.9% → 59.6%
 
@@ -42,38 +42,38 @@ I benchmarked on **Terminal-Bench 2.0** via Harbor — 89 tasks, each in its own
 
 The final run: 16.5 hours, two tasks in parallel, errored trials counted as failures (10 wall-clock timeouts on the heaviest tasks plus one container OOM — all counted against me).
 
-For context, on the public leaderboard the *same model* (Opus 4.8) driven by a full lab harness scores **74.6%**, the 49-model field average is **60%**, and the top entry (GPT-5.5) is 82.7%. So ~970 lines lands at field average and captures about 80% of what a frontier lab harness gets out of the identical model. That gap — 59.6 vs 74.6, same brain — is a clean measurement of what the other several hundred thousand lines of harness are worth.
+Public Terminal-Bench results are agent-model *pairs*, so model quality and harness quality are entangled in every number. The official 2.0 board is topped by things like Codex CLI + GPT-5.5 (82.2%) and WOZCODE + Opus 4.7 (80.2%). I couldn't find a verified entry for my exact model on that table, so I'm not going to dress 59.6% up as a clean measurement of "the harness gap." It's my self-run result under the conditions disclosed here — a ~970-line harness against a suite where the tuned, much larger harnesses live in the low 80s — with the code and the task-level record in the repo for anyone who wants to check.
 
 ## The part where another model gave my code a 4/10
 
 Here's the part I actually want to tell you about.
 
-After the first full benchmark run, I pasted the five core files into an independent frontier model — a competitor's, no shared context — and asked for an adversarial code review. It scored the code **4/10** and produced a list of findings. The one that stung most was also the best catch:
+After the first full benchmark run, I pasted the five core files into an independent frontier model — a competitor's, no shared context — and asked for an adversarial code review. It scored the code **4/10** and produced a list of findings. The most consequential one was also the best catch:
 
 > **A shell command that failed was reported to the model as success.**
 
 My bash tool captured output but not exit status. `false`, a failing test suite, `grep` with no match — all of it came back looking clean. Which means my verify gate, the "keep it honest" centerpiece, could be satisfied by a *failing* test run. The harness's whole reason to exist had a hole in the middle of it.
 
-So I fixed everything, test-first — every fix landed with a failing regression test before the fix. Then I had a second independent review pass over the result. It scored **6/10** and caught two of my fixes as only *half*-fixes:
+So I worked through the findings test-first — every fix landed with a failing regression test before the fix. (Worth stating plainly, since this is an article about honesty: nano-harness was built with heavy AI-assisted coding — I directed the work, made the calls, and ran every benchmark and review, but I did not hand-type all 967 lines. The review gauntlet below was three *independent* models with no shared context, which is exactly why it caught what it caught.) Then I had a second independent review pass over the result. It scored **6/10** and caught two of my fixes as only *half*-fixes:
 
 - I'd stored tool calls in two places, and my context-truncation pass only shrank one of them — so the OpenAI serialization path silently re-inflated giant tool arguments I thought I'd truncated.
 - My CRLF fix preserved line endings for uniform files but homogenized mixed-ending files.
 
 Fixed those too. Then a third pass — a multi-agent cloud review fleet — found exactly **two nits** (a missed retry case for client-side API timeouts, and an explicit JSON `null` argument bypassing a default). Fixed both.
 
-Total damage across the gauntlet: **~20 real bugs, test suite grown from 52 to 86 tests.** Among the fixes:
+Total damage across the gauntlet: **~20 real bugs, test suite grown from 52 to 87 tests.** Among the fixes:
 
-- Nonzero exit status now raises a tool error — a failing test can never satisfy the verify gate again
+- Nonzero shell status now raises a tool error, so a plain failing test command no longer counts as successful verification evidence
 - The shell's sentinel protocol survives `set -x` (a substring match used to latch onto the trace line and mis-frame every subsequent command)
 - `edit_file` preserves file permissions (it used to silently strip the executable bit off any script it edited — on Linux benchmark containers, that's a task-killer), edits *through* symlinks instead of replacing them, and leaves untouched lines' endings byte-identical in mixed CRLF/LF files
 - Process-tree kills are verified and reaped — no zombie shells accumulating across timeouts
 - The verify gate fails *closed*: out of pushbacks means `unverified`, not fake success
 
-And here's the punchline the benchmark handed me: the pre-hardening harness scored 53.9%. The post-hardening harness — same model, same suite — scored **59.6%**. Five extra tasks, purely from correctness fixes. I wasn't benchmark-chasing; the biggest single fix was making failure *look like failure* to the model, and it turns out models solve more tasks when their harness stops lying to them.
+And here's the punchline the benchmark handed me: the pre-hardening harness scored 53.9%. The post-hardening run — same model, same suite — passed five more tasks for **59.6%**, a 5.7-point gain. These are stochastic single runs, so I can't prove every point came from a specific fix. What I *can* say: the intervening changes were correctness and safety fixes, not task-specific benchmark patches, and the next full run scored higher. The biggest single fix was making failure *look like failure* to the model — and it turns out models get further when their harness stops lying to them.
 
 ## What this cost
 
-The final run burned roughly 2.7M tokens — about **$40 at list price** for Opus 4.8. (I ran it through a university AI gateway with free tokens, so my actual spend was $0, but $40 is the honest number for reproduction.) A 10-task slice for iteration costs a few dollars and about an hour. This whole project — build, three review rounds, two full benchmark runs — fits inside what a single seat of most agent products costs per month.
+The clean run's root JSON has null token/cost fields (Harbor's later retry overwrote several per-trial artifacts), so I can't quote a pristine tally. What the surviving 88 agent logs total is about **3.0M tokens** (≈1.54M in, ≈1.43M out). At Opus 4.8's July 2026 global list rates ($5/M input, $25/M output) that's roughly **$44** — but that total includes retry-overwritten trials, so treat it as an estimate, not a receipt. My actual spend was **$0** because I used the ASU AIML gateway's free allocation. A 10-task iteration slice runs one to two hours and would cost about $4–$6 at list.
 
 ## Honesty footnotes
 
@@ -86,7 +86,7 @@ Things a benchmark writeup usually omits:
 
 ## Steal this code
 
-The repo is [github.com/TroyJLorents-GH/nano-harness](https://github.com/TroyJLorents-GH/nano-harness) — MIT, ~970 non-blank lines across `agent.py`, `tools.py`, `providers.py`, `prompts.py`, `cli.py`, with the 86-test suite, the Terminal-Bench adapter, the full benchmark breakdown, and the review artifacts all in the tree.
+The repo is [github.com/TroyJLorents-GH/nano-harness](https://github.com/TroyJLorents-GH/nano-harness) — MIT, ~970 non-blank lines across `agent.py`, `tools.py`, `providers.py`, `prompts.py`, `cli.py`, with the 87-test suite, the Terminal-Bench adapter, the full benchmark breakdown, and the re-review prompt and resulting fix history in the tree.
 
 If you take one thing from this: **the harness's job is not to be smart — the model is smart. The harness's job is to keep the run alive and refuse to let anyone lie, including the model, and including you.** The 4/10 review was the moment that thesis got real. Publishing the whole arc — the bad score, the half-fixes, the variance — is the point.
 

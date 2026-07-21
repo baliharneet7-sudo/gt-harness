@@ -71,8 +71,6 @@ repository; it reads code, runs commands, edits files, runs tests, and reports b
 Terminal-Bench 2.0, full 89-task suite, self-run through Harbor (each task in its own
 Docker container, the exact shipping harness installed per container):
 
-![Terminal-Bench 2.0 scorecard — nano-harness at 59.6%, field average 60%](docs/benchmarks/tb2-scorecard.png)
-
 | Harness | Model | Tasks | Score |
 |---------|-------|-------|-------|
 | nano-harness | Claude Opus 4.8 | 89 (full) | **59.6% (53/89)** |
@@ -85,7 +83,7 @@ breakdown and reproduce steps: [`docs/benchmarks/2026-07-18-tb2-89.md`](docs/ben
 
 An earlier build scored **53.9% (48/89)**. That run predates the correctness hardening
 below — the same harness, same model, same suite went from 53.9% to 59.6% while ~20
-correctness/safety bugs were fixed and the test suite grew from 52 to 86. The point
+correctness/safety bugs were fixed and the test suite grew from 52 to 87. The point
 isn't the 5.7-point gain; it's that the gain came from making the harness *correct*
 (a failing command now actually reads as a failure), not from benchmark-chasing.
 
@@ -96,7 +94,7 @@ review and scored **4/10** — one finding was a real correctness bug (a shell c
 that failed was still reported to the model as success). Every finding was triaged and
 fixed test-first. A second independent review scored **6/10** and caught defects the
 first pass introduced; those were fixed too. A third pass (a multi-agent cloud review)
-found only two nits. The test suite grew from 52 to 86 tests across the process. The
+found only two nits. The test suite grew from 52 to 87 tests across the process. The
 point of publishing this isn't that the harness is flawless — it's that the path from
 4/10 to here is visible, tested, and in the commit history.
 
