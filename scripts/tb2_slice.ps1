@@ -15,14 +15,16 @@ param(
 
 Set-Location $PSScriptRoot\..
 
-# Load .env (ASU token/project id) into this process only.
+# Load .env (API token + gateway URL) into this process only. Put these in .env:
+#   OPENAI_API_KEY=<your key>
+#   OPENAI_BASE_URL=<your OpenAI-compatible endpoint, e.g. https://api.openai.com/v1>
 Get-Content .env | ForEach-Object {
     if ($_ -match '^([^#=]+)=(.*)$') {
         [Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim())
     }
 }
-$env:OPENAI_API_KEY  = $env:ASU_AIML_TOKEN
-$env:OPENAI_BASE_URL = "https://api-main.aiml.asu.edu/v1"
+if (-not $env:OPENAI_API_KEY -and $env:ASU_AIML_TOKEN) { $env:OPENAI_API_KEY = $env:ASU_AIML_TOKEN }
+if (-not $env:OPENAI_BASE_URL) { $env:OPENAI_BASE_URL = "https://api.openai.com/v1" }
 # Force UTF-8 for all Python file writes. Harbor writes trial result.json with
 # pathlib.write_text(), which defaults to Windows cp1252 and crashes the whole
 # job on any unicode in a trial result. This makes those writes UTF-8 safe.

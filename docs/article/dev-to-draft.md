@@ -73,7 +73,7 @@ And here's the punchline the benchmark handed me: the pre-hardening harness scor
 
 ## What this cost
 
-The clean run's root JSON has null token/cost fields (Harbor's later retry overwrote several per-trial artifacts), so I can't quote a pristine tally. What the surviving 88 agent logs total is about **3.0M tokens** (≈1.54M in, ≈1.43M out). At Opus 4.8's July 2026 global list rates ($5/M input, $25/M output) that's roughly **$44** — but that total includes retry-overwritten trials, so treat it as an estimate, not a receipt. My actual spend was **$0** because I used the ASU AIML gateway's free allocation. A 10-task iteration slice runs one to two hours and would cost about $4–$6 at list.
+More than I can quote to the exact dollar, and the honest reason is a gap in my own adapter: nano logs token usage to the agent's stdout instead of reporting it back into Harbor's result schema, so the run's summary JSON has null token fields. Adding up the surviving per-task agent logs gives about **3.0M tokens** (≈1.54M in, ≈1.43M out) — and since a later retry pass overwrote a few of those logs, treat it as an estimate, not a receipt. At Opus 4.8's July 2026 list rates ($5/M input, $25/M output), that's roughly **$44** for the full 89-task run. A 10-task iteration slice runs one to two hours, on the order of $4–$6. Cheap enough that the bottleneck is wall-clock, not budget.
 
 ## Honesty footnotes
 
