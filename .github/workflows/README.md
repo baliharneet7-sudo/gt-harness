@@ -26,15 +26,32 @@ Anthropic provider, everything else to the OpenAI provider — see
 
 | Model choice | Required secrets |
 |---|---|
-| `deepseek/deepseek-v4-flash` (default) | `OPENAI_API_KEY` (=DeepSeek key) + `OPENAI_BASE_URL` (DeepSeek's OpenAI-compatible endpoint) |
+| `deepseek-v4-flash` (default) | `OPENAI_API_KEY` (=DeepSeek key) + `OPENAI_BASE_URL` (DeepSeek's OpenAI-compatible endpoint) |
 | `openai/gpt-*` | `OPENAI_API_KEY` |
 | `anthropic/claude-*` | `ANTHROPIC_API_KEY` |
 | Gemini or anything else | via an OpenAI-compatible gateway: `OPENAI_API_KEY` (gateway token) + `OPENAI_BASE_URL` |
 
 The `base_url` dispatch input overrides the `OPENAI_BASE_URL` secret for a
-single run. When `OPENAI_BASE_URL` is set, the full `provider/name` string is
-passed through as the gateway's model id; without it, the provider prefix is
-stripped (see `eval/tb_agent.py`).
+single run.
+
+**Model-id gotcha (read before changing `model`).** `eval/tb_agent.py` strips a
+`provider/` prefix *only when `OPENAI_BASE_URL` is unset*. With a gateway
+configured, the `model` string reaches nano — and therefore the gateway's
+`/chat/completions` — **verbatim**. So `model` must be the gateway's own native
+model id:
+
+| Endpoint | Correct `model` |
+|---|---|
+| `https://api.deepseek.com/v1` | `deepseek-v4-flash` (bare) |
+| OpenRouter | `deepseek/deepseek-v4-flash` (prefixed — OpenRouter's id *is* prefixed) |
+
+Passing DeepSeek the OpenRouter spelling makes every request 400, which
+surfaces as "the model can't drive the harness" rather than as a config error.
+The **preflight step** exists to catch exactly this: before any task image is
+pulled it makes one ~1k-token call through `nano.cli.build_provider` — nano's
+real routing, real `max_completion_tokens`, real translated tool schemas — and
+fails the job with a clear message if the id, key, gateway, or request shape is
+wrong. It costs well under a cent.
 
 ### 2. Dispatch
 

@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model name in provider/name form (harbor -m)"
+        description: "Model id passed to harbor -m AND through to nano. When base_url is set this string is used verbatim as the gateway's model id, so it must be the gateway's NATIVE spelling (api.deepseek.com wants bare 'deepseek-v4-flash', not OpenRouter's 'deepseek/deepseek-v4-flash'). Only with no base_url is a provider/ prefix stripped."
         type: string
-        default: "deepseek/deepseek-v4-flash"
+        default: "deepseek-v4-flash"
       base_url:
         description: "OpenAI-compatible gateway URL; when set, exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
@@ -77,6 +77,41 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . "harbor==0.20.0"
+
+      # One ~1k-token call (<$0.001) through nano's OWN provider routing before
+      # harbor pulls a single task image. Catches the failures that otherwise
+      # cost a full run and look like "the model is bad": wrong model id, bad
+      # key, unreachable gateway, and gateways that reject the exact request
+      # shape nano sends (max_completion_tokens, translated tool schemas).
+      - name: Preflight provider (fail fast, not 5 dead containers)
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          from nano.cli import build_provider
+          from nano.prompts import SYSTEM_PROMPT
+          from nano.tools import TOOLS
+
+          model = os.environ["MODEL"]
+          base = os.environ.get("OPENAI_BASE_URL") or ""
+          # Mirror eval/tb_agent.py: it passes no --base-url, so nano builds a
+          # plain client and the openai SDK picks up OPENAI_BASE_URL from env.
+          print(f"model={model!r} OPENAI_BASE_URL={base or '(unset)'}")
+          try:
+              provider = build_provider(model=model, base_url=None)
+              r = provider.step(
+                  messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+                  tools=TOOLS, system=SYSTEM_PROMPT,
+              )
+          except Exception as e:
+              print(f"::error::preflight failed: {type(e).__name__}: {e}")
+              print("The model id, API key, or gateway is wrong - fix it before "
+                    "spending a run. No task images were pulled.")
+              sys.exit(1)
+          print(f"preflight ok: stop_reason={r.stop_reason} usage={r.usage} "
+                f"text={(r.text or '')[:80]!r} tool_calls={len(r.tool_calls)}")
+          EOF
 
       - name: Disk before run
         run: df -h /
