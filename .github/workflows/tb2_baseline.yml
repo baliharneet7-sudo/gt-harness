@@ -78,6 +78,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . "harbor==0.20.0"
 
+      # A secret set from a PowerShell-written file carries a UTF-8 BOM. The key
+      # only ever appears in the `Authorization: Bearer <key>` header, which
+      # httpx encodes as ASCII, so a BOM raises
+      #   UnicodeEncodeError: 'ascii' codec can't encode character U+FEFF (a BOM)
+      # on every single request - i.e. a total run failure that looks like a
+      # model problem. Strip it here (and re-mask, since the cleaned string is
+      # not the registered secret and would otherwise print unmasked in a PUBLIC
+      # repo's logs). Fix at source too: `gh secret set` from clean UTF-8.
+      - name: Sanitize API keys (strip BOM / stray whitespace)
+        run: |
+          python - <<'EOF'
+          import os, sys
+
+          cleaned, notes = [], []
+          for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+              raw = os.environ.get(name) or ""
+              if not raw:
+                  continue
+              clean = raw.replace("\ufeff", "").strip()
+              if clean != raw:
+                  notes.append(f"{name}: removed {len(raw) - len(clean)} stray "
+                               "char(s) (BOM/whitespace); re-set the secret to fix at source")
+              if not clean.isascii():
+                  print(f"::error::{name} still holds non-ASCII characters after "
+                        "stripping BOM/whitespace - it cannot be sent as an HTTP header")
+                  sys.exit(1)
+              cleaned.append((name, clean))
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              for name, clean in cleaned:
+                  print(f"::add-mask::{clean}")
+                  f.write(f"{name}={clean}\n")
+          for n in notes:
+              print(f"::warning::{n}")
+          print(f"sanitized {len(cleaned)} key(s); {len(notes)} needed repair")
+          EOF
+
       # One ~1k-token call (<$0.001) through nano's OWN provider routing before
       # harbor pulls a single task image. Catches the failures that otherwise
       # cost a full run and look like "the model is bad": wrong model id, bad
