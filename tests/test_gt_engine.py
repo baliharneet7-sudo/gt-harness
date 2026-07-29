@@ -531,11 +531,340 @@ def test_agent_gt_off_smoke_end_to_end():
     assert any("nano-smoke" in t["output"] for t in tool_outputs)
 
 
-def test_agent_gt_root_on_non_code_dir_stays_dormant(tmp_path):
+def test_agent_gt_root_on_non_code_dir_gets_dormant_bridge(tmp_path):
+    """Phase-3 contract change: a non-code gt_root gets a DORMANT bridge
+    (graph_db None, producers abstain) that can WAKE when the agent writes
+    source files - it is no longer None-forever."""
+    if not HAVE_GT:
+        pytest.skip("groundtruth not installed")
     (tmp_path / "data.txt").write_text("no code here", encoding="utf-8")
     steps = [StepResult(text="hi", tool_calls=[], stop_reason="end_turn",
                         usage=_usage())]
     agent = Agent(provider=_ScriptedProvider(steps), system="s",
                   gt_root=str(tmp_path))
-    assert agent._gt is None  # non-code root -> GT dormant
-    assert agent.run("t").stop_reason == "end_turn"
+    assert agent._gt is not None
+    assert agent._gt.graph_db is None      # dormant: no graph substrate
+    result = agent.run("t")
+    assert result.stop_reason == "end_turn"
+    # Dormant bridge delivers nothing: the initial message is the raw task
+    # (task_start abstains without a graph) and no evidence was sealed.
+    assert result.transcript[0]["content"] == "t"
+    assert agent._gt.deliveries == []
+
+
+# --------------------------------------------------------------------------- #
+# WIRE 1: L6 freshness - wake-from-dormant + reindex-after-edit (GT_L6_FRESH)
+# --------------------------------------------------------------------------- #
+def _node_count(db: str) -> int:
+    import sqlite3
+    con = sqlite3.connect(db)
+    try:
+        return con.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    finally:
+        con.close()
+
+
+@requires_gt
+def test_l6_wake_from_dormant_on_source_edit(tmp_path, monkeypatch):
+    """A task that STARTS non-code becomes code: the dormant bridge wakes on
+    the first source-file edit and the new module's symbols are in the graph."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_L6_FRESH", "1")
+    (tmp_path / "notes.txt").write_text("non-code at start", encoding="utf-8")
+    from gt_engine import create_bridge
+    b = create_bridge(str(tmp_path))
+    if b is None:
+        pytest.skip("gt-index binary unavailable")
+    assert b.graph_db is None                       # dormant
+    content = "def fresh_fn(a):\n    return a * 2\n"
+    (tmp_path / "newmod.py").write_text(content, encoding="utf-8")
+    out = b.enrich("edit_file", {"path": str(tmp_path / "newmod.py")},
+                   "edited", False, edit_before=None, edit_after=content)
+    assert out.startswith("edited")                 # never breaks the turn
+    assert b.graph_db is not None                   # WOKE
+    import sqlite3
+    con = sqlite3.connect(b.graph_db)
+    rows = con.execute(
+        "SELECT name FROM nodes WHERE name='fresh_fn'").fetchall()
+    con.close()
+    assert rows == [("fresh_fn",)]                  # the agent's new code
+
+
+@requires_gt
+def test_l6_reindex_after_edit_grows_graph(tmp_path, monkeypatch):
+    """A second new module (calling the first) re-indexes: node count grows
+    and the cross-file CALLS edge to the NEW symbol exists - the evidence the
+    full-reindex decision buys (gt-index -file cannot mint new incoming edges)."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_L6_FRESH", "1")
+    from gt_engine import create_bridge
+    (tmp_path / "newmod.py").write_text(
+        "def fresh_fn(a):\n    return a * 2\n", encoding="utf-8")
+    b = create_bridge(str(tmp_path))
+    if b is None or b.graph_db is None:
+        pytest.skip("gt-index binary unavailable")
+    n0 = _node_count(b.graph_db)
+    c2 = "from newmod import fresh_fn\n\n\ndef consumer(v):\n    return fresh_fn(v)\n"
+    (tmp_path / "second.py").write_text(c2, encoding="utf-8")
+    b.enrich("edit_file", {"path": str(tmp_path / "second.py")}, "edited",
+             False, edit_before=None, edit_after=c2)
+    n1 = _node_count(b.graph_db)
+    assert n1 > n0                                  # graph re-indexed
+    import sqlite3
+    con = sqlite3.connect(b.graph_db)
+    edges = con.execute(
+        "SELECT s.name, t.name, e.type FROM edges e "
+        "JOIN nodes s ON s.id=e.source_id JOIN nodes t ON t.id=e.target_id "
+        "WHERE e.type='CALLS'").fetchall()
+    con.close()
+    assert ("consumer", "fresh_fn", "CALLS") in edges
+
+
+@requires_gt
+def test_l6_flag_off_never_wakes(tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    # Explicit kill-switch (an unset flag would be fanned to "1" by the
+    # Profile-2 defaults create_bridge applies; explicit user value wins).
+    monkeypatch.setenv("GT_L6_FRESH", "0")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    from gt_engine import create_bridge
+    b = create_bridge(str(tmp_path))
+    if b is None:
+        pytest.skip("groundtruth unavailable")
+    content = "def f():\n    return 1\n"
+    (tmp_path / "m.py").write_text(content, encoding="utf-8")
+    b.enrich("edit_file", {"path": str(tmp_path / "m.py")}, "edited", False,
+             edit_before=None, edit_after=content)
+    assert b.graph_db is None                       # gated off: stays dormant
+
+
+# --------------------------------------------------------------------------- #
+# WIRE 2: executed covering-RED at post-edit + submit covering head
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def covering_repo(tmp_path, monkeypatch):
+    """An indexed repo whose OWN test file covers helper() through a FACT-tier
+    import-resolved CALLS edge - the covering lane's selection substrate."""
+    if not HAVE_GT:
+        pytest.skip("groundtruth not installed")
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_VERIFY_EXECUTE", "1")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "alpha.py").write_text(
+        "def helper(x, y):\n    return x + y\n\n\n"
+        "def caller_a(v):\n    return helper(v, 1)\n", encoding="utf-8")
+    (tmp_path / "test_alpha.py").write_text(
+        "from pkg.alpha import helper\n\n\n"
+        "def test_helper_sum():\n    assert helper(1, 2) == 3\n",
+        encoding="utf-8")
+    db = ensure_index(str(tmp_path))
+    if db is None:
+        pytest.skip("gt-index binary unavailable")
+    from gt_engine.bridge import GTBridge
+    return GTBridge(repo_root=str(tmp_path), graph_db=db)
+
+
+def _break_helper(root, crash=True):
+    alpha = root / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    repl = ("return x + y + undefined_name" if crash else "return x + y")
+    after = before.replace("return x + y", repl)
+    alpha.write_text(after, encoding="utf-8")
+    return alpha, before, after
+
+
+@requires_gt
+def test_covering_red_fires_at_post_edit(covering_repo, tmp_path):
+    """The TB-critical live fire: a real edit that breaks a covering test
+    delivers the Format-D RED into the SAME post-edit observation, sealed,
+    with ZERO test identity in the delivered bytes."""
+    b = covering_repo
+    alpha, before, after = _break_helper(tmp_path)
+    out = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                   edit_before=before, edit_after=after)
+    assert out.startswith("edited")                       # pure suffix
+    delta = out[len("edited"):]
+    assert "A covering test fails:" in delta              # Format-D head
+    assert "undefined_name" in delta                      # the real signal
+    assert "pkg/alpha.py" in delta                        # the where-to-fix
+    # Leak law: no test identity, no GT tag, in the delivered bytes.
+    from groundtruth.runtime.native_render import contains_gt_tag, contains_test_identity
+    assert not contains_gt_tag(delta)
+    assert not contains_test_identity(delta)
+    assert "test_alpha" not in delta and "test_helper" not in delta
+    # Sealed as THIS observation's one dose.
+    assert [d.evidence_type for d in b.deliveries] == ["covering_verdict"]
+    assert b.deliveries[0].receipt_state == "delivered"
+    assert b.chain_head
+    # The executed verdict is cached for the submit gate's covering head.
+    assert b._last_covering is not None
+    assert b._last_covering.get("verdict") == "fail"
+
+
+@requires_gt
+def test_covering_green_stays_quiet_and_latches(covering_repo, tmp_path):
+    """A green covering run delivers nothing (correct-or-quiet), caches the
+    non-fail verdict for the submit fast-path, and the per-file latch bounds
+    the cost: a second edit to the same file never re-runs the tests."""
+    b = covering_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before.replace("return helper(v, 1)", "return helper(v, 2)")
+    alpha.write_text(after, encoding="utf-8")
+    out = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                   edit_before=before, edit_after=after)
+    assert "A covering test fails:" not in out
+    assert b._last_covering is not None
+    assert b._last_covering.get("verdict") == "pass"
+    assert "pkg/alpha.py" in b._covering_fired
+    # Latch: instrument _run_covering - a second edit to the SAME file must
+    # never re-run the covering tests (production's fire-once cost bound).
+    calls: list[int] = []
+    b._run_covering = (  # type: ignore[method-assign]
+        lambda changed: (calls.append(1), (None, []))[1])
+    out2 = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                    edit_before=after, edit_after=after)
+    assert out2.startswith("edited")
+    assert calls == []
+
+
+@requires_gt
+def test_covering_off_by_flag(covering_repo, tmp_path, monkeypatch):
+    monkeypatch.delenv("GT_VERIFY_EXECUTE", raising=False)
+    b = covering_repo
+    alpha, before, after = _break_helper(tmp_path)
+    out = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                   edit_before=before, edit_after=after)
+    assert "A covering test fails:" not in out
+    assert b._last_covering is None                 # gate off: no execution
+
+
+# --------------------------------------------------------------------------- #
+# WIRE 3: CompletionCertificate delivery at the submit boundary
+# --------------------------------------------------------------------------- #
+@requires_gt
+def test_submit_cert_block_on_covering_red(covering_repo, tmp_path, monkeypatch):
+    """Broken edit -> the submit probe re-runs the covering head fresh (G-2:
+    a cached FAIL is stale at submit) and delivers the NOT-CLEAN cert as the
+    native per-head pre-commit block."""
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    b = covering_repo
+    alpha, before, after = _break_helper(tmp_path)
+    b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+             edit_before=before, edit_after=after)
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert nudge.startswith("pre-commit hook failed:")
+    assert "run covering tests" in nudge            # the cert's covering head
+    assert nudge.rstrip().endswith("commit aborted (exit 1)")
+    assert "test_alpha" not in nudge                # leak law on the cert too
+    assert "<gt-" not in nudge.lower()
+    sealed = b.deliveries[-1]
+    assert sealed.evidence_type == "submit_refusal"
+    # Fail-open: the second probe never deadlocks the run.
+    assert b.submit_probe() is None
+
+
+@requires_gt
+def test_submit_cert_block_on_syntax_error(indexed_repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n", encoding="utf-8")
+    b = indexed_repo
+    b.edited_files.append("pkg/broken.py")
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert "check syntax" in nudge                  # per-head cert line
+    assert "Failed" in nudge
+    assert b.deliveries[-1].evidence_type == "submit_refusal"
+
+
+@requires_gt
+def test_submit_cert_allow_never_blocks(indexed_repo, monkeypatch):
+    """Clean episode + GT_CERT_DELIVERY on: the cert is head-derived and a
+    clean head ALWAYS returns None - the cert can never invent a block."""
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    b = indexed_repo
+    b.edited_files.append("pkg/alpha.py")           # syntactically fine
+    assert b.submit_probe() is None
+    assert b.deliveries == []
+
+
+@requires_gt
+def test_submit_cert_fault_falls_back_to_plain_refusal(indexed_repo, tmp_path,
+                                                       monkeypatch):
+    """A poisoned cert renderer degrades to the existing native refusal -
+    a real block is never silenced by a cert fault (correct-or-quiet)."""
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    import groundtruth.runtime.native_render as nr
+    monkeypatch.setattr(nr, "render_completion_cert_native",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
+    (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n", encoding="utf-8")
+    b = indexed_repo
+    b.edited_files.append("pkg/broken.py")
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert "syntax_error" in nudge                  # the plain refusal form
+    assert b.deliveries[-1].evidence_type == "syntax_result"
+
+
+# --------------------------------------------------------------------------- #
+# WIRE 6: on-disk delivery ledger (both-sides observability)
+# --------------------------------------------------------------------------- #
+def _read_ledger(root) -> list[dict[str, Any]]:
+    import json
+    p = root / ".gt" / "gt_ledger.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(ln) for ln in
+            p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+@requires_gt
+def test_ledger_one_line_per_sealed_delivery(covering_repo, tmp_path,
+                                             monkeypatch):
+    """Ledger line count == len(bridge.deliveries) across a multi-delivery run
+    (gateway dose + covering dose + submit refusal), each line joinable to its
+    sealed envelope by rendered_bytes_hash; no wall clock, no payload bytes."""
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    b = covering_repo
+    b.enrich("bash", {"command": _AMBIGUOUS_GREP}, _GREP_OUT, False)  # gateway
+    alpha, before, after = _break_helper(tmp_path)
+    b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+             edit_before=before, edit_after=after)                   # covering
+    b.submit_probe()                                                 # submit
+    lines = _read_ledger(tmp_path)
+    assert len(lines) == len(b.deliveries) >= 2
+    by_hash = {ln["rendered_bytes_hash"]: ln for ln in lines}
+    for sealed in b.deliveries:
+        ln = by_hash[sealed.rendered_bytes_hash]     # 1:1 join (dose law)
+        assert ln["evidence_type"] == sealed.evidence_type
+        assert ln["dedup_key"] == sealed.dedup_key
+        assert ln["len_shipped_chars"] > 0
+        assert "timestamp" not in ln and "time" not in ln
+        # Leak law applies to the ledger too: no payload, no test identity.
+        assert "test_alpha" not in str(ln)
+
+
+@requires_gt
+def test_ledger_write_failure_never_unseals(indexed_repo, monkeypatch):
+    b = indexed_repo
+    monkeypatch.setattr(type(b), "_ledger_path",
+                        lambda self: (_ for _ in ()).throw(RuntimeError()))
+    out = b.enrich("bash", {"command": _AMBIGUOUS_GREP}, _GREP_OUT, False)
+    assert len(out) > len(_GREP_OUT)                # delivery still happened
+    assert len(b.deliveries) == 1                   # and stayed sealed
+
+
+def test_ledger_absent_when_gt_off(tmp_path):
+    steps = [StepResult(text="hi", tool_calls=[], stop_reason="end_turn",
+                        usage=_usage())]
+    agent = Agent(provider=_ScriptedProvider(steps), system="s")  # gt_root=None
+    assert agent._gt is None
+    agent.run("t")
+    assert not (tmp_path / ".gt").exists()

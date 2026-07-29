@@ -23,8 +23,27 @@ Laws honored:
   contains_test_identity) drops the delta WHOLE.
 - Law 8: an over-budget delta is dropped WHOLE, never clipped.
 - update_receipts is NOT wired (removed from production 2026-07-28: the acted
-  signal was causally inverted). covering= is NOT threaded (SM-3: would
-  double-deliver once a covering lane exists).
+  signal was causally inverted).
+- covering= is NOT threaded into normalize_event (SM-3). Phase-3 DECISION: the
+  covering-RED home is a BRIDGE-OWNED lane at post-edit (production's own home,
+  ``_executed_covering_emission`` — gt_mini_patch.py:11980; the gateway's
+  ``_produce_covering`` bridge is LEFT DARK INTENTIONALLY there too, :16293).
+  Second reason the gateway home is unsound here: the registry declares the
+  gateway's ``covering_verdict`` boundary as test_result (fact_registry.py:723
+  — only the seam's ``covering_red`` is re-homed to edit_result), so under
+  Profile-2's GT_REGISTRY_ENFORCE a covering fact fired on an EDIT event would
+  route DEFER — structurally mute. ONE home: when the covering lane delivers,
+  the gateway dose is skipped for that observation (dose law, <=1/observation);
+  the submit gate consumes the CACHED verdict only as its covering HEAD (G-2),
+  which renders submit_refusal-class bytes, never a second Format-D dose.
+- L6 freshness (GT_L6_FRESH): after an edit observation touching a source file
+  the graph.db is refreshed with a FULL gt-index run (never the -file
+  incremental — see ``_refresh_graph``), and a DORMANT bridge (non-code task
+  root, graph_db=None) wakes when the agent's edits create source files.
+- Delivery ledger: every sealed delivery appends one JSONL line on disk
+  (``_ledger_record``) so a transcript auditor can join agent-side blocks
+  against GT-side seals 1:1 (dose-reconciliation law). Host-side telemetry
+  only — never model bytes; a ledger fault never affects delivery.
 """
 from __future__ import annotations
 
@@ -260,7 +279,10 @@ class GTBridge:
     GatewayState per turn (the production seam pattern)."""
 
     repo_root: str
-    graph_db: str
+    # None = DORMANT (non-code task root at start). The bridge stays quiet
+    # (producers abstain on a missing graph) until an edit observation creates
+    # source files and the L6 wake path (_refresh_graph) indexes them.
+    graph_db: str | None = None
     issue_text: str = ""
     action_index: int = 0
     chain_head: str = ""  # TITO chain genesis per episode
@@ -275,6 +297,13 @@ class GTBridge:
         # {rel: before_content_or_None}; None = the target did not exist (a
         # creation); an ABSENT key = unreadable/huge -> downstream stays quiet.
         self._bash_preimages: dict[str, str | None] = {}
+        # Covering lane state (WIRE 2): per-file once-per-episode fire latch
+        # (production's per-symbol `_covering_exec_fired_syms` cost bound) and
+        # the cached last executed covering result the submit gate's covering
+        # head reuses (G-2: a cached non-fail can never false-block; a cached
+        # FAIL is stale at submit and re-run fresh).
+        self._covering_fired: set[str] = set()
+        self._last_covering: dict[str, Any] | None = None
         from groundtruth.runtime.episode_state import EpisodeState
 
         self.episode = EpisodeState()
@@ -304,6 +333,247 @@ class GTBridge:
         except Exception:  # noqa: BLE001
             pass
         return p
+
+    # ------------------------------------------------------------------ #
+    # WIRE 6: on-disk delivery ledger (both-sides observability).
+    # One JSONL line per SEALED delivery, written at seal time, so an auditor
+    # can join the agent-side observation blocks against the GT-side seals 1:1
+    # (the dose-reconciliation law). No payload bytes (rendered_bytes_hash is
+    # the byte-proof), no wall clock (event_id is the order key), no test
+    # identity (only already-leak-guarded envelope metadata). Correct-or-quiet:
+    # a ledger fault never affects the delivery it records.
+    # ------------------------------------------------------------------ #
+    _LEDGER_CONTAINER_DIR = "/logs/agent"  # harbor containers' artifact tree
+
+    def _ledger_path(self) -> str | None:
+        try:
+            if os.path.isdir(self._LEDGER_CONTAINER_DIR):
+                return self._LEDGER_CONTAINER_DIR + "/gt_ledger.jsonl"
+            if not self.repo_root:
+                return None
+            gt_dir = os.path.join(self.repo_root, ".gt")
+            os.makedirs(gt_dir, exist_ok=True)
+            ignore = os.path.join(gt_dir, ".gitignore")
+            if not os.path.exists(ignore):
+                with open(ignore, "w", encoding="utf-8") as fh:
+                    fh.write("*\n")  # never pollute the task's diff
+            return os.path.join(gt_dir, "gt_ledger.jsonl")
+        except Exception:  # noqa: BLE001 - no ledger home: stay quiet
+            return None
+
+    def _ledger_record(self, sealed: Any, shipped_chars: int, boundary: str) -> None:
+        """Append one delivery line. Never raises; a failed write does NOT
+        unseal the delivery (the seal already happened)."""
+        try:
+            path = self._ledger_path()
+            if not path:
+                return
+            import json
+
+            line = json.dumps({
+                "event_id": str(getattr(sealed, "event_id", "") or ""),
+                "evidence_type": str(getattr(sealed, "evidence_type", "") or ""),
+                "tier": str(getattr(sealed, "tier", "") or ""),
+                "dedup_key": str(getattr(sealed, "dedup_key", "") or ""),
+                "rendered_bytes_hash": str(
+                    getattr(sealed, "rendered_bytes_hash", "") or ""),
+                "chain_head": self.chain_head,
+                "len_shipped_chars": int(shipped_chars),
+                "boundary": boundary,
+            }, sort_keys=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                fh.flush()
+        except Exception:  # noqa: BLE001 - ledger failure must never break delivery
+            pass
+
+    # ------------------------------------------------------------------ #
+    # WIRE 1: L6 freshness + wake-from-dormant (GT_L6_FRESH).
+    #
+    # FULL reindex, NEVER `gt-index -file` incremental. Decision evidence
+    # (cmd/gt-index/main.go:966-1090, read in source): runIncremental is a
+    # single-file delete-and-replace whose INCOMING edges are restored only
+    # from a pre-delete snapshot — a NEW file's symbols gain their own nodes
+    # and OUTGOING edges, but existing files' calls INTO the new symbols are
+    # never minted (their edges did not exist to snapshot), and a multi-file
+    # bash edit would need N invocations. The create-from-scratch case (the
+    # TB-critical gap) therefore needs the full run; task repos are small and
+    # ensure_index's own contract already says "gt-index is fast". One path,
+    # correct for changed+new+multi-file alike.
+    # ------------------------------------------------------------------ #
+    def _refresh_graph(self, changed: tuple[str, ...]) -> None:
+        """Refresh (or WAKE: graph_db None -> indexed) the graph after an edit
+        observation that touched a source-ext file. Runs BEFORE the producers
+        see this observation, so post-edit evidence reads the post-edit graph
+        (the contract-DRIFT ordering _binary.run_incremental_index documents).
+        Gated by GT_L6_FRESH == "1" (production's exact read, rl_profile:207;
+        Profile-2 fans it to "1"). Correct-or-quiet: any fault keeps the prior
+        graph (stale beats broken; producers still abstain on a bad db)."""
+        try:
+            if os.environ.get("GT_L6_FRESH", "").strip() != "1":
+                return
+            if not any(_has_source_ext(c) for c in changed):
+                return  # bounded: only a source-file edit can move the graph
+            from gt_engine.indexer import ensure_index
+
+            db = ensure_index(self.repo_root)
+            if db:
+                self.graph_db = db  # wake-from-dormant is this same assignment
+        except Exception:  # noqa: BLE001 - a reindex fault must never break the turn
+            pass
+
+    # ------------------------------------------------------------------ #
+    # WIRE 2: executed covering-RED at post-edit (GT_VERIFY_EXECUTE).
+    # Bridge-owned lane (the SM-3 home decision — module docstring). Budget
+    # caps are production's own (gt_mini_patch.py:12046).
+    # ------------------------------------------------------------------ #
+    _COV_PER_FILE_TIMEOUT = 20
+    _COV_TOTAL_BUDGET = 35
+
+    def _edited_symbol_identities(self, changed: tuple[str, ...]) -> set[str]:
+        """Qualified ``path::name`` identities of the NON-test symbols defined
+        in the changed files (graph read-only, bounded, deterministic order).
+        Path-qualified so select_covering_tests resolves by exact identity —
+        never the global bare-name match production measured at 12% cross-file
+        collision (gt_mini_patch.py:7186). Empty on any fault."""
+        if not self.graph_db or not os.path.isfile(self.graph_db):
+            return set()
+        from groundtruth.runtime.covering_runner import _connect_ro
+        from groundtruth.runtime.reasoning_runtime import repository_symbol_identity
+
+        con = _connect_ro(self.graph_db)
+        if con is None:
+            return set()
+        try:
+            rels = sorted({self._fwd(c) for c in changed if c})
+            if not rels:
+                return set()
+            ph = ",".join("?" * len(rels))
+            rows = con.execute(
+                "SELECT file_path, name FROM nodes "
+                f"WHERE REPLACE(file_path, '\\', '/') IN ({ph}) "
+                "AND COALESCE(is_test, 0) = 0 "
+                "ORDER BY file_path, name LIMIT 20", rels).fetchall()
+            out: set[str] = set()
+            for fp, name in rows:
+                ident = repository_symbol_identity(str(fp or ""), str(name or ""))
+                if ident:
+                    out.add(ident)
+            return out
+        except Exception:  # noqa: BLE001 - correct-or-quiet
+            return set()
+        finally:
+            try:
+                con.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _run_covering(self, changed: tuple[str, ...]) -> tuple[dict | None, list[str]]:
+        """Select + EXECUTE the repo's own covering tests for the symbols the
+        changed files define. Returns ``(result, files)``; caches the result
+        for the submit gate's covering head. ``(None, [])`` when nothing is
+        selectable (correct-or-quiet)."""
+        from groundtruth.runtime.covering_runner import (
+            run_covering_tests,
+            select_covering_tests,
+        )
+
+        syms = self._edited_symbol_identities(changed)
+        if not syms:
+            return None, []
+        sel = select_covering_tests(
+            self.graph_db, syms, limit=2, repo_root=self.repo_root)
+        files = [c["file"] for c in (sel or []) if c.get("file")]
+        if not files:
+            return None, []
+        cres = run_covering_tests(
+            self.repo_root, files,
+            per_file_timeout=self._COV_PER_FILE_TIMEOUT,
+            total_budget_seconds=self._COV_TOTAL_BUDGET)
+        self._last_covering = cres
+        return cres, files
+
+    def _covering_lane(self, changed: tuple[str, ...]) -> str | None:
+        """The post-edit covering-RED text (Format D, identity-scrubbed), or
+        None. Delivers ONLY an ATTRIBUTED executed failure (frames first, then
+        the green->base->red differential — is_red_attributable, the ONE
+        question the seam asks). A pass/unavailable/unattributed run caches its
+        verdict for the submit head and stays quiet."""
+        if os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+            return None
+        if not self.graph_db:
+            return None
+        src = [c for c in changed if c and _has_source_ext(c)]
+        if not src or all(c in self._covering_fired for c in src):
+            return None  # cost bound: fire at most once per file per episode
+        self._covering_fired.update(src)
+        from groundtruth.runtime.covering_runner import is_red_attributable
+        from groundtruth.runtime.native_render import (
+            render_covering_failure_native,
+        )
+
+        cres, files = self._run_covering(changed)
+        if not cres or cres.get("verdict") != "fail":
+            return None
+        ran = list(cres.get("ran") or files)
+        if not is_red_attributable(
+                cres, list(changed), test_files=ran,
+                repo_root=self.repo_root, covering_files=files,
+                per_file_timeout=self._COV_PER_FILE_TIMEOUT,
+                total_budget_seconds=self._COV_TOTAL_BUDGET):
+            return None  # a red the edit did not plausibly cause never ships
+        # No edited_symbol claim: nano has no span-derived symbol proof, and an
+        # unproven name in model-facing text is worse than the generic head
+        # (production's _verified_edited_symbol_for_rendering rule).
+        return render_covering_failure_native(
+            cres, test_files=ran, repo_root=self.repo_root) or None
+
+    def _deliver_covering(self, output: str, text: str, target: str) -> str:
+        """Seal + append the covering-RED as THIS observation's one dose (the
+        gateway dose is skipped by the caller — dose law). Same guard order as
+        _deliver: leak guard, law 8, seal-before-append."""
+        from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
+        from groundtruth.runtime.evidence_envelope import (
+            VERIFIED,
+            EvidenceEnvelope,
+        )
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag,
+            contains_test_identity,
+        )
+
+        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
+        if (not text or (native and contains_gt_tag(text))
+                or contains_test_identity(text)):
+            return output
+        if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            return output
+        env = EvidenceEnvelope.build(
+            producer="covering_runner", fact_id=target or "covering",
+            target=target or "covering", evidence_type="covering_verdict",
+            payload=tuple(text.splitlines()),
+            provenance=((target, 0),) if target else (),
+            confidence=0.9, tier=VERIFIED, preferred_event="edit",
+            measured=True)  # an EXECUTED test verdict, never a heuristic
+        shipped = self._join(output, text)[len(output):]
+        tob = output.encode("utf-8", "surrogatepass")
+        sealed, self.chain_head = seal_delivery(
+            env,
+            episode_id=getattr(self.episode, "episode_id", ""),
+            event_id=str(self.action_index),
+            parent_hash=self.chain_head,
+            rendered_bytes=shipped.encode("utf-8", "surrogatepass"),
+            renderer_id="native" if native else "tagged",
+            tool_output_bytes=tob,
+            boundary=(str(len(tob)) + ":covering_verdict").encode("utf-8"),
+            dedup_chain=self.episode.delivered_dedup,
+        )
+        self.deliveries.append(sealed)
+        self.delivered_spans.append(DeliveredSpan(
+            text=shipped, tier="VERIFIED",
+            evidence_type="covering_verdict", dedup_key=env.dedup_key or ""))
+        self._ledger_record(sealed, len(shipped), "covering")
+        return output + shipped
 
     # ------------------------------------------------------------------ #
     # bash-mediated edit bridges (pre-dispatch snapshot + post-dispatch derive)
@@ -443,6 +713,20 @@ class GTBridge:
             for rel in changed:
                 if rel and rel not in self.edited_files:
                     self.edited_files.append(rel)  # submit-gate syntax domain
+            if changed:
+                # WIRE 1: refresh/wake the graph BEFORE the producers read it,
+                # so this observation's evidence reflects the post-edit code.
+                self._refresh_graph(changed)
+                # WIRE 2: the executed covering-RED lane. When it delivers, it
+                # IS this observation's one dose — the gateway is skipped
+                # (dose law; covering_verdict out-ranks every gateway class at
+                # severity 60 anyway, so no evidence is wrongly displaced).
+                try:
+                    cov_text = self._covering_lane(changed)
+                except Exception:  # noqa: BLE001 - covering fault: fall through
+                    cov_text = None
+                if cov_text:
+                    return self._deliver_covering(output, cov_text, changed[0])
             return self._deliver(cmd, output, rc,
                                  changed_files=changed, viewed_files=viewed,
                                  edit_before_after=eba)
@@ -473,6 +757,41 @@ class GTBridge:
     # Syntax-check at most this many edited files at the submit boundary.
     _MAX_SUBMIT_SYNTAX_FILES = 10
 
+    def _submit_covering(self) -> dict | None:
+        """The submit gate's covering HEAD (G-2 staleness law, the mini seam's
+        `_gt_submit_covering` mechanism, gt_mini_patch.py:22146): a cached
+        NON-fail can never false-block -> reuse without re-run; a cached FAIL
+        (or no cache) is STALE at the submit decision point -> re-select +
+        re-RUN fresh over the episode's edited files. A fresh FAIL feeds the
+        head ONLY when the edit is PROVEN to have caused it
+        (is_red_attributable — unproven never blocks, invariant FP=0).
+        Correct-or-quiet: gate off / no graph / no selection / fault -> None."""
+        if os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+            return None
+        if not self.graph_db:
+            return None
+        try:
+            if (self._last_covering is not None
+                    and self._last_covering.get("verdict") != "fail"):
+                return self._last_covering
+            changed = tuple(self.edited_files[: self._MAX_SUBMIT_SYNTAX_FILES])
+            cres, files = self._run_covering(changed)
+            if not cres:
+                return None
+            if cres.get("verdict") == "fail":
+                from groundtruth.runtime.covering_runner import is_red_attributable
+
+                if not is_red_attributable(
+                        cres, list(changed),
+                        test_files=list(cres.get("ran") or files),
+                        repo_root=self.repo_root, covering_files=files,
+                        per_file_timeout=self._COV_PER_FILE_TIMEOUT,
+                        total_budget_seconds=self._COV_TOTAL_BUDGET):
+                    return None  # unattributed RED must not block the submit
+            return cres
+        except Exception:  # noqa: BLE001 - covering head unavailable: never block
+            return None
+
     def _submit_gate(self) -> str | None:
         from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
         from groundtruth.runtime.edit_check import check_edit_syntax
@@ -488,12 +807,16 @@ class GTBridge:
         from groundtruth.runtime.submit_gate import safe_gate_verdict
 
         # POSITIVE evidence only: an executed parse failure in an edited file.
+        # ``syntax_res`` additionally feeds the certificate's syntax head (a
+        # descriptive FieldCert — the head still decides through submit_block).
         submit_block: dict[str, Any] | None = None
+        syntax_res: dict[str, Any] | None = None
         bad_rel = ""
         for rel in self.edited_files[: self._MAX_SUBMIT_SYNTAX_FILES]:
             res = check_edit_syntax(rel, self.repo_root)
             if res.get("verdict") == "syntax_error":
                 bad_rel = rel
+                syntax_res = res
                 submit_block = {
                     "blocking": True,
                     "reason": "syntax_error",
@@ -501,20 +824,69 @@ class GTBridge:
                     or f"syntax error in {rel}",
                 }
                 break
+            if syntax_res is None and res.get("verdict") == "ok":
+                syntax_res = res  # an executed PASS is honest cert evidence
+        # WIRE 2 (submit head): the executed covering verdict — fresh by the
+        # G-2 staleness law, attribution-gated. None never blocks.
+        covering = self._submit_covering()
         verdict = safe_gate_verdict(
-            covering=None, hygiene=None, submit_block=submit_block,
+            covering=covering, hygiene=None, submit_block=submit_block,
             bounce_count=self.submit_bounces, max_bounces=1)
+        # WIRE 3: the CompletionCertificate (GT_CERT_DELIVERY, production's own
+        # flag read — gt_mini_patch.py:22329). Built from what nano HONESTLY
+        # has: the frozen head itself, the executed syntax + covering results.
+        # Heads nano cannot compute stay absent -> UNKNOWN/NOT_APPLICABLE
+        # (visible, fail-open). obligations=None exactly as production passes
+        # it: ADVISORY-only, never a block input (T2 law). ``cert.decision`` is
+        # a pure function of the head, so the cert can NEVER turn an allow into
+        # a block (allow-never-block) — we return None on allow regardless.
+        cert = None
+        if os.environ.get("GT_CERT_DELIVERY") == "1":
+            try:
+                from groundtruth.runtime.submit_gate import safe_build_certificate
+
+                cert = safe_build_certificate(
+                    head=verdict, covering=covering, hygiene=None,
+                    submit_block=submit_block,
+                    bounce_count=self.submit_bounces, max_bounces=1,
+                    syntax=syntax_res, obligations=None)
+            except Exception:  # noqa: BLE001 - a cert fault degrades to the head
+                cert = None
         if verdict.allow:
             return None  # clean / unavailable / failed-open: quiet
         self.submit_bounces += 1
-        text = render_submit_rejection(verdict.reason, verdict.detail)
+        # BLOCK render: the NOT-CLEAN cert as the native per-head pre-commit
+        # block (D7 headline); an empty cert render (or cert off/fault) falls
+        # back to the existing single-line native refusal — never silent on a
+        # real block.
+        text = ""
+        cert_rendered = False
+        if cert is not None:
+            try:
+                from groundtruth.runtime.native_render import (
+                    render_completion_cert_native,
+                )
+
+                text = render_completion_cert_native(
+                    list(getattr(cert, "unresolved_failures", ()) or ()))
+                cert_rendered = bool(text)
+            except Exception:  # noqa: BLE001 - render fault -> plain refusal
+                text = ""
+        if not text:
+            text = render_submit_rejection(verdict.reason, verdict.detail)
         # Seam-owned leak guard + law 8 on the rendered bytes, same as a delta.
         if (not text or contains_gt_tag(text) or contains_test_identity(text)
                 or not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS)):
             return None
+        # The cert block / a covering block is the submit_refusal fact class
+        # (production's lineage binding, gt_mini_patch.py:22415); the legacy
+        # syntax-only fallback keeps its executed syntax_result identity.
+        ev_type = ("submit_refusal"
+                   if cert_rendered or verdict.reason == "covering_test_failed"
+                   else "syntax_result")
         env = EvidenceEnvelope.build(
             producer="submit_gate", fact_id=bad_rel or "submit",
-            target=bad_rel or "submit", evidence_type="syntax_result",
+            target=bad_rel or "submit", evidence_type=ev_type,
             payload=tuple(text.splitlines()),
             provenance=((bad_rel, 0),) if bad_rel else (),
             confidence=0.9, tier=VERIFIED, preferred_event="submit",
@@ -527,10 +899,11 @@ class GTBridge:
             rendered_bytes=text.encode("utf-8", "surrogatepass"),
             renderer_id="native",
             tool_output_bytes=b"",
-            boundary=b"0:syntax_result",
+            boundary=("0:" + ev_type).encode("utf-8"),
             dedup_chain=self.episode.delivered_dedup,
         )
         self.deliveries.append(sealed)
+        self._ledger_record(sealed, len(text), "submit")
         return text
 
     def task_start(self) -> str | None:
@@ -551,6 +924,8 @@ class GTBridge:
     def _task_start(self) -> str | None:
         if not (self.issue_text or "").strip():
             return None
+        if not self.graph_db:
+            return None  # DORMANT bridge: no graph substrate, no honest brief
         if os.environ.get("GT_GATEWAY", "").strip().lower() in (
                 "", "0", "false", "no", "off"):
             return None
@@ -601,6 +976,7 @@ class GTBridge:
             dedup_chain=self.episode.delivered_dedup,
         )
         self.deliveries.append(sealed)
+        self._ledger_record(sealed, len(text), "task_start")
         return text
 
     def _deliver(
@@ -675,6 +1051,7 @@ class GTBridge:
             text=shipped, tier=winner.tier or "",
             evidence_type=winner.evidence_type or "",
             dedup_key=winner.dedup_key or ""))
+        self._ledger_record(sealed, len(shipped), "gateway")
         # 9. pure-suffix append (TITO law 1).
         return output + shipped
 
