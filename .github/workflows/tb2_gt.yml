@@ -1,0 +1,258 @@
+# Terminal-Bench 2.0 GT ARM: nano-harness + GroundTruth via Harbor.
+#
+# Mirrors tb2_baseline.yml (same inputs, score summary, artifacts) with three
+# GT-specific deltas:
+#   1. agent import path eval.tb_agent:GTNanoAgent (uploads gt_engine/, the
+#      vendored groundtruth wheel, and a Linux gt-index binary into every task
+#      container; runs nano with --gt-root "$PWD").
+#   2. a gt_profile input exported as GT_RL_PROFILE (default "2", the GT
+#      production law; the agent forwards every host GT_* var in-container).
+#   3. a build step that compiles gt-index for linux-amd64 from the vendored
+#      Go source (vendor/gt-index-src) with CGO + `-tags sqlite_fts5`.
+#
+# Why build here instead of downloading: the public groundtruth repo has NO
+# binary release assets (tag v1.1.0, which _binary.py's auto-downloader
+# targets, does not exist — verified 2026-07-29 via `gh release list`), so the
+# in-container download path is dead. Building from the vendored source (the
+# exact tree the local runtime was developed against; the public repo's
+# gt-index has drifted) is the only deterministic option.
+#
+# NOTE: gt_engine writes no ledger/receipt files to disk yet — delivered GT
+# evidence is only visible inline in the transcript (<task>/agent/nano.txt),
+# which the results artifact already captures. On-disk delivery ledgers are a
+# gap deferred to the audit-tooling phase.
+name: TB2 GT arm (nano + GroundTruth)
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model name in provider/name form (harbor -m)"
+        type: string
+        default: "deepseek/deepseek-v4-flash"
+      base_url:
+        description: "OpenAI-compatible gateway URL; when set, exported as OPENAI_BASE_URL (overrides the repo secret)"
+        type: string
+        default: ""
+      n_tasks:
+        description: "Slice size (harbor -l). 'all' = full 89-task dataset"
+        type: string
+        default: "5"
+      concurrency:
+        description: "Concurrent trials (harbor -n)"
+        type: string
+        default: "4"
+      job_name:
+        description: "Harbor job name (default: auto tb2-gt-<run id>)"
+        type: string
+        default: ""
+      task_ids:
+        description: "Optional comma-separated task names (harbor -i, glob ok). Overrides n_tasks — use to shard a full run manually"
+        type: string
+        default: ""
+      gt_profile:
+        description: "GT_RL_PROFILE for the agent (GT capability profile; '2' = production law)"
+        type: string
+        default: "2"
+
+jobs:
+  gt:
+    runs-on: ubuntu-latest
+    # A full 89-task run at -n 4 may not fit even this window; shard it with
+    # task_ids across several dispatches if it times out (see workflows README).
+    timeout-minutes: 350
+    env:
+      # Set whichever your model needs: `gh secret set ANTHROPIC_API_KEY` etc.
+      # Unset secrets resolve to "" and are simply absent for the agent.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Input beats secret; empty means "no gateway" (direct provider APIs).
+      OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
+      # GTNanoAgent resolves GT_RL_PROFILE as kwarg > host env > default "2"
+      # and forwards every GT_* host var into the task container.
+      GT_RL_PROFILE: ${{ inputs.gt_profile }}
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Go (for gt-index)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/gt-index-src/go.mod
+          cache-dependency-path: vendor/gt-index-src/go.sum
+
+      # CGO (mattn/go-sqlite3) + `-tags sqlite_fts5` is MANDATORY: without the
+      # tag the FTS tables are silently compiled out and GT's search legs
+      # degrade (Groundtruth AGENTS.md §E). gcc ships on ubuntu-latest.
+      # Static link first so the binary also runs on musl/alpine task images;
+      # fall back to dynamic (glibc-only) with a visible warning.
+      - name: Build gt-index (linux-amd64, CGO + sqlite_fts5)
+        working-directory: vendor/gt-index-src
+        run: |
+          set -uo pipefail
+          export CGO_ENABLED=1
+          if go build -tags sqlite_fts5 \
+               -ldflags '-linkmode external -extldflags "-static"' \
+               -o ../gt-index-linux-amd64 ./cmd/gt-index/; then
+            echo "static build ok"
+          else
+            echo "::warning::static link failed; falling back to a dynamically linked gt-index (will not run on musl/alpine task images)"
+            go build -tags sqlite_fts5 -o ../gt-index-linux-amd64 ./cmd/gt-index/
+          fi
+          file ../gt-index-linux-amd64 || true
+          ldd ../gt-index-linux-amd64 || true
+
+      # Prove the binary indexes AND that FTS5 made it in (the failure mode is
+      # silent) before spending a single API dollar.
+      - name: Smoke gt-index
+        run: |
+          set -euo pipefail
+          ./vendor/gt-index-linux-amd64 -root nano -output /tmp/gt-smoke.db
+          python3 - <<'EOF'
+          import sqlite3
+          names = {r[0] for r in sqlite3.connect("/tmp/gt-smoke.db")
+                   .execute("SELECT name FROM sqlite_master")}
+          assert {"nodes", "edges"} <= names, f"core tables missing: {names}"
+          missing = {"nodes_fts", "symbol_content_fts"} - names
+          assert not missing, f"FTS5 tables missing (built without -tags sqlite_fts5?): {missing}"
+          print("gt-index smoke ok:", len(names), "tables")
+          EOF
+
+      # Ubuntu runners ship ~20-25 GB free on /. TB2 task images are mostly
+      # sub-GB but there are 89 distinct ones and harbor keeps pulled images
+      # around, so a full run plausibly exhausts the disk. Reclaim the big
+      # preinstalled toolchains (~25-30 GB) only for full runs; slices don't
+      # need it and this step costs a couple of minutes.
+      - name: Free disk space (full runs only)
+        if: ${{ inputs.n_tasks == 'all' && inputs.task_ids == '' }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af
+
+      - name: Install nano-harness + harbor
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . "harbor==0.20.0"
+
+      # GTNanoAgent fail-fasts in install() when the wheel or binary is
+      # missing; surface the same check here, before harbor spends anything.
+      - name: Preflight GT artifacts
+        run: |
+          set -euo pipefail
+          ls vendor/groundtruth_mcp-*.whl
+          test -x vendor/gt-index-linux-amd64
+          python - <<'EOF'
+          from eval.tb_agent import GTNanoAgent
+          print("wheel:", GTNanoAgent._gt_wheel())
+          print("binary:", GTNanoAgent._gt_binary_host())
+          EOF
+
+      - name: Disk before run
+        run: df -h /
+
+      - name: Run harbor (Terminal-Bench 2.0)
+        id: harbor
+        env:
+          MODEL: ${{ inputs.model }}
+          N_TASKS: ${{ inputs.n_tasks }}
+          CONCURRENCY: ${{ inputs.concurrency }}
+          JOB_NAME_INPUT: ${{ inputs.job_name }}
+          TASK_IDS: ${{ inputs.task_ids }}
+        run: |
+          set -uo pipefail
+          JOB_NAME="${JOB_NAME_INPUT:-tb2-gt-${GITHUB_RUN_ID}}"
+          echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
+
+          args=( run
+            -d terminal-bench@2.0
+            -a eval.tb_agent:GTNanoAgent
+            -m "$MODEL"
+            -o results/terminal-bench
+            --job-name "$JOB_NAME"
+            --agent-timeout-multiplier 2.0
+            -n "$CONCURRENCY"
+            -y
+          )
+          if [ -n "$TASK_IDS" ]; then
+            IFS=',' read -ra ids <<< "$TASK_IDS"
+            for id in "${ids[@]}"; do
+              id="$(echo "$id" | xargs)"   # trim whitespace
+              [ -n "$id" ] && args+=( -i "$id" )
+            done
+          elif [ "$N_TASKS" != "all" ]; then
+            args+=( -l "$N_TASKS" )
+          fi
+
+          harbor "${args[@]}"
+
+      - name: Disk after run
+        if: always()
+        run: df -h /
+
+      # Everything harbor wrote: result.json plus per-task dirs with the agent
+      # transcript (<task>/agent/nano.txt — GT evidence deliveries appear
+      # inline there), verifier output, and config. gt_engine writes no
+      # separate ledger/receipt files yet (audit-tooling gap).
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tb2-gt-${{ github.run_id }}
+          path: results/terminal-bench/
+          if-no-files-found: warn
+
+      - name: Score summary
+        if: always()
+        env:
+          JOB_NAME: ${{ steps.harbor.outputs.job_name }}
+        run: |
+          python - <<'EOF'
+          import json, os
+          from pathlib import Path
+
+          job = os.environ.get("JOB_NAME", "")
+          path = Path("results/terminal-bench") / job / "result.json"
+          out = [f"## TB2 GT arm: `{job}`", ""]
+          if not path.is_file():
+              out.append(f"No result.json at `{path}` - harbor did not finish. "
+                         "Check the run logs and the uploaded artifact.")
+          else:
+              r = json.loads(path.read_text(encoding="utf-8"))
+              stats = r.get("stats", {})
+              out += [
+                  f"- total trials: **{r.get('n_total_trials', '?')}**",
+                  f"- completed: **{stats.get('n_completed_trials', '?')}**"
+                  f", errored: **{stats.get('n_errored_trials', '?')}**",
+              ]
+              # stats.evals["<agent>__<model>__<dataset>"].reward_stats maps
+              # reward name -> {value: [trial names]} (harbor 0.20 schema).
+              for key, ev in (stats.get("evals") or {}).items():
+                  out.append(f"\n### {key}")
+                  for reward, by_val in (ev.get("reward_stats") or {}).items():
+                      total = sum(len(v) for v in by_val.values())
+                      solved = sum(len(v) for val, v in by_val.items()
+                                   if float(val) >= 1)
+                      pct = f"{100 * solved / total:.1f}%" if total else "n/a"
+                      out.append(f"- **{reward}**: {solved}/{total} ({pct})")
+                  for k, v in (ev.get("pass_at_k") or {}).items():
+                      out.append(f"- pass@{k}: {v}")
+              rows = []
+              for t in r.get("trial_results", []):
+                  name = t.get("task_name") or t.get("trial_name", "?")
+                  vr = t.get("verifier_result") or {}
+                  rewards = vr.get("rewards")
+                  exc = (t.get("exception_info") or {}).get("exception_type")
+                  status = json.dumps(rewards) if rewards else (exc or "no reward")
+                  rows.append(f"| {name} | {status} |")
+              if rows:
+                  out += ["", "| task | rewards |", "|---|---|"] + rows
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("\n".join(out) + "\n")
+          EOF
