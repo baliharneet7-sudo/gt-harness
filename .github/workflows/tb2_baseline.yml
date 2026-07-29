@@ -37,6 +37,14 @@ on:
         description: "Optional comma-separated task names (harbor -i, glob ok). Overrides n_tasks — use to shard a full run manually"
         type: string
         default: ""
+      agent_timeout_multiplier:
+        description: "LEAVE EMPTY for a leaderboard-legal run. The TB2.1 leaderboard's static_analysis.py requires agent_timeout_multiplier to be null; any value here disqualifies the run AND doubles worst-case wall clock."
+        type: string
+        default: ""
+      n_attempts:
+        description: "Trials per task (harbor -k). Leaderboard submission requires >=5 (MIN_TRIALS_PER_TASK). 1 is fine for an internal paired baseline."
+        type: string
+        default: "1"
 
 jobs:
   baseline:
@@ -161,6 +169,8 @@ jobs:
           CONCURRENCY: ${{ inputs.concurrency }}
           JOB_NAME_INPUT: ${{ inputs.job_name }}
           TASK_IDS: ${{ inputs.task_ids }}
+          AGENT_TIMEOUT_MULTIPLIER: ${{ inputs.agent_timeout_multiplier }}
+          N_ATTEMPTS: ${{ inputs.n_attempts }}
         run: |
           set -uo pipefail
           JOB_NAME="${JOB_NAME_INPUT:-tb2-baseline-${GITHUB_RUN_ID}}"
@@ -172,10 +182,18 @@ jobs:
             -m "$MODEL"
             -o results/terminal-bench
             --job-name "$JOB_NAME"
-            --agent-timeout-multiplier 2.0
             -n "$CONCURRENCY"
+            -k "$N_ATTEMPTS"
             -y
           )
+          # Only pass the flag when explicitly asked for. Omitting it leaves the
+          # multiplier null, which is what the leaderboard's static analysis
+          # requires; passing 1.0 explicitly would also be accepted, but null is
+          # the documented default and the safer thing to record in the config.
+          if [ -n "$AGENT_TIMEOUT_MULTIPLIER" ]; then
+            args+=( --agent-timeout-multiplier "$AGENT_TIMEOUT_MULTIPLIER" )
+            echo "::warning::agent_timeout_multiplier=$AGENT_TIMEOUT_MULTIPLIER set - this run is NOT leaderboard-legal"
+          fi
           if [ -n "$TASK_IDS" ]; then
             IFS=',' read -ra ids <<< "$TASK_IDS"
             for id in "${ids[@]}"; do
