@@ -141,6 +141,73 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . "harbor==0.20.0"
 
+      # A BOM-carrying secret dies at httpx's ASCII header encode on every
+      # request (GHA run 30496848157: all 5 tasks dead at iteration 1, zero
+      # tokens). Strip + re-mask + re-export, same step as tb2_baseline.yml.
+      - name: Sanitize API keys (strip BOM / stray whitespace)
+        run: |
+          python - <<'EOF'
+          import os, sys
+
+          cleaned, notes = [], []
+          for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+              raw = os.environ.get(name) or ""
+              if not raw:
+                  continue
+              clean = raw.replace("\ufeff", "").strip()
+              if clean != raw:
+                  notes.append(f"{name}: removed {len(raw) - len(clean)} stray "
+                               "char(s) (BOM/whitespace); re-set the secret to fix at source")
+              if not clean.isascii():
+                  print(f"::error::{name} still holds non-ASCII characters after "
+                        "stripping BOM/whitespace - it cannot be sent as an HTTP header")
+                  sys.exit(1)
+              cleaned.append((name, clean))
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              for name, clean in cleaned:
+                  print(f"::add-mask::{clean}")
+                  f.write(f"{name}={clean}\n")
+          for n in notes:
+              print(f"::warning::{n}")
+          print(f"sanitized {len(cleaned)} key(s); {len(notes)} needed repair")
+          EOF
+
+      # One ~1k-token call (<$0.001) through nano's OWN provider routing before
+      # harbor pulls a single task image. Would have failed run 30496848157 for
+      # under a cent instead of five dead containers. Model-prefix handling
+      # mirrors eval/tb_agent.py _model_and_env (strip "provider/" only when no
+      # OPENAI_BASE_URL gateway is configured).
+      - name: Preflight provider (fail fast, not 5 dead containers)
+        env:
+          MODEL: ${{ inputs.model }}
+        run: |
+          python - <<'EOF'
+          import os, sys
+          from nano.cli import build_provider
+          from nano.prompts import SYSTEM_PROMPT
+          from nano.tools import TOOLS
+
+          model = os.environ["MODEL"]
+          base = os.environ.get("OPENAI_BASE_URL") or ""
+          if not base:
+              model = model.split("/", 1)[-1]
+          print(f"model={model!r} OPENAI_BASE_URL={base or '(unset)'}")
+          try:
+              provider = build_provider(model=model, base_url=None)
+              r = provider.step(
+                  messages=[{"role": "user", "content": "Reply with the single word: ok"}],
+                  tools=TOOLS, system=SYSTEM_PROMPT,
+              )
+          except Exception as e:
+              print(f"::error::preflight failed: {type(e).__name__}: {e}")
+              print("The model id, API key, or gateway is wrong - fix it before "
+                    "spending a run. No task images were pulled.")
+              sys.exit(1)
+          print(f"preflight ok: stop_reason={r.stop_reason} usage={r.usage} "
+                f"text={(r.text or '')[:80]!r} tool_calls={len(r.tool_calls)}")
+          EOF
+
       # GTNanoAgent fail-fasts in install() when the wheel or binary is
       # missing; surface the same check here, before harbor spends anything.
       - name: Preflight GT artifacts
