@@ -8,7 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from .agent import Agent
-from .prompts import SYSTEM_PROMPT
+from .prompts import GT_PROMPT_SUFFIX, SYSTEM_PROMPT
 from .providers import AnthropicProvider, OpenAIProvider, Provider
 
 _console = Console()
@@ -63,14 +63,21 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--base-url", default=None,
                      help="OpenAI-compatible base URL (Together, vLLM, etc.).")
     run.add_argument("--max-iterations", type=int, default=30)
+    run.add_argument("--gt-root", default=None,
+                     help="Codebase root for GroundTruth evidence enrichment. "
+                          "Omit to run stock nano (GT off).")
     args = parser.parse_args(argv)
 
     # Construction failures (missing SDK/key, no usable shell) happen before
     # Agent.run()'s error boundary - turn them into a clean nonzero exit.
     try:
         provider = build_provider(model=args.model, base_url=args.base_url)
-        agent = Agent(provider=provider, system=SYSTEM_PROMPT,
-                      max_iterations=args.max_iterations, on_event=_print_event)
+        # The GT sentence is added ONLY when GT is requested: a GT-off run must
+        # send byte-identical prompts to stock nano-harness.
+        system = SYSTEM_PROMPT + (GT_PROMPT_SUFFIX if args.gt_root else "")
+        agent = Agent(provider=provider, system=system,
+                      max_iterations=args.max_iterations, on_event=_print_event,
+                      gt_root=args.gt_root)
     except Exception as e:
         _console.print(f"[bold red]setup error:[/] {type(e).__name__}: {e}")
         return 1

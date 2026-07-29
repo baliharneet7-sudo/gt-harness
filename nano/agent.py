@@ -29,10 +29,21 @@ class Agent:
     max_pushbacks: int = 3  # toolless "done"s challenged before giving in
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
+    gt_root: str | None = None  # codebase root for GroundTruth; None = GT off
 
     def __post_init__(self) -> None:
         if self.bash is None:
             self.bash = BashTool()
+        # GT integration point 1: auto-index the codebase and build the bridge.
+        # None (no gt_root, non-code root, GT unavailable) leaves every code
+        # path below byte-identical to stock nano-harness.
+        self._gt = None
+        if self.gt_root:
+            try:
+                from gt_engine import create_bridge
+                self._gt = create_bridge(self.gt_root)
+            except Exception:  # noqa: BLE001 - GT absent/broken: run stock nano
+                self._gt = None
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.on_event:
@@ -47,6 +58,9 @@ class Agent:
         pushbacks_left = self.max_pushbacks if self.verify else 0
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
+        gt_submit_checked = False  # GT submit-boundary probe spent (once per run)
+        if self._gt is not None:
+            self._gt.issue_text = task  # B-4: thread the real task text into GT
 
         try:
           while True:
@@ -59,7 +73,19 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 )
 
-            self._truncate_if_needed(messages, transcript)
+            # GT integration point 3: evidence-aware truncation. Stock path
+            # (and stock bytes) whenever the GT bridge is absent; the GT path
+            # itself falls back to stock truncation on any fault.
+            if self._gt is not None:
+                try:
+                    from gt_engine.context import smart_truncate
+                    smart_truncate(messages, transcript,
+                                   char_budget=self.truncation_char_budget,
+                                   delivered_spans=self._gt.delivered_spans)
+                except Exception:  # noqa: BLE001 - GT must never break the loop
+                    self._truncate_if_needed(messages, transcript)
+            else:
+                self._truncate_if_needed(messages, transcript)
             sr: StepResult = self.provider.step(messages, TOOLS, self.system)
             total_in += sr.usage.input_tokens
             total_out += sr.usage.output_tokens
@@ -108,6 +134,25 @@ class Agent:
                 # evidence since the last challenge; toolless (or failed-only)
                 # dones get pushed back until max_pushbacks runs out. Skipped
                 # when no tool was ever used.
+                # GT verify hook (advisory, brief §10): ask GT - a synthetic
+                # submit-boundary event through the same bridge - whether
+                # submit_refusal/syntax_result evidence exists. If yes, spend
+                # ONE pushback delivering that evidence as the nudge text.
+                # No evidence / any fault: the stock gate proceeds unchanged.
+                if (self._gt is not None and not gt_submit_checked
+                        and used_tools and pushbacks_left > 0
+                        and (self.max_iterations - iteration) > 0):
+                    gt_submit_checked = True
+                    from gt_engine.verify import submit_evidence
+                    gt_nudge = submit_evidence(self._gt)  # None on abstain/fault
+                    if gt_nudge:
+                        pushbacks_left -= 1
+                        challenged = True
+                        tools_since_nudge = False
+                        messages.append({"role": "user", "content": gt_nudge})
+                        transcript.append({"type": "user", "content": gt_nudge,
+                                           "gt": "submit_evidence"})
+                        continue
                 # Don't spend the last iteration on a pushback - a challenge
                 # the model can't answer would return max_iterations and throw
                 # away the summary it just produced.
@@ -228,6 +273,16 @@ class Agent:
                         if total_chars() <= self.truncation_char_budget:
                             return
 
+    @staticmethod
+    def _read_for_gt(path: Any) -> str | None:
+        """File content snapshot for GT's edit bridges; None when unreadable
+        (missing file = new-file creation, binary, bad arg). Never raises."""
+        try:
+            with open(path, encoding="utf-8", newline="") as f:
+                return f.read()
+        except Exception:  # noqa: BLE001
+            return None
+
     def _assistant_message(self, sr: StepResult) -> dict[str, Any]:
         # Canonical shape: content blocks are the single source of truth for
         # both text and tool calls. Each provider re-serializes from these -
@@ -244,6 +299,12 @@ class Agent:
                             transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for call in calls:
+            # GT edit bridges (B-3): edit-turn producers need the target file's
+            # before/after content. Captured HERE (tools.py stays unchanged);
+            # before-content read pre-dispatch, after-content post-dispatch.
+            gt_edit_before: str | None = None
+            if self._gt is not None and call.name == "edit_file":
+                gt_edit_before = self._read_for_gt(call.arguments.get("path"))
             try:
                 output = dispatch(call.name, call.arguments, bash=self.bash)
                 is_error = False
@@ -255,6 +316,19 @@ class Agent:
                 # not crash the whole run.
                 output = f"ERROR: {type(e).__name__}: {e}"
                 is_error = True
+            # GT integration point 2: complete the observation with at most one
+            # evidence dose, appended as a pure suffix. Any GT fault returns
+            # the raw output unchanged (enrich also guards internally).
+            if self._gt is not None:
+                gt_edit_after: str | None = None
+                if call.name == "edit_file" and not is_error:
+                    gt_edit_after = self._read_for_gt(call.arguments.get("path"))
+                try:
+                    output = self._gt.enrich(
+                        call.name, call.arguments, output, is_error,
+                        edit_before=gt_edit_before, edit_after=gt_edit_after)
+                except Exception:  # noqa: BLE001 - GT must never break a tool turn
+                    pass
             transcript.append({"type": "tool_result", "id": call.id,
                                "name": call.name, "output": output,
                                "is_error": is_error})

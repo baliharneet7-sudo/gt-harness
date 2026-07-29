@@ -63,6 +63,10 @@ class NanoAgent(BaseInstalledAgent):
         )
 
     async def install(self, environment: BaseEnvironment) -> None:
+        # TODO(gt): GT container plumbing goes here in a later phase -
+        # upload_dir gt_engine/, upload the groundtruth package (or pip install
+        # it from a wheel), stage the gt-index binary (or set GT_INDEX_BINARY /
+        # rely on the release download), and pass --gt-root in run() below.
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
         await environment.upload_file(
