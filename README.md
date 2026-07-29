@@ -1,4 +1,28 @@
-# nano-harness
+# GT-Harness — GroundTruth × nano-harness
+
+> **The main harness here is [nano-harness](https://github.com/TroyJLorents-GH/nano-harness)
+> by Troy J Lorents — we are adding [GroundTruth](https://github.com/harneet2512/groundtruth) on top.**
+
+This repository embeds **GroundTruth (GT)** — a deterministic, LLM-free codebase-evidence
+engine — inside the nano-harness agent loop. GT pre-computes a complete call graph of the
+task repository (tree-sitter AST parsing via the Go `gt-index` binary) and appends verified
+structural facts (definitions, caller contracts, signature deltas, covering tests, recovery
+guidance) directly into the tool observations the model already reads — at most one evidence
+dose per observation, append-only, sealed with a hash chain, and silent when it has nothing
+verified to say.
+
+The integration lives in `gt_engine/` (bridge, indexer, evidence-aware context management,
+advisory verify gate) plus three surgical touch points in `nano/agent.py`. **With GT disabled
+(no `--gt-root`), this harness is byte-identical to stock nano-harness** — that property is
+enforced by tests, and it is what makes clean GT-on vs. GT-off benchmark comparisons possible.
+
+All credit for the base harness — the loop, tools, providers, prompts, and the Terminal Bench
+adapter — belongs to upstream nano-harness. Everything below this section is its original
+README.
+
+---
+
+# nano-harness (the base harness)
 
 ![nano-harness — a coding agent in ~970 lines](docs/assets/banner.png)
 
