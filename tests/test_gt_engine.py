@@ -1,18 +1,38 @@
 """gt_engine unit tests: bridge sequence, exit-code parsing, GT-off byte
-identity of truncation, indexer detection, and a GT-off agent-loop smoke with
-a stubbed provider (no API key required)."""
+identity of truncation, indexer detection, profile-2 default fan-out, bash
+edit bridges, the gate-kernel submit probe, the task-start capsule, and a
+GT-off agent-loop smoke with a stubbed provider (no API key required)."""
 from __future__ import annotations
 
 import copy
+import os
 from typing import Any
 
 import pytest
 
-from gt_engine.bridge import DeliveredSpan, parse_exit_code
+from gt_engine.bridge import (
+    DeliveredSpan,
+    apply_profile_env,
+    bash_edit_target,
+    parse_exit_code,
+)
 from gt_engine.context import smart_truncate
 from gt_engine.indexer import ensure_index, is_code_repo
 from nano.agent import Agent
 from nano.providers import StepResult, ToolCall, Usage
+
+
+@pytest.fixture(autouse=True)
+def _gt_env_isolation():
+    """Strip GT_* env before each test and undo anything a test (or
+    apply_profile_env's direct os.environ writes) added - no cross-test leak."""
+    saved = {k: v for k, v in os.environ.items() if k.startswith("GT_")}
+    for k in saved:
+        del os.environ[k]
+    yield
+    for k in [k for k in os.environ if k.startswith("GT_")]:
+        del os.environ[k]
+    os.environ.update(saved)
 
 try:
     import groundtruth  # noqa: F401
@@ -228,6 +248,248 @@ def test_bridge_repo_rel_paths(indexed_repo):
 
 
 # --------------------------------------------------------------------------- #
+# FIX 1: profile-2 default fan-out (production parity, AGENTS.md §C / W8)
+# --------------------------------------------------------------------------- #
+@requires_gt
+def test_profile_default_fans_out_profile_2():
+    apply_profile_env()
+    # Profile-1 core + Super-Mode members the edit-turn producers need.
+    for flag in ("GT_GATEWAY", "GT_GATEWAY_NATIVE", "GT_GATEWAY_EDIT_BRIDGES",
+                 "GT_PATCH_DELTA", "GT_CHANGE_SURFACE", "GT_LOC_RESLOT"):
+        assert os.environ.get(flag) == "1", flag
+    # Determinism: durable cross-session memory never set by the bridge.
+    assert not any(k.startswith("GT_XSESSION") for k in os.environ)
+
+
+@requires_gt
+def test_profile_explicit_member_value_wins(monkeypatch):
+    monkeypatch.setenv("GT_PATCH_DELTA", "0")  # user kill-switch
+    apply_profile_env()
+    assert os.environ["GT_PATCH_DELTA"] == "0"
+    assert os.environ.get("GT_GATEWAY") == "1"
+
+
+@requires_gt
+def test_profile_explicit_legacy_token_is_minimal_pair(monkeypatch):
+    monkeypatch.setenv("GT_RL_PROFILE", "off")
+    apply_profile_env()
+    assert os.environ.get("GT_GATEWAY") == "1"
+    assert os.environ.get("GT_GATEWAY_NATIVE") == "1"
+    assert "GT_PATCH_DELTA" not in os.environ  # no profile fan-out
+
+
+@requires_gt
+def test_profile_explicit_token_resolves_that_profile(monkeypatch):
+    monkeypatch.setenv("GT_RL_PROFILE", "1")
+    apply_profile_env()
+    assert os.environ.get("GT_GATEWAY_EDIT_BRIDGES") == "1"  # profile-1 member
+    assert "GT_PATCH_DELTA" not in os.environ  # super-mode only
+
+
+@requires_gt
+def test_profile_unknown_token_never_dark(monkeypatch):
+    monkeypatch.setenv("GT_RL_PROFILE", "99")
+    apply_profile_env()
+    assert os.environ.get("GT_GATEWAY") == "1"  # minimal pair fallback
+
+
+# --------------------------------------------------------------------------- #
+# FIX 1 (live proof): an edit with edit_before_after fires an edit-family
+# envelope under the profile-2 defaults (patch_delta was dark before).
+# --------------------------------------------------------------------------- #
+@requires_gt
+def test_edit_fires_signature_mismatch_under_profile_2(indexed_repo, tmp_path):
+    apply_profile_env()  # profile-2 defaults on top of the fixture's pair
+    b = indexed_repo
+    b.issue_text = "helper returns the wrong sum"
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before.replace("def helper(x, y):", "def helper(x):").replace(
+        "return x + y", "return x")
+    alpha.write_text(after, encoding="utf-8")
+    out = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                   edit_before=before, edit_after=after)
+    assert [d.evidence_type for d in b.deliveries] == ["signature_mismatch"]
+    assert out.startswith("edited")           # pure suffix
+    assert "helper()" in out                  # the arity diagnostic delivered
+    assert "<gt-" not in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+# FIX 3: bash-mediated edit bridges (production _gateway_edit_bridges port)
+# --------------------------------------------------------------------------- #
+def test_bash_edit_target_shapes():
+    assert bash_edit_target("sed -i 's/a/b/' pkg/alpha.py") == "pkg/alpha.py"
+    assert bash_edit_target("cat > src/x.js <<'EOF'\ncode\nEOF") == "src/x.js"
+    assert bash_edit_target("echo hi >> pkg/mod.py") == "pkg/mod.py"
+    assert bash_edit_target(
+        "python -c \"open('pkg/z.py','w').write('x')\"") == "pkg/z.py"
+    assert bash_edit_target(
+        "git apply <<'EOF'\n--- a/pkg/y.py\n+++ b/pkg/y.py\n@@\nEOF") == "pkg/y.py"
+    assert bash_edit_target("grep -rn helper .") is None
+    assert bash_edit_target("cat pkg/alpha.py") is None
+    # A heredoc BODY line must not read as a redirect target.
+    assert bash_edit_target(
+        "cat > /tmp/t.txt <<'EOF'\n> fake.py\nEOF") is None
+
+
+@requires_gt
+def test_bash_edit_bridges_round_trip(indexed_repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    pre_content = alpha.read_text(encoding="utf-8")
+    args = {"command": "sed -i 's/return x + y/return x+y+0/' pkg/alpha.py"}
+    b.capture_bash_preimage(args)
+    assert b._bash_preimages == {"pkg/alpha.py": pre_content}
+    # simulate the dispatched edit
+    alpha.write_text(pre_content.replace("return x + y", "return x+y+0"),
+                     encoding="utf-8")
+    changed, eba = b._bash_bridges(args["command"])
+    assert changed == ("pkg/alpha.py",)
+    assert eba == {"pkg/alpha.py": (pre_content,
+                                    alpha.read_text(encoding="utf-8"))}
+
+
+@requires_gt
+def test_bash_edit_bridges_creation_before_is_none(indexed_repo, tmp_path,
+                                                   monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    b = indexed_repo
+    args = {"command": "cat > pkg/newmod.py <<'EOF'\nX = 1\nEOF"}
+    b.capture_bash_preimage(args)
+    assert b._bash_preimages == {"pkg/newmod.py": None}  # positive creation
+    (tmp_path / "pkg" / "newmod.py").write_text("X = 1\n", encoding="utf-8")
+    changed, eba = b._bash_bridges(args["command"])
+    assert changed == ("pkg/newmod.py",)
+    assert eba == {"pkg/newmod.py": (None, "X = 1\n")}
+
+
+@requires_gt
+def test_bash_edit_bridges_off_by_flag(indexed_repo):
+    b = indexed_repo  # fixture sets only GT_GATEWAY/NATIVE - bridges flag off
+    b.capture_bash_preimage({"command": "sed -i 's/a/b/' pkg/alpha.py"})
+    assert b._bash_preimages == {}
+    assert b._bash_bridges("sed -i 's/a/b/' pkg/alpha.py") == ((), None)
+
+
+@requires_gt
+def test_bash_edit_fires_edit_producer_end_to_end(indexed_repo, tmp_path):
+    """A sed edit (no edit_file tool) reaches the edit-turn producers: the
+    bridges reconstruct changed_files + before/after and patch_delta fires."""
+    apply_profile_env()  # profile-2: GT_GATEWAY_EDIT_BRIDGES + GT_PATCH_DELTA
+    b = indexed_repo
+    b.issue_text = "helper returns the wrong sum"
+    cmd = ("sed -i 's/def helper(x, y):/def helper(x):/; "
+           "s/return x + y/return x/' pkg/alpha.py")
+    b.capture_bash_preimage({"command": cmd})
+    alpha = tmp_path / "pkg" / "alpha.py"
+    src = alpha.read_text(encoding="utf-8")
+    alpha.write_text(src.replace("def helper(x, y):", "def helper(x):")
+                     .replace("return x + y", "return x"), encoding="utf-8")
+    out = b.enrich("bash", {"command": cmd}, "", False)
+    assert [d.evidence_type for d in b.deliveries] == ["signature_mismatch"]
+    assert "helper()" in out  # the arity diagnostic reached the observation
+
+
+@requires_gt
+def test_bash_edit_enrich_records_edited_file(indexed_repo, monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    b = indexed_repo
+    args = {"command": "sed -i 's/x/y/' pkg/alpha.py"}
+    b.capture_bash_preimage(args)
+    b.enrich("bash", args, "", False)
+    assert b.edited_files == ["pkg/alpha.py"]
+    assert b._bash_preimages == {}  # consumed by the observation
+
+
+# --------------------------------------------------------------------------- #
+# FIX 2: gate-kernel submit probe (positive executed evidence only)
+# --------------------------------------------------------------------------- #
+@requires_gt
+def test_submit_probe_blocks_on_real_syntax_error(indexed_repo, tmp_path):
+    (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n    pass\n",
+                                                encoding="utf-8")
+    b = indexed_repo
+    b.edited_files.append("pkg/broken.py")
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert nudge.startswith("pre-commit hook failed:")  # native refusal form
+    assert "SyntaxError" in nudge
+    assert "pkg/broken.py" in nudge          # repo-relative, the agent's own file
+    assert "<gt-" not in nudge.lower()
+    # Sealed as a delivery so the audit sees it.
+    sealed = b.deliveries[-1]
+    assert sealed.evidence_type == "syntax_result"
+    assert sealed.receipt_state == "delivered"
+    assert sealed.rendered_bytes_hash
+    assert b.chain_head
+
+
+@requires_gt
+def test_submit_probe_quiet_on_clean_or_unedited(indexed_repo):
+    b = indexed_repo
+    assert b.submit_probe() is None          # nothing edited: clean allow
+    b.edited_files.append("pkg/alpha.py")    # syntactically fine
+    assert b.submit_probe() is None
+
+
+@requires_gt
+def test_submit_probe_fails_open_after_max_bounces(indexed_repo, tmp_path):
+    (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n", encoding="utf-8")
+    b = indexed_repo
+    b.edited_files.append("pkg/broken.py")
+    assert b.submit_probe() is not None      # first refusal
+    assert b.submit_probe() is None          # gate_overridden: never deadlock
+
+
+# --------------------------------------------------------------------------- #
+# FIX 4: task-start capsule (v1r brief) against the real fixture graph.db
+# --------------------------------------------------------------------------- #
+@requires_gt
+def test_task_start_capsule_fires_and_seals(indexed_repo):
+    pytest.importorskip("numpy")  # v1r brief hard-requires numpy upstream
+    apply_profile_env()  # profile-2: native/minimal brief form
+    b = indexed_repo
+    b.issue_text = ("helper in pkg/alpha.py returns the wrong sum; "
+                    "caller_a breaks when helper drops an argument")
+    cap = b.task_start()
+    assert cap is not None
+    assert cap.startswith("Requirements to satisfy (from the issue):")
+    assert "helper" in cap
+    assert "<gt-" not in cap.lower()         # frame unwrapped, no tag leaks
+    assert len(cap) <= 4000                  # law 8 budget
+    sealed = b.deliveries[-1]
+    assert sealed.evidence_type == "obligations"
+    assert sealed.receipt_state == "delivered"
+    assert b.chain_head
+
+
+@requires_gt
+def test_task_start_abstains_without_issue_text(indexed_repo):
+    b = indexed_repo
+    b.issue_text = ""
+    assert b.task_start() is None
+    assert b.deliveries == []
+
+
+def test_agent_prepends_task_start_capsule():
+    class _StubBridge:
+        issue_text = ""
+        delivered_spans: list[Any] = []
+
+        def task_start(self):
+            return "CAPSULE"
+
+    steps = [StepResult(text="hi", tool_calls=[], stop_reason="end_turn",
+                        usage=_usage())]
+    agent = Agent(provider=_ScriptedProvider(steps), system="s")
+    agent._gt = _StubBridge()
+    result = agent.run("the task")
+    assert result.transcript[0]["content"] == "the task\n\nCAPSULE"
+
+
+# --------------------------------------------------------------------------- #
 # GT-off agent-loop smoke: stubbed provider, no API key, gt_root=None
 # --------------------------------------------------------------------------- #
 class _ScriptedProvider:
@@ -262,6 +524,9 @@ def test_agent_gt_off_smoke_end_to_end():
     result = agent.run("say hi")
     assert result.stop_reason == "end_turn"
     assert result.final_text == "all done"
+    # GT-off byte identity: the initial user message is exactly the task
+    # (no task-start capsule path touched it).
+    assert result.transcript[0]["content"] == "say hi"
     tool_outputs = [t for t in result.transcript if t["type"] == "tool_result"]
     assert any("nano-smoke" in t["output"] for t in tool_outputs)
 

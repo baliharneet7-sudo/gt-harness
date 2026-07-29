@@ -17,7 +17,9 @@ eval = ["harbor", "swebench"]
 # groundtruth-mcp (import name: groundtruth); it is not on PyPI - install from
 # the local checkout: `pip install -e D:\Groundtruth`. groundtruth-mcp declares
 # requires-python >=3.11; nano's >=3.12 is the binding constraint here.
-gt = ["groundtruth-mcp"]
+# numpy: required by the task-start v1r brief leg (pretask.anchor_select);
+# absent, the brief abstains correct-or-quiet and every other GT path still runs.
+gt = ["groundtruth-mcp", "numpy"]
 
 [project.scripts]
 nano = "nano.cli:main"

@@ -50,8 +50,23 @@ class Agent:
             self.on_event(event)
 
     def run(self, task: str) -> AgentResult:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
-        transcript: list[dict[str, Any]] = [{"type": "user", "content": task}]
+        task_content = task
+        if self._gt is not None:
+            self._gt.issue_text = task  # B-4: thread the real task text into GT
+            # GT integration point 4: task-start delivery. Production's step-0
+            # surface (the v1r brief: obligations + ranked localization) rides
+            # the INITIAL user message, before the first provider call, so the
+            # model's first decision is aided. Rendered/leak-guarded/budget-
+            # checked/sealed inside the bridge; None (abstain or any fault)
+            # leaves the message byte-identical to stock.
+            try:
+                gt_capsule = self._gt.task_start()
+            except Exception:  # noqa: BLE001 - GT must never break task start
+                gt_capsule = None
+            if gt_capsule:
+                task_content = task + "\n\n" + gt_capsule
+        messages: list[dict[str, Any]] = [{"role": "user", "content": task_content}]
+        transcript: list[dict[str, Any]] = [{"type": "user", "content": task_content}]
         total_in = total_out = total_cache = 0
         iteration = 0
         used_tools = False
@@ -59,8 +74,6 @@ class Agent:
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
         gt_submit_checked = False  # GT submit-boundary probe spent (once per run)
-        if self._gt is not None:
-            self._gt.issue_text = task  # B-4: thread the real task text into GT
 
         try:
           while True:
@@ -305,6 +318,14 @@ class Agent:
             gt_edit_before: str | None = None
             if self._gt is not None and call.name == "edit_file":
                 gt_edit_before = self._read_for_gt(call.arguments.get("path"))
+            elif self._gt is not None and call.name == "bash":
+                # Bash-mediated edit bridges: a redirect/sed edit cannot be
+                # reverse-applied post-hoc, so the bridge snapshots the target
+                # file at the PRE-dispatch boundary (never raises internally).
+                try:
+                    self._gt.capture_bash_preimage(call.arguments)
+                except Exception:  # noqa: BLE001 - GT must never break dispatch
+                    pass
             try:
                 output = dispatch(call.name, call.arguments, bash=self.bash)
                 is_error = False
