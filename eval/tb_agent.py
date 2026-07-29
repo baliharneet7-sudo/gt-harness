@@ -36,6 +36,8 @@ from harbor.agents.installed.base import (
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from eval._env import UTF8_ENV, provider_env
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REMOTE_DIR = "/installed-agent/nano-harness"
 # GT arm: container path for the Linux gt-index binary (staged by the workflow
@@ -95,7 +97,9 @@ class NanoAgent(BaseInstalledAgent):
         await self.exec_as_root(
             environment, _ENSURE_CURL, env={"DEBIAN_FRONTEND": "noninteractive"}
         )
-        await self.exec_as_agent(environment, _INSTALL_NANO)
+        # UTF8_ENV: task images run POSIX/C locales; force UTF-8 for nano's
+        # Python at install AND run (arm-neutral - see eval/_env.py).
+        await self.exec_as_agent(environment, _INSTALL_NANO, env=dict(UTF8_ENV))
 
     def _model_and_env(self) -> tuple[str, dict[str, str]]:
         # Harbor model names look like "anthropic/claude-opus-4-7"; nano's
@@ -105,11 +109,11 @@ class NanoAgent(BaseInstalledAgent):
         model = self.model_name or "anthropic/claude-opus-4-7"
         if not os.environ.get("OPENAI_BASE_URL"):
             model = model.split("/", 1)[-1]
-        env = {
-            k: v
-            for k in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL")
-            if (v := os.environ.get(k))
-        }
+        # provider_env(): BOM/whitespace-sanitized credentials (a BOM-carrying
+        # secret kills every request at the ASCII header encode - GHA run
+        # 30496848157); UTF8_ENV: UTF-8 regardless of image locale.
+        env = provider_env()
+        env.update(UTF8_ENV)
         return model, env
 
     def _run_command(self, instruction: str, model: str, extra_args: str = "") -> str:
@@ -228,6 +232,7 @@ class GTNanoAgent(NanoAgent):
         await self.exec_as_agent(
             environment,
             _install_nano_cmd(f"--with {shlex.quote(remote_wheel)} --with numpy "),
+            env=dict(UTF8_ENV),
         )
         # Smoke the stack inside the container, fail-closed at install time:
         # (a) groundtruth + gt_engine import from nano's tool venv (default uv
@@ -241,6 +246,7 @@ class GTNanoAgent(NanoAgent):
             f'"{_REMOTE_GT_BINARY}" -root {_REMOTE_DIR}/gt_engine '
             "-output /tmp/gt-install-smoke.db >/dev/null && "
             "test -s /tmp/gt-install-smoke.db && rm -f /tmp/gt-install-smoke.db",
+            env=dict(UTF8_ENV),
         )
 
     @with_prompt_template
