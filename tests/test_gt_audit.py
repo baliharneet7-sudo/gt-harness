@@ -135,7 +135,7 @@ def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
     assert audit.feature_attribution["recovery"]["status"] == "TRIGGERED_DARK"
 
 
-def test_audit_reports_provider_temperature_from_request_receipt(tmp_path):
+def test_audit_reports_provider_and_profile_activation_receipts(tmp_path):
     from gt_engine.attribution import AttributionTrace
 
     task = make_task_dir(
@@ -147,6 +147,18 @@ def test_audit_reports_provider_temperature_from_request_receipt(tmp_path):
     trace = AttributionTrace(
         lambda: task / "agent" / "gt_attribution.jsonl",
         trace_id="a" * 32,
+    )
+    trace.record(
+        "run.started",
+        action_index=0,
+        boundary="task_start",
+        payload={
+            "expected_profile_controls": ["GT_GATEWAY", "GT_CS_EDIT_TRIGGER"],
+            "active_profile_controls": ["GT_GATEWAY", "GT_CS_EDIT_TRIGGER"],
+            "missing_profile_controls": [],
+            "active_behavior_flags": ["GT_CS_EDIT_TRIGGER"],
+            "profile_receipt_fault": "",
+        },
     )
     trace.record(
         "provider.request",
@@ -166,6 +178,15 @@ def test_audit_reports_provider_temperature_from_request_receipt(tmp_path):
 
     assert audit.attribution_issues == []
     assert audit.provider_temperatures == [1.0]
+    assert audit.expected_profile_controls == [
+        "GT_CS_EDIT_TRIGGER", "GT_GATEWAY",
+    ]
+    assert audit.active_profile_controls == [
+        "GT_CS_EDIT_TRIGGER", "GT_GATEWAY",
+    ]
+    assert audit.missing_profile_controls == []
+    assert audit.profile_behavior_flags == ["GT_CS_EDIT_TRIGGER"]
+    assert audit.profile_receipt_fault == ""
 
 
 def test_attribution_integrity_failure_is_red(tmp_path):

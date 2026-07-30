@@ -11,6 +11,11 @@ def _task(
     lifecycle=None,
     *,
     provider_temperatures=None,
+    expected_profile_controls=None,
+    active_profile_controls=None,
+    missing_profile_controls=None,
+    profile_behavior_flags=None,
+    profile_receipt_fault="",
 ):
     return {
         "task_name": name,
@@ -22,6 +27,11 @@ def _task(
         "feature_attribution": features,
         "lifecycle_checkpoints": lifecycle or {},
         "provider_temperatures": provider_temperatures or [],
+        "expected_profile_controls": expected_profile_controls or [],
+        "active_profile_controls": active_profile_controls or [],
+        "missing_profile_controls": missing_profile_controls or [],
+        "profile_behavior_flags": profile_behavior_flags or [],
+        "profile_receipt_fault": profile_receipt_fault,
     }
 
 
@@ -208,3 +218,69 @@ def test_live_gate_rejects_missing_identity_wrong_temperature_and_too_few_action
     assert any("feature census" in issue for issue in report["issues"])
     assert any("temperature" in issue for issue in report["issues"])
     assert any("action-consistent" in issue for issue in report["issues"])
+
+
+def test_live_gate_requires_profile_controls_and_behavior_flags(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    audit = {
+        "tasks": [
+            _task(
+                "task",
+                {"obligations": _feature()},
+                missing_profile_controls=["GT_CS_EDIT_TRIGGER"],
+                profile_behavior_flags=[],
+            ),
+        ],
+    }
+
+    report = evaluate_live_gate(
+        audit,
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        required_behavior_flags=("GT_CS_EDIT_TRIGGER",),
+        require_complete_profile=True,
+        run_dir=tmp_path,
+    )
+
+    assert report["passed"] is False
+    assert any("profile control" in issue for issue in report["issues"])
+    assert any("behavior flag" in issue for issue in report["issues"])
+
+
+def test_live_gate_accepts_complete_profile_and_required_behavior(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    controls = ["GT_GATEWAY", "GT_CS_EDIT_TRIGGER"]
+    audit = {
+        "tasks": [
+            _task(
+                "task",
+                {"obligations": _feature()},
+                expected_profile_controls=controls,
+                active_profile_controls=controls,
+                profile_behavior_flags=["GT_CS_EDIT_TRIGGER"],
+            ),
+        ],
+    }
+
+    report = evaluate_live_gate(
+        audit,
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        required_behavior_flags=("GT_CS_EDIT_TRIGGER",),
+        require_complete_profile=True,
+        run_dir=tmp_path,
+    )
+
+    assert report["passed"] is True
+    assert report["complete_profile"] is True
+    assert report["observed_behavior_flags"] == ["GT_CS_EDIT_TRIGGER"]

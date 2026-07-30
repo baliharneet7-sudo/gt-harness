@@ -350,6 +350,8 @@ jobs:
               --expected-model "deepseek-v4-flash" \
               --expected-temperature "$EXPECTED_TEMPERATURE" \
               --require-complete-census \
+              --require-complete-profile \
+              --require-behavior-flags "GT_CS_EDIT_TRIGGER,GT_SS_EDIT_PREVENTIVE,GT_INFRA_NOISE_GUARD,GT_HYP_CONTRA_GUARD,GT_RECOVERY_ESCALATE,GT_OBLIG_STEER_GUARD,GT_ROLE_DRIVEN_COALITION" \
               --require-lifecycle "task_start,research,pre_edit,post_edit,test,verify,submit" \
               --json "$gate_json" || gate_rc=$?
           else

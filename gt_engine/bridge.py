@@ -111,8 +111,9 @@ def apply_profile_env() -> None:
 
     - GT_RL_PROFILE unset  -> ``resolve_profile_defaults`` (W8: Profile-2 members
       + behavior flags, each "1").
-    - GT_RL_PROFILE = explicit token -> ``resolve_profile`` (that profile's
-      members; an explicit member env value rides through unchanged).
+    - GT_RL_PROFILE = explicit token -> ``resolve_profile_defaults`` (that
+      profile's members and behavior flags; an explicit env value rides
+      through unchanged at the ``setdefault`` seam).
     - GT_RL_PROFILE = explicit "0"/"off"/"none" -> the legacy/control posture:
       no fan-out, only the minimal pair (the bridge still needs GT_GATEWAY to
       produce anything at all; a user who wants GT fully off unsets --gt-root
@@ -129,14 +130,14 @@ def apply_profile_env() -> None:
         if profile and profile.lower() in ("0", "off", "none"):
             _minimal_pair()  # explicit legacy posture: no profile fan-out
             return
-        if profile:
-            from groundtruth.runtime.rl_profile import resolve_profile
+        from groundtruth.runtime.rl_profile import resolve_profile_defaults
 
-            members = resolve_profile(os.environ)
-        else:
-            from groundtruth.runtime.rl_profile import resolve_profile_defaults
-
-            members = resolve_profile_defaults(os.environ)
+        # Use the defaults resolver for both an unset token and an explicit
+        # profile token. ``resolve_profile`` returns inventory members only;
+        # it deliberately excludes PROFILE_BEHAVIOR_FLAGS. Workflows set
+        # GT_RL_PROFILE=2 explicitly, so using resolve_profile here silently
+        # disabled the seven Profile-2 behavior switches in every live run.
+        members = resolve_profile_defaults(os.environ)
         for k, v in members.items():
             if k.startswith("GT_XSESSION"):
                 continue  # durable cross-session memory: off for determinism
@@ -627,6 +628,53 @@ class GTBridge:
             )
         except Exception:  # noqa: BLE001 - census cannot affect submission
             pass
+
+    @staticmethod
+    def _profile_activation_receipt() -> dict[str, Any]:
+        """Return names-only proof that the selected profile fully fanned out."""
+        profile = (os.environ.get("GT_RL_PROFILE") or "2").strip() or "2"
+        try:
+            from groundtruth.runtime.rl_profile import (
+                PROFILE_BEHAVIOR_FLAGS,
+                resolve_profile_defaults,
+            )
+
+            expected = sorted(
+                name for name in resolve_profile_defaults(os.environ)
+                if not name.startswith("GT_XSESSION")
+            )
+            active = sorted(
+                name for name in expected
+                if os.environ.get(name, "").strip().lower()
+                not in {"", "0", "false", "no", "off"}
+            )
+            behavior = sorted(
+                name for name in PROFILE_BEHAVIOR_FLAGS.get(
+                    profile, frozenset()
+                )
+                if name in active
+            )
+            return {
+                "profile": profile,
+                "expected_profile_controls": expected,
+                "active_profile_controls": active,
+                "expected_profile_control_count": len(expected),
+                "active_profile_control_count": len(active),
+                "missing_profile_controls": sorted(set(expected) - set(active)),
+                "active_behavior_flags": behavior,
+                "profile_receipt_fault": "",
+            }
+        except Exception as exc:  # noqa: BLE001 - receipt cannot break task start
+            return {
+                "profile": profile,
+                "expected_profile_controls": [],
+                "active_profile_controls": [],
+                "expected_profile_control_count": 0,
+                "active_profile_control_count": 0,
+                "missing_profile_controls": [],
+                "active_behavior_flags": [],
+                "profile_receipt_fault": type(exc).__name__,
+            }
 
     def _producer_record(self, row: dict[str, Any]) -> None:
         """Adapter for GT core's ``gt.producer_invocation.v1`` hook."""
@@ -2493,6 +2541,7 @@ class GTBridge:
         SEALED capsule string, or None (no issue text, empty brief, guard
         drop, or ANY fault - correct-or-quiet). Never raises."""
         try:
+            profile_receipt = self._profile_activation_receipt()
             self._trace_record(
                 "run.started",
                 "task_start",
@@ -2501,6 +2550,7 @@ class GTBridge:
                     "graph_available": bool(self.graph_db),
                     "feature_count": 17,
                     "provider_final_receipts_required": True,
+                    **profile_receipt,
                 },
             )
             self._lifecycle_checkpoint(

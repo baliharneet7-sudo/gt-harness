@@ -549,6 +549,61 @@ def test_profile_explicit_token_resolves_that_profile(monkeypatch):
 
 
 @requires_gt
+@pytest.mark.gt_all17
+def test_profile_explicit_two_fans_out_behavior_flags(monkeypatch):
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+
+    apply_profile_env()
+
+    for flag in (
+        "GT_CS_EDIT_TRIGGER",
+        "GT_SS_EDIT_PREVENTIVE",
+        "GT_INFRA_NOISE_GUARD",
+        "GT_HYP_CONTRA_GUARD",
+        "GT_RECOVERY_ESCALATE",
+        "GT_OBLIG_STEER_GUARD",
+        "GT_ROLE_DRIVEN_COALITION",
+    ):
+        assert os.environ.get(flag) == "1", flag
+
+
+@requires_gt
+def test_task_start_receipts_complete_profile_two_control_activation(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+    apply_profile_env()
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text="Inspect the repository.",
+    )
+    bridge.task_start()
+
+    started = next(
+        row for row in bridge._attribution.rows
+        if row["event_type"] == "run.started"
+    )
+    payload = started["payload"]
+    assert payload["profile"] == "2"
+    assert payload["missing_profile_controls"] == []
+    assert payload["expected_profile_control_count"] == (
+        payload["active_profile_control_count"]
+    )
+    assert set(payload["active_behavior_flags"]) == {
+        "GT_CS_EDIT_TRIGGER",
+        "GT_SS_EDIT_PREVENTIVE",
+        "GT_INFRA_NOISE_GUARD",
+        "GT_HYP_CONTRA_GUARD",
+        "GT_RECOVERY_ESCALATE",
+        "GT_OBLIG_STEER_GUARD",
+        "GT_ROLE_DRIVEN_COALITION",
+    }
+
+
+@requires_gt
 def test_profile_unknown_token_never_dark(monkeypatch):
     monkeypatch.setenv("GT_RL_PROFILE", "99")
     apply_profile_env()
@@ -662,6 +717,62 @@ def test_repeated_failed_search_fires_newfile_precedent_and_change_surface(
     summary = summarize_features(bridge._attribution.rows)
     assert summary["newfile_precedent"]["status"] == "WITNESSED"
     assert summary["GT_CHANGE_SURFACE"]["status"] == "WITNESSED"
+
+
+@requires_gt
+@pytest.mark.gt_all17
+def test_explicit_profile_two_new_file_fires_change_surface(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+    apply_profile_env()
+    monkeypatch.setenv("GT_LOC_RESLOT", "0")
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "__init__.py").write_text(
+        "from .aws import AwsProvider\n"
+        "from .gcp import GcpProvider\n"
+        "REGISTRY = {'aws': AwsProvider, 'gcp': GcpProvider}\n",
+        encoding="utf-8",
+    )
+    (providers / "aws.py").write_text(
+        "class AwsProvider:\n    pass\n", encoding="utf-8"
+    )
+    (providers / "gcp.py").write_text(
+        "class GcpProvider:\n    pass\n", encoding="utf-8"
+    )
+    db = ensure_index(str(tmp_path))
+    if db is None:
+        pytest.skip("gt-index binary unavailable")
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=db,
+        issue_text="Add an azure provider like the aws and gcp providers.",
+    )
+    azure = providers / "azure.py"
+    after = "class AzureProvider:\n    pass\n"
+    azure.write_text(after, encoding="utf-8")
+
+    output = bridge.enrich(
+        "edit_file",
+        {"path": str(azure)},
+        "created",
+        False,
+        edit_before=None,
+        edit_after=after,
+    )
+
+    assert output.startswith("created")
+    assert [
+        item.evidence_type for item in bridge.deliveries
+    ] == ["missing_role_postcreate:registration"]
+    from gt_engine.attribution import summarize_features
+
+    summary = summarize_features(bridge._attribution.rows)
+    assert summary["newfile_precedent"]["status"] == "DELIVERED_UNEXPOSED"
+    assert summary["GT_CHANGE_SURFACE"]["status"] == "DELIVERED_UNEXPOSED"
 
 
 # --------------------------------------------------------------------------- #

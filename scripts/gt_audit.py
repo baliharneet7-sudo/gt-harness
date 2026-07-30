@@ -655,6 +655,11 @@ class TaskAudit:
     lifecycle_checkpoints: dict[str, dict] = field(default_factory=dict)
     provider_temperatures: list[float] = field(default_factory=list)
     provider_receipts_required: bool = False
+    expected_profile_controls: list[str] = field(default_factory=list)
+    active_profile_controls: list[str] = field(default_factory=list)
+    missing_profile_controls: list[str] = field(default_factory=list)
+    profile_behavior_flags: list[str] = field(default_factory=list)
+    profile_receipt_fault: str = ""
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -822,6 +827,33 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 if temperature not in a.provider_temperatures:
                     a.provider_temperatures.append(temperature)
         a.provider_temperatures.sort()
+        started = next(
+            (
+                row.get("payload", {})
+                for row in attribution_rows
+                if row.get("event_type") == "run.started"
+            ),
+            {},
+        )
+        a.expected_profile_controls = sorted(
+            str(value)
+            for value in started.get("expected_profile_controls", ())
+        )
+        a.active_profile_controls = sorted(
+            str(value)
+            for value in started.get("active_profile_controls", ())
+        )
+        a.missing_profile_controls = sorted(
+            str(value)
+            for value in started.get("missing_profile_controls", ())
+        )
+        a.profile_behavior_flags = sorted(
+            str(value)
+            for value in started.get("active_behavior_flags", ())
+        )
+        a.profile_receipt_fault = str(
+            started.get("profile_receipt_fault") or ""
+        )
         a.provider_receipts_required = any(
             row.get("event_type") == "provider.request"
             or (

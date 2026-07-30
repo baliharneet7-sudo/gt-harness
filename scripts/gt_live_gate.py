@@ -38,6 +38,8 @@ def evaluate_live_gate(
     expected_model: str,
     expected_temperature: float | None = None,
     require_complete_census: bool = False,
+    require_complete_profile: bool = False,
+    required_behavior_flags: tuple[str, ...] = (),
     required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -51,6 +53,8 @@ def evaluate_live_gate(
     lifecycle_observed: set[str] = set()
     provider_temperatures: set[float] = set()
     complete_census = True
+    complete_profile = True
+    observed_behavior_flags: set[str] = set()
     expected_feature_ids = set(DIRECT_FEATURES)
     valid_statuses = {
         "INELIGIBLE",
@@ -99,6 +103,39 @@ def evaluate_live_gate(
         for value in task.get("provider_temperatures") or ():
             if isinstance(value, int | float):
                 provider_temperatures.add(float(value))
+        task_behavior_flags = {
+            str(value) for value in task.get("profile_behavior_flags") or ()
+        }
+        observed_behavior_flags.update(task_behavior_flags)
+        expected_controls = {
+            str(value) for value in task.get("expected_profile_controls") or ()
+        }
+        active_controls = {
+            str(value) for value in task.get("active_profile_controls") or ()
+        }
+        missing_controls = {
+            str(value) for value in task.get("missing_profile_controls") or ()
+        }
+        receipt_fault = str(task.get("profile_receipt_fault") or "")
+        if require_complete_profile and (
+            not expected_controls
+            or active_controls != expected_controls
+            or missing_controls
+            or receipt_fault
+        ):
+            complete_profile = False
+            issues.append(
+                f"{task_name}: incomplete profile control activation "
+                f"(expected={len(expected_controls)}, "
+                f"active={len(active_controls)}, "
+                f"missing={sorted(missing_controls)}, "
+                f"fault={receipt_fault or 'none'})"
+            )
+        for flag in required_behavior_flags:
+            if flag not in task_behavior_flags:
+                issues.append(
+                    f"{task_name}: required behavior flag {flag} not active"
+                )
         for feature_id, item in task_features.items():
             status = str(item.get("status") or "")
             if status == "WITNESSED":
@@ -177,6 +214,9 @@ def evaluate_live_gate(
         "expected_temperature": expected_temperature,
         "provider_temperatures": sorted(provider_temperatures),
         "complete_census": complete_census,
+        "complete_profile": complete_profile,
+        "required_behavior_flags": sorted(set(required_behavior_flags)),
+        "observed_behavior_flags": sorted(observed_behavior_flags),
         "issues": issues,
     }
 
@@ -191,6 +231,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-model", default="deepseek-v4-flash")
     parser.add_argument("--expected-temperature", type=float)
     parser.add_argument("--require-complete-census", action="store_true")
+    parser.add_argument("--require-complete-profile", action="store_true")
+    parser.add_argument(
+        "--require-behavior-flags",
+        default="",
+        help="comma-separated profile behavior flags required on every task",
+    )
     parser.add_argument(
         "--require-lifecycle",
         default="",
@@ -209,6 +255,12 @@ def main(argv: list[str] | None = None) -> int:
         expected_model=args.expected_model,
         expected_temperature=args.expected_temperature,
         require_complete_census=args.require_complete_census,
+        require_complete_profile=args.require_complete_profile,
+        required_behavior_flags=tuple(
+            flag.strip()
+            for flag in args.require_behavior_flags.split(",")
+            if flag.strip()
+        ),
         required_lifecycle=tuple(
             phase.strip()
             for phase in args.require_lifecycle.split(",")
