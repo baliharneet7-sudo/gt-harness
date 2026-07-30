@@ -1487,7 +1487,6 @@ class GTBridge:
             return None
 
     def _submit_gate(self) -> str | None:
-        from gt_engine.attribution import feature_for_evidence
         from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
         from groundtruth.runtime.edit_check import check_edit_syntax
         from groundtruth.runtime.evidence_envelope import (
@@ -1500,6 +1499,8 @@ class GTBridge:
             render_submit_rejection,
         )
         from groundtruth.runtime.submit_gate import safe_gate_verdict
+
+        from gt_engine.attribution import feature_for_evidence
 
         # POSITIVE evidence only: an executed parse failure in an edited file.
         # ``syntax_res`` additionally feeds the certificate's syntax head (a

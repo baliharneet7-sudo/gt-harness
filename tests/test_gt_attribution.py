@@ -181,3 +181,41 @@ def test_unterminated_producer_invocation_is_telemetry_fault():
 
     assert summary["def_partition"]["status"] == "TELEMETRY_FAULT"
     assert summary["def_partition"]["reasons"] == ["producer_terminal_missing"]
+
+
+def test_cap_is_witnessed_only_when_same_action_delivers_its_fact():
+    rows = [
+        {
+            "action_index": 9,
+            "event_type": "feature.evaluated",
+            "payload": {
+                "feature_id": "GT_HYPOTHESIS",
+                "eligible": True,
+                "outcome": "candidate_returned",
+            },
+        },
+        {
+            "action_index": 9,
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "9",
+                "feature_id": "recovery",
+                "evidence_type": "recovery",
+            },
+        },
+        {
+            "action_index": 10,
+            "event_type": "feature.evaluated",
+            "payload": {
+                "feature_id": "GT_CERT_DELIVERY",
+                "eligible": True,
+                "outcome": "candidate_returned",
+            },
+        },
+    ]
+
+    summary = summarize_features(rows)
+
+    assert summary["GT_HYPOTHESIS"]["status"] == "WITNESSED"
+    assert summary["GT_CERT_DELIVERY"]["status"] == "TRIGGERED_DARK"
