@@ -1,18 +1,23 @@
 """Evidence-aware context management for nano-harness.
 
 ``smart_truncate`` preserves nano's exact two-phase, char-metric truncation
-(agent.py:_truncate_if_needed) as the base behavior. The single change is the
-ORDER phase 1 visits tool_result blocks when GT has delivered evidence:
+(agent.py:_truncate_if_needed) as the base behavior. The single change is
+phase 1's treatment of tool_result blocks that carry delivered GT evidence:
 
-    1. blocks carrying no GT evidence (oldest first - the stock order),
-    2. blocks carrying non-VERIFIED evidence (oldest first),
-    3. blocks carrying VERIFIED-tier evidence (oldest first, dropped last).
+    SEALED => SEEN (FIX E, structural): a block containing ANY delivered
+    span is EXEMPT from phase-1 truncation — never merely ranked last. A
+    delivery sealed at the end of iteration N must still be present when the
+    model reads iteration N+1; a sealed-but-never-seen delivery would be the
+    F1 lie class (the seal attests the model received the bytes). Overflow
+    falls through to phase 2 (tool_use input shrinking) and ultimately to
+    nano's provider-side token cap — accepted cost: deliveries are <=4000
+    chars and <=1 per observation.
 
 Phase 2 (shrinking >200-char string args of past tool_use blocks) is kept
 verbatim - giant edit_file `new` strings would otherwise re-inflate every
-request. When GT never delivered anything the visit order degenerates to the
-stock oldest-first pass, so behavior (including transcript truncation events)
-is byte-identical to the original.
+request. When GT never delivered anything there are no exemptions, so
+behavior (including transcript truncation events) is byte-identical to the
+original oldest-first pass (GT-off byte identity).
 """
 from __future__ import annotations
 
@@ -58,22 +63,24 @@ def smart_truncate(
     if total_chars() <= char_budget:
         return
 
-    # Phase 1: drop tool_result content - evidence-poor first, VERIFIED last.
-    # Collect candidate blocks in message (oldest-first) order, then stable-sort
-    # by evidence rank so equal-rank blocks keep the stock oldest-first order.
-    candidates: list[tuple[int, dict[str, Any]]] = []
+    # Phase 1: drop tool_result content - evidence-bearing blocks are EXEMPT
+    # (sealed => seen): any block containing a delivered span is never
+    # phase-1 truncated, whatever its tier. Evidence-free blocks keep the
+    # stock oldest-first order; with no delivered spans NOTHING is exempt
+    # and this is byte-identical to the stock pass.
+    candidates: list[dict[str, Any]] = []
     for m in messages:
         if not isinstance(m.get("content"), list):
             continue
         for b in m["content"]:
             if b.get("type") == "tool_result" and not str(
                     b.get("content", "")).startswith("[truncated"):
-                rank = _block_evidence_rank(str(b.get("content", "")),
-                                            delivered_spans)
-                candidates.append((rank, b))
-    candidates.sort(key=lambda rb: rb[0])  # stable: order within rank preserved
+                if _block_evidence_rank(str(b.get("content", "")),
+                                        delivered_spans) > 0:
+                    continue  # sealed => seen: exempt, fall through to phase 2
+                candidates.append(b)
 
-    for _rank, b in candidates:
+    for b in candidates:
         original_len = len(b.get("content", ""))
         b["content"] = f"[truncated - {original_len} chars dropped]"
         transcript.append({"type": "truncation",

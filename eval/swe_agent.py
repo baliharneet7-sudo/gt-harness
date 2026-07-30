@@ -186,7 +186,7 @@ class NanoSweAgent(BaseInstalledAgent):
 
     def _run_command(self, task: str, model: str, gt_flags: str) -> str:
         marker = (
-            f"echo '[swe_agent] GT arm requested ({gt_flags})'; " if gt_flags else ""
+            f"echo '[swe_agent] GT arm active ({gt_flags})'; " if gt_flags else ""
         )
         # `|| true` on the nano run: a partial run (max_iterations) may still
         # pass the tests — never let the agent's exit code abort the trial

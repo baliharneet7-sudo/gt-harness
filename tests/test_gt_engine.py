@@ -14,6 +14,7 @@ from gt_engine.bridge import (
     DeliveredSpan,
     apply_profile_env,
     bash_edit_target,
+    failure_fingerprint,
     parse_exit_code,
 )
 from gt_engine.context import smart_truncate
@@ -106,7 +107,10 @@ def test_smart_truncate_byte_identical_when_no_deliveries(budget, big_input):
     assert gt_tr == stock_tr
 
 
-def test_smart_truncate_drops_evidence_free_blocks_first():
+def test_smart_truncate_exempts_evidence_blocks_entirely():
+    """FIX E (sealed => seen, structural): a tool_result carrying a delivered
+    span - ANY tier - is never phase-1 truncated; only evidence-free blocks
+    are reclaimed, in the stock oldest-first order."""
     msgs = _make_messages(n_results=3, result_len=500)
     evidence = "pkg/a.py:1:helper\n"
     warn = "note: check callers\n"
@@ -116,15 +120,44 @@ def test_smart_truncate_drops_evidence_free_blocks_first():
                            evidence_type="def_ref_partition", dedup_key="k1"),
              DeliveredSpan(text=warn, tier="WARNING",
                            evidence_type="cochange_partner", dedup_key="k2")]
-    # A tight budget drops all three blocks; the ORDER must be: the
-    # evidence-free block (t2, the NEWEST) first, then WARNING (t1), then
-    # VERIFIED (t0) last of all - the stock pass would have gone t0,t1,t2.
     tr: list[dict[str, Any]] = []
     smart_truncate(msgs, tr, char_budget=100, delivered_spans=spans)
-    order = [t["tool_use_id"] for t in tr if t["type"] == "truncation"][:3]
-    assert order == ["t2", "t1", "t0"]
-    for i in (2, 4, 6):
-        assert str(msgs[i]["content"][0]["content"]).startswith("[truncated")
+    # Only the evidence-free block (t2) was reclaimed by phase 1.
+    order = [t["tool_use_id"] for t in tr if t["type"] == "truncation"]
+    assert order == ["t2"]
+    assert str(msgs[6]["content"][0]["content"]).startswith("[truncated")
+    # Both evidence-bearing blocks survive INTACT (bytes, not just presence).
+    assert evidence in str(msgs[2]["content"][0]["content"])
+    assert warn in str(msgs[4]["content"][0]["content"])
+
+
+def test_smart_truncate_evidence_only_overflow_falls_to_phase_two():
+    """FIX E: when the ONLY reclaimable phase-1 blocks carry evidence, phase 1
+    reclaims nothing - the evidence survives intact and phase 2 (tool_use
+    input shrinking) fires instead."""
+    msgs = _make_messages(n_results=2, result_len=300, big_input=5000)
+    ev0 = "pkg/a.py:1:helper\n"
+    ev1 = "note: check callers\n"
+    msgs[2]["content"][0]["content"] += "\n" + ev0
+    msgs[4]["content"][0]["content"] += "\n" + ev1
+    spans = [DeliveredSpan(text=ev0, tier="VERIFIED",
+                           evidence_type="def_ref_partition", dedup_key="k1"),
+             DeliveredSpan(text=ev1, tier="HYPOTHESIS",
+                           evidence_type="recovery", dedup_key="k2")]
+    tr: list[dict[str, Any]] = []
+    smart_truncate(msgs, tr, char_budget=800, delivered_spans=spans)
+    # No tool_result was truncated; every truncation event is a phase-2
+    # tool_use input shrink.
+    assert tr and all(t["type"] == "truncation" for t in tr)
+    for i in (2, 4):
+        assert not str(msgs[i]["content"][0]["content"]).startswith("[truncated")
+    assert ev0 in str(msgs[2]["content"][0]["content"])
+    assert ev1 in str(msgs[4]["content"][0]["content"])
+    # Phase 2 shrank the oversized input string(s).
+    assert any(str(v).startswith("[truncated")
+               for m in msgs if isinstance(m.get("content"), list)
+               for b in m["content"] if b.get("type") == "tool_use"
+               for v in (b.get("input") or {}).values())
 
 
 def test_smart_truncate_keeps_phase_two():
@@ -868,3 +901,343 @@ def test_ledger_absent_when_gt_off(tmp_path):
     assert agent._gt is None
     agent.run("t")
     assert not (tmp_path / ".gt").exists()
+
+
+# --------------------------------------------------------------------------- #
+# FIX A: gt_deliveries.txt - verbatim shipped bytes alongside the ledger
+# --------------------------------------------------------------------------- #
+import hashlib  # noqa: E402
+import re as _re  # noqa: E402
+
+_DELIV_HDR = _re.compile(
+    rb"--- event_id=(\S*) boundary=(\S+) evidence_type=(\S+) "
+    rb"rendered_bytes_hash=([0-9a-f]{64}) ---\n")
+
+
+def _read_deliveries(root) -> dict[str, dict[str, Any]]:
+    """Parse gt_deliveries.txt into {rendered_bytes_hash: block}. Body = the
+    exact bytes between the header newline and the trailing blank-line
+    delimiter the writer appends (b'\\n\\n')."""
+    p = root / ".gt" / "gt_deliveries.txt"
+    if not p.exists():
+        return {}
+    data = p.read_bytes()
+    hits = list(_DELIV_HDR.finditer(data))
+    out: dict[str, dict[str, Any]] = {}
+    for i, m in enumerate(hits):
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(data)
+        body = data[m.end():end]
+        assert body.endswith(b"\n\n")  # the framing blank line
+        out[m.group(4).decode()] = {
+            "event_id": m.group(1).decode(),
+            "boundary": m.group(2).decode(),
+            "evidence_type": m.group(3).decode(),
+            "body": body[:-2],
+        }
+    return out
+
+
+@requires_gt
+def test_deliveries_file_joins_ledger_one_to_one(covering_repo, tmp_path,
+                                                 monkeypatch):
+    """Every ledger row has exactly one framed block whose body bytes hash to
+    rendered_bytes_hash (law 6: the shipped bytes ARE the sealed bytes), with
+    matching boundary/evidence_type - across gateway, covering and submit
+    deliveries in one episode."""
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    b = covering_repo
+    b.enrich("bash", {"command": _AMBIGUOUS_GREP}, _GREP_OUT, False)  # gateway
+    alpha, before, after = _break_helper(tmp_path)
+    b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+             edit_before=before, edit_after=after)                   # covering
+    b.submit_probe()                                                 # submit
+    rows = _read_ledger(tmp_path)
+    blocks = _read_deliveries(tmp_path)
+    assert len(rows) == len(blocks) == len(b.deliveries) >= 2
+    for ln in rows:
+        blk = blocks[ln["rendered_bytes_hash"]]      # 1:1 join by hash
+        assert hashlib.sha256(blk["body"]).hexdigest() == ln["rendered_bytes_hash"]
+        assert blk["boundary"] == ln["boundary"]
+        assert blk["evidence_type"] == ln["evidence_type"]
+        assert blk["event_id"] == ln["event_id"]
+    # The verbatim bytes are the EXACT shipped suffixes the bridge appended.
+    shipped = {hashlib.sha256(
+        s.text.encode("utf-8", "surrogatepass")).hexdigest(): s.text
+        for s in b.delivered_spans}
+    for h, txt in shipped.items():
+        assert blocks[h]["body"].decode("utf-8") == txt
+
+
+@requires_gt
+def test_deliveries_file_write_failure_never_unseals(indexed_repo, monkeypatch,
+                                                     tmp_path):
+    """An unwritable ledger home (missing dir) silences BOTH files but the
+    delivery still ships sealed - correct-or-quiet on the record path."""
+    b = indexed_repo
+    bad = str(tmp_path / "nodir" / "gt_ledger.jsonl")  # parent never created
+    monkeypatch.setattr(type(b), "_ledger_path", lambda self: bad)
+    out = b.enrich("bash", {"command": _AMBIGUOUS_GREP}, _GREP_OUT, False)
+    assert len(out) > len(_GREP_OUT)                 # delivery still happened
+    assert len(b.deliveries) == 1                    # and stayed sealed
+    assert not (tmp_path / "nodir").exists()
+
+
+def test_deliveries_file_absent_when_gt_off(tmp_path):
+    steps = [StepResult(text="hi", tool_calls=[], stop_reason="end_turn",
+                        usage=_usage())]
+    agent = Agent(provider=_ScriptedProvider(steps), system="s")  # gt_root=None
+    assert agent._gt is None
+    agent.run("t")
+    assert not (tmp_path / ".gt" / "gt_deliveries.txt").exists()
+
+
+# --------------------------------------------------------------------------- #
+# FIX B: recovery / GT_HYPOTHESIS lane (falsification recurrence -> one steer)
+# --------------------------------------------------------------------------- #
+_PYTEST_CMD = "python -m pytest -x"
+_FAIL_X = ("=================== test session starts ===================\n"
+           "FAILED test_math.py::test_helper_sum - AssertionError: assert 4 == 3\n"
+           "1 failed in 0.12s\n"
+           "[exit code 1]")
+_FAIL_Y = ("=================== test session starts ===================\n"
+           "FAILED test_math.py::test_caller - TypeError: caller_a() missing arg\n"
+           "1 failed in 0.10s\n"
+           "[exit code 1]")
+_RECOVERY_STEER = ("The last edit did not change the failing result — form a "
+                   "new hypothesis before editing again.")
+
+
+def test_failure_fingerprint_normalization():
+    """Production's scrub: numbers/hex and path tokens are volatile; a passing
+    observation has no signature."""
+    a = failure_fingerprint("FAILED pkg/x.py::t - AssertionError: assert 4 == 3")
+    b = failure_fingerprint("FAILED src/y.py::t - AssertionError: assert 7 == 9")
+    assert a and a == b                       # same failure shape, same key
+    assert failure_fingerprint("5 passed in 0.01s") == ""
+    assert failure_fingerprint("") == ""
+    assert failure_fingerprint(_FAIL_X) != failure_fingerprint(_FAIL_Y)
+
+
+def _edit_alpha(b, tmp_path, marker: str):
+    """A real intervening source edit through the bridge (records the edit
+    index for the ledger's edit-between predicate)."""
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before + f"\n# {marker}\n"
+    alpha.write_text(after, encoding="utf-8")
+    b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+             edit_before=before, edit_after=after)
+    return alpha
+
+
+@requires_gt
+def test_recovery_fires_on_same_failure_recurring_across_edit(
+        indexed_repo, tmp_path, monkeypatch):
+    """LIVE FIRE: fail(X) -> edit -> fail(X) delivers ONE HYPOTHESIS-tier
+    native steer as a sealed pure suffix on the recurrence observation."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    out1 = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert "form a new hypothesis" not in out1     # a FRESH failure never steers
+    _edit_alpha(b, tmp_path, "attempt 1")
+    out2 = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert out2.startswith(_FAIL_X)                # pure suffix (TITO law 1)
+    delta = out2[len(_FAIL_X):]
+    assert _RECOVERY_STEER in delta                # the production imperative
+    assert "<gt-" not in delta.lower()             # native, leak-guarded
+    assert "test_math" not in delta                # no test identity
+    sealed = b.deliveries[-1]
+    assert sealed.evidence_type == "recovery"
+    assert sealed.tier == "HYPOTHESIS"             # CAP: never [VERIFIED]
+    assert sealed.receipt_state == "delivered"
+    # Dose law: exactly ONE delivery rode this observation.
+    assert [d for d in b.deliveries if d.event_id == sealed.event_id] == [sealed]
+    # Ledger + deliveries-file record the steer (boundary "recovery").
+    rows = [ln for ln in _read_ledger(tmp_path) if ln["boundary"] == "recovery"]
+    assert len(rows) == 1
+    assert rows[0]["rendered_bytes_hash"] == sealed.rendered_bytes_hash
+    blk = _read_deliveries(tmp_path)[sealed.rendered_bytes_hash]
+    assert _RECOVERY_STEER.encode("utf-8") in blk["body"]
+
+
+@requires_gt
+def test_recovery_quiet_on_different_failure(indexed_repo, tmp_path, monkeypatch):
+    """fail(X) -> edit -> fail(Y): a DIFFERENT failure is progress evidence,
+    never a falsification steer (quiet)."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    _edit_alpha(b, tmp_path, "attempt 1")
+    out = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_Y, True)
+    assert out == _FAIL_Y
+    assert not [d for d in b.deliveries if d.evidence_type == "recovery"]
+
+
+@requires_gt
+def test_recovery_quiet_without_intervening_edit(indexed_repo, monkeypatch):
+    """fail(X) -> fail(X) with NO edit between is the unchanged-patch class
+    (D_REQUEST_NEW_HYPOTHESIS) - deliberately NOT wired: quiet."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    out = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert out == _FAIL_X
+    assert not [d for d in b.deliveries if d.evidence_type == "recovery"]
+
+
+@requires_gt
+def test_recovery_quiet_on_nontest_failure_recurrence(indexed_repo, tmp_path,
+                                                      monkeypatch):
+    """The stall gate's genuine-test half: a recurring NON-test failure (a
+    plain command error, no runner protocol) never steers."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    err = "ERROR: cannot open config: parse failure\n[exit code 1]"
+    b.enrich("bash", {"command": "./tool --check"}, err, True)
+    _edit_alpha(b, tmp_path, "attempt 1")
+    out = b.enrich("bash", {"command": "./tool --check"}, err, True)
+    assert out == err
+    assert not [d for d in b.deliveries if d.evidence_type == "recovery"]
+
+
+@requires_gt
+def test_recovery_once_per_signature_per_episode(indexed_repo, tmp_path,
+                                                 monkeypatch):
+    """After the steer fires for signature X, a THIRD recurrence of X (after
+    yet another edit) stays quiet - the latch is per signature per episode."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    _edit_alpha(b, tmp_path, "attempt 1")
+    out2 = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert _RECOVERY_STEER in out2                   # fired once
+    _edit_alpha(b, tmp_path, "attempt 2")
+    out3 = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert out3 == _FAIL_X                           # latched: quiet
+    assert len([d for d in b.deliveries
+                if d.evidence_type == "recovery"]) == 1
+
+
+@requires_gt
+def test_recovery_flag_off_touches_no_state(indexed_repo, tmp_path):
+    """GT_HYPOTHESIS unset: no failure memory fed, no episode edited_files
+    mirror, no delivery - flag-off state identity."""
+    b = indexed_repo
+    b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    _edit_alpha(b, tmp_path, "attempt 1")
+    out = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
+    assert out == _FAIL_X
+    assert b.episode.failure_fingerprints == set()
+    assert b.episode.edited_files == {}
+    assert not [d for d in b.deliveries if d.evidence_type == "recovery"]
+
+
+@requires_gt
+def test_recovery_is_profile_2_member():
+    """GT_HYPOTHESIS is fanned out by the Profile-2 defaults (rl_profile:106),
+    so the production GT arm runs this lane without extra knobs."""
+    apply_profile_env()
+    assert os.environ.get("GT_HYPOTHESIS") == "1"
+    # FIX D's gate flag is a Profile-2 member too (rl_profile:260).
+    assert os.environ.get("GT_SS_SUBMIT_RED") == "1"
+
+
+# --------------------------------------------------------------------------- #
+# FIX D: SS-2 observed-RED broad fallback at the submit boundary
+# --------------------------------------------------------------------------- #
+# A failing run whose traceback frame TOUCHES the edited surface (pkg/alpha.py)
+# - production's relatedness rule reads only the agent's own strings.
+_RED_TOUCH = ("FAILED test_math.py::test_helper_sum - AssertionError\n"
+              '  File "pkg/alpha.py", line 2, in helper\n'
+              "1 failed in 0.12s\n[exit code 1]")
+_GREEN_TOUCH = "3 passed in 0.08s\n"
+
+
+def _edit_and_fail(b, tmp_path, cmd=_PYTEST_CMD):
+    _edit_alpha(b, tmp_path, "fix attempt")
+    b.enrich("bash", {"command": cmd}, _RED_TOUCH, True)
+
+
+@requires_gt
+def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
+                                                       monkeypatch):
+    """LIVE FIRE: edit -> observed test FAIL on the edited surface -> submit
+    is refused ONCE (native pre-commit form, agent's own command quoted),
+    sealed as submit_refusal; the second submit passes (single dose)."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    _edit_and_fail(b, tmp_path)
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert nudge.startswith("pre-commit hook failed:")
+    assert "never re-run green" in nudge
+    assert "python -m pytest -x" in nudge      # the agent's OWN command echoed
+    assert "test_math" not in nudge            # leak law on the rendered bytes
+    assert "<gt-" not in nudge.lower()
+    sealed = b.deliveries[-1]
+    assert sealed.evidence_type == "submit_refusal"
+    assert sealed.receipt_state == "delivered"
+    assert b.submit_probe() is None            # single dose: 2nd submit passes
+
+
+@requires_gt
+def test_submit_red_detail_degrades_when_command_names_a_test(
+        indexed_repo, tmp_path, monkeypatch):
+    """A test command that NAMES a test file still blocks, but the quoted
+    detail degrades to the generic form - no test identity ships."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    _edit_and_fail(b, tmp_path, cmd="python -m pytest tests/test_math.py -x")
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert "never re-run green" in nudge
+    assert "test_math" not in nudge            # degraded, never leaked
+    from groundtruth.runtime.native_render import contains_test_identity
+    assert not contains_test_identity(nudge)
+
+
+@requires_gt
+def test_submit_red_quiet_when_no_test_ever_observed(indexed_repo, tmp_path,
+                                                     monkeypatch):
+    """Hidden verifier tests are invisible by design: an edit with NO
+    agent-observed test run must never fire the fallback (GT only knows what
+    the agent observed)."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    _edit_alpha(b, tmp_path, "fix attempt")
+    assert b.submit_probe() is None
+    assert b.deliveries == [] or all(
+        d.evidence_type != "submit_refusal" for d in b.deliveries)
+
+
+@requires_gt
+def test_submit_red_quiet_after_rerun_green(indexed_repo, tmp_path, monkeypatch):
+    """fail -> pass on the same edited surface clears the latch: quiet."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    _edit_and_fail(b, tmp_path)
+    b.enrich("bash", {"command": "python -m pytest pkg/alpha.py"},
+             _GREEN_TOUCH, False)              # touching PASS clears
+    assert b.submit_probe() is None
+
+
+@requires_gt
+def test_submit_red_ignores_failure_on_unedited_surface(indexed_repo,
+                                                        monkeypatch):
+    """A pre-existing failure on an UNEDITED tree is not the agent's
+    unresolved RED - the latch never sets (production's touch rule)."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    b.enrich("bash", {"command": _PYTEST_CMD}, _RED_TOUCH, True)  # no edits yet
+    assert b._observed_red is None
+    assert b.submit_probe() is None
+
+
+@requires_gt
+def test_submit_red_flag_off_never_fires(indexed_repo, tmp_path):
+    """Latch set but GT_SS_SUBMIT_RED unset: the submit boundary stays quiet
+    (default-off byte identity for the gate consumption)."""
+    b = indexed_repo
+    _edit_and_fail(b, tmp_path)
+    assert b._observed_red is not None         # host-side latch tracked
+    assert b.submit_probe() is None            # consumption is flag-gated

@@ -44,9 +44,21 @@ Laws honored:
   (``_ledger_record``) so a transcript auditor can join agent-side blocks
   against GT-side seals 1:1 (dose-reconciliation law). Host-side telemetry
   only — never model bytes; a ledger fault never affects delivery.
+- Deliveries file (FIX A): alongside the ledger, ``gt_deliveries.txt`` records
+  the VERBATIM shipped bytes per sealed delivery (``_deliveries_record``) —
+  the human-auditable record for deliveries the transcript display hides
+  (task-start rides the unprinted seed message; long suffixes fall past the
+  CLI's [:2000] cap). Contains payload bytes: lives in /logs/agent when
+  possible; the <root>/.gt fallback is self-gitignored + rm'd pre-snapshot.
+- Recovery lane (FIX B, GT_HYPOTHESIS): the HypothesisLedger's typed
+  falsification rule over the shared EpisodeState — the SAME genuine test
+  failure recurring after an intervening edit delivers ONE short native
+  imperative at HYPOTHESIS tier (never [VERIFIED]), once per signature per
+  episode, only when the gateway dose was quiet (ladder floor, dose law).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass, field
@@ -123,6 +135,48 @@ def parse_exit_code(output: str, is_error: bool) -> int | None:
         return 0
     m = _EXIT_CODE_RE.search(output or "")
     return int(m.group(1)) if m else None
+
+
+# --------------------------------------------------------------------------- #
+# Recovery / GT_HYPOTHESIS lane (FIX B): failure-signature normalization.
+# Port of production ``_hypothesis_failure_fingerprint``
+# (gt_mini_patch.py:12658-12686), byte-for-byte mechanism: marker-line
+# extraction (last 8), number/hex + path-token scrub, sha256[:16]. HOST-ONLY:
+# the hash is the repeat key in EpisodeState.failure_fingerprints — it is
+# NEVER emitted to the model (the model surface is the generic imperative).
+# The W4 infra-noise guard (GT_INFRA_NOISE_GUARD, Profile-2 member) keeps
+# harness teardown noise out of the failure-repeat memory, exactly as there.
+# --------------------------------------------------------------------------- #
+_FAILURE_MARKERS = ("error", "failed", "failure", "exception", "traceback",
+                    "assert", "fatal", "not found", "cannot", "no such", "panic")
+
+
+def failure_fingerprint(observation: str) -> str:
+    """Deterministic path/number-scrubbed signature of a FAILING observation,
+    or "" when it shows no failure (production's exact normalization)."""
+    obs = observation or ""
+    if os.environ.get("GT_INFRA_NOISE_GUARD", "").strip() == "1":
+        try:
+            from groundtruth.runtime.patterns import is_infra_noise
+
+            if is_infra_noise(obs):
+                return ""
+        except Exception:  # noqa: BLE001 - guard absent: fall through (as prod)
+            pass
+    low = obs.lower()
+    if not any(s in low for s in _FAILURE_MARKERS):
+        return ""
+    sig_lines = [ln.strip() for ln in obs.splitlines()
+                 if any(s in ln.lower() for s in _FAILURE_MARKERS)]
+    if not sig_lines:
+        return ""
+    sig = "\n".join(sig_lines[-8:])
+    sig = re.sub(r"0x[0-9a-fA-F]+|\d+", "", sig)      # numbers/hex are volatile
+    sig = re.sub(r"[\w.]*[/\\][\w./\\-]+", "", sig)   # path-ish tokens are volatile
+    sig = " ".join(sig.split())
+    if not sig:
+        return ""
+    return hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------- #
@@ -304,6 +358,16 @@ class GTBridge:
         # FAIL is stale at submit and re-run fresh).
         self._covering_fired: set[str] = set()
         self._last_covering: dict[str, Any] | None = None
+        # Recovery lane (FIX B): once-per-signature-per-episode fire latch,
+        # burned ONLY on an actual delivery (production burns its counters on
+        # delivery too, never on a deferred candidate).
+        self._recovery_fired_sigs: set[str] = set()
+        # SS-2 observed-RED latch (FIX D, production `_ss_last_failing_test`,
+        # gt_mini_patch.py:18947): the most recent formal test event the agent
+        # ran that FAILED while TOUCHING an edited surface and has not since
+        # gone green. Host-side only; consumed at the submit boundary under
+        # GT_SS_SUBMIT_RED.
+        self._observed_red: dict[str, Any] | None = None
         from groundtruth.runtime.episode_state import EpisodeState
 
         self.episode = EpisodeState()
@@ -361,9 +425,10 @@ class GTBridge:
         except Exception:  # noqa: BLE001 - no ledger home: stay quiet
             return None
 
-    def _ledger_record(self, sealed: Any, shipped_chars: int, boundary: str) -> None:
-        """Append one delivery line. Never raises; a failed write does NOT
-        unseal the delivery (the seal already happened)."""
+    def _ledger_record(self, sealed: Any, shipped: str, boundary: str) -> None:
+        """Append one delivery line (+ the verbatim shipped-bytes block, FIX A).
+        Never raises; a failed write does NOT unseal the delivery (the seal
+        already happened). ``shipped`` is the EXACT appended suffix text."""
         try:
             path = self._ledger_path()
             if not path:
@@ -378,13 +443,51 @@ class GTBridge:
                 "rendered_bytes_hash": str(
                     getattr(sealed, "rendered_bytes_hash", "") or ""),
                 "chain_head": self.chain_head,
-                "len_shipped_chars": int(shipped_chars),
+                "len_shipped_chars": int(len(shipped)),
                 "boundary": boundary,
             }, sort_keys=True)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
                 fh.flush()
         except Exception:  # noqa: BLE001 - ledger failure must never break delivery
+            pass
+        self._deliveries_record(sealed, shipped, boundary)
+
+    def _deliveries_record(self, sealed: Any, shipped: str, boundary: str) -> None:
+        """FIX A: gt_deliveries.txt — the VERBATIM shipped bytes, one framed
+        block per sealed delivery, alongside gt_ledger.jsonl (same dir
+        selection: /logs/agent preferred; <root>/.gt fallback is self-
+        gitignored at creation and rm'd pre-snapshot on SWE). Motivation
+        (TRAJECTORY_AUDIT.md): two deliveries were model-received but
+        human-invisible — task-start rides the unprinted seed message and a
+        suffix past nano's [:2000] display cap never prints. This file is the
+        human-auditable byte record; it CONTAINS payload bytes, so it must
+        never enter the graded tree (both homes guarantee that).
+
+        Format per block:
+            --- event_id=<id> boundary=<b> evidence_type=<t> rendered_bytes_hash=<h> ---
+            <EXACT shipped text>
+            <blank line>
+        Written in binary so the body bytes hash exactly to
+        rendered_bytes_hash (sha256 of the shipped utf-8 bytes, law 6).
+        Correct-or-quiet: a write failure never unseals; GT-off -> no file
+        (the bridge does not exist)."""
+        try:
+            path = self._ledger_path()
+            if not path:
+                return
+            dpath = os.path.join(os.path.dirname(path), "gt_deliveries.txt")
+            header = "--- event_id=%s boundary=%s evidence_type=%s rendered_bytes_hash=%s ---" % (
+                str(getattr(sealed, "event_id", "") or ""),
+                boundary,
+                str(getattr(sealed, "evidence_type", "") or ""),
+                str(getattr(sealed, "rendered_bytes_hash", "") or ""),
+            )
+            with open(dpath, "ab") as fh:
+                fh.write(header.encode("utf-8") + b"\n"
+                         + shipped.encode("utf-8", "surrogatepass") + b"\n\n")
+                fh.flush()
+        except Exception:  # noqa: BLE001 - never affects the sealed delivery
             pass
 
     # ------------------------------------------------------------------ #
@@ -572,8 +675,200 @@ class GTBridge:
         self.delivered_spans.append(DeliveredSpan(
             text=shipped, tier="VERIFIED",
             evidence_type="covering_verdict", dedup_key=env.dedup_key or ""))
-        self._ledger_record(sealed, len(shipped), "covering")
+        self._ledger_record(sealed, shipped, "covering")
         return output + shipped
+
+    # ------------------------------------------------------------------ #
+    # FIX B: recovery / GT_HYPOTHESIS lane (the last unwired DIRECT feature).
+    #
+    # Port of the production MECHANISM (gt_mini_patch.py):
+    #   * `_gt_hypothesis_classify_turn` (:12689) — run the HypothesisLedger's
+    #     `classify_all` over the shared EpisodeState + a per-turn LedgerEvent;
+    #     feed the failure fingerprint into the episode memory AFTER classify
+    #     (a repeat is detected on the NEXT occurrence, never the same turn);
+    #     first-mapped disposition wins (the production imperative-map order).
+    #   * The recurrence rule is the ledger's own `classify_edit_contradicted_
+    #     contract` (hypothesis_ledger.py:736): the SAME failure fingerprint
+    #     recurred with a PROVABLE intervening source edit (prior index KNOWN
+    #     from last_failure_record + an edit index strictly inside the window;
+    #     unknown ordering NEVER fires — falsification demands proof, F1).
+    #   * The W6 FIX 1b stall gate (:12732): a candidate is eligible only on a
+    #     GENUINE failing state RIGHT NOW — here the observation itself must
+    #     classify as a formal test FAIL (`classify_test_observation`), the
+    #     bridge's honest equivalent of `_last_test_outcome_failed`; the
+    #     repeat half is already strictly implied by the falsification rule.
+    #   * Render: `render_recovery_native` (native_render.py:925) — ONE short
+    #     active imperative at the decision point, identity-scrubbed; the
+    #     imperative text is production's own D_HYPOTHESIS_FALSIFIED mapping
+    #     (:12639).
+    #   * HYPOTHESIS tier, never [VERIFIED] (the GT_HYPOTHESIS CAP contract,
+    #     gt_gt.md: 'HYPOTHESIS-tier steer ... fires when the SAME genuine
+    #     test failure recurs across edits'); once per signature per episode
+    #     (latch burned on delivery only); ladder FLOOR (SM-10, :12769) — the
+    #     candidate defers to the gateway dose and ships only when nothing
+    #     higher delivered on this observation (dose law, <=1/observation).
+    #
+    # HONEST SUBSET (documented): production's imperative map covers five
+    # dispositions (env-repair, falsified, new-hypothesis, alternate-surface,
+    # stale-graph). Only D_HYPOTHESIS_FALSIFIED is DELIVERED here — it is the
+    # class the GT_HYPOTHESIS CAP owns and the only one nano's observables
+    # prove (an executed formal-test FAIL + the bridge's own edit record).
+    # Selection still respects production's first-mapped-wins order: when a
+    # higher-priority mapped disposition (e.g. env-failure -> repair) wins the
+    # turn, this lane stays QUIET rather than misdelivering falsification.
+    # Also NOT ported: the degenerate-loop stall union (GT_RECOVERY_LOOP needs
+    # the seam's TIDE loop detector, which nano does not track) and the
+    # GT_RECOVERY_ESCALATE form escalation (needs delivery-count history that
+    # only matters once >1 recovery ships; we ship at most one per signature).
+    # ------------------------------------------------------------------ #
+    def _recovery_classify(
+        self, cmd: str, output: str, rc: int | None,
+    ) -> tuple[str, str] | None:
+        """Classify THIS observation; return ``(rendered_text, signature)``
+        when the recovery steer should fire, else None. ALWAYS feeds the
+        episode failure memory when the flag is on (classification state is
+        not conditional on delivery). Flag off -> no state touched."""
+        if os.environ.get("GT_HYPOTHESIS", "").strip() != "1":
+            return None
+        from groundtruth.runtime.hypothesis_ledger import (
+            D_ALTERNATE_SURFACE_CANDIDATE,
+            D_HYPOTHESIS_FALSIFIED,
+            D_REFRESH_BEFORE_ADVICE,
+            D_REPAIR_NOT_SOURCE,
+            D_REQUEST_NEW_HYPOTHESIS,
+            LedgerEvent,
+            classify_all,
+        )
+
+        fp = failure_fingerprint(output)
+        event = LedgerEvent(
+            action_index=self.action_index, command=cmd or "",
+            observation=output or "", probe_stem="",
+            failure_fingerprint=fp, graph_revision="")
+        advisories = classify_all(self.episode, event)  # sees PRIOR memory
+        if fp:  # feed AFTER classify: this failure is prior-memory next turn
+            self.episode.failure_fingerprints.add(fp)
+            self.episode.last_failure_record = {
+                "failure_fingerprint": fp, "action_index": self.action_index}
+        # Production's selection: TRANSITIONS order is the fixed priority and
+        # the FIRST disposition present in the imperative map wins (:12717).
+        mapped = (D_REPAIR_NOT_SOURCE, D_HYPOTHESIS_FALSIFIED,
+                  D_REQUEST_NEW_HYPOTHESIS, D_ALTERNATE_SURFACE_CANDIDATE,
+                  D_REFRESH_BEFORE_ADVICE)
+        selection = next(
+            (a.disposition for a in advisories if a.disposition in mapped), None)
+        if selection != D_HYPOTHESIS_FALSIFIED:
+            return None  # honest subset: only the CAP's recurs-across-edits class
+        if fp in self._recovery_fired_sigs:
+            return None  # once per signature per episode
+        from groundtruth.runtime.patterns import classify_test_observation
+
+        if classify_test_observation(cmd or "", output or "", rc)[0] != "fail":
+            return None  # stall gate: a GENUINE failing TEST right now (W6 1b)
+        from groundtruth.runtime.native_render import render_recovery_native
+
+        # Production's D_HYPOTHESIS_FALSIFIED imperative, verbatim (:12639).
+        imperative = ("The last edit did not change the failing result — form "
+                      "a new hypothesis before editing again.")
+        text = render_recovery_native(D_HYPOTHESIS_FALSIFIED, imperative)
+        return (text, fp) if text else None
+
+    def _deliver_recovery(self, output: str, text: str, signature: str) -> str:
+        """Seal + append the HYPOTHESIS-tier recovery steer as THIS
+        observation's one dose (caller guarantees the gateway dose was quiet —
+        ladder-floor semantics). Same guard order as every delivery lane."""
+        from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
+        from groundtruth.runtime.evidence_envelope import (
+            HYPOTHESIS,
+            EvidenceEnvelope,
+        )
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag,
+            contains_test_identity,
+        )
+
+        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
+        if (not text or (native and contains_gt_tag(text))
+                or contains_test_identity(text)):
+            return output
+        if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            return output
+        env = EvidenceEnvelope.build(
+            producer="hypothesis_ledger", fact_id=signature or "recovery",
+            target="recovery", evidence_type="recovery",
+            payload=tuple(text.splitlines()),
+            confidence=0.5, tier=HYPOTHESIS,  # never [VERIFIED] (CAP contract)
+            preferred_event="test")
+        shipped = self._join(output, text)[len(output):]
+        tob = output.encode("utf-8", "surrogatepass")
+        sealed, self.chain_head = seal_delivery(
+            env,
+            episode_id=getattr(self.episode, "episode_id", ""),
+            event_id=str(self.action_index),
+            parent_hash=self.chain_head,
+            rendered_bytes=shipped.encode("utf-8", "surrogatepass"),
+            renderer_id="native" if native else "tagged",
+            tool_output_bytes=tob,
+            boundary=(str(len(tob)) + ":recovery").encode("utf-8"),
+            dedup_chain=self.episode.delivered_dedup,
+        )
+        self.deliveries.append(sealed)
+        self.delivered_spans.append(DeliveredSpan(
+            text=shipped, tier="HYPOTHESIS",
+            evidence_type="recovery", dedup_key=env.dedup_key or ""))
+        self._ledger_record(sealed, shipped, "recovery")
+        self._recovery_fired_sigs.add(signature)  # burned on DELIVERY only
+        return output + shipped
+
+    # ------------------------------------------------------------------ #
+    # FIX D: SS-2 observed-RED tracking (the submit gate's broad fallback).
+    # Port of production's latch rule (`_ss_record_test` tail,
+    # gt_mini_patch.py:20651 + `_ss_test_touches_edit`, :20546): the LAST
+    # formal test event TOUCHING an edited surface decides — a FAIL sets the
+    # latch (agent's own command + step), a PASS clears it, a test touching
+    # no edit (or any non-test event) leaves it unchanged. "No edits yet"
+    # is False by construction: a pre-existing failure on an unedited tree
+    # is never the agent's unresolved RED (correct-or-quiet). Populated
+    # unconditionally (host state, zero model bytes); CONSUMED only under
+    # GT_SS_SUBMIT_RED (Profile-2 member, rl_profile.py:260).
+    # ------------------------------------------------------------------ #
+    def _test_touches_edit(self, cmd: str, output: str) -> bool:
+        """True iff an edited rel path (or its basename, len>=4) appears in
+        the agent's OWN command or observed output — production's leak-safe
+        relatedness signal (it reads only the agent's own strings)."""
+        rels = self.edited_files
+        if not rels:
+            return False
+        hay = (cmd or "") + "\n" + (output or "")
+        if not hay.strip():
+            return False
+        for rel in rels:
+            r = self._fwd(rel)
+            if r and r in hay:
+                return True
+            b = os.path.basename(r) if r else ""
+            if b and len(b) >= 4 and b in hay:
+                return True
+        return False
+
+    def _track_observed_red(self, cmd: str, output: str, rc: int | None) -> None:
+        """Set/clear the observed-RED latch from THIS observation. Uses the
+        same formal-runner classifier normalize_event derives test_outcome
+        from (patterns.classify_test_observation — never a home-grown test
+        detector). Never raises."""
+        try:
+            from groundtruth.runtime.patterns import classify_test_observation
+
+            outcome, _ = classify_test_observation(cmd or "", output or "", rc)
+            if outcome not in ("fail", "pass"):
+                return  # env_fail / no-tests / non-test: latch unchanged
+            if not self._test_touches_edit(cmd, output):
+                return  # a test touching no edited surface never decides
+            self._observed_red = (
+                {"cmd": (cmd or "").strip(), "step": self.action_index}
+                if outcome == "fail" else None)
+        except Exception:  # noqa: BLE001 - host-side latch must never break the turn
+            pass
 
     # ------------------------------------------------------------------ #
     # bash-mediated edit bridges (pre-dispatch snapshot + post-dispatch derive)
@@ -713,6 +1008,29 @@ class GTBridge:
             for rel in changed:
                 if rel and rel not in self.edited_files:
                     self.edited_files.append(rel)  # submit-gate syntax domain
+            # FIX B (recovery lane state): the ledger's edit-ordering predicate
+            # reads EpisodeState.edited_files (path -> last action_index) +
+            # edit_events. augment appends edit_events only when the gateway
+            # dose path runs, so the bridge mirrors the seam's own feed
+            # (`_oracle_edited_rels -> edited_files`, episode_state.py:153)
+            # here — covering-lane-delivered edits stay ordered too. Flag-
+            # gated so GT_HYPOTHESIS off leaves the episode state untouched.
+            if changed and os.environ.get("GT_HYPOTHESIS", "").strip() == "1":
+                for rel in changed:
+                    if rel:
+                        self.episode.edited_files[rel] = self.action_index
+            # FIX B (classification): runs on EVERY observation (the
+            # production seam classifies each turn) — feeds the failure-repeat
+            # memory and names this turn's recovery candidate, if any.
+            try:
+                recovery = self._recovery_classify(cmd, output, rc)
+            except Exception:  # noqa: BLE001 - classification fault: no candidate
+                recovery = None
+            # FIX D: SS-2 observed-RED latch — real executions only (the
+            # read_file `cat` carrier is a VIEW; a viewed log containing a
+            # runner frame must never latch a phantom RED).
+            if tool_name == "bash":
+                self._track_observed_red(cmd, output, rc)
             if changed:
                 # WIRE 1: refresh/wake the graph BEFORE the producers read it,
                 # so this observation's evidence reflects the post-edit code.
@@ -726,10 +1044,16 @@ class GTBridge:
                 except Exception:  # noqa: BLE001 - covering fault: fall through
                     cov_text = None
                 if cov_text:
+                    # Recovery defers (ladder floor); its latch is NOT burned.
                     return self._deliver_covering(output, cov_text, changed[0])
-            return self._deliver(cmd, output, rc,
-                                 changed_files=changed, viewed_files=viewed,
-                                 edit_before_after=eba)
+            enriched = self._deliver(cmd, output, rc,
+                                     changed_files=changed, viewed_files=viewed,
+                                     edit_before_after=eba)
+            if enriched != output or not recovery:
+                # Gateway dose spent (recovery is the severity FLOOR — SM-10:
+                # it defers to every higher producer) or no candidate: done.
+                return enriched
+            return self._deliver_recovery(output, recovery[0], recovery[1])
         except Exception:  # noqa: BLE001 - GT failure must never break the harness
             return output
 
@@ -826,6 +1150,38 @@ class GTBridge:
                 break
             if syntax_res is None and res.get("verdict") == "ok":
                 syntax_res = res  # an executed PASS is honest cert evidence
+        # FIX D (SS-2 broad fallback, GT_SS_SUBMIT_RED): the agent's OWN
+        # unresolved observed RED — fires exactly where graph coverage is
+        # dark (production's conan-17092 class: the agent watched a test on
+        # an edited surface FAIL, rationalized it away, and submitted). Feeds
+        # the SAME decision head (gate_verdict documents submit_block as "an
+        # unresolved test RED the agent itself observed"). Correct-or-quiet:
+        # if the agent NEVER observed a failing test (hidden verifier tests
+        # are invisible by design), the latch is None and this never fires —
+        # GT only knows what the agent observed. Single-dose rides the
+        # existing bounce economy (max_bounces=1: the second submit passes).
+        # Leak guard on the detail: the echoed command is the agent's OWN
+        # (agent-visible by definition), but the seam law still applies —
+        # if the quoted line trips contains_test_identity it degrades to the
+        # generic form (production's render_ss_submit_red scrub-or-silent
+        # rule, native_render.py:486-500; here degrade beats silent because
+        # the block itself is still honest positive evidence).
+        if (submit_block is None and self._observed_red is not None
+                and self.edited_files
+                and os.environ.get("GT_SS_SUBMIT_RED", "").strip().lower()
+                not in ("", "0", "false", "no", "off")):
+            cmd_line = str(self._observed_red.get("cmd") or "").splitlines()[0][:200]
+            detail = "your last test run failed and was never re-run green"
+            if cmd_line:
+                quoted = (f"your last test run (`{cmd_line}`) failed and was "
+                          "never re-run green")
+                if not contains_test_identity(quoted):
+                    detail = quoted
+            submit_block = {
+                "blocking": True,
+                "reason": "observed_red_unresolved",
+                "detail": detail,
+            }
         # WIRE 2 (submit head): the executed covering verdict — fresh by the
         # G-2 staleness law, attribution-gated. None never blocks.
         covering = self._submit_covering()
@@ -878,11 +1234,15 @@ class GTBridge:
         if (not text or contains_gt_tag(text) or contains_test_identity(text)
                 or not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS)):
             return None
-        # The cert block / a covering block is the submit_refusal fact class
-        # (production's lineage binding, gt_mini_patch.py:22415); the legacy
-        # syntax-only fallback keeps its executed syntax_result identity.
+        # The cert block / a covering block / the SS-2 observed-RED block is
+        # the submit_refusal fact class (production's lineage binding,
+        # gt_mini_patch.py:22415; gt_gt.md: GT_SS_SUBMIT_RED owns
+        # submit_refusal); the legacy syntax-only fallback keeps its executed
+        # syntax_result identity.
         ev_type = ("submit_refusal"
-                   if cert_rendered or verdict.reason == "covering_test_failed"
+                   if cert_rendered
+                   or verdict.reason in ("covering_test_failed",
+                                         "observed_red_unresolved")
                    else "syntax_result")
         env = EvidenceEnvelope.build(
             producer="submit_gate", fact_id=bad_rel or "submit",
@@ -903,7 +1263,7 @@ class GTBridge:
             dedup_chain=self.episode.delivered_dedup,
         )
         self.deliveries.append(sealed)
-        self._ledger_record(sealed, len(text), "submit")
+        self._ledger_record(sealed, text, "submit")
         return text
 
     def task_start(self) -> str | None:
@@ -976,7 +1336,7 @@ class GTBridge:
             dedup_chain=self.episode.delivered_dedup,
         )
         self.deliveries.append(sealed)
-        self._ledger_record(sealed, len(text), "task_start")
+        self._ledger_record(sealed, text, "task_start")
         return text
 
     def _deliver(
@@ -1051,7 +1411,7 @@ class GTBridge:
             text=shipped, tier=winner.tier or "",
             evidence_type=winner.evidence_type or "",
             dedup_key=winner.dedup_key or ""))
-        self._ledger_record(sealed, len(shipped), "gateway")
+        self._ledger_record(sealed, shipped, "gateway")
         # 9. pure-suffix append (TITO law 1).
         return output + shipped
 
