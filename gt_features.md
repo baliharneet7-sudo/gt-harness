@@ -505,7 +505,7 @@ Hold constant:
 The current trigger-oriented smoke configuration already identifies five tasks
 from structured GT-off tool-call/tool-result pairs. It targets indexed success,
 change-surface, unresolved-RED submit, and search-partition opportunities. Its
-acceptance target is at least 7 provider-witnessed identities and at least 12
+acceptance target is at least 7 live-witnessed identities and at least 12
 specifically exercised identities, zero triggered-dark identities, zero
 telemetry faults, and a provider-final receipt for every delivery. “Exercised”
 means that the identity has a specific evaluation or terminal outcome; merely
@@ -573,7 +573,8 @@ advice.
 
 The corrected proof contract therefore separates:
 
-- positive evidence that was provider-witnessed (`min_witnessed=7`);
+- identities live-witnessed through a delivery or deterministic capability
+  receipt (`min_witnessed=7`);
 - identities that were actually evaluated or reached a specific terminal
   outcome (`min_exercised=12`); and
 - identities whose trigger never occurred, which remain honestly ineligible.
@@ -610,7 +611,7 @@ model response. The aggregate live result was:
 | Active Profile-2 controls | 53/53 on every task |
 | Active behavior flags | 7/7 on every task |
 | Exercised identities | 16/17 |
-| Provider-witnessed identities | 9/17 |
+| Live-witnessed identities | 9/17 |
 | Action-consistent identities | 8/17 |
 | Lifecycle stages observed | 7/7 |
 | Sealed deliveries | 18 |
@@ -624,9 +625,13 @@ model response. The aggregate live result was:
 | Provider output tokens | 97,604 |
 | Sealed GT characters | 5,670 |
 
-The nine provider-witnessed identities were `obligations`, `localization`,
+The nine live-witnessed identities were `obligations`, `localization`,
 `caller_contract`, `signature_delta`, `submit_refusal`, `GT_LOC_RESLOT`,
 `GT_EDIT_CHECK`, `GT_PATCH_DELTA`, and `GT_CERT_DELIVERY`.
+
+Eight of those identities owned or received provider-bound delivery bytes;
+`GT_EDIT_CHECK` was witnessed through five clean deterministic capability
+receipts and correctly emitted no model bytes for those clean results.
 
 The correct-quiet path was also proven live. `headless-terminal` and
 `reshard-c4-data` each created a file; both `newfile_precedent` and

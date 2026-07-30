@@ -62,7 +62,7 @@ on:
         type: string
         default: "2"
       min_witnessed:
-        description: "Minimum provider-witnessed identities with positive evidence"
+        description: "Minimum live-witnessed identities (delivery or deterministic capability receipt)"
         type: string
         default: "7"
       min_exercised:
