@@ -59,6 +59,7 @@ Laws honored:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -157,6 +158,33 @@ def parse_exit_code(output: str, is_error: bool) -> int | None:
         return 0
     m = _EXIT_CODE_RE.search(output or "")
     return int(m.group(1)) if m else None
+
+
+def gateway_observation_output(
+    command: str, output: str, returncode: int | None
+) -> str:
+    """Restore an empty failed-search observation for Groundtruth only.
+
+    ``BashTool`` appends ``[exit code 1]`` to every failed command. For a grep
+    with no stdout this turns the physically empty result into non-empty text,
+    so Groundtruth classifies it as ``search_result`` instead of
+    ``failed_search`` and the repeated-absence/new-file trigger is unreachable.
+
+    Strip only a lone exit-code marker, only for a search, only for rc=1.
+    Real diagnostics, other return codes, and the model-visible observation
+    remain byte-identical.
+    """
+    if returncode != 1:
+        return output
+    try:
+        from groundtruth.runtime.gateway import KIND_SEARCH, classify_command
+
+        if classify_command(command) != KIND_SEARCH:
+            return output
+    except Exception:  # noqa: BLE001 - classifier fault preserves raw truth
+        return output
+    without_marker = _EXIT_CODE_RE.sub("", output or "")
+    return "" if not without_marker.strip() else output
 
 
 # --------------------------------------------------------------------------- #
@@ -440,6 +468,8 @@ class GTBridge:
         # against the provider request. The attribution file stores IDs/hashes,
         # never unrestricted model or tool content.
         self._delivery_texts: dict[str, str] = {}
+        self._delivery_metadata: dict[str, dict[str, str]] = {}
+        self._capability_receipts: set[tuple[str, str]] = set()
         # Bash-edit pre-images captured at the pre-dispatch boundary:
         # {rel: before_content_or_None}; None = the target did not exist (a
         # creation); an ABSENT key = unreadable/huge -> downstream stays quiet.
@@ -589,7 +619,14 @@ class GTBridge:
         except Exception:  # noqa: BLE001 - no ledger home: stay quiet
             return None
 
-    def _ledger_record(self, sealed: Any, shipped: str, boundary: str) -> None:
+    def _ledger_record(
+        self,
+        sealed: Any,
+        shipped: str,
+        boundary: str,
+        *,
+        capability_ids: tuple[str, ...] = (),
+    ) -> None:
         """Append one delivery line (+ the verbatim shipped-bytes block, FIX A).
         Never raises; a failed write does NOT unseal the delivery (the seal
         already happened). ``shipped`` is the EXACT appended suffix text."""
@@ -619,8 +656,14 @@ class GTBridge:
             pass
         self._deliveries_record(sealed, shipped, boundary)
         self._delivery_texts[event_id] = shipped
+        self._delivery_metadata[event_id] = {
+            "evidence_type": evidence_type,
+            "producer": str(getattr(sealed, "producer", "") or ""),
+            "target": str(getattr(sealed, "target", "") or ""),
+        }
         from gt_engine.attribution import feature_for_evidence
 
+        fact_id = feature_for_evidence(evidence_type) or ""
         self._trace_record(
             "decision.committed",
             boundary,
@@ -629,11 +672,44 @@ class GTBridge:
                 "reason": "sealed_and_delivered",
                 "delivery_id": event_id,
                 "evidence_type": evidence_type,
-                "feature_id": feature_for_evidence(evidence_type) or "",
+                "feature_id": fact_id,
                 "rendered_bytes_hash": str(
                     getattr(sealed, "rendered_bytes_hash", "") or ""
                 ),
                 "shipped_chars": len(shipped),
+            },
+        )
+        for capability_id in capability_ids:
+            self._record_capability_applied(
+                capability_id,
+                fact_id=fact_id,
+                boundary=boundary,
+                delivery_id=event_id,
+            )
+
+    def _record_capability_applied(
+        self,
+        feature_id: str,
+        *,
+        fact_id: str,
+        boundary: str,
+        delivery_id: str = "",
+        reason: str = "producer_applied",
+    ) -> None:
+        """Record a capability only at the decision site that applied it."""
+        key = (str(feature_id), str(delivery_id))
+        if key in self._capability_receipts:
+            return
+        self._capability_receipts.add(key)
+        self._trace_record(
+            "capability.applied",
+            boundary,
+            {
+                "feature_id": str(feature_id),
+                "fact_id": str(fact_id),
+                "delivery_id": str(delivery_id),
+                "decision": "APPLIED",
+                "reason": str(reason),
             },
         )
 
@@ -674,6 +750,90 @@ class GTBridge:
         )
         return delivery_ids
 
+    @staticmethod
+    def _text_leaves(
+        value: Any, path: tuple[str, ...] = ()
+    ) -> list[tuple[tuple[str, ...], str]]:
+        """Return block-aware paths to all textual leaves in a payload."""
+        leaves: list[tuple[tuple[str, ...], str]] = []
+        if isinstance(value, str):
+            leaves.append((path, value))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                leaves.extend(
+                    GTBridge._text_leaves(item, path + (str(index),))
+                )
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                leaves.extend(
+                    GTBridge._text_leaves(item, path + (str(key),))
+                )
+        return leaves
+
+    def trace_provider_request(
+        self, iteration: int, provider: str, payload: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Bind sealed bytes to the final normalized provider request."""
+        messages = payload.get("messages", ())
+        leaves = self._text_leaves(messages)
+        matches: list[dict[str, Any]] = []
+        delivery_ids: list[str] = []
+        for delivery_id, shipped in self._delivery_texts.items():
+            locations = [
+                ".".join(path)
+                for path, text in leaves
+                if shipped and shipped in text
+            ]
+            if not locations:
+                continue
+            delivery_ids.append(delivery_id)
+            matches.append({
+                "delivery_id": delivery_id,
+                "locations": locations,
+                "rendered_sha256": hashlib.sha256(
+                    shipped.encode("utf-8", "surrogatepass")
+                ).hexdigest(),
+                "rendered_chars": len(shipped),
+            })
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        )
+        self._trace_record(
+            "provider.request",
+            "provider",
+            {
+                "iteration": int(iteration),
+                "provider": str(provider),
+                "model": str(payload.get("model") or ""),
+                "delivery_ids": delivery_ids,
+                "matches": matches,
+                "message_count": len(messages) if isinstance(messages, list) else 0,
+                "payload_chars": len(canonical),
+                "payload_sha256": hashlib.sha256(
+                    canonical.encode("utf-8", "surrogatepass")
+                ).hexdigest(),
+            },
+        )
+        for delivery_id in delivery_ids:
+            meta = self._delivery_metadata.get(delivery_id, {})
+            if meta.get("evidence_type") in {
+                "localization", "ranked_localization"
+            } and os.environ.get("GT_LOC_RESLOT", "").strip().lower() not in {
+                "", "0", "false", "no", "off"
+            }:
+                self._record_capability_applied(
+                    "GT_LOC_RESLOT",
+                    fact_id="localization",
+                    boundary="provider",
+                    delivery_id=delivery_id,
+                    reason="provider_payload_reslot",
+                )
+        return tuple(delivery_ids)
+
     def trace_model_response(
         self, iteration: int, result: Any, delivery_ids: tuple[str, ...]
     ) -> None:
@@ -701,6 +861,63 @@ class GTBridge:
             )
         except Exception:  # noqa: BLE001 - observability is always fail-open
             pass
+        for delivery_id in delivery_ids:
+            meta = self._delivery_metadata.get(delivery_id, {})
+            try:
+                from gt_engine.attribution import feature_for_evidence
+
+                feature_id = feature_for_evidence(
+                    meta.get("evidence_type")
+                ) or ""
+            except Exception:  # noqa: BLE001 - classification telemetry only
+                feature_id = ""
+            tool_names = [
+                str(getattr(call, "name", "") or "") for call in calls
+            ]
+            target = self._fwd(meta.get("target", "")).lower()
+            arguments = "\n".join(
+                json.dumps(
+                    getattr(call, "arguments", {}) or {},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                for call in calls
+            ).lower()
+            if not calls:
+                classification = "no_tool_action"
+            elif (
+                target
+                and target not in {"task_start", "submit", "recovery"}
+                and (
+                    target in arguments
+                    or os.path.basename(target) in arguments
+                )
+            ):
+                classification = "target_referenced"
+            elif feature_id in {
+                "syntax_result", "covering_red", "submit_refusal", "recovery"
+            } and any(name in {"bash", "edit_file"} for name in tool_names):
+                classification = "repair_or_verify_action"
+            elif feature_id == "def_partition" and any(
+                name in {"bash", "read_file"} for name in tool_names
+            ):
+                classification = "inspect_or_search_action"
+            elif feature_id == "obligations":
+                classification = "action_taken"
+            else:
+                classification = "other_action"
+            self._trace_record(
+                "response.action",
+                "model",
+                {
+                    "iteration": int(iteration),
+                    "delivery_id": str(delivery_id),
+                    "feature_id": feature_id,
+                    "classification": classification,
+                    "tool_names": tool_names,
+                },
+            )
 
     def trace_run_completed(self, result: Any) -> None:
         """Record nano's terminal state; the benchmark reward joins offline."""
@@ -1155,7 +1372,12 @@ class GTBridge:
         self.delivered_spans.append(DeliveredSpan(
             text=shipped, tier="HYPOTHESIS",
             evidence_type="recovery", dedup_key=env.dedup_key or ""))
-        self._ledger_record(sealed, shipped, "recovery")
+        self._ledger_record(
+            sealed,
+            shipped,
+            "recovery",
+            capability_ids=("GT_HYPOTHESIS",),
+        )
         self._recovery_fired_sigs.add(signature)  # burned on DELIVERY only
         return output + shipped
 
@@ -1633,6 +1855,13 @@ class GTBridge:
                 "outcome": syntax_outcome,
             },
         )
+        if syntax_res is not None:
+            self._record_capability_applied(
+                "GT_EDIT_CHECK",
+                fact_id="syntax_result",
+                boundary="submit",
+                reason=f"executed_{syntax_outcome}",
+            )
         self._trace_record(
             "feature.evaluated",
             "submit",
@@ -1846,7 +2075,22 @@ class GTBridge:
             dedup_chain=self.episode.delivered_dedup,
         )
         self.deliveries.append(sealed)
-        self._ledger_record(sealed, text, "submit")
+        capability_ids: list[str] = []
+        if ev_type == "syntax_result" and syntax_res is not None:
+            capability_ids.append("GT_EDIT_CHECK")
+        if (
+            submit_block
+            and submit_block.get("reason") == "observed_red_unresolved"
+        ):
+            capability_ids.append("GT_SS_SUBMIT_RED")
+        if cert_rendered:
+            capability_ids.append("GT_CERT_DELIVERY")
+        self._ledger_record(
+            sealed,
+            text,
+            "submit",
+            capability_ids=tuple(capability_ids),
+        )
         return text
 
     def task_start(self) -> str | None:
@@ -1867,6 +2111,7 @@ class GTBridge:
                     "gt_enabled": True,
                     "graph_available": bool(self.graph_db),
                     "feature_count": 17,
+                    "provider_final_receipts_required": True,
                 },
             )
             result = self._task_start()
@@ -2008,8 +2253,9 @@ class GTBridge:
         )
 
         # 1. normalize (pure). covering= deliberately NOT threaded (SM-3).
+        event_output = gateway_observation_output(command, output, returncode)
         ev = normalize_event(
-            command, output, returncode, self.action_index,
+            command, event_output, returncode, self.action_index,
             changed_files=changed_files, viewed_files=viewed_files,
             edit_before_after=edit_before_after)
         # 2. per-turn state over the ONE shared episode (production pattern).
@@ -2101,7 +2347,19 @@ class GTBridge:
             text=shipped, tier=winner.tier or "",
             evidence_type=winner.evidence_type or "",
             dedup_key=winner.dedup_key or ""))
-        self._ledger_record(sealed, shipped, "gateway")
+        producer_capability = {
+            "change_surface": "GT_CHANGE_SURFACE",
+            "patch_delta": "GT_PATCH_DELTA",
+            "edit_check": "GT_EDIT_CHECK",
+        }.get(str(getattr(winner, "producer", "") or ""))
+        self._ledger_record(
+            sealed,
+            shipped,
+            "gateway",
+            capability_ids=(
+                (producer_capability,) if producer_capability else ()
+            ),
+        )
         # 9. pure-suffix append (TITO law 1).
         return output + shipped
 

@@ -1,0 +1,58 @@
+{
+  "schema": "gt.feature_smoke.v1",
+  "model": "deepseek-v4-flash",
+  "profile": "2",
+  "temperature_note": "The provider default is stochastic; no replay claim is made.",
+  "selection_source": "local 89-task DeepSeek V4 Flash GT-off baseline corpus",
+  "selection_rule": "Maximize distinct natural GT trigger opportunities in existing GT-off trajectories without using GT outcomes.",
+  "task_ids": [
+    "build-cython-ext",
+    "cancel-async-tasks",
+    "fix-code-vulnerability",
+    "filter-js-from-html",
+    "torch-tensor-parallelism"
+  ],
+  "historical_opportunities": {
+    "build-cython-ext": [
+      "search",
+      "file_view",
+      "callable_edit",
+      "test",
+      "failed_test",
+      "retest"
+    ],
+    "cancel-async-tasks": [
+      "file_view",
+      "new_source_file",
+      "callable_edit"
+    ],
+    "fix-code-vulnerability": [
+      "search",
+      "file_view",
+      "callable_edit",
+      "test",
+      "failed_test",
+      "retest"
+    ],
+    "filter-js-from-html": [
+      "search",
+      "file_view",
+      "new_source_file",
+      "callable_edit"
+    ],
+    "torch-tensor-parallelism": [
+      "search",
+      "file_view",
+      "new_source_file",
+      "callable_edit"
+    ]
+  },
+  "acceptance": {
+    "expected_tasks": 5,
+    "minimum_witnessed_identities": 9,
+    "target_witnessed_identities": 12,
+    "maximum_triggered_dark": 0,
+    "maximum_telemetry_faults": 0,
+    "provider_final_receipt_required_for_every_delivery": true
+  }
+}

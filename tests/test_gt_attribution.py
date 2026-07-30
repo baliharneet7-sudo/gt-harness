@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from gt_engine.attribution import (
+    CAPABILITY_OWNERS,
     DIRECT_FEATURES,
     AttributionTrace,
+    feature_for_evidence,
     summarize_features,
+    verify_lifecycle_rows,
     verify_trace_rows,
 )
 
@@ -37,7 +42,17 @@ def test_direct_feature_registry_is_exact_and_complete():
     }
     assert len(DIRECT_FEATURES) == 17
     assert all(spec["boundaries"] for spec in DIRECT_FEATURES.values())
+    assert all(spec["trigger"] for spec in DIRECT_FEATURES.values())
     assert all(spec["intended_action"] for spec in DIRECT_FEATURES.values())
+    assert CAPABILITY_OWNERS == {
+        "GT_CHANGE_SURFACE": "newfile_precedent",
+        "GT_PATCH_DELTA": "signature_delta",
+        "GT_LOC_RESLOT": "localization",
+        "GT_SS_SUBMIT_RED": "submit_refusal",
+        "GT_EDIT_CHECK": "syntax_result",
+        "GT_HYPOTHESIS": "recovery",
+        "GT_CERT_DELIVERY": "submit_refusal",
+    }
 
 
 def test_attribution_trace_is_append_only_hash_chained(tmp_path):
@@ -64,6 +79,15 @@ def test_attribution_trace_is_append_only_hash_chained(tmp_path):
     assert rows[0]["sequence"] == 1
     assert rows[1]["sequence"] == 2
     assert verify_trace_rows(rows) == []
+
+
+def test_newfile_missing_role_evidence_maps_to_canonical_feature():
+    assert feature_for_evidence("missing_role:registration") == (
+        "newfile_precedent"
+    )
+    assert feature_for_evidence("missing_role_postcreate:template") == (
+        "newfile_precedent"
+    )
 
 
 def test_trace_integrity_rejects_mutated_payload(tmp_path):
@@ -100,6 +124,92 @@ def test_sensitive_payload_values_are_hashed_not_persisted(tmp_path):
     assert len(row["payload"]["content_sha256"]) == 64
 
 
+def test_lifecycle_verifier_requires_same_action_provider_and_response_chain():
+    rows = [
+        {
+            "sequence": 1,
+            "action_index": 4,
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "d4",
+                "rendered_bytes_hash": "a" * 64,
+            },
+        },
+        {
+            "sequence": 2,
+            "action_index": 4,
+            "event_type": "provider.request",
+            "payload": {
+                "iteration": 5,
+                "delivery_ids": ["d4"],
+                "matches": [{
+                    "delivery_id": "d4",
+                    "rendered_sha256": "a" * 64,
+                    "locations": ["1.content"],
+                }],
+            },
+        },
+        {
+            "sequence": 3,
+            "action_index": 4,
+            "event_type": "model.response",
+            "payload": {"iteration": 5, "delivery_ids": ["d4"]},
+        },
+    ]
+
+    assert verify_lifecycle_rows(rows) == []
+
+    rows[1]["action_index"] = 5
+    assert verify_lifecycle_rows(rows) == [
+        "delivery d4: provider request action 5 != delivery action 4"
+    ]
+
+
+def test_lifecycle_verifier_rejects_missing_or_hash_mismatched_receipt():
+    delivered = {
+        "sequence": 1,
+        "action_index": 2,
+        "event_type": "decision.committed",
+        "payload": {
+            "decision": "delivered",
+            "delivery_id": "d2",
+            "rendered_bytes_hash": "b" * 64,
+        },
+    }
+    assert verify_lifecycle_rows([delivered]) == [
+        "delivery d2: missing provider-final request receipt",
+        "delivery d2: missing linked model response",
+    ]
+
+    rows = [
+        delivered,
+        {
+            "sequence": 2,
+            "action_index": 2,
+            "event_type": "provider.request",
+            "payload": {
+                "iteration": 3,
+                "delivery_ids": ["d2"],
+                "matches": [{
+                    "delivery_id": "d2",
+                    "rendered_sha256": "c" * 64,
+                    "locations": ["2.content"],
+                }],
+            },
+        },
+        {
+            "sequence": 3,
+            "action_index": 2,
+            "event_type": "model.response",
+            "payload": {"iteration": 3, "delivery_ids": ["d2"]},
+        },
+    ]
+    assert verify_lifecycle_rows(rows) == [
+        "delivery d2: provider receipt hash does not match sealed bytes"
+    ]
+
+
 def test_feature_summary_distinguishes_delivery_dark_suppressed_and_ineligible():
     rows = [
         {
@@ -113,7 +223,7 @@ def test_feature_summary_distinguishes_delivery_dark_suppressed_and_ineligible()
             },
         },
         {
-            "event_type": "model.request",
+            "event_type": "provider.request",
             "payload": {"iteration": 2, "delivery_ids": ["1"]},
         },
         {
@@ -167,18 +277,12 @@ def test_feature_summary_distinguishes_delivery_dark_suppressed_and_ineligible()
     assert summary["covering_red"]["status"] == "INELIGIBLE"
 
 
-def test_delivered_facts_witness_their_authoritative_capability_owners():
-    owner_to_fact = {
-        "GT_CHANGE_SURFACE": "newfile_precedent",
-        "GT_PATCH_DELTA": "signature_delta",
-        "GT_LOC_RESLOT": "localization",
-        "GT_SS_SUBMIT_RED": "submit_refusal",
-        "GT_EDIT_CHECK": "syntax_result",
-        "GT_HYPOTHESIS": "recovery",
-        "GT_CERT_DELIVERY": "submit_refusal",
-    }
+@pytest.mark.gt_all17
+def test_capabilities_require_explicit_application_receipts():
     rows = []
-    for action_index, fact_id in enumerate(sorted(set(owner_to_fact.values())), 1):
+    for action_index, (capability, fact_id) in enumerate(
+        CAPABILITY_OWNERS.items(), 1
+    ):
         delivery_id = f"d{action_index}"
         rows.extend([
             {
@@ -192,7 +296,17 @@ def test_delivered_facts_witness_their_authoritative_capability_owners():
                 },
             },
             {
-                "event_type": "model.request",
+                "event_type": "capability.applied",
+                "action_index": action_index,
+                "payload": {
+                    "feature_id": capability,
+                    "fact_id": fact_id,
+                    "delivery_id": delivery_id,
+                    "decision": "APPLIED",
+                },
+            },
+            {
+                "event_type": "provider.request",
                 "action_index": action_index,
                 "payload": {"delivery_ids": [delivery_id]},
             },
@@ -205,10 +319,37 @@ def test_delivered_facts_witness_their_authoritative_capability_owners():
 
     summary = summarize_features(rows)
 
-    for capability, fact_id in owner_to_fact.items():
+    for capability, fact_id in CAPABILITY_OWNERS.items():
         assert summary[fact_id]["status"] == "WITNESSED"
         assert summary[capability]["status"] == "WITNESSED"
-        assert summary[capability]["reasons"] == [f"delivered_{fact_id}"]
+        assert summary[capability]["reasons"] == ["capability_applied"]
+
+
+def test_delivered_fact_does_not_automatically_credit_capability_owner():
+    rows = [
+        {
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "d1",
+                "feature_id": "localization",
+                "evidence_type": "localization",
+            },
+        },
+        {
+            "event_type": "provider.request",
+            "payload": {"delivery_ids": ["d1"]},
+        },
+        {
+            "event_type": "model.response",
+            "payload": {"delivery_ids": ["d1"]},
+        },
+    ]
+
+    summary = summarize_features(rows)
+
+    assert summary["localization"]["status"] == "WITNESSED"
+    assert summary["GT_LOC_RESLOT"]["status"] == "INELIGIBLE"
 
 
 def test_unterminated_producer_invocation_is_telemetry_fault():
@@ -231,6 +372,26 @@ def test_cap_is_witnessed_only_when_same_action_delivers_its_fact():
     rows = [
         {
             "action_index": 9,
+            "event_type": "capability.applied",
+            "payload": {
+                "feature_id": "GT_HYPOTHESIS",
+                "fact_id": "recovery",
+                "delivery_id": "9",
+                "decision": "APPLIED",
+            },
+        },
+        {
+            "action_index": 9,
+            "event_type": "provider.request",
+            "payload": {"delivery_ids": ["9"]},
+        },
+        {
+            "action_index": 9,
+            "event_type": "model.response",
+            "payload": {"delivery_ids": ["9"]},
+        },
+        {
+            "action_index": 10,
             "event_type": "feature.evaluated",
             "payload": {
                 "feature_id": "GT_HYPOTHESIS",
@@ -276,14 +437,32 @@ def test_executed_clean_edit_check_is_witnessed_but_no_target_is_ineligible():
                 "outcome": "ok",
             },
         },
+        {
+            "action_index": 4,
+            "event_type": "capability.applied",
+            "payload": {
+                "feature_id": "GT_EDIT_CHECK",
+                "fact_id": "syntax_result",
+                "delivery_id": "",
+                "decision": "APPLIED",
+            },
+        },
     ]
     assert summarize_features(rows)["GT_EDIT_CHECK"]["status"] == "WITNESSED"
 
-    rows[0]["payload"].update({
-        "eligible": False,
-        "outcome": "no_edited_syntax_target",
-    })
-    assert summarize_features(rows)["GT_EDIT_CHECK"]["status"] == "INELIGIBLE"
+    quiet_rows = [{
+        "action_index": 4,
+        "event_type": "feature.evaluated",
+        "payload": {
+            "feature_id": "GT_EDIT_CHECK",
+            "eligible": False,
+            "outcome": "no_edited_syntax_target",
+        },
+    }]
+    assert (
+        summarize_features(quiet_rows)["GT_EDIT_CHECK"]["status"]
+        == "INELIGIBLE"
+    )
 
 
 def test_named_correct_quiet_outcome_is_retained_for_ineligible_feature():

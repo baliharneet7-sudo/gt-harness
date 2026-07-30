@@ -90,7 +90,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from gt_engine.attribution import summarize_features, verify_trace_rows  # noqa: E402
+from gt_engine.attribution import (  # noqa: E402
+    summarize_features,
+    verify_lifecycle_rows,
+    verify_trace_rows,
+)
 
 # --------------------------------------------------------------------------- #
 # transcript parsing (nano CLI rich-panel format, tee'd without ANSI)
@@ -692,6 +696,20 @@ def load_attribution(path: Path) -> tuple[list[dict], list[str]]:
         rows.append(value)
     if len(rows) == len(lines):
         issues.extend(verify_trace_rows(rows))
+        provider_receipts_required = any(
+            row.get("event_type") == "provider.request"
+            or (
+                row.get("event_type") == "run.started"
+                and bool(
+                    row.get("payload", {}).get(
+                        "provider_final_receipts_required"
+                    )
+                )
+            )
+            for row in rows
+        )
+        if provider_receipts_required:
+            issues.extend(verify_lifecycle_rows(rows))
     return rows, issues
 
 

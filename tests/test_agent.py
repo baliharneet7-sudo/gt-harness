@@ -40,12 +40,24 @@ def test_agent_one_shot_end_turn():
 
 
 def test_agent_links_gt_exposure_to_the_next_model_response():
+    class _ReceiptProvider(FakeProvider):
+        request_observer = None
+
+        def step(self, messages, tools, system):
+            if self.request_observer is not None:
+                self.request_observer(
+                    "test.provider",
+                    {"model": self.model, "messages": list(messages)},
+                )
+            return super().step(messages, tools, system)
+
     class _TraceGT:
         issue_text = ""
         delivered_spans = []
 
         def __init__(self):
             self.requests = []
+            self.provider_requests = []
             self.responses = []
             self.completed = []
 
@@ -54,6 +66,10 @@ def test_agent_links_gt_exposure_to_the_next_model_response():
 
         def trace_model_request(self, iteration, messages):
             self.requests.append((iteration, messages))
+            return ("0",)
+
+        def trace_provider_request(self, iteration, provider, payload):
+            self.provider_requests.append((iteration, provider, payload))
             return ("0",)
 
         def trace_model_response(self, iteration, result, delivery_ids):
@@ -65,7 +81,7 @@ def test_agent_links_gt_exposure_to_the_next_model_response():
                  result.total_input_tokens, result.total_output_tokens)
             )
 
-    fp = FakeProvider([
+    fp = _ReceiptProvider([
         StepResult(text="used evidence", tool_calls=[], stop_reason="end_turn",
                    usage=_u(10, 5)),
     ])
@@ -78,6 +94,7 @@ def test_agent_links_gt_exposure_to_the_next_model_response():
     assert result.stop_reason == "end_turn"
     assert gt.requests and gt.requests[0][0] == 1
     assert "GT evidence" in str(gt.requests[0][1])
+    assert gt.provider_requests[0][0:2] == (1, "test.provider")
     assert gt.responses == [(1, "used evidence", ("0",))]
     assert gt.completed == [("end_turn", 1, 10, 5)]
 

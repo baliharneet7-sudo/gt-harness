@@ -237,6 +237,53 @@ def test_openai_provider_translates_tool_schema_to_openai_format():
     assert sent_tool["function"]["parameters"]["required"] == ["command"]
 
 
+def test_openai_provider_observer_receives_final_normalized_payload():
+    resp = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="done", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    observed = []
+    p = OpenAIProvider(
+        model="deepseek-v4-flash",
+        client=fake_client,
+        request_observer=lambda provider, payload: observed.append(
+            (provider, payload)
+        ),
+    )
+
+    p.step(
+        messages=[{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "tool-1",
+                "content": "raw output\nsealed GT bytes",
+                "is_error": False,
+            }],
+        }],
+        tools=[],
+        system="SYS",
+    )
+
+    assert len(observed) == 1
+    provider, payload = observed[0]
+    assert provider == "openai.chat.completions"
+    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["messages"] == (
+        fake_client.chat.completions.create.call_args.kwargs["messages"]
+    )
+    assert payload["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "tool-1",
+        "content": "raw output\nsealed GT bytes",
+    }
+
+
 def test_normalize_for_openai_round_trips_assistant_tool_calls():
     from nano.providers import _normalize_for_openai
     out = _normalize_for_openai({

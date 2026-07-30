@@ -20,72 +20,112 @@ from typing import Any
 DIRECT_FEATURES: dict[str, dict[str, Any]] = {
     "caller_contract": {
         "kind": "FACT", "boundaries": ("file_view", "edit_result"),
+        "producer": "contract_map",
+        "trigger": "a viewed or signature-edited callable has verified callers",
         "intended_action": "update or inspect proven callers",
     },
     "covering_red": {
         "kind": "FACT", "boundaries": ("edit_result", "submit"),
+        "producer": "covering_runner",
+        "trigger": "an executed covering test fails because of an edited source file",
         "intended_action": "repair an attributable covering-test regression",
     },
     "def_partition": {
         "kind": "FACT", "boundaries": ("search_result",),
+        "producer": "post_search",
+        "trigger": "a symbol search contains definitions and references that can be partitioned",
         "intended_action": "distinguish definitions from references",
     },
     "localization": {
         "kind": "FACT", "boundaries": ("task_start", "search_result"),
+        "producer": "v1r_brief",
+        "trigger": "the indexed task or search has ranked relevant source locations",
         "intended_action": "inspect ranked relevant source locations",
     },
     "newfile_precedent": {
-        "kind": "FACT", "boundaries": ("edit_result",),
+        "kind": "FACT", "boundaries": ("search_result", "edit_result"),
+        "producer": "change_surface",
+        "trigger": (
+            "repeated failed search or a new file exposes a verified "
+            "sibling/registry precedent"
+        ),
         "intended_action": "follow a verified repository precedent for a new file",
     },
     "obligations": {
         "kind": "FACT", "boundaries": ("task_start",),
+        "producer": "spec",
+        "trigger": "issue text yields non-empty, evidence-backed implementation obligations",
         "intended_action": "satisfy issue-derived requirements",
     },
     "recovery": {
         "kind": "FACT", "boundaries": ("test_result", "tool_result"),
+        "producer": "governor",
+        "trigger": "the same test failure recurs after an intervening edit",
         "intended_action": "form a new hypothesis after a falsified edit",
     },
     "signature_delta": {
         "kind": "FACT", "boundaries": ("edit_result",),
+        "producer": "patch_delta",
+        "trigger": "a before/after edit changes a callable signature with verified call sites",
         "intended_action": "repair call sites affected by a signature change",
     },
     "submit_refusal": {
         "kind": "FACT", "boundaries": ("submit",),
+        "producer": "submit_gate",
+        "trigger": "submission is attempted with unresolved positive failing evidence",
         "intended_action": "resolve positive failing evidence before submission",
     },
     "syntax_result": {
-        "kind": "FACT", "boundaries": ("submit",),
+        "kind": "FACT", "boundaries": ("edit_result", "submit"),
+        "producer": "edit_check",
+        "trigger": "an executed syntax/compiler check fails on an edited source file",
         "intended_action": "repair an executed syntax failure",
     },
     "GT_CERT_DELIVERY": {
         "kind": "CAP", "boundaries": ("submit",),
+        "trigger": "a completion certificate owns a submit-refusal delivery",
         "intended_action": "name the evidence state of the completion decision",
     },
     "GT_CHANGE_SURFACE": {
         "kind": "CAP", "boundaries": ("search_result",),
+        "trigger": "the change-surface producer yields a new-file precedent",
         "intended_action": "identify the proven change surface",
     },
     "GT_EDIT_CHECK": {
         "kind": "CAP", "boundaries": ("edit_result", "submit"),
+        "trigger": "the edit checker executes, or yields a syntax-result delivery on failure",
         "intended_action": "validate edited code with deterministic checks",
     },
     "GT_HYPOTHESIS": {
         "kind": "CAP", "boundaries": ("test_result", "tool_result"),
+        "trigger": "the recovery governor yields a repeated-failure recovery fact",
         "intended_action": "track repeated failures across edits",
     },
     "GT_LOC_RESLOT": {
         "kind": "CAP", "boundaries": ("search_result",),
+        "trigger": "ranked localization is reslotted into the next model request",
         "intended_action": "reslot a ranked localization result into the request",
     },
     "GT_PATCH_DELTA": {
         "kind": "CAP", "boundaries": ("edit_result",),
+        "trigger": "the patch-delta producer yields a signature delta",
         "intended_action": "derive evidence from the actual before/after patch",
     },
     "GT_SS_SUBMIT_RED": {
         "kind": "CAP", "boundaries": ("submit",),
+        "trigger": "the submit gate yields refusal for an observed unresolved RED check",
         "intended_action": "refuse once after an observed unresolved test failure",
     },
+}
+
+CAPABILITY_OWNERS: dict[str, str] = {
+    "GT_CHANGE_SURFACE": "newfile_precedent",
+    "GT_PATCH_DELTA": "signature_delta",
+    "GT_LOC_RESLOT": "localization",
+    "GT_SS_SUBMIT_RED": "submit_refusal",
+    "GT_EDIT_CHECK": "syntax_result",
+    "GT_HYPOTHESIS": "recovery",
+    "GT_CERT_DELIVERY": "submit_refusal",
 }
 
 _EVIDENCE_FEATURES = {
@@ -111,7 +151,10 @@ _EVIDENCE_FEATURES = {
 
 def feature_for_evidence(evidence_type: str | None) -> str | None:
     """Map a concrete envelope type to its 17-feature census identity."""
-    return _EVIDENCE_FEATURES.get(str(evidence_type or ""))
+    value = str(evidence_type or "")
+    if value.startswith(("missing_role:", "missing_role_postcreate:")):
+        return "newfile_precedent"
+    return _EVIDENCE_FEATURES.get(value)
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -231,6 +274,106 @@ def verify_trace_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
     return issues
 
 
+def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """Verify every sealed delivery reached one provider request and response.
+
+    This checks provenance and timing only. It does not infer that the model's
+    behavior was caused by the delivery.
+    """
+    materialized = [dict(row) for row in rows]
+    deliveries: dict[str, dict[str, Any]] = {}
+    provider_rows: dict[str, list[dict[str, Any]]] = {}
+    response_rows: dict[str, list[dict[str, Any]]] = {}
+    for position, row in enumerate(materialized, 1):
+        row.setdefault("sequence", position)
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(row.get("event_type") or "")
+        if (
+            event_type == "decision.committed"
+            and payload.get("decision") == "delivered"
+        ):
+            delivery_id = str(payload.get("delivery_id") or "")
+            if delivery_id:
+                deliveries[delivery_id] = row
+        elif event_type == "provider.request":
+            for delivery_id in payload.get("delivery_ids", ()):
+                provider_rows.setdefault(str(delivery_id), []).append(row)
+        elif event_type == "model.response":
+            for delivery_id in payload.get("delivery_ids", ()):
+                response_rows.setdefault(str(delivery_id), []).append(row)
+
+    issues: list[str] = []
+    for delivery_id, delivery in deliveries.items():
+        delivery_payload = delivery.get("payload", {})
+        delivery_sequence = int(delivery.get("sequence") or 0)
+        delivery_action = int(delivery.get("action_index") or 0)
+        providers = [
+            row for row in provider_rows.get(delivery_id, ())
+            if int(row.get("sequence") or 0) > delivery_sequence
+        ]
+        provider = providers[0] if providers else None
+        if provider is None:
+            issues.append(
+                f"delivery {delivery_id}: missing provider-final request receipt"
+            )
+        else:
+            provider_action = int(provider.get("action_index") or 0)
+            if provider_action != delivery_action:
+                issues.append(
+                    f"delivery {delivery_id}: provider request action "
+                    f"{provider_action} != delivery action {delivery_action}"
+                )
+            provider_payload = provider.get("payload", {})
+            matches = [
+                item for item in provider_payload.get("matches", ())
+                if isinstance(item, dict)
+                and str(item.get("delivery_id") or "") == delivery_id
+            ]
+            sealed_hash = str(
+                delivery_payload.get("rendered_bytes_hash") or ""
+            )
+            if not matches:
+                issues.append(
+                    f"delivery {delivery_id}: provider byte match missing"
+                )
+            elif sealed_hash and not any(
+                str(item.get("rendered_sha256") or "") == sealed_hash
+                for item in matches
+            ):
+                issues.append(
+                    f"delivery {delivery_id}: provider receipt hash does not "
+                    "match sealed bytes"
+                )
+
+        provider_sequence = (
+            int(provider.get("sequence") or 0) if provider is not None
+            else delivery_sequence
+        )
+        responses = [
+            row for row in response_rows.get(delivery_id, ())
+            if int(row.get("sequence") or 0) > provider_sequence
+        ]
+        response = responses[0] if responses else None
+        if response is None:
+            issues.append(f"delivery {delivery_id}: missing linked model response")
+        elif provider is not None:
+            provider_iteration = int(
+                provider.get("payload", {}).get("iteration") or 0
+            )
+            response_iteration = int(
+                response.get("payload", {}).get("iteration") or 0
+            )
+            if response_iteration != provider_iteration:
+                issues.append(
+                    f"delivery {delivery_id}: response iteration "
+                    f"{response_iteration} != provider iteration "
+                    f"{provider_iteration}"
+                )
+    return issues
+
+
 def summarize_features(
     rows: Iterable[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -248,6 +391,9 @@ def summarize_features(
             "deliveries": [],
             "exposed": False,
             "response_observed": False,
+            "exposure_source": "",
+            "action_observed": False,
+            "action_consistent": False,
         }
         for feature_id, spec in DIRECT_FEATURES.items()
     }
@@ -279,10 +425,13 @@ def summarize_features(
             if reason not in summary[feature_id]["reasons"]:
                 summary[feature_id]["reasons"].append(reason)
 
-    delivery_to_feature: dict[str, str] = {}
-    delivered_features: list[str] = []
+    delivery_to_features: dict[str, list[str]] = {}
     exposed_ids: set[str] = set()
     response_ids: set[str] = set()
+    action_by_delivery: dict[str, str] = {}
+    provider_receipts_present = any(
+        row.get("event_type") == "provider.request" for row in materialized
+    )
     producer_terminal_ids = {
         str(row.get("payload", {}).get("invocation_id") or "")
         for row in materialized
@@ -294,11 +443,57 @@ def summarize_features(
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        if event_type == "model.request":
+        if event_type == "provider.request":
             exposed_ids.update(str(item) for item in payload.get("delivery_ids", ()))
+            continue
+        if event_type == "model.request":
+            if not provider_receipts_present:
+                exposed_ids.update(
+                    str(item) for item in payload.get("delivery_ids", ())
+                )
             continue
         if event_type == "model.response":
             response_ids.update(str(item) for item in payload.get("delivery_ids", ()))
+            continue
+        if event_type == "response.action":
+            delivery_id = str(payload.get("delivery_id") or "")
+            if delivery_id:
+                action_by_delivery[delivery_id] = str(
+                    payload.get("classification") or ""
+                )
+            continue
+        if event_type == "capability.applied":
+            feature_id = str(payload.get("feature_id") or "")
+            fact_id = str(payload.get("fact_id") or "")
+            decision = str(payload.get("decision") or "")
+            delivery_id = str(payload.get("delivery_id") or "")
+            if fact_id and CAPABILITY_OWNERS.get(feature_id) != fact_id:
+                update(feature_id, "TELEMETRY_FAULT", "capability_owner_mismatch")
+            elif decision == "APPLIED":
+                if delivery_id:
+                    update(
+                        feature_id,
+                        "DELIVERED_UNEXPOSED",
+                        "capability_applied",
+                    )
+                    delivery_to_features.setdefault(delivery_id, []).append(
+                        feature_id
+                    )
+                    summary[feature_id]["deliveries"].append(delivery_id)
+                else:
+                    update(feature_id, "WITNESSED", "capability_applied")
+            elif decision in {"SUPPRESSED", "DROPPED"}:
+                update(
+                    feature_id,
+                    "SUPPRESSED_WITH_REASON",
+                    str(payload.get("reason") or "capability_suppressed"),
+                )
+            elif decision == "FAULT":
+                update(
+                    feature_id,
+                    "TELEMETRY_FAULT",
+                    str(payload.get("reason") or "capability_fault"),
+                )
             continue
         if event_type == "decision.committed":
             evidence_type = str(payload.get("evidence_type") or "")
@@ -315,9 +510,10 @@ def summarize_features(
                     reason or "sealed_and_delivered",
                 )
                 if delivery_id:
-                    delivery_to_feature[delivery_id] = feature_id
+                    delivery_to_features.setdefault(delivery_id, []).append(
+                        feature_id
+                    )
                     summary[feature_id]["deliveries"].append(delivery_id)
-                delivered_features.append(feature_id)
             elif decision == "suppressed" and feature_id:
                 update(feature_id, "SUPPRESSED_WITH_REASON", reason or "suppressed")
             continue
@@ -325,12 +521,6 @@ def summarize_features(
             feature_id = str(payload.get("feature_id") or "")
             if bool(payload.get("eligible")):
                 outcome = str(payload.get("outcome") or "")
-                if (
-                    feature_id == "GT_EDIT_CHECK"
-                    and outcome in {"ok", "pass"}
-                ):
-                    update(feature_id, "WITNESSED", outcome)
-                    continue
                 update(
                     feature_id,
                     "TRIGGERED_DARK",
@@ -414,27 +604,40 @@ def summarize_features(
             elif feature_id:
                 update(feature_id, "INELIGIBLE", reason)
 
-    for delivery_id, feature_id in delivery_to_feature.items():
-        summary[feature_id]["exposed"] = (
-            summary[feature_id]["exposed"] or delivery_id in exposed_ids
-        )
-        summary[feature_id]["response_observed"] = (
-            summary[feature_id]["response_observed"]
-            or delivery_id in response_ids
-        )
-        if delivery_id in response_ids:
-            update(feature_id, "WITNESSED")
-        elif delivery_id in exposed_ids:
-            update(feature_id, "EXPOSED")
-    fact_caps = {
-        "newfile_precedent": ("GT_CHANGE_SURFACE",),
-        "localization": ("GT_LOC_RESLOT",),
-        "recovery": ("GT_HYPOTHESIS",),
-        "signature_delta": ("GT_PATCH_DELTA",),
-        "submit_refusal": ("GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY"),
-        "syntax_result": ("GT_EDIT_CHECK",),
+    consistent_actions = {
+        "target_referenced",
+        "repair_or_verify_action",
+        "inspect_or_search_action",
+        "action_taken",
     }
-    for feature_id in delivered_features:
-        for cap in fact_caps.get(feature_id, ()):
-            update(cap, "WITNESSED", f"delivered_{feature_id}")
+    for delivery_id, feature_ids in delivery_to_features.items():
+        for feature_id in feature_ids:
+            summary[feature_id]["exposed"] = (
+                summary[feature_id]["exposed"] or delivery_id in exposed_ids
+            )
+            if delivery_id in exposed_ids:
+                summary[feature_id]["exposure_source"] = (
+                    "provider.request"
+                    if provider_receipts_present else "model.request_legacy"
+                )
+            summary[feature_id]["response_observed"] = (
+                summary[feature_id]["response_observed"]
+                or delivery_id in response_ids
+            )
+            action = action_by_delivery.get(delivery_id, "")
+            if action:
+                summary[feature_id]["action_observed"] = True
+                summary[feature_id]["action_consistent"] = (
+                    summary[feature_id]["action_consistent"]
+                    or action in consistent_actions
+                )
+            if delivery_id in response_ids:
+                update(
+                    feature_id,
+                    "WITNESSED",
+                    "capability_applied"
+                    if summary[feature_id]["kind"] == "CAP" else "",
+                )
+            elif delivery_id in exposed_ids:
+                update(feature_id, "EXPOSED")
     return summary

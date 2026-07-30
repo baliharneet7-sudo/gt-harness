@@ -18,6 +18,7 @@ from gt_engine.bridge import (
     bash_edit_target,
     bash_edit_targets,
     failure_fingerprint,
+    gateway_observation_output,
     parse_exit_code,
 )
 from gt_engine.context import smart_truncate
@@ -70,6 +71,17 @@ def test_parse_exit_code_unparsable_is_none():
     assert parse_exit_code("", True) is None
     # The marker must be terminal, not mid-text.
     assert parse_exit_code("[exit code 3] and then more text", True) is None
+
+
+def test_empty_failed_search_marker_is_restored_only_for_gateway_semantics():
+    marker = "\n[exit code 1]"
+    assert gateway_observation_output("grep -R azure providers", marker, 1) == ""
+    assert gateway_observation_output("pytest -q", marker, 1) == marker
+    diagnostic = "grep: providers: No such file\n[exit code 1]"
+    assert (
+        gateway_observation_output("grep -R azure providers", diagnostic, 1)
+        == diagnostic
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -234,17 +246,63 @@ def test_model_action_is_bound_to_gt_exposure_without_persisting_arguments(
     )
     bridge.trace_model_response(2, result, delivery_ids)
 
-    row = bridge._attribution.rows[-1]
+    row = next(
+        item for item in bridge._attribution.rows
+        if item["event_type"] == "model.response"
+    )
     assert delivery_ids == ("7",)
     assert row["event_type"] == "model.response"
     assert row["payload"]["delivery_ids"] == ["7"]
     assert row["payload"]["tool_calls"] == [
         {"id": "next-1", "name": "read_file"},
     ]
+    action = bridge._attribution.rows[-1]
+    assert action["event_type"] == "response.action"
+    assert action["payload"]["delivery_id"] == "7"
     raw = (tmp_path / ".gt" / "gt_attribution.jsonl").read_text(
         encoding="utf-8")
     assert secret_path not in raw
     assert "I will inspect the evidence target" not in raw
+
+
+def test_provider_receipt_binds_block_list_delivery_without_persisting_payload(
+        tmp_path):
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    secret = "\nprovider-final GT capsule"
+    bridge._delivery_texts["8"] = secret
+    bridge._delivery_metadata["8"] = {
+        "evidence_type": "localization",
+        "producer": "ranked_localization",
+        "target": "pkg/alpha.py",
+    }
+
+    delivery_ids = bridge.trace_provider_request(
+        3,
+        "openai.chat.completions",
+        {
+            "model": "deepseek-v4-flash",
+            "messages": [{
+                "role": "tool",
+                "tool_call_id": "call-2",
+                "content": "ordinary output" + secret,
+            }],
+        },
+    )
+
+    assert delivery_ids == ("8",)
+    row = bridge._attribution.rows[-1]
+    assert row["event_type"] == "provider.request"
+    assert row["payload"]["matches"][0]["locations"] == ["0.content"]
+    assert row["payload"]["matches"][0]["rendered_sha256"] == hashlib.sha256(
+        secret.encode()
+    ).hexdigest()
+    raw = (tmp_path / ".gt" / "gt_attribution.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert secret not in raw
+    assert "ordinary output" not in raw
 
 
 # --------------------------------------------------------------------------- #
@@ -304,6 +362,7 @@ _GREP_OUT = ("pkg/alpha.py:1:def helper(x, y):\n"
 
 
 @requires_gt
+@pytest.mark.gt_all17
 def test_bridge_delivers_sealed_pure_suffix(indexed_repo):
     b = indexed_repo
     out = b.enrich("bash", {"command": _AMBIGUOUS_GREP}, _GREP_OUT, False)
@@ -324,6 +383,78 @@ def test_bridge_delivers_sealed_pure_suffix(indexed_repo):
     assert len(delta) <= 4001  # delta + at most one inserted newline
     # Span tracked for evidence-aware truncation.
     assert b.delivered_spans[0].evidence_type == "def_ref_partition"
+
+
+@requires_gt
+@pytest.mark.gt_all17
+def test_file_view_fires_verified_caller_contract(indexed_repo, tmp_path):
+    bridge = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    source = alpha.read_text(encoding="utf-8")
+
+    output = bridge.enrich(
+        "read_file", {"path": str(alpha)}, source, False
+    )
+
+    assert output.startswith(source)
+    assert [item.evidence_type for item in bridge.deliveries] == [
+        "caller_contract_view"
+    ]
+
+
+@requires_gt
+@pytest.mark.gt_all17
+def test_search_fires_ranked_localization_and_loc_reslot(
+    indexed_repo, monkeypatch,
+):
+    apply_profile_env()
+    bridge = indexed_repo
+    bridge.issue_text = "Repair the helper implementation."
+    from groundtruth.runtime import gateway
+
+    monkeypatch.setattr(
+        gateway,
+        "_compute_ranked_localization_rows",
+        lambda _state, _audit=None: [("pkg/alpha.py", 1, "helper")],
+    )
+    output = bridge.enrich(
+        "bash", {"command": "grep -rn helper ."}, _GREP_OUT, False
+    )
+
+    assert [item.evidence_type for item in bridge.deliveries] == [
+        "localization"
+    ]
+    delivery_id = next(iter(bridge._delivery_texts))
+    exposure = bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": output}],
+        },
+    )
+    bridge.trace_model_response(
+        1,
+        StepResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id="next-1",
+                    name="read_file",
+                    arguments={"path": "pkg/alpha.py"},
+                )
+            ],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        exposure,
+    )
+    from gt_engine.attribution import summarize_features
+
+    summary = summarize_features(bridge._attribution.rows)
+    assert exposure == (delivery_id,)
+    assert summary["localization"]["status"] == "WITNESSED"
+    assert summary["GT_LOC_RESLOT"]["status"] == "WITNESSED"
 
 
 @requires_gt
@@ -410,6 +541,7 @@ def test_profile_unknown_token_never_dark(monkeypatch):
 # envelope under the profile-2 defaults (patch_delta was dark before).
 # --------------------------------------------------------------------------- #
 @requires_gt
+@pytest.mark.gt_all17
 def test_edit_fires_signature_mismatch_under_profile_2(indexed_repo, tmp_path):
     apply_profile_env()  # profile-2 defaults on top of the fixture's pair
     b = indexed_repo
@@ -440,6 +572,77 @@ def test_edit_fires_signature_mismatch_under_profile_2(indexed_repo, tmp_path):
     }
     assert entered
     assert entered == terminal
+
+
+@requires_gt
+@pytest.mark.gt_all17
+def test_repeated_failed_search_fires_newfile_precedent_and_change_surface(
+    tmp_path, monkeypatch,
+):
+    apply_profile_env()
+    monkeypatch.setenv("GT_LOC_RESLOT", "0")
+    providers = tmp_path / "providers"
+    providers.mkdir()
+    (providers / "__init__.py").write_text(
+        "from .aws import AwsProvider\n"
+        "from .gcp import GcpProvider\n"
+        "REGISTRY = {'aws': AwsProvider, 'gcp': GcpProvider}\n",
+        encoding="utf-8",
+    )
+    (providers / "aws.py").write_text(
+        "class AwsProvider:\n    pass\n", encoding="utf-8"
+    )
+    (providers / "gcp.py").write_text(
+        "class GcpProvider:\n    pass\n", encoding="utf-8"
+    )
+    db = ensure_index(str(tmp_path))
+    if db is None:
+        pytest.skip("gt-index binary unavailable")
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=db,
+        issue_text="Add an azure provider like the aws and gcp providers.",
+    )
+    args = {"command": "grep -R azure providers"}
+    failed = "[exit code 1]"
+
+    first = bridge.enrich("bash", args, failed, True)
+    assert first == failed
+    second = bridge.enrich("bash", args, failed, True)
+
+    assert second.startswith(failed)
+    assert [item.evidence_type for item in bridge.deliveries] == [
+        "missing_role:registration"
+    ]
+    delivery_id = next(iter(bridge._delivery_texts))
+    exposure = bridge.trace_model_request(
+        1,
+        [{"role": "user", "content": [{"type": "text", "text": second}]}],
+    )
+    assert exposure == (delivery_id,)
+    bridge.trace_model_response(
+        1,
+        StepResult(
+            text="",
+            tool_calls=[
+                ToolCall(
+                    id="next-1",
+                    name="edit_file",
+                    arguments={"path": "providers/azure.py"},
+                )
+            ],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        exposure,
+    )
+    from gt_engine.attribution import summarize_features
+
+    summary = summarize_features(bridge._attribution.rows)
+    assert summary["newfile_precedent"]["status"] == "WITNESSED"
+    assert summary["GT_CHANGE_SURFACE"]["status"] == "WITNESSED"
 
 
 # --------------------------------------------------------------------------- #
@@ -672,6 +875,7 @@ def test_bash_edit_enrich_records_edited_file(indexed_repo, monkeypatch):
 # FIX 2: gate-kernel submit probe (positive executed evidence only)
 # --------------------------------------------------------------------------- #
 @requires_gt
+@pytest.mark.gt_all17
 def test_submit_probe_blocks_on_real_syntax_error(indexed_repo, tmp_path):
     (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n    pass\n",
                                                 encoding="utf-8")
@@ -809,6 +1013,23 @@ class _ScriptedProvider:
         return next(self._steps)
 
 
+class _ReceiptScriptedProvider(_ScriptedProvider):
+    request_observer = None
+    model = "deepseek-v4-flash"
+
+    def step(self, messages, tools, system):
+        if self.request_observer is not None:
+            self.request_observer(
+                "openai.chat.completions",
+                {
+                    "model": self.model,
+                    "messages": [{"role": "system", "content": system}]
+                    + list(messages),
+                },
+            )
+        return super().step(messages, tools, system)
+
+
 def _usage():
     return Usage(input_tokens=10, output_tokens=5, cache_read_tokens=0)
 
@@ -919,6 +1140,7 @@ def test_agent_gt_root_on_non_code_dir_gets_dormant_bridge(tmp_path):
 
 
 @requires_gt
+@pytest.mark.gt_all17
 def test_real_indexed_agent_proves_task_start_exposure(indexed_repo):
     from gt_engine.attribution import summarize_features, verify_trace_rows
 
@@ -926,7 +1148,7 @@ def test_real_indexed_agent_proves_task_start_exposure(indexed_repo):
     steps = [StepResult(text="I will inspect helper.", tool_calls=[],
                         stop_reason="end_turn", usage=_usage())]
     agent = Agent(
-        provider=_ScriptedProvider(steps),
+        provider=_ReceiptScriptedProvider(steps),
         system="s",
         gt_root=indexed_repo.repo_root,
         verify=False,
@@ -1073,6 +1295,7 @@ def _break_helper(root, crash=True):
 
 
 @requires_gt
+@pytest.mark.gt_all17
 def test_covering_red_fires_at_post_edit(covering_repo, tmp_path):
     """The TB-critical live fire: a real edit that breaks a covering test
     delivers the Format-D RED into the SAME post-edit observation, sealed,
@@ -1465,6 +1688,7 @@ def _edit_alpha(b, tmp_path, marker: str):
 
 
 @requires_gt
+@pytest.mark.gt_all17
 def test_recovery_fires_on_same_failure_recurring_across_edit(
         indexed_repo, tmp_path, monkeypatch):
     """LIVE FIRE: fail(X) -> edit -> fail(X) delivers ONE HYPOTHESIS-tier
@@ -1593,6 +1817,7 @@ def _edit_and_fail(b, tmp_path, cmd=_PYTEST_CMD):
 
 
 @requires_gt
+@pytest.mark.gt_all17
 def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
                                                        monkeypatch):
     """LIVE FIRE: edit -> observed test FAIL on the edited surface -> submit

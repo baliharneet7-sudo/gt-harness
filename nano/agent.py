@@ -103,16 +103,44 @@ class Agent:
                     self._truncate_if_needed(messages, transcript)
             else:
                 self._truncate_if_needed(messages, transcript)
-            gt_exposure_ids: tuple[str, ...] = ()
+            provider_exposure_ids: tuple[str, ...] = ()
             if self._gt is not None:
                 try:
-                    gt_exposure_ids = self._gt.trace_model_request(iteration, messages)
+                    self._gt.trace_model_request(iteration, messages)
                 except Exception:  # noqa: BLE001 - telemetry never blocks inference
-                    gt_exposure_ids = ()
-            sr: StepResult = self.provider.step(messages, TOOLS, self.system)
+                    pass
+            previous_request_observer = None
+            provider_observer_installed = False
+            if self._gt is not None and hasattr(
+                    self.provider, "request_observer"):
+                try:
+                    previous_request_observer = self.provider.request_observer
+
+                    def _observe_provider_request(
+                        provider_name, payload, request_iteration=iteration
+                    ):
+                        nonlocal provider_exposure_ids
+                        provider_exposure_ids = self._gt.trace_provider_request(
+                            request_iteration, provider_name, payload
+                        )
+
+                    self.provider.request_observer = _observe_provider_request
+                    provider_observer_installed = True
+                except Exception:  # noqa: BLE001 - tracing cannot block inference
+                    provider_observer_installed = False
+            try:
+                sr: StepResult = self.provider.step(messages, TOOLS, self.system)
+            finally:
+                if provider_observer_installed:
+                    try:
+                        self.provider.request_observer = previous_request_observer
+                    except Exception:  # noqa: BLE001 - telemetry cleanup only
+                        pass
             if self._gt is not None:
                 try:
-                    self._gt.trace_model_response(iteration, sr, gt_exposure_ids)
+                    self._gt.trace_model_response(
+                        iteration, sr, provider_exposure_ids
+                    )
                 except Exception:  # noqa: BLE001 - telemetry never changes the loop
                     pass
             total_in += sr.usage.input_tokens
