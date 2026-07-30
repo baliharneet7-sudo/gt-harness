@@ -16,6 +16,7 @@ from gt_engine.bridge import (
     DeliveredSpan,
     apply_profile_env,
     bash_edit_target,
+    bash_edit_targets,
     failure_fingerprint,
     parse_exit_code,
 )
@@ -424,6 +425,21 @@ def test_edit_fires_signature_mismatch_under_profile_2(indexed_repo, tmp_path):
     assert out.startswith("edited")           # pure suffix
     assert "helper()" in out                  # the arity diagnostic delivered
     assert "<gt-" not in out.lower()
+    producer_rows = [
+        row for row in b._attribution.rows
+        if row["event_type"] == "producer.invocation"
+        and row["payload"].get("producer") == "caller_contract"
+    ]
+    entered = {
+        row["payload"]["invocation_id"] for row in producer_rows
+        if row["payload"]["outcome"] == "entered"
+    }
+    terminal = {
+        row["payload"]["invocation_id"] for row in producer_rows
+        if row["payload"]["outcome"] != "entered"
+    }
+    assert entered
+    assert entered == terminal
 
 
 # --------------------------------------------------------------------------- #
@@ -442,6 +458,21 @@ def test_bash_edit_target_shapes():
     # A heredoc BODY line must not read as a redirect target.
     assert bash_edit_target(
         "cat > /tmp/t.txt <<'EOF'\n> fake.py\nEOF") is None
+
+
+def test_bash_edit_targets_include_multiple_structured_artifacts():
+    cmd = (
+        "python3 <<'PY'\n"
+        "open('output/plan_a.jsonl', 'w').write('a')\n"
+        "open('output/plan_b.jsonl', 'w').write('b')\n"
+        "PY"
+    )
+
+    assert bash_edit_targets(cmd) == (
+        "output/plan_a.jsonl",
+        "output/plan_b.jsonl",
+    )
+    assert bash_edit_target(cmd) == "output/plan_a.jsonl"
 
 
 @requires_gt
@@ -474,6 +505,65 @@ def test_bash_edit_bridges_creation_before_is_none(indexed_repo, tmp_path,
     changed, eba = b._bash_bridges(args["command"])
     assert changed == ("pkg/newmod.py",)
     assert eba == {"pkg/newmod.py": (None, "X = 1\n")}
+
+
+@requires_gt
+def test_structured_artifact_edit_can_drive_unresolved_red_submit_gate(
+    indexed_repo,
+    tmp_path,
+    monkeypatch,
+):
+    import groundtruth.runtime.patterns as runtime_patterns
+
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    # The formal-runner classifier may label an ad-hoc Python assertion as an
+    # environment failure. Its explicit AssertionError/exit status still gives
+    # the bridge an unambiguous executed RED.
+    monkeypatch.setattr(
+        runtime_patterns,
+        "classify_test_observation",
+        lambda *_args: ("env_fail", None),
+    )
+    b = indexed_repo
+    cmd = (
+        "python3 <<'PY'\n"
+        "open('output/plan_a.jsonl', 'w').write('a')\n"
+        "open('output/plan_b.jsonl', 'w').write('b')\n"
+        "PY"
+    )
+    args = {"command": cmd}
+    b.capture_bash_preimage(args)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "plan_a.jsonl").write_text("a", encoding="utf-8")
+    (output_dir / "plan_b.jsonl").write_text("b", encoding="utf-8")
+
+    b.enrich("bash", args, "", False)
+
+    assert b.edited_files == [
+        "output/plan_a.jsonl",
+        "output/plan_b.jsonl",
+    ]
+    b.enrich(
+        "bash",
+        {
+            "command": (
+                "python3 <<'PY'\n"
+                "assert metric <= limit, 'performance threshold'\n"
+                "PY"
+            )
+        },
+        (
+            "AssertionError: performance threshold for "
+            "output/plan_b.jsonl\n[exit code 1]"
+        ),
+        True,
+    )
+    assert b._observed_red is not None
+    refusal = b.submit_probe()
+    assert refusal is not None
+    assert "never re-run green" in refusal
 
 
 @requires_gt
@@ -596,6 +686,34 @@ def test_task_start_abstains_without_issue_text(indexed_repo):
     b.issue_text = ""
     assert b.task_start() is None
     assert b.deliveries == []
+
+
+@requires_gt
+def test_task_start_empty_brief_is_named_correct_quiet(indexed_repo, monkeypatch):
+    from types import SimpleNamespace
+
+    import groundtruth.pretask.v1r_brief as v1r_brief
+
+    b = indexed_repo
+    b.issue_text = "change behavior without any rankable repository surface"
+    monkeypatch.setattr(
+        v1r_brief,
+        "generate_v1r_brief",
+        lambda *_args, **_kwargs: SimpleNamespace(brief_text=""),
+    )
+
+    assert b.task_start() is None
+    events = [
+        row["payload"]
+        for row in b._attribution.rows
+        if row["event_type"] == "feature.evaluated"
+        and row["payload"].get("feature_id") == "obligations"
+    ]
+    assert events[-1] == {
+        "feature_id": "obligations",
+        "eligible": False,
+        "outcome": "brief_empty",
+    }
 
 
 def test_agent_prepends_task_start_capsule():

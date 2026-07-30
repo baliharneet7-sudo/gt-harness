@@ -327,6 +327,13 @@ def summarize_features(
         if event_type == "feature.evaluated":
             feature_id = str(payload.get("feature_id") or "")
             if bool(payload.get("eligible")):
+                outcome = str(payload.get("outcome") or "")
+                if (
+                    feature_id == "GT_EDIT_CHECK"
+                    and outcome in {"ok", "pass"}
+                ):
+                    update(feature_id, "WITNESSED", outcome)
+                    continue
                 if DIRECT_FEATURES.get(feature_id, {}).get("kind") == "CAP":
                     eligible_cap_actions.add(
                         (int(row.get("action_index", 0) or 0), feature_id)
@@ -334,7 +341,13 @@ def summarize_features(
                 update(
                     feature_id,
                     "TRIGGERED_DARK",
-                    str(payload.get("outcome") or "producer_abstained"),
+                    outcome or "producer_abstained",
+                )
+            else:
+                update(
+                    feature_id,
+                    "INELIGIBLE",
+                    str(payload.get("outcome") or "trigger_not_satisfied"),
                 )
             continue
         if event_type == "producer.invocation":

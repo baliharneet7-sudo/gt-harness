@@ -232,6 +232,14 @@ _SRC_EXTS = (
     ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".zig", ".sh",
 )
 
+# Repo-confined structured artifacts are also legitimate task outputs. They do
+# not feed the source graph or syntax checker, but tracking their mutation lets
+# the unresolved-observed-RED submit head protect data/config/document tasks.
+_ARTIFACT_EXTS = (
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".csv", ".tsv",
+    ".xml", ".txt", ".md",
+)
+
 # sed -i / tee / patch / apply_patch at line start or after a shell separator
 # (production _EDIT_KW_RE).
 _EDIT_KW_RE = re.compile(r"(?:^|[|&;]\s*)(sed\s+-i|tee\b|patch\b|apply_patch\b)")
@@ -251,6 +259,11 @@ _REDIRECT_RE = re.compile(r">>?\s*([^\s'\"<>|&;]+)")
 
 def _has_source_ext(tok: str) -> bool:
     return (tok or "").replace("\\", "/").lower().endswith(_SRC_EXTS)
+
+
+def _has_trackable_ext(tok: str) -> bool:
+    normalized = (tok or "").replace("\\", "/").lower()
+    return normalized.endswith(_SRC_EXTS + _ARTIFACT_EXTS)
 
 
 def _without_heredoc_bodies(cmd: str) -> str:
@@ -280,6 +293,15 @@ def _src_tokens(text: str) -> list[str]:
     return toks
 
 
+def _trackable_tokens(text: str) -> list[str]:
+    toks: list[str] = []
+    for tok in re.split(r"\s+", text or ""):
+        t = tok.strip("\"'`()<>;|&")
+        if _has_trackable_ext(t) and "*" not in t and "$" not in t:
+            toks.append(t)
+    return toks
+
+
 def _patch_payload_target(cmd: str) -> str | None:
     """Target of an INLINE-heredoc patch-apply command, or None."""
     first = (cmd or "").split("\n", 1)[0]
@@ -303,33 +325,53 @@ def _patch_payload_target(cmd: str) -> str | None:
     return None
 
 
-def bash_edit_target(cmd: str) -> str | None:
-    """The SOURCE file a bash command WRITES, or None (production
-    `_edit_target` mechanism: patch payload -> redirect -> edit-keyword source
-    arg -> python/node write -> deferred /tmp redirect)."""
+def bash_edit_targets(cmd: str) -> tuple[str, ...]:
+    """Repo file targets an explicit bash write mutates, in command order."""
     if not cmd:
-        return None
+        return ()
+    targets: list[str] = []
+
+    def add(target: str) -> None:
+        normalized = (target or "").strip().replace("\\", "/")
+        if (
+            normalized
+            and normalized not in targets
+            and "*" not in normalized
+            and "$" not in normalized
+        ):
+            targets.append(normalized)
+
     pt = _patch_payload_target(cmd)
     if pt:
-        return pt
+        add(pt)
+        return tuple(targets)
     nohd = _without_heredoc_bodies(cmd)
-    redir_fallback: str | None = None
+    redir_fallbacks: list[str] = []
     for mm in _REDIRECT_RE.finditer(nohd):
         t = mm.group(1).strip("\"'`()")
-        if _has_source_ext(t) and "*" not in t and "$" not in t:
+        if _has_trackable_ext(t) and "*" not in t and "$" not in t:
             if t.startswith("/tmp/"):
-                redir_fallback = redir_fallback or t  # scratch: defer
+                if _has_source_ext(t) and t not in redir_fallbacks:
+                    redir_fallbacks.append(t)  # scratch: defer
             else:
-                return t
+                add(t)
     if _EDIT_KW_RE.search(cmd.split("\n", 1)[0].lstrip()):
-        toks = _src_tokens(nohd)
-        if toks:
-            return toks[-1]
+        for target in _trackable_tokens(nohd):
+            add(target)
     for rx in (_PY_WRITE_RE, _JS_WRITE_RE):
-        m = rx.search(cmd)
-        if m and _has_source_ext(m.group(1)) and "*" not in m.group(1):
-            return m.group(1)
-    return redir_fallback
+        for match in rx.finditer(cmd):
+            if _has_trackable_ext(match.group(1)):
+                add(match.group(1))
+    if not targets:
+        for target in redir_fallbacks:
+            add(target)
+    return tuple(targets)
+
+
+def bash_edit_target(cmd: str) -> str | None:
+    """First explicit bash write target (backward-compatible single-target API)."""
+    targets = bash_edit_targets(cmd)
+    return targets[0] if targets else None
 
 
 def _edit_bridges_on() -> bool:
@@ -1132,6 +1174,20 @@ class GTBridge:
             from groundtruth.runtime.patterns import classify_test_observation
 
             outcome, _ = classify_test_observation(cmd or "", output or "", rc)
+            # Generated artifacts often have no test runner. An inline
+            # assertion is still an explicit self-check with an unambiguous
+            # fail/pass result, so keep it in the same unresolved-RED latch.
+            if (
+                outcome not in ("fail", "pass")
+                and re.search(r"\bassert\b", cmd or "")
+            ):
+                if (
+                    rc not in (None, 0)
+                    and "assertionerror" in (output or "").lower()
+                ):
+                    outcome = "fail"
+                elif rc == 0:
+                    outcome = "pass"
             if outcome not in ("fail", "pass"):
                 return  # env_fail / no-tests / non-test: latch unchanged
             if not self._test_touches_edit(cmd, output):
@@ -1171,22 +1227,26 @@ class GTBridge:
 
             if classify_command(cmd) != KIND_EDIT:
                 return
-            target = bash_edit_target(cmd)
-            if not target:
+            targets = bash_edit_targets(cmd)
+            if not targets:
                 return
-            rel = self._repo_rel(target)
-            if not rel:
-                return
-            fp = self._confined_abs(rel)
-            if fp is None:
-                return
-            if not os.path.exists(fp):
-                self._bash_preimages[rel] = None  # positive creation evidence
-                return
-            if not os.path.isfile(fp) or os.path.getsize(fp) > _MAX_BRIDGE_FILE_BYTES:
-                return  # no entry: downstream stays quiet
-            with open(fp, encoding="utf-8", errors="replace") as fh:
-                self._bash_preimages[rel] = fh.read()
+            for target in targets:
+                rel = self._repo_rel(target)
+                if not rel:
+                    continue
+                fp = self._confined_abs(rel)
+                if fp is None:
+                    continue
+                if not os.path.exists(fp):
+                    self._bash_preimages[rel] = None  # positive creation evidence
+                    continue
+                if (
+                    not os.path.isfile(fp)
+                    or os.path.getsize(fp) > _MAX_BRIDGE_FILE_BYTES
+                ):
+                    continue  # no entry: downstream stays quiet
+                with open(fp, encoding="utf-8", errors="replace") as fh:
+                    self._bash_preimages[rel] = fh.read()
         except Exception:  # noqa: BLE001 - pre-image capture must never break dispatch
             self._bash_preimages.clear()
 
@@ -1197,25 +1257,31 @@ class GTBridge:
         fabrication is worse than absence."""
         if not _edit_bridges_on():
             return (), None
-        target = bash_edit_target(cmd)
-        if not target:
+        targets = bash_edit_targets(cmd)
+        if not targets:
             return (), None
-        rel = self._repo_rel(target)
-        if not rel:
-            return (), None
-        changed: tuple[str, ...] = (rel,)
-        after: str | None = None
-        try:
-            fp = self._confined_abs(rel)
-            if (fp and os.path.isfile(fp)
-                    and os.path.getsize(fp) <= _MAX_BRIDGE_FILE_BYTES):
-                with open(fp, encoding="utf-8", errors="replace") as fh:
-                    after = fh.read()
-        except Exception:  # noqa: BLE001
-            after = None
-        if after is None or rel not in self._bash_preimages:
-            return changed, None  # changed only - never a fabricated before
-        return changed, {rel: (self._bash_preimages[rel], after)}
+        changed: list[str] = []
+        before_after: dict[str, tuple[str | None, str]] = {}
+        for target in targets:
+            rel = self._repo_rel(target)
+            if not rel:
+                continue
+            changed.append(rel)
+            after: str | None = None
+            try:
+                fp = self._confined_abs(rel)
+                if (
+                    fp
+                    and os.path.isfile(fp)
+                    and os.path.getsize(fp) <= _MAX_BRIDGE_FILE_BYTES
+                ):
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        after = fh.read()
+            except Exception:  # noqa: BLE001
+                after = None
+            if after is not None and rel in self._bash_preimages:
+                before_after[rel] = (self._bash_preimages[rel], after)
+        return tuple(changed), before_after or None
 
     # ------------------------------------------------------------------ #
     # nano tool call -> gateway event ingredients
@@ -1532,7 +1598,7 @@ class GTBridge:
             "submit",
             {
                 "feature_id": "GT_EDIT_CHECK",
-                "eligible": bool(self.edited_files),
+                "eligible": syntax_res is not None,
                 "outcome": syntax_outcome,
             },
         )
@@ -1846,8 +1912,8 @@ class GTBridge:
         if not text:
             self._trace_record(
                 "feature.evaluated", "task_start",
-                {"feature_id": "obligations", "eligible": True,
-                 "outcome": "producer_abstained"})
+                {"feature_id": "obligations", "eligible": False,
+                 "outcome": "brief_empty"})
             return None
         # Seam leak guard on the rendered bytes: in the native channel a
         # <gt-*> tag must never reach the model; test identity never may.

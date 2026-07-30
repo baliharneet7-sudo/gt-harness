@@ -219,3 +219,41 @@ def test_cap_is_witnessed_only_when_same_action_delivers_its_fact():
 
     assert summary["GT_HYPOTHESIS"]["status"] == "WITNESSED"
     assert summary["GT_CERT_DELIVERY"]["status"] == "TRIGGERED_DARK"
+
+
+def test_executed_clean_edit_check_is_witnessed_but_no_target_is_ineligible():
+    rows = [
+        {
+            "action_index": 4,
+            "event_type": "feature.evaluated",
+            "payload": {
+                "feature_id": "GT_EDIT_CHECK",
+                "eligible": True,
+                "outcome": "ok",
+            },
+        },
+    ]
+    assert summarize_features(rows)["GT_EDIT_CHECK"]["status"] == "WITNESSED"
+
+    rows[0]["payload"].update({
+        "eligible": False,
+        "outcome": "no_edited_syntax_target",
+    })
+    assert summarize_features(rows)["GT_EDIT_CHECK"]["status"] == "INELIGIBLE"
+
+
+def test_named_correct_quiet_outcome_is_retained_for_ineligible_feature():
+    rows = [{
+        "action_index": 0,
+        "event_type": "feature.evaluated",
+        "payload": {
+            "feature_id": "obligations",
+            "eligible": False,
+            "outcome": "brief_empty",
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["obligations"]["status"] == "INELIGIBLE"
+    assert summary["obligations"]["reasons"] == ["brief_empty"]
