@@ -23,6 +23,34 @@ Checks per task:
                   observable = chars inside GT-attributable blocks.
   7. PAIRING      with ``--baseline <dir>``: align tasks by name, emit the
                   no-harm table (reward / tokens / iterations / deliveries).
+  8. LEDGER-JOIN  when ``agent/gt_ledger.jsonl`` exists (GT-side seal records,
+                  one JSONL row per SEALED delivery), every ledger row is
+                  reconciled 1:1 against the agent-side transcript - gt_math's
+                  dose-reconciliation law made mechanical.  Per row:
+                    TRANSCRIPT-CONFIRMED  the shipped bytes were located in a
+                        tool_result panel (sha256 of the located slice matches
+                        the row's ``rendered_bytes_hash``, or the byte-exact
+                        text from ``gt_deliveries.txt`` was found);
+                    MODEL-ONLY  delivered to the model but structurally
+                        invisible in nano.txt - either boundary=task_start
+                        (rides the un-printed initial user message) or the
+                        target observation hit the CLI's [:2000] display cap
+                        (the GT suffix sits past the display window);
+                    UNRECONCILED  should be visible but is not = potential
+                        delivery lie (the F1 class) -> verdict RED.
+                  Ledger integrity: chain_head values must be unique 64-hex
+                  and event_ids strictly advancing; duplicate dedup_keys are
+                  flagged; >1 gateway/covering row per event_id violates the
+                  dose law.  When a ledger exists it REPLACES the heuristic
+                  dose count (ledger truth); the heuristic remains for
+                  ledgerless/baseline runs.  ``agent/gt_deliveries.txt``
+                  (optional, per-delivery framed blocks: header line carrying
+                  event_id/boundary/evidence_type/rendered_bytes_hash, then
+                  the exact shipped text, then a blank line) is sha256-checked
+                  block-by-block and used to locate/quote deliveries; when
+                  absent the auditor degrades to hash-locating panel slices.
+                  A fully reconciled ledger with clean leak/dose laws earns
+                  GREEN-delivered (proven delivery), distinct from GREEN-quiet.
 
 Anything the parser does not recognize is reported as UNPARSED - the tool
 fails loud, never lies quiet (one-sided observation scores false-green).
@@ -51,6 +79,7 @@ Known detection limits (documented, not silent):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -69,6 +98,10 @@ _STOP_RE = re.compile(
     r"\s+out=(?P<out>\d+)\s+cache_read=(?P<cache>\d+)\s*$")
 _STATS_RE = re.compile(r"^iter=(?P<iter>\d+)\s+in=(?P<in>\d+)\s+out=(?P<out>\d+)\s*$")
 _SETUP_ERROR_RE = re.compile(r"^setup error:")
+# GT L1 host-side telemetry (bare stdout between panels, never model-facing;
+# verified in-panel count = 0 across the smoke artifact). Known shape, so it
+# is consumed - an occurrence INSIDE a panel is flagged separately.
+_GT_L1_RE = re.compile(r"^\[GT L1\] ")
 
 _KNOWN_PANEL_TITLES = {"assistant", "tool_call", "tool_result", "tool_result (error)", "final"}
 
@@ -90,6 +123,7 @@ class Transcript:
     stop: dict | None = None
     stats: list[dict] = field(default_factory=list)
     setup_error: str | None = None
+    gt_l1_lines: int = 0  # host-side [GT L1] telemetry lines (outside panels)
     unparsed: list[tuple[int, str]] = field(default_factory=list)  # (lineno, line)
     unparsed_structures: list[str] = field(default_factory=list)
 
@@ -144,6 +178,9 @@ def parse_transcript(text: str) -> Transcript:
             continue
         if _SETUP_ERROR_RE.match(line.strip()):
             t.setup_error = line.strip()
+            continue
+        if _GT_L1_RE.match(line):
+            t.gt_l1_lines += 1
             continue
         t.unparsed.append((i, line))
     if cur is not None:
@@ -263,6 +300,309 @@ def detect_gt_blocks(panel: Panel) -> list[GTBlock]:
 
 
 # --------------------------------------------------------------------------- #
+# LEDGER-JOIN: reconcile GT-side seals (gt_ledger.jsonl) against the transcript
+# --------------------------------------------------------------------------- #
+# Hash contract (verified against the real smoke artifact tb2-gt-30501483446):
+#   rendered_bytes_hash = sha256(shipped bytes); shipped = the delivery lines
+#   joined with '\n' + a trailing '\n', with ONE leading '\n' only when the
+#   base observation did not already end in a newline (bridge._join).
+#   len_shipped_chars = len(shipped).  event_id N (gateway/covering) rides the
+#   N-th tool observation = the N-th tool_result panel (1-based); event_id 0
+#   with boundary=task_start rides the initial user message, which the nano
+#   CLI never prints.  The CLI displays output[:2000] per panel - a suffix
+#   past that boundary is model-received but transcript-invisible.
+_DISPLAY_CAP = 2000
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+_LEDGER_KEYS = ("event_id", "boundary", "evidence_type", "tier", "dedup_key",
+                "rendered_bytes_hash", "chain_head", "len_shipped_chars")
+# statuses
+CONFIRMED = "TRANSCRIPT-CONFIRMED"
+MODEL_ONLY = "MODEL-ONLY"
+UNRECONCILED = "UNRECONCILED"
+
+_DELIV_EVENT_RE = re.compile(r"\bevent_id=(\S+)")
+_DELIV_HASH_RE = re.compile(r"\brendered_bytes_hash=([0-9a-fA-F]{64})\b")
+
+
+@dataclass
+class LedgerRow:
+    event_id: str
+    boundary: str
+    evidence_type: str
+    tier: str
+    dedup_key: str
+    rendered_bytes_hash: str
+    chain_head: str
+    len_shipped_chars: int
+    status: str = UNRECONCILED
+    status_reason: str = ""
+    quote: str = ""
+
+
+def load_ledger(path: Path) -> tuple[list[LedgerRow], list[str]]:
+    """Parse gt_ledger.jsonl. Malformed lines are ISSUES (fail loud), never
+    silently dropped - a seal record the auditor cannot read is a seal record
+    it cannot clear."""
+    rows: list[LedgerRow] = []
+    issues: list[str] = []
+    for i, raw in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+        if not raw.strip():
+            continue
+        try:
+            d = json.loads(raw)
+            if not isinstance(d, dict):
+                raise ValueError("not an object")
+        except (json.JSONDecodeError, ValueError) as e:
+            issues.append(f"gt_ledger.jsonl line {i}: unparseable ({e})")
+            continue
+        missing = [k for k in _LEDGER_KEYS if k not in d]
+        if missing:
+            issues.append(f"gt_ledger.jsonl line {i}: missing keys {missing}")
+        try:
+            shipped = int(d.get("len_shipped_chars", 0))
+        except (TypeError, ValueError):
+            shipped = 0
+            issues.append(f"gt_ledger.jsonl line {i}: non-integer len_shipped_chars")
+        rows.append(LedgerRow(
+            event_id=str(d.get("event_id", "")), boundary=str(d.get("boundary", "")),
+            evidence_type=str(d.get("evidence_type", "")), tier=str(d.get("tier", "")),
+            dedup_key=str(d.get("dedup_key", "")),
+            rendered_bytes_hash=str(d.get("rendered_bytes_hash", "")),
+            chain_head=str(d.get("chain_head", "")), len_shipped_chars=shipped))
+    return rows, issues
+
+
+_DELIV_HEADER_LINE_RE = re.compile(
+    r"^(?=.*\bevent_id=\S)(?=.*\brendered_bytes_hash=[0-9a-fA-F]{64}\b).*$",
+    re.MULTILINE)
+
+
+def load_deliveries(path: Path) -> tuple[dict[str, str], list[str]]:
+    """Parse the OPTIONAL gt_deliveries.txt: per-delivery framed blocks - a
+    header line carrying event_id=... rendered_bytes_hash=<64hex> (the bridge
+    writes ``--- event_id=<id> boundary=<b> evidence_type=<t>
+    rendered_bytes_hash=<h> ---``), then the EXACT shipped bytes, then a blank
+    line.  Framing is header-delimited (the shipped text itself may begin with
+    a newline or contain blank lines), and each block is sha256-verified
+    against its header hash with the writer's ``shipped + '\\n\\n'`` frame
+    peeled 0-2 trailing newlines.  Returns {event_id: verified_text}; a block
+    that fails verification is an ISSUE and yields no text - tampered bytes
+    must never be used to 'confirm' a delivery."""
+    texts: dict[str, str] = {}
+    issues: list[str] = []
+    content = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    headers = list(_DELIV_HEADER_LINE_RE.finditer(content))
+    if not headers:
+        issues.append("gt_deliveries.txt: no delivery header lines recognized")
+        return texts, issues
+    lead = content[:headers[0].start()]
+    if lead.strip():
+        issues.append(
+            f"gt_deliveries.txt: unrecognized content before the first header: "
+            f"{lead.strip()[:80]}")
+    for k, m in enumerate(headers):
+        eid = _DELIV_EVENT_RE.search(m.group(0)).group(1)  # guaranteed by regex
+        want = _DELIV_HASH_RE.search(m.group(0)).group(1).lower()
+        start = m.end()
+        if start < len(content) and content[start] == "\n":
+            start += 1
+        end = headers[k + 1].start() if k + 1 < len(headers) else len(content)
+        seg = content[start:end]
+        verified = None
+        for cand in (seg, seg[:-1] if seg.endswith("\n") else None,
+                     seg[:-2] if seg.endswith("\n\n") else None,
+                     seg + "\n"):
+            if cand and hashlib.sha256(
+                    cand.encode("utf-8", "surrogatepass")).hexdigest() == want:
+                verified = cand
+                break
+        if verified is None:
+            issues.append(
+                f"gt_deliveries.txt event {eid}: block text fails sha256 against "
+                f"header hash {want[:12]}... (tamper or corruption)")
+        elif eid in texts:
+            issues.append(f"gt_deliveries.txt: duplicate block for event {eid}")
+        else:
+            texts[eid] = verified
+    return texts, issues
+
+
+def _hash_scan_panel(panel: Panel, row: LedgerRow) -> str | None:
+    """Try to find a contiguous run of panel lines whose joined text (with the
+    bridge's newline variants) hashes to the row's rendered_bytes_hash.
+    Returns the matched shipped text, or None."""
+    lines = panel.lines
+    want = row.rendered_bytes_hash
+    target = row.len_shipped_chars
+    for j in range(len(lines), 0, -1):
+        for i in range(j - 1, -1, -1):
+            cand = "\n".join(lines[i:j]) + "\n"
+            if len(cand) > target + 1:
+                break  # extending further back only grows the candidate
+            if len(cand) == target and hashlib.sha256(
+                    cand.encode("utf-8", "surrogatepass")).hexdigest() == want:
+                return cand
+            if len(cand) + 1 == target and hashlib.sha256(
+                    ("\n" + cand).encode("utf-8", "surrogatepass")).hexdigest() == want:
+                return "\n" + cand
+    return None
+
+
+def _target_panel(row: LedgerRow, tool_panels: list[Panel]) -> tuple[int, Panel] | None:
+    """event_id N (1-based tool-action index) -> the N-th tool_result panel."""
+    try:
+        idx = int(row.event_id)
+    except ValueError:
+        return None
+    if 1 <= idx <= len(tool_panels):
+        return idx, tool_panels[idx - 1]
+    return None
+
+
+def _first_line(text: str) -> str:
+    for ln in text.splitlines():
+        if ln.strip():
+            return ln.strip()[:120]
+    return ""
+
+
+def reconcile_ledger(rows: list[LedgerRow], tool_panels: list[Panel],
+                     deliveries: dict[str, str], deliveries_issue_ids: set[str],
+                     ) -> None:
+    """Assign a reconciliation status to every ledger row, in place."""
+    for row in rows:
+        # 0. a deliveries block that FAILED its hash check poisons the row:
+        #    the one byte-source we were given is untrustworthy -> F1 class.
+        if row.event_id in deliveries_issue_ids:
+            row.status = UNRECONCILED
+            row.status_reason = ("gt_deliveries.txt block for this event fails "
+                                 "its sha256 check - byte source untrusted")
+            continue
+        text = deliveries.get(row.event_id)
+        # 1. byte-exact join via the deliveries file (when present).
+        if text is not None:
+            if hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest() \
+                    != row.rendered_bytes_hash:
+                row.status = UNRECONCILED
+                row.status_reason = ("gt_deliveries.txt bytes verify against their "
+                                     "header but NOT against the ledger row hash "
+                                     "(ledger/deliveries disagree)")
+                continue
+            body = text.strip("\n")
+            hit = None
+            for k, p in enumerate(tool_panels, start=1):
+                if body and body in p.text:
+                    hit = (k, p, "byte-exact")
+                    break
+                joined = " ".join(ln.strip() for ln in p.lines if ln.strip())
+                if body and all(ln.strip() in joined
+                                for ln in body.splitlines() if ln.strip()):
+                    hit = (k, p, "wrap-tolerant")
+                    break
+            if hit:
+                k, p, how = hit
+                row.status = CONFIRMED
+                row.status_reason = (f"deliveries-file bytes located ({how}) in "
+                                     f"tool_result #{k} (panel line {p.start_line})")
+                row.quote = _first_line(text)
+                continue
+            # fall through: bytes known but not visible - explain or escalate
+        else:
+            # 2. no byte source: hash-locate a panel slice (target panel first,
+            #    then all panels - deterministic order).
+            ordered: list[tuple[int, Panel]] = []
+            tp = _target_panel(row, tool_panels)
+            if tp:
+                ordered.append(tp)
+            ordered.extend((k, p) for k, p in enumerate(tool_panels, start=1)
+                           if not tp or p is not tp[1])
+            located = None
+            for k, p in ordered:
+                m = _hash_scan_panel(p, row)
+                if m is not None:
+                    located = (k, p, m)
+                    break
+            if located:
+                k, p, m = located
+                row.status = CONFIRMED
+                row.status_reason = (f"sha256 of a panel slice matches the seal - "
+                                     f"tool_result #{k} (panel line {p.start_line})")
+                row.quote = _first_line(m)
+                continue
+        # 3. explained invisibility, else UNRECONCILED.
+        if row.boundary == "task_start":
+            row.status = MODEL_ONLY
+            row.status_reason = ("task_start capsule rides the initial user "
+                                 "message, which the nano CLI never prints - "
+                                 "invisible by construction")
+            continue
+        tp = _target_panel(row, tool_panels)
+        if tp and len(tp[1].text) >= _DISPLAY_CAP:
+            row.status = MODEL_ONLY
+            row.status_reason = (
+                f"display-cap truncation: tool_result #{tp[0]} (panel line "
+                f"{tp[1].start_line}) shows >= {_DISPLAY_CAP} chars - the CLI "
+                f"prints output[:{_DISPLAY_CAP}], so the GT suffix sits past "
+                f"the display window (model-received, transcript-invisible)")
+            continue
+        row.status = UNRECONCILED
+        if tp is None:
+            row.status_reason = (f"event_id {row.event_id!r} maps to no tool "
+                                 f"observation ({len(tool_panels)} panels seen) "
+                                 "and bytes were not located anywhere")
+        else:
+            row.status_reason = (f"tool_result #{tp[0]} (panel line "
+                                 f"{tp[1].start_line}, {len(tp[1].text)} chars, "
+                                 "under the display cap) does not contain the "
+                                 "sealed bytes - potential delivery lie")
+
+
+def check_ledger_integrity(rows: list[LedgerRow]) -> tuple[list[str], list[str]]:
+    """Chain/dedup integrity + the ledger-truth dose law.
+    Returns (integrity_issues, dose_violations)."""
+    issues: list[str] = []
+    dose: list[str] = []
+    seen_heads: dict[str, str] = {}
+    seen_dedup: dict[str, str] = {}
+    prev_eid: int | None = None
+    gateway_per_event: dict[str, int] = {}
+    for r in rows:
+        if not _HEX64_RE.match(r.chain_head):
+            issues.append(f"ev{r.event_id}: chain_head is not 64-hex "
+                          f"({r.chain_head[:16]!r}...)")
+        elif r.chain_head in seen_heads:
+            issues.append(f"ev{r.event_id}: chain_head duplicates "
+                          f"ev{seen_heads[r.chain_head]} (chain must strictly "
+                          "advance; identical heads = replay/tamper)")
+        else:
+            seen_heads[r.chain_head] = r.event_id
+        if r.dedup_key:
+            if r.dedup_key in seen_dedup:
+                issues.append(f"ev{r.event_id}: dedup_key {r.dedup_key} already "
+                              f"sealed at ev{seen_dedup[r.dedup_key]} (double "
+                              "delivery of one fact)")
+            else:
+                seen_dedup[r.dedup_key] = r.event_id
+        try:
+            eid = int(r.event_id)
+            if prev_eid is not None and eid < prev_eid:
+                issues.append(f"ev{r.event_id}: event_id regressed after "
+                              f"ev{prev_eid} (seal order must advance)")
+            prev_eid = eid
+        except ValueError:
+            issues.append(f"non-numeric event_id {r.event_id!r}")
+        if r.boundary in ("gateway", "covering"):
+            gateway_per_event[r.event_id] = gateway_per_event.get(r.event_id, 0) + 1
+    for eid in sorted(gateway_per_event, key=lambda s: (len(s), s)):
+        if gateway_per_event[eid] > 1:
+            dose.append(f"ledger dose-law violation: {gateway_per_event[eid]} "
+                        f"gateway/covering rows sealed for event {eid} "
+                        "(at most ONE dose per observation)")
+    return issues, dose
+
+
+# --------------------------------------------------------------------------- #
 # per-task audit
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -280,11 +620,18 @@ class TaskAudit:
     agent_error: str | None = None
     exception_info: str | None = None
     reward: float | None = None
-    # gt activity
+    # gt activity (gt_deliveries = ledger truth when a ledger exists,
+    # else the heuristic transcript-block count)
     code_task: bool = False
     gt_deliveries: int = 0
     gt_delivery_kinds: dict[str, int] = field(default_factory=dict)
     gt_overhead_chars: int = 0
+    gt_blocks_observed: int = 0  # heuristic count, always reported
+    # ledger join
+    ledger_present: bool = False
+    deliveries_file_present: bool = False
+    ledger_rows: list[LedgerRow] = field(default_factory=list)
+    ledger_issues: list[str] = field(default_factory=list)
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -355,32 +702,76 @@ def audit_task(task_dir: Path) -> TaskAudit:
     if t.setup_error:
         a.agent_error = a.agent_error or t.setup_error[:300]
 
+    # LEDGER-JOIN inputs --------------------------------------------------- #
+    ledger_path = task_dir / "agent" / "gt_ledger.jsonl"
+    a.ledger_present = ledger_path.is_file()
+    ledger_rows: list[LedgerRow] = []
+    if a.ledger_present:
+        ledger_rows, issues = load_ledger(ledger_path)
+        a.ledger_issues.extend(issues)
+    deliveries_texts: dict[str, str] = {}
+    deliveries_bad_ids: set[str] = set()
+    deliv_path = task_dir / "agent" / "gt_deliveries.txt"
+    a.deliveries_file_present = deliv_path.is_file()
+    if a.deliveries_file_present:
+        deliveries_texts, dl_issues = load_deliveries(deliv_path)
+        a.ledger_issues.extend(dl_issues)
+        for msg in dl_issues:
+            m = re.search(r"event (\S+):", msg)
+            if m:
+                deliveries_bad_ids.add(m.group(1))
+
     # 2-6. per-panel checks ------------------------------------------------ #
     all_blocks: list[GTBlock] = []
+    tool_panels: list[Panel] = []
     for p in t.panels:
         if p.title.startswith("tool_result"):
             a.tool_results += 1
+            tool_panels.append(p)
             if p.title == "tool_result (error)" or p.text.startswith("ERROR:"):
                 a.tool_errors += 1
             blocks = detect_gt_blocks(p)
             all_blocks.extend(blocks)
-            if len(blocks) > 1:
+            if len(blocks) > 1 and not a.ledger_present:
+                # heuristic dose law - ledger truth supersedes it when present
                 kinds = ", ".join(b.kind for b in blocks)
                 a.dose_violations.append(
                     f"panel at line {p.start_line}: {len(blocks)} GT blocks in one "
                     f"observation ({kinds})")
+            if any(_GT_L1_RE.match(ln) for ln in p.lines):
+                a.review_flags.append(
+                    f"[GT L1] telemetry INSIDE a model-facing panel at line "
+                    f"{p.start_line} - host diagnostics leaked into an observation")
         elif p.title == "tool_call":
             if _SOURCE_EXT_RE.search(p.text) or p.text.startswith("edit_file("):
                 a.code_task = True
 
-    a.gt_deliveries = len(all_blocks)
+    a.gt_blocks_observed = len(all_blocks)
     for b in all_blocks:
-        a.gt_delivery_kinds[b.kind] = a.gt_delivery_kinds.get(b.kind, 0) + 1
-        a.gt_overhead_chars += len(b.text)
         if _TEST_IDENTITY_RE.search(b.text):
             a.review_flags.append(
                 f"possible test identity inside GT block ({b.kind}, panel line "
                 f"{b.panel_start_line}) - human review")
+
+    if a.ledger_present:
+        # ledger truth replaces the heuristic count (fired-side undercounts -
+        # bare grep rows, display caps, task_start - become explained rows).
+        a.gt_deliveries = len(ledger_rows)
+        for r in ledger_rows:
+            a.gt_delivery_kinds[r.evidence_type] = \
+                a.gt_delivery_kinds.get(r.evidence_type, 0) + 1
+            a.gt_overhead_chars += r.len_shipped_chars
+        reconcile_ledger(ledger_rows, tool_panels, deliveries_texts,
+                         deliveries_bad_ids)
+        integ, dose = check_ledger_integrity(ledger_rows)
+        a.ledger_issues.extend(integ)
+        a.dose_violations.extend(dose)
+        a.ledger_rows = ledger_rows
+    else:
+        a.gt_deliveries = len(all_blocks)
+        for b in all_blocks:
+            a.gt_delivery_kinds[b.kind] = a.gt_delivery_kinds.get(b.kind, 0) + 1
+            a.gt_overhead_chars += len(b.text)
     a.gt_delivery_kinds = dict(sorted(a.gt_delivery_kinds.items()))
 
     # 3. LEAK LAW: <gt-*> anywhere in the transcript ------------------------ #
@@ -405,10 +796,18 @@ def audit_task(task_dir: Path) -> TaskAudit:
     if a.leak_tag_count:
         a.verdict_reasons.append(
             f"LEAK: <gt-*> tag visible in observations x{a.leak_tag_count}")
-    if a.agent_error or a.exception_info or a.leak_tag_count or a.stop_reason == "error":
+    unreconciled = [r for r in a.ledger_rows if r.status == UNRECONCILED]
+    for r in unreconciled:
+        a.verdict_reasons.append(
+            f"UNRECONCILED ledger row ev{r.event_id} ({r.evidence_type}, "
+            f"{r.len_shipped_chars}c): {r.status_reason}")
+    if (a.agent_error or a.exception_info or a.leak_tag_count
+            or a.stop_reason == "error" or unreconciled):
         a.verdict = "RED"
         return a
 
+    if a.ledger_issues:
+        a.verdict_reasons.extend(a.ledger_issues)
     if a.dose_violations:
         a.verdict_reasons.extend(a.dose_violations)
     if a.review_flags:
@@ -434,6 +833,16 @@ def audit_task(task_dir: Path) -> TaskAudit:
             a.verdict = "GREEN-dormant"
             a.verdict_reasons.append(
                 "non-code task, zero GT deliveries (dormancy is correct)")
+    elif a.ledger_present:
+        # every sealed row is TRANSCRIPT-CONFIRMED or explained MODEL-ONLY,
+        # leak/dose/chain laws clean: delivery is PROVEN, not just quiet.
+        confirmed = sum(1 for r in a.ledger_rows if r.status == CONFIRMED)
+        model_only = sum(1 for r in a.ledger_rows if r.status == MODEL_ONLY)
+        a.verdict = "GREEN-delivered"
+        a.verdict_reasons.append(
+            f"{len(a.ledger_rows)} sealed deliver(y/ies) fully reconciled: "
+            f"{confirmed} transcript-confirmed, {model_only} model-only "
+            "(explained); chain and dose laws clean")
     else:
         a.verdict = "GREEN"
     return a
@@ -476,20 +885,23 @@ def _fmt(v: object, width: int) -> str:
 def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
     out: list[str] = []
     out.append(f"GT AUDIT  {run_dir}")
-    out.append("=" * 100)
-    hdr = (_fmt("task", 34) + _fmt("verdict", 14) + _fmt("stop", 12) + _fmt("iter", 6)
-           + _fmt("in/out tok", 16) + _fmt("reward", 8) + _fmt("gt", 4) + _fmt("err%", 6))
+    out.append("=" * 104)
+    hdr = (_fmt("task", 34) + _fmt("verdict", 16) + _fmt("stop", 12) + _fmt("iter", 6)
+           + _fmt("in/out tok", 16) + _fmt("reward", 8) + _fmt("gt", 5) + _fmt("err%", 6))
     out.append(hdr)
-    out.append("-" * 100)
+    out.append("-" * 104)
     for a in audits:
         tok = None
         if a.in_tokens is not None or a.out_tokens is not None:
             tok = f"{a.in_tokens or 0}/{a.out_tokens or 0}"
         er = None if a.error_rate is None else f"{a.error_rate:.0%}"
-        out.append(_fmt(a.task_name, 34) + _fmt(a.verdict, 14) + _fmt(a.stop_reason, 12)
+        gt_col = f"{a.gt_deliveries}L" if a.ledger_present else str(a.gt_deliveries)
+        out.append(_fmt(a.task_name, 34) + _fmt(a.verdict, 16) + _fmt(a.stop_reason, 12)
                    + _fmt(a.iterations, 6) + _fmt(tok, 16) + _fmt(a.reward, 8)
-                   + _fmt(a.gt_deliveries, 4) + _fmt(er, 6))
-    out.append("-" * 100)
+                   + _fmt(gt_col, 5) + _fmt(er, 6))
+    out.append("-" * 104)
+    out.append("gt column: deliveries ('NL' = N sealed rows from gt_ledger.jsonl = "
+               "ledger truth; bare N = transcript heuristic, no ledger)")
     for a in audits:
         out.append(f"\n{a.task_name} [{a.verdict}]")
         for r in a.verdict_reasons:
@@ -497,7 +909,26 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
         if a.gt_delivery_kinds:
             out.append(f"  - GT delivery kinds: {a.gt_delivery_kinds}")
         if a.gt_overhead_chars:
-            out.append(f"  - GT overhead observable: {a.gt_overhead_chars} chars")
+            src = "sealed (ledger)" if a.ledger_present else "observable"
+            out.append(f"  - GT overhead {src}: {a.gt_overhead_chars} chars")
+        if a.ledger_present:
+            n_c = sum(1 for r in a.ledger_rows if r.status == CONFIRMED)
+            n_m = sum(1 for r in a.ledger_rows if r.status == MODEL_ONLY)
+            n_u = sum(1 for r in a.ledger_rows if r.status == UNRECONCILED)
+            deliv = (" + gt_deliveries.txt" if a.deliveries_file_present else "")
+            out.append(f"  - LEDGER{deliv}: {len(a.ledger_rows)} sealed row(s) | "
+                       f"{n_c} {CONFIRMED}, {n_m} {MODEL_ONLY}, {n_u} {UNRECONCILED}"
+                       f" | heuristic blocks observed: {a.gt_blocks_observed}")
+            for r in a.ledger_rows:
+                line = (f"      ev{_fmt(r.event_id, 5)} "
+                        f"{_fmt(r.evidence_type, 22)} {_fmt(r.tier, 11)} "
+                        f"{_fmt(str(r.len_shipped_chars) + 'c', 6)} {r.status}")
+                out.append(line)
+                out.append(f"            {r.status_reason}")
+                if r.quote:
+                    out.append(f"            quote: {r.quote}")
+            for s in a.ledger_issues:
+                out.append(f"  - LEDGER-ISSUE {s}")
         for n in a.notes:
             out.append(f"  - note: {n}")
         for s in a.unparsed_samples:

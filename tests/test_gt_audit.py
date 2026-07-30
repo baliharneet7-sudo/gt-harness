@@ -8,8 +8,10 @@ detection, pairing - are pinned before a healthy artifact exists.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +21,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "gt_audit.py"
 CRASHED_RUN = Path(__file__).resolve().parent / "fixtures" / "gt_audit" / "crashed_run"
+SMOKE_RUN = Path(__file__).resolve().parent / "fixtures" / "gt_audit" / "smoke_run"
 
 _spec = importlib.util.spec_from_file_location("gt_audit", SCRIPT)
 gt_audit = importlib.util.module_from_spec(_spec)
@@ -338,3 +341,293 @@ def test_nested_run_dir_is_found(tmp_path):
 def test_empty_run_dir_fails_loud(tmp_path):
     with pytest.raises(SystemExit):
         gt_audit.audit_run(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# 8. LEDGER-JOIN - fixtures derived from the REAL smoke artifact
+#    (tb2-gt-30501483446 / llm-inference-batching-scheduler: real nano.txt
+#    excerpt through tool_result #2 + real trailing stop/final panel, plus the
+#    real 3-row gt_ledger.jsonl).
+# --------------------------------------------------------------------------- #
+# the REAL shipped bytes of ev1 (verified: sha256 == the ledger row hash)
+EV1_TEXT = ("task_file/scripts/cost_model.py:28:align\n"
+            "task_file/scripts/baseline_packer.py:37:load_requests\n")
+EV1_HASH = "16b158360fab054f58554d7762ec60da87765f853d688e5b348ca21c1ea63cbf"
+
+
+def copy_smoke(tmp_path: Path) -> Path:
+    dst = tmp_path / "run"
+    shutil.copytree(SMOKE_RUN, dst)
+    return dst
+
+
+def smoke_task_agent(run_dir: Path) -> Path:
+    return run_dir / "llm-inference-batching-scheduler__kbuaa8w" / "agent"
+
+
+def test_smoke_fixture_hash_contract_is_real():
+    # pin the hash contract itself: shipped bytes = rows + trailing '\n'
+    assert hashlib.sha256(EV1_TEXT.encode()).hexdigest() == EV1_HASH
+    ledger = (smoke_task_agent(SMOKE_RUN) / "gt_ledger.jsonl").read_text()
+    assert EV1_HASH in ledger
+
+
+def test_smoke_fixture_reconciles_green_delivered():
+    audits = gt_audit.audit_run(SMOKE_RUN)
+    assert len(audits) == 1
+    a = audits[0]
+    assert a.verdict == "GREEN-delivered"
+    assert a.ledger_present is True
+    assert a.gt_deliveries == 3  # ledger truth, NOT the heuristic (which sees 0)
+    assert a.gt_blocks_observed == 0
+    assert a.gt_overhead_chars == 537 + 95 + 178
+    assert a.gt_delivery_kinds == {
+        "caller_contract_view": 1, "localization": 1, "obligations": 1}
+    by_ev = {r.event_id: r for r in a.ledger_rows}
+    # ev0: task_start capsule -> MODEL-ONLY by construction
+    assert by_ev["0"].status == "MODEL-ONLY"
+    assert "initial user message" in by_ev["0"].status_reason
+    # ev1: the real localization delivery, hash-located in tool_result #1
+    assert by_ev["1"].status == "TRANSCRIPT-CONFIRMED"
+    assert "tool_result #1" in by_ev["1"].status_reason
+    assert by_ev["1"].quote == "task_file/scripts/cost_model.py:28:align"
+    # ev2: caller_contract_view suffix past the CLI [:2000] display cap
+    assert by_ev["2"].status == "MODEL-ONLY"
+    assert "display-cap" in by_ev["2"].status_reason
+    # real transcript parses fully ([GT L1] telemetry is a known shape now)
+    assert a.unparsed_lines == 0
+    assert not a.unparsed_structures
+    assert not a.ledger_issues and not a.dose_violations
+
+
+def test_smoke_fixture_cli_json_and_exit_code(tmp_path):
+    out_json = tmp_path / "audit.json"
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), str(SMOKE_RUN), "--json", str(out_json)],
+        capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0
+    assert "GREEN-delivered" in proc.stdout
+    assert "3L" in proc.stdout  # gt column marks ledger truth
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    task = data["tasks"][0]
+    assert task["verdict"] == "GREEN-delivered"
+    assert task["ledger_present"] is True
+    assert [r["status"] for r in task["ledger_rows"]] == [
+        "MODEL-ONLY", "TRANSCRIPT-CONFIRMED", "MODEL-ONLY"]
+
+
+def test_smoke_report_is_deterministic():
+    r1 = gt_audit.render_report(gt_audit.audit_run(SMOKE_RUN), SMOKE_RUN)
+    r2 = gt_audit.render_report(gt_audit.audit_run(SMOKE_RUN), SMOKE_RUN)
+    assert r1 == r2
+
+
+def test_tampered_ledger_row_is_unreconciled_red(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    rows = [json.loads(x) for x in lp.read_text().splitlines()]
+    rows[1]["rendered_bytes_hash"] = "0" * 64  # tamper the sealed byte-proof
+    lp.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert a.verdict == "RED"
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "UNRECONCILED"
+    assert any("UNRECONCILED ledger row ev1" in r for r in a.verdict_reasons)
+
+
+def test_chain_head_duplicate_is_flagged(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    rows = [json.loads(x) for x in lp.read_text().splitlines()]
+    rows[2]["chain_head"] = rows[0]["chain_head"]  # chain must strictly advance
+    lp.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert a.verdict == "YELLOW"  # integrity flag, not the F1 delivery-lie class
+    assert any("chain_head duplicates" in s for s in a.ledger_issues)
+
+
+def test_event_id_regression_is_flagged(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    rows = [json.loads(x) for x in lp.read_text().splitlines()]
+    rows.append(dict(rows[0]))  # re-seal event 0 AFTER event 2
+    rows[-1]["chain_head"] = "f" * 64
+    rows[-1]["dedup_key"] = "ffffffffffffffff"
+    lp.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert any("event_id regressed" in s for s in a.ledger_issues)
+    assert a.verdict == "YELLOW"
+
+
+def test_duplicate_dedup_key_is_flagged(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    rows = [json.loads(x) for x in lp.read_text().splitlines()]
+    rows[2]["dedup_key"] = rows[1]["dedup_key"]  # one fact sealed twice
+    lp.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert any("dedup_key" in s and "already" in s for s in a.ledger_issues)
+    assert a.verdict == "YELLOW"
+
+
+def test_ledger_dose_law_two_gateway_rows_one_event(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    rows = [json.loads(x) for x in lp.read_text().splitlines()]
+    dup = dict(rows[1])  # second gateway seal on the SAME observation
+    dup["chain_head"] = "e" * 64
+    dup["dedup_key"] = "eeeeeeeeeeeeeeee"
+    rows.insert(2, dup)
+    lp.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert any("dose-law violation" in s and "event 1" in s
+               for s in a.dose_violations)
+    assert a.verdict == "YELLOW"
+
+
+def test_malformed_ledger_line_fails_loud(tmp_path):
+    run = copy_smoke(tmp_path)
+    lp = smoke_task_agent(run) / "gt_ledger.jsonl"
+    lp.write_text(lp.read_text() + "{not json\n", encoding="utf-8")
+    a = gt_audit.audit_run(run)[0]
+    assert any("unparseable" in s for s in a.ledger_issues)
+    assert a.verdict == "YELLOW"
+
+
+# --------------------------------------------------------------------------- #
+# 9. gt_deliveries.txt - optional byte-source, sha256 contract
+# --------------------------------------------------------------------------- #
+def write_deliveries(run: Path, blocks: list[tuple[str, str, str, str, str]]) -> None:
+    """blocks: (event_id, boundary, evidence_type, hash, text)."""
+    out: list[str] = []
+    for eid, boundary, ev_type, h, text in blocks:
+        out.append(f"event_id={eid} boundary={boundary} evidence_type={ev_type} "
+                   f"rendered_bytes_hash={h}")
+        out.extend(text.strip("\n").splitlines())
+        out.append("")
+    (smoke_task_agent(run) / "gt_deliveries.txt").write_text(
+        "\n".join(out) + "\n", encoding="utf-8")
+
+
+def test_deliveries_file_verified_and_used_for_join(tmp_path):
+    run = copy_smoke(tmp_path)
+    write_deliveries(run, [("1", "gateway", "localization", EV1_HASH, EV1_TEXT)])
+    a = gt_audit.audit_run(run)[0]
+    assert a.deliveries_file_present is True
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "TRANSCRIPT-CONFIRMED"
+    assert "deliveries-file bytes located" in ev1.status_reason
+    assert ev1.quote == "task_file/scripts/cost_model.py:28:align"
+    assert a.verdict == "GREEN-delivered"
+    assert not a.ledger_issues
+
+
+def test_deliveries_file_bridge_exact_format(tmp_path):
+    # pin the EXACT gt_engine/bridge.py writer frame: '--- ... ---' header,
+    # then shipped bytes verbatim, then b'\n\n' (shipped may START with '\n').
+    run = copy_smoke(tmp_path)
+    lead_text = "\n" + EV1_TEXT  # leading-newline join variant
+    lead_hash = hashlib.sha256(lead_text.encode()).hexdigest()
+    raw = (f"--- event_id=1 boundary=gateway evidence_type=localization "
+           f"rendered_bytes_hash={lead_hash} ---\n"
+           + lead_text + "\n\n")
+    (smoke_task_agent(run) / "gt_deliveries.txt").write_bytes(raw.encode())
+    texts, issues = gt_audit.load_deliveries(
+        smoke_task_agent(run) / "gt_deliveries.txt")
+    assert issues == []
+    assert texts == {"1": lead_text}
+    # the run still reconciles: header hash differs from the ledger seal
+    # (ledger sealed the no-leading-newline variant), which must be REPORTED,
+    # not silently accepted.
+    a = gt_audit.audit_run(run)[0]
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "UNRECONCILED"
+    assert "disagree" in ev1.status_reason
+
+
+def test_deliveries_file_bridge_format_matching_ledger(tmp_path):
+    run = copy_smoke(tmp_path)
+    raw = (f"--- event_id=1 boundary=gateway evidence_type=localization "
+           f"rendered_bytes_hash={EV1_HASH} ---\n"
+           + EV1_TEXT + "\n\n")
+    (smoke_task_agent(run) / "gt_deliveries.txt").write_bytes(raw.encode())
+    a = gt_audit.audit_run(run)[0]
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "TRANSCRIPT-CONFIRMED"
+    assert "deliveries-file bytes located" in ev1.status_reason
+    assert a.verdict == "GREEN-delivered"
+
+
+def test_deliveries_block_hash_mismatch_is_red(tmp_path):
+    run = copy_smoke(tmp_path)
+    write_deliveries(run, [
+        ("1", "gateway", "localization", EV1_HASH,
+         EV1_TEXT.replace("28", "99"))])  # tampered shipped text
+    a = gt_audit.audit_run(run)[0]
+    assert any("fails sha256" in s for s in a.ledger_issues)
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "UNRECONCILED"
+    assert a.verdict == "RED"
+
+
+def test_deliveries_header_ledger_disagreement_is_red(tmp_path):
+    # block verifies against ITS OWN header hash, but that hash is not the
+    # ledger row's seal -> the two GT-side records disagree -> F1 class.
+    run = copy_smoke(tmp_path)
+    fake_text = "task_file/scripts/other.py:1:nope\n"
+    fake_hash = hashlib.sha256(fake_text.encode()).hexdigest()
+    write_deliveries(run, [("1", "gateway", "localization", fake_hash, fake_text)])
+    a = gt_audit.audit_run(run)[0]
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "UNRECONCILED"
+    assert "disagree" in ev1.status_reason
+    assert a.verdict == "RED"
+
+
+def test_absent_deliveries_file_degrades_to_hash_locate():
+    a = gt_audit.audit_run(SMOKE_RUN)[0]
+    assert a.deliveries_file_present is False
+    ev1 = next(r for r in a.ledger_rows if r.event_id == "1")
+    assert ev1.status == "TRANSCRIPT-CONFIRMED"
+    assert "sha256 of a panel slice" in ev1.status_reason
+
+
+# --------------------------------------------------------------------------- #
+# 10. ledgerless behavior unchanged + [GT L1] telemetry handling
+# --------------------------------------------------------------------------- #
+def test_ledgerless_run_keeps_heuristic_behavior(tmp_path):
+    make_task_dir(tmp_path, "datecheck__abc", "datecheck", HEALTHY_NONCODE,
+                  reward=1.0)
+    a = gt_audit.audit_run(tmp_path)[0]
+    assert a.ledger_present is False
+    assert a.verdict == "GREEN-dormant"  # never GREEN-delivered without a ledger
+    assert a.ledger_rows == []
+
+
+def test_gt_l1_lines_outside_panels_are_known_shape(tmp_path):
+    transcript = "\n".join([
+        panel("tool_call", "bash(command='grep -rn foo /app')"),
+        "[GT L1] grep-to-seed: searching 3 tokens in /app",
+        "[GT L1] FTS5: query returned 2 candidates",
+        panel("tool_result", "ok"),
+        stop_line(),
+        panel("final", "done"),
+    ])
+    make_task_dir(tmp_path, "t__1", "t", transcript)
+    a = gt_audit.audit_run(tmp_path)[0]
+    assert a.unparsed_lines == 0
+    assert a.verdict in ("GREEN-dormant", "GREEN-quiet")
+
+
+def test_gt_l1_inside_a_panel_is_flagged(tmp_path):
+    transcript = "\n".join([
+        panel("tool_call", "bash(command='ls')"),
+        panel("tool_result", "ok\n[GT L1] FTS5: query returned 2 candidates",
+              width=100),
+        stop_line(),
+        panel("final", "done"),
+    ])
+    make_task_dir(tmp_path, "t__1", "t", transcript)
+    a = gt_audit.audit_run(tmp_path)[0]
+    assert any("[GT L1] telemetry INSIDE" in f for f in a.review_flags)
+    assert a.verdict == "YELLOW"
