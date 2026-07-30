@@ -225,6 +225,72 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
             "symbol_count": 3,
             "node_count": 4,
             "surface_hits": {"nodes_fts": 2, "closure": 1},
+            "revision": "graph-r1",
+            "router_revision": "graph-r1",
+            "semantic_fact_count": 8,
+        },
+    )
+    trace.record(
+        "role_pack.selected",
+        action_index=0,
+        boundary="task_start",
+        payload={"pack_id": "code-build", "version": "1"},
+    )
+    for predicate_id in ("pred-1", "pred-2", "pred-3", "pred-4"):
+        trace.record(
+            "contract.predicate_compiled",
+            action_index=0,
+            boundary="task_start",
+            payload={"predicate_id": predicate_id, "kind": "behavior"},
+        )
+    trace.record(
+        "contract.predicate_observed",
+        action_index=3,
+        boundary="test",
+        payload={"predicate_id": "pred-1", "kind": "behavior"},
+    )
+    trace.record(
+        "graph.context_refreshed",
+        action_index=2,
+        boundary="post_edit",
+        payload={"revision": "graph-r2"},
+    )
+    trace.record(
+        "provider.request",
+        action_index=1,
+        boundary="provider",
+        payload={
+            "matches": [{"delivery_id": "delivery-1"}],
+            "temperature": 1.0,
+        },
+    )
+    trace.record(
+        "capsule.expired",
+        action_index=2,
+        boundary="provider",
+        payload={"delivery_id": "delivery-1"},
+    )
+    trace.record(
+        "utility.scored",
+        action_index=2,
+        boundary="gateway",
+        payload={"selected": True},
+    )
+    trace.record(
+        "progress.transition",
+        action_index=2,
+        boundary="tool_result",
+        payload={"current": "STALLED"},
+    )
+    trace.record(
+        "tool.outcome_classified",
+        action_index=2,
+        boundary="tool_result",
+        payload={
+            "classification": "useful_red",
+            "harmful": False,
+            "information_gain": True,
+            "new_delivery_ids": ["delivery-1"],
         },
     )
     trace.record(
@@ -273,6 +339,20 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
     assert audit.verification_plan_applied is True
     assert audit.verify_obligation_total == 4
     assert audit.verify_obligation_met == 4
+    assert audit.role_pack_id == "code-build"
+    assert audit.predicate_compiled_count == 4
+    assert audit.predicate_observed_kinds == {"behavior": 1}
+    assert audit.graph_projection_revision == "graph-r1"
+    assert audit.graph_router_revision == "graph-r1"
+    assert audit.graph_semantic_fact_count == 8
+    assert audit.graph_refresh_count == 1
+    assert audit.capsule_expired_count == 1
+    assert audit.capsule_unique_exposed_count == 1
+    assert audit.capsule_repeated_exposure_count == 0
+    assert audit.utility_selected_count == 1
+    assert audit.progress_states == {"STALLED": 1}
+    assert audit.tool_outcome_counts == {"useful_red": 1}
+    assert audit.tool_outcome_new_capsule_count == 1
 
 
 def test_attribution_integrity_failure_is_red(tmp_path):

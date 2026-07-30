@@ -71,6 +71,23 @@ def _strip_cmd_prompt(text: str) -> str:
     return "".join(out_lines)
 
 
+_SHELL_EXIT_RE = re.compile(
+    r"(?m)^[ \t]*(?:(?:builtin|command)[ \t]+)?(?:exit|logout)(?=[ \t;]|$)"
+)
+
+
+def _needs_isolated_shell(command: str) -> bool:
+    """Return whether *command* can terminate nano's persistent POSIX shell.
+
+    Model-authored verification snippets sometimes end an ``if`` branch with
+    ``exit 0``/``exit 1``.  Sending that text directly to the long-lived shell
+    prevents the framing sentinel from running and turns an otherwise useful
+    check into ``Shell process exited unexpectedly``.  Match command-position
+    exit builtins only; words inside ordinary arguments do not qualify.
+    """
+    return bool(_SHELL_EXIT_RE.search(command or ""))
+
+
 class BashTool:
     """Persistent shell. Each `run()` writes the command followed by a sentinel
     echo, then reads stdout until the sentinel appears. Cwd, env, and shell
@@ -133,7 +150,15 @@ class BashTool:
         else:
             tail = f"__nano_rc=$?; echo; echo {sentinel}:$__nano_rc"
         assert self._proc and self._proc.stdin
-        self._proc.stdin.write(f"{command}{nl}{tail}{nl}")
+        # An exit/logout builtin must not terminate the persistent parent.
+        # A POSIX subshell preserves the command's exact control-flow and exit
+        # status while containing its lifecycle effect.  State from a command
+        # that explicitly exits could not persist anyway.  cmd.exe has
+        # different syntax and is left unchanged.
+        effective_command = command
+        if not self._is_cmd and _needs_isolated_shell(command):
+            effective_command = f"(\n{command}\n)"
+        self._proc.stdin.write(f"{effective_command}{nl}{tail}{nl}")
         self._proc.stdin.flush()
 
         sentinel_re = re.compile(re.escape(sentinel) + r":(-?\d+)\s*$")

@@ -2,7 +2,15 @@ import sys
 
 import pytest
 
-from nano.tools import TOOLS, BashTool, ToolError, dispatch, edit_file, read_file
+from nano.tools import (
+    TOOLS,
+    BashTool,
+    ToolError,
+    _needs_isolated_shell,
+    dispatch,
+    edit_file,
+    read_file,
+)
 
 
 @pytest.fixture
@@ -261,6 +269,39 @@ def test_bash_output_without_trailing_newline(bash):
     # correctly and return that output intact.
     out = bash.run("printf 'x'", timeout=5)
     assert out.strip() == "x"
+
+
+def test_bash_top_level_exit_isolated_from_persistent_shell(bash):
+    if bash._is_cmd:
+        pytest.skip("POSIX subshell isolation")
+    out = bash.run(
+        "if true; then\n"
+        "  echo validation-complete\n"
+        "  exit 0\n"
+        "fi",
+        timeout=5,
+    )
+    assert out.strip() == "validation-complete"
+    assert bash.run("echo shell-still-alive", timeout=5).strip() == (
+        "shell-still-alive"
+    )
+
+
+def test_bash_nonzero_exit_isolated_and_parent_recovers(bash):
+    if bash._is_cmd:
+        pytest.skip("POSIX subshell isolation")
+    with pytest.raises(ToolError) as exc:
+        bash.run("echo useful-red\nexit 7", timeout=5)
+    assert "useful-red" in str(exc.value)
+    assert "exit code 7" in str(exc.value).lower()
+    assert bash.run("echo recovered", timeout=5).strip() == "recovered"
+
+
+def test_exit_detector_ignores_argument_text():
+    assert _needs_isolated_shell("echo before\nexit 0")
+    assert _needs_isolated_shell("  builtin exit 1")
+    assert not _needs_isolated_shell("echo 'exit 0'")
+    assert not _needs_isolated_shell("printf 'please exit now\\n'")
 
 
 def test_bash_timeout_does_not_contaminate_next_command(bash):

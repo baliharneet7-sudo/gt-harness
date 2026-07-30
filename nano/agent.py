@@ -54,6 +54,7 @@ class Agent:
         task_content = task
         if self._gt is not None:
             self._gt.issue_text = task  # B-4: thread the real task text into GT
+            self._gt.iteration_budget = self.max_iterations
             # GT integration point 4: task-start delivery. Production's step-0
             # surface (the v1r brief: obligations + ranked localization) rides
             # the INITIAL user message, before the first provider call, so the
@@ -104,9 +105,17 @@ class Agent:
             else:
                 self._truncate_if_needed(messages, transcript)
             provider_exposure_ids: tuple[str, ...] = ()
+            request_messages = messages
             if self._gt is not None:
                 try:
-                    self._gt.trace_model_request(iteration, messages)
+                    if hasattr(self._gt, "provider_message_view"):
+                        request_messages = self._gt.provider_message_view(
+                            messages
+                        )
+                except Exception:  # noqa: BLE001 - telemetry never blocks inference
+                    request_messages = messages
+                try:
+                    self._gt.trace_model_request(iteration, request_messages)
                 except Exception:  # noqa: BLE001 - telemetry never blocks inference
                     pass
             previous_request_observer = None
@@ -129,7 +138,9 @@ class Agent:
                 except Exception:  # noqa: BLE001 - tracing cannot block inference
                     provider_observer_installed = False
             try:
-                sr: StepResult = self.provider.step(messages, TOOLS, self.system)
+                sr: StepResult = self.provider.step(
+                    request_messages, TOOLS, self.system
+                )
             finally:
                 if provider_observer_installed:
                     try:

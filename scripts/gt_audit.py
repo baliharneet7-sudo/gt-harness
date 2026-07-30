@@ -680,6 +680,32 @@ class TaskAudit:
     verification_plan_decisions: list[str] = field(default_factory=list)
     verify_obligation_total: int = 0
     verify_obligation_met: int = 0
+    # measured improvement receipts
+    role_pack_present: bool = False
+    role_pack_id: str = ""
+    role_pack_version: str = ""
+    predicate_compiled_count: int = 0
+    predicate_observed_count: int = 0
+    predicate_observed_kinds: dict[str, int] = field(default_factory=dict)
+    graph_projection_revision: str = ""
+    graph_router_revision: str = ""
+    graph_semantic_fact_count: int = 0
+    graph_refresh_count: int = 0
+    graph_refresh_failure_count: int = 0
+    capsule_expired_count: int = 0
+    capsule_unique_exposed_count: int = 0
+    capsule_exposure_count: int = 0
+    capsule_repeated_exposure_count: int = 0
+    utility_scored_count: int = 0
+    utility_selected_count: int = 0
+    utility_abstained_count: int = 0
+    progress_transition_count: int = 0
+    progress_states: dict[str, int] = field(default_factory=dict)
+    tool_outcome_classified_count: int = 0
+    tool_outcome_counts: dict[str, int] = field(default_factory=dict)
+    tool_outcome_harmful_count: int = 0
+    tool_outcome_information_gain_count: int = 0
+    tool_outcome_new_capsule_count: int = 0
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -889,6 +915,98 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 ).items()
                 if isinstance(value, int | float)
             }
+            a.graph_projection_revision = str(
+                projection_receipt.get("revision") or ""
+            )
+            a.graph_router_revision = str(
+                projection_receipt.get("router_revision") or ""
+            )
+            a.graph_semantic_fact_count = int(
+                projection_receipt.get("semantic_fact_count") or 0
+            )
+        role_pack_receipt = next(
+            (
+                row.get("payload", {})
+                for row in attribution_rows
+                if row.get("event_type") == "role_pack.selected"
+            ),
+            None,
+        )
+        if role_pack_receipt is not None:
+            a.role_pack_present = True
+            a.role_pack_id = str(role_pack_receipt.get("pack_id") or "")
+            a.role_pack_version = str(
+                role_pack_receipt.get("version") or ""
+            )
+        exposure_counts: dict[str, int] = {}
+        for row in attribution_rows:
+            event_type = str(row.get("event_type") or "")
+            payload = row.get("payload", {})
+            if event_type == "contract.predicate_compiled":
+                a.predicate_compiled_count += 1
+            elif event_type == "contract.predicate_observed":
+                a.predicate_observed_count += 1
+                kind = str(payload.get("kind") or "unknown")
+                a.predicate_observed_kinds[kind] = (
+                    a.predicate_observed_kinds.get(kind, 0) + 1
+                )
+            elif event_type == "graph.context_refreshed":
+                a.graph_refresh_count += 1
+            elif event_type == "graph.context_refresh_failed":
+                a.graph_refresh_failure_count += 1
+            elif event_type == "capsule.expired":
+                a.capsule_expired_count += 1
+            elif event_type == "provider.request":
+                for match in payload.get("matches") or ():
+                    if not isinstance(match, dict):
+                        continue
+                    delivery_id = str(match.get("delivery_id") or "")
+                    if delivery_id:
+                        exposure_counts[delivery_id] = (
+                            exposure_counts.get(delivery_id, 0) + 1
+                        )
+            elif event_type == "utility.scored":
+                a.utility_scored_count += 1
+                if bool(payload.get("selected")):
+                    a.utility_selected_count += 1
+            elif (
+                event_type == "decision.committed"
+                and payload.get("reason") == "utility_abstain"
+            ):
+                a.utility_abstained_count += 1
+            elif event_type == "progress.transition":
+                a.progress_transition_count += 1
+                state = str(payload.get("current") or "UNKNOWN")
+                a.progress_states[state] = (
+                    a.progress_states.get(state, 0) + 1
+                )
+            elif event_type == "tool.outcome_classified":
+                a.tool_outcome_classified_count += 1
+                classification = str(
+                    payload.get("classification") or "unknown"
+                )
+                a.tool_outcome_counts[classification] = (
+                    a.tool_outcome_counts.get(classification, 0) + 1
+                )
+                a.tool_outcome_harmful_count += int(
+                    bool(payload.get("harmful"))
+                )
+                a.tool_outcome_information_gain_count += int(
+                    bool(payload.get("information_gain"))
+                )
+                a.tool_outcome_new_capsule_count += int(
+                    bool(payload.get("new_delivery_ids"))
+                )
+        a.predicate_observed_kinds = dict(
+            sorted(a.predicate_observed_kinds.items())
+        )
+        a.progress_states = dict(sorted(a.progress_states.items()))
+        a.tool_outcome_counts = dict(sorted(a.tool_outcome_counts.items()))
+        a.capsule_unique_exposed_count = len(exposure_counts)
+        a.capsule_exposure_count = sum(exposure_counts.values())
+        a.capsule_repeated_exposure_count = sum(
+            max(0, count - 1) for count in exposure_counts.values()
+        )
         for row in attribution_rows:
             if row.get("event_type") != "control.decision":
                 continue

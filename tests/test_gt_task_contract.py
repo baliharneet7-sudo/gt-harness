@@ -148,6 +148,39 @@ def test_content_scan_router_rejects_call_graph_noise_and_duplicate_localization
 
 
 @requires_gt
+def test_content_scan_router_allows_one_graph_grounded_scope_challenge():
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.task_contract import extract_task_contract
+
+    router = EvidenceRouter(
+        extract_task_contract(SANITIZE_TASK),
+        graph_files=frozenset(
+            {"exp_data/contaminated.json", "other/second_secret.txt"}
+        ),
+    )
+    first = "exp_data/contaminated.json:4:hf_secret"
+    second = "other/second_secret.txt:2:AWS_ACCESS_KEY_ID"
+    command = 'grep -R "hf_" . | grep -v "exp_data/"'
+
+    keep, reason = router.admit(
+        "localization", first, command=command, output="", commit=False
+    )
+    assert (keep, reason) == (True, "graph_scope_challenge")
+    router.commit("localization", first)
+
+    assert router.admit(
+        "localization", second, command=command, output="", commit=False
+    ) == (False, "scope_challenge_already_delivered")
+    assert router.admit(
+        "localization",
+        "unrelated/noise.py:1:thing",
+        command=command,
+        output="",
+        commit=False,
+    ) == (False, "not_grounded_in_content_search")
+
+
+@requires_gt
 def test_graph_receipt_names_all_trustworthy_surfaces(tmp_path):
     from gt_engine.graph_context import graph_surface_receipt
 
@@ -285,3 +318,91 @@ def test_full_repository_test_run_verifies_complete_contract(tmp_path, monkeypat
 
     assert bridge.submit_probe() is None
     assert bridge._obligation_coverage()["unmet"] == []
+
+
+@requires_gt
+def test_full_repository_suite_cannot_verify_content_scope(tmp_path, monkeypatch):
+    from gt_engine.bridge import GTBridge
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_SDLC_VERIFY", "1")
+    target = tmp_path / "config.py"
+    before = 'TOKEN = "secret"\n'
+    after = 'TOKEN = "<placeholder>"\n'
+    target.write_text(after, encoding="utf-8")
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text=(
+            "Remove all sensitive tokens from the entire repository and ensure "
+            "no secret values remain."
+        ),
+    )
+    assert bridge.task_start()
+    bridge.enrich(
+        "edit_file",
+        {"path": str(target)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+    bridge.enrich(
+        "bash",
+        {"command": "python -m pytest -q"},
+        "3 passed in 0.08s",
+        False,
+    )
+
+    refusal = bridge.submit_probe()
+
+    assert refusal is not None
+    assert bridge._obligation_coverage()["unmet"]
+    assert not bridge._predicate_receipts
+
+
+@requires_gt
+def test_later_edit_invalidates_prior_predicate_receipts(tmp_path, monkeypatch):
+    from gt_engine.bridge import GTBridge
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_SDLC_VERIFY", "1")
+    source = tmp_path / "helper.py"
+    source.write_text("def helper():\n    return 2\n", encoding="utf-8")
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text="Implement helper and keep its callers compatible.",
+    )
+    assert bridge.task_start()
+    bridge.enrich(
+        "edit_file",
+        {"path": str(source)},
+        "edited",
+        False,
+        edit_before="def helper():\n    return 1\n",
+        edit_after="def helper():\n    return 2\n",
+    )
+    bridge.enrich(
+        "bash",
+        {"command": "python -m pytest -q"},
+        "3 passed in 0.08s",
+        False,
+    )
+    assert not bridge._obligation_coverage()["unmet"]
+    assert bridge._predicate_receipts
+
+    source.write_text("def helper():\n    return 3\n", encoding="utf-8")
+    bridge.enrich(
+        "edit_file",
+        {"path": str(source)},
+        "edited",
+        False,
+        edit_before="def helper():\n    return 2\n",
+        edit_after="def helper():\n    return 3\n",
+    )
+
+    assert bridge._obligation_coverage()["unmet"]
+    assert not bridge._predicate_receipts

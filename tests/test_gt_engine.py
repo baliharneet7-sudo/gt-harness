@@ -324,6 +324,53 @@ def test_provider_receipt_records_explicit_temperature(tmp_path):
     assert row["payload"]["temperature"] == 1.0
 
 
+def test_provider_message_view_exposes_capsule_once_without_mutating_history(
+    tmp_path,
+):
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    capsule = "\nprovider-final GT capsule"
+    bridge._delivery_texts["8"] = capsule
+    bridge._delivery_metadata["8"] = {
+        "evidence_type": "localization",
+        "producer": "ranked_localization",
+        "target": "pkg/alpha.py",
+        "issued_action": "4",
+    }
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "content": "ordinary output" + capsule,
+        }],
+    }]
+
+    bridge.action_index = 4
+    active = bridge.provider_message_view(messages)
+    assert capsule in bridge._message_text(active)
+    bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {"model": "deepseek-v4-flash", "messages": active},
+    )
+
+    bridge.action_index = 5
+    expired = bridge.provider_message_view(messages)
+    assert capsule not in bridge._message_text(expired)
+    assert "ordinary output" in bridge._message_text(expired)
+    assert capsule in bridge._message_text(
+        messages
+    ), "forensic history must remain unchanged"
+    assert bridge._delivery_exposures["8"] == 1
+    expiry = [
+        row for row in bridge._attribution.rows
+        if row["event_type"] == "capsule.expired"
+    ]
+    assert len(expiry) == 1
+    assert expiry[0]["payload"]["exposure_count"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # indexer: code-repo detection (GT dormant on non-code roots)
 # --------------------------------------------------------------------------- #
@@ -1460,6 +1507,45 @@ def test_l6_wake_from_dormant_on_source_edit(tmp_path, monkeypatch):
         "SELECT name FROM nodes WHERE name='fresh_fn'").fetchall()
     con.close()
     assert rows == [("fresh_fn",)]                  # the agent's new code
+
+
+@requires_gt
+def test_l6_wake_rebuilds_task_projection_and_router(tmp_path, monkeypatch):
+    """A graph wake publishes its db, projection, and router as one context."""
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    monkeypatch.setenv("GT_L6_FRESH", "1")
+    (tmp_path / "notes.txt").write_text("non-code at start", encoding="utf-8")
+    from gt_engine import create_bridge
+
+    b = create_bridge(str(tmp_path))
+    if b is None:
+        pytest.skip("gt-index binary unavailable")
+    b.issue_text = (
+        "Create newmod.py and implement fresh_fn so it returns twice its input."
+    )
+    assert b.task_start()
+    assert b.graph_db is None
+    assert b._graph_projection is not None
+    assert not b._graph_projection.files
+
+    content = "def fresh_fn(a):\n    return a * 2\n"
+    path = tmp_path / "newmod.py"
+    path.write_text(content, encoding="utf-8")
+    b.enrich(
+        "edit_file",
+        {"path": str(path)},
+        "edited",
+        False,
+        edit_before=None,
+        edit_after=content,
+    )
+
+    assert b.graph_db is not None
+    assert b._graph_projection is not None
+    assert "newmod.py" in b._graph_projection.files
+    assert b._evidence_router is not None
+    assert "newmod.py" in b._evidence_router.graph_files
 
 
 @requires_gt

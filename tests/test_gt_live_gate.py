@@ -24,6 +24,19 @@ def _task(
     graph_projection_present=False,
     graph_available=False,
     verification_plan_evaluated=False,
+    role_pack_present=False,
+    role_pack_id="",
+    role_pack_version="",
+    predicate_compiled_count=0,
+    tool_results=0,
+    tool_outcome_classified_count=0,
+    tool_outcome_counts=None,
+    graph_refresh_failure_count=0,
+    capsule_repeated_exposure_count=0,
+    utility_scored_count=0,
+    utility_selected_count=0,
+    graph_projection_revision="",
+    graph_router_revision="",
 ):
     return {
         "task_name": name,
@@ -48,6 +61,21 @@ def _task(
         "graph_projection_present": graph_projection_present,
         "graph_available": graph_available,
         "verification_plan_evaluated": verification_plan_evaluated,
+        "role_pack_present": role_pack_present,
+        "role_pack_id": role_pack_id,
+        "role_pack_version": role_pack_version,
+        "predicate_compiled_count": predicate_compiled_count,
+        "tool_results": tool_results,
+        "tool_outcome_classified_count": tool_outcome_classified_count,
+        "tool_outcome_counts": tool_outcome_counts or {},
+        "graph_refresh_failure_count": graph_refresh_failure_count,
+        "capsule_repeated_exposure_count": (
+            capsule_repeated_exposure_count
+        ),
+        "utility_scored_count": utility_scored_count,
+        "utility_selected_count": utility_selected_count,
+        "graph_projection_revision": graph_projection_revision,
+        "graph_router_revision": graph_router_revision,
     }
 
 
@@ -210,6 +238,71 @@ def test_live_gate_requires_contract_graph_and_graph_edit_plan(tmp_path):
     assert any("incomplete task contract" in item for item in report["issues"])
     assert any("missing graph surface" in item for item in report["issues"])
     assert any("did not evaluate" in item for item in report["issues"])
+
+
+def test_live_gate_requires_complete_improvement_receipts(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    healthy = _task(
+        "healthy",
+        {"obligations": _feature()},
+        obligation_count=2,
+        role_pack_present=True,
+        role_pack_id="code-build",
+        role_pack_version="1",
+        predicate_compiled_count=2,
+        tool_results=3,
+        tool_outcome_classified_count=3,
+        tool_outcome_counts={"success": 2, "useful_red": 1},
+        utility_scored_count=2,
+        utility_selected_count=1,
+        graph_available=True,
+        graph_projection_revision="graph-r1",
+        graph_router_revision="graph-r1",
+    )
+    report = evaluate_live_gate(
+        {"tasks": [healthy]},
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        require_improvement_receipts=True,
+        run_dir=tmp_path,
+    )
+    assert report["passed"] is True
+
+    broken = dict(healthy)
+    broken.update({
+        "role_pack_present": False,
+        "predicate_compiled_count": 1,
+        "tool_outcome_classified_count": 2,
+        "tool_outcome_counts": {"unknown": 1, "shell_lifecycle": 1},
+        "graph_refresh_failure_count": 1,
+        "capsule_repeated_exposure_count": 1,
+        "utility_selected_count": 3,
+        "graph_router_revision": "graph-r0",
+    })
+    report = evaluate_live_gate(
+        {"tasks": [broken]},
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        require_improvement_receipts=True,
+        run_dir=tmp_path,
+    )
+    assert report["passed"] is False
+    joined = "\n".join(report["issues"])
+    assert "missing role-pack" in joined
+    assert "predicate compilation mismatch" in joined
+    assert "tool-outcome census mismatch" in joined
+    assert "unknown tool outcome" in joined
+    assert "shell lifecycle" in joined
+    assert "graph context refresh failure" in joined
+    assert "capsule repeated" in joined
+    assert "invalid utility selection" in joined
+    assert "projection/router revision mismatch" in joined
 
 
 def test_live_gate_requires_complete_census_temperature_and_actions(tmp_path):

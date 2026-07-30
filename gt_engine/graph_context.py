@@ -1,6 +1,7 @@
 """Read-only projection of graph.db surfaces into task and verification context."""
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -25,12 +26,45 @@ GRAPH_SURFACES = (
 )
 
 
+def graph_revision(graph_db: str) -> str:
+    """Return a bounded revision token for the on-disk graph snapshot.
+
+    The indexer replaces/updates ``graph.db`` as a unit.  Size plus nanosecond
+    mtime is sufficient to distinguish snapshots inside one task without
+    reading and hashing a potentially large SQLite database.  The path is
+    included so a wake to a different database cannot alias the old revision.
+    """
+    try:
+        stat = os.stat(graph_db)
+    except (OSError, TypeError, ValueError):
+        return ""
+    material = (
+        f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
+    )
+    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+@dataclass(frozen=True)
+class GraphSemanticFact:
+    surface: str
+    node_id: int
+    file_path: str
+    symbol: str
+    kind: str
+    value: str
+    line: int = 0
+    confidence: float = 0.0
+    revision: str = ""
+
+
 @dataclass(frozen=True)
 class GraphProjection:
     files: frozenset[str]
     symbols: frozenset[str]
     node_ids: frozenset[int]
     surface_hits: tuple[tuple[str, int], ...]
+    semantic_facts: tuple[GraphSemanticFact, ...] = ()
+    revision: str = ""
 
 
 def _connect(graph_db: str) -> sqlite3.Connection | None:
@@ -102,6 +136,8 @@ def build_graph_projection(
     symbols: set[str] = set()
     node_ids: set[int] = set()
     hits = {name: 0 for name in GRAPH_SURFACES}
+    semantic_facts: list[GraphSemanticFact] = []
+    revision = graph_revision(graph_db)
     try:
         tables = _tables(con)
         query = _fts_query(contract)
@@ -208,6 +244,29 @@ def build_graph_projection(
                         seed_ids,
                     ).fetchone()[0]
                 )
+                rows = con.execute(
+                    "SELECT p.node_id,n.file_path,n.name,p.kind,p.value,"
+                    "COALESCE(p.line,0),COALESCE(p.confidence,1.0) "
+                    "FROM properties p JOIN nodes n ON n.id=p.node_id "
+                    "WHERE p.node_id IN (" + placeholders + ") "
+                    "ORDER BY COALESCE(p.confidence,1.0) DESC LIMIT ?",
+                    (*seed_ids, limit),
+                ).fetchall()
+                semantic_facts.extend(
+                    GraphSemanticFact(
+                        "properties",
+                        int(node_id),
+                        str(path).replace("\\", "/"),
+                        str(symbol),
+                        str(kind),
+                        str(value)[:500],
+                        int(line or 0),
+                        float(confidence or 0.0),
+                        revision,
+                    )
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
+                )
             except sqlite3.Error:
                 pass
         if seed_ids and "assertions" in tables:
@@ -220,6 +279,106 @@ def build_graph_projection(
                         + ")",
                         seed_ids,
                     ).fetchone()[0]
+                )
+                rows = con.execute(
+                    "SELECT a.target_node_id,n.file_path,n.name,a.kind,"
+                    "a.expression,COALESCE(a.line,0),"
+                    "COALESCE(a.resolution_score,0.0) "
+                    "FROM assertions a JOIN nodes n ON n.id=a.target_node_id "
+                    "WHERE a.target_node_id IN (" + placeholders + ") "
+                    "ORDER BY COALESCE(a.resolution_score,0.0) DESC LIMIT ?",
+                    (*seed_ids, limit),
+                ).fetchall()
+                semantic_facts.extend(
+                    GraphSemanticFact(
+                        "assertions",
+                        int(node_id),
+                        str(path).replace("\\", "/"),
+                        str(symbol),
+                        str(kind),
+                        str(value)[:500],
+                        int(line or 0),
+                        float(confidence or 0.0),
+                        revision,
+                    )
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
+                )
+            except sqlite3.Error:
+                pass
+        if seed_ids and {"edge_metadata", "edges", "nodes"} <= tables:
+            placeholders = ",".join("?" for _ in seed_ids)
+            try:
+                rows = con.execute(
+                    "SELECT e.target_id,n.file_path,n.name,em.key,em.value,"
+                    "0,COALESCE(e.confidence,0.0) "
+                    "FROM edge_metadata em JOIN edges e ON e.id=em.edge_id "
+                    "JOIN nodes n ON n.id=e.target_id "
+                    "WHERE e.source_id IN (" + placeholders + ") "
+                    "OR e.target_id IN (" + placeholders + ") LIMIT ?",
+                    (*seed_ids, *seed_ids, limit),
+                ).fetchall()
+                hits["edge_metadata"] += len(rows)
+                semantic_facts.extend(
+                    GraphSemanticFact(
+                        "edge_metadata",
+                        int(node_id),
+                        str(path).replace("\\", "/"),
+                        str(symbol),
+                        str(kind),
+                        str(value)[:500],
+                        int(line or 0),
+                        float(confidence or 0.0),
+                        revision,
+                    )
+                    for node_id, path, symbol, kind, value, line, confidence
+                    in rows
+                )
+            except sqlite3.Error:
+                pass
+        if files and "file_hashes" in tables:
+            base_files = sorted(files)[:limit]
+            placeholders = ",".join("?" for _ in base_files)
+            try:
+                rows = con.execute(
+                    "SELECT file_path,content_hash,COALESCE(language,''),"
+                    "indexed_at FROM file_hashes WHERE file_path IN ("
+                    + placeholders + ") LIMIT ?",
+                    (*base_files, limit),
+                ).fetchall()
+                hits["file_hashes"] += len(rows)
+                semantic_facts.extend(
+                    GraphSemanticFact(
+                        "file_hashes",
+                        0,
+                        str(path).replace("\\", "/"),
+                        "",
+                        str(language),
+                        f"{content_hash}:{indexed_at}"[:500],
+                        revision=revision,
+                    )
+                    for path, content_hash, language, indexed_at in rows
+                )
+            except sqlite3.Error:
+                pass
+        if "project_meta" in tables:
+            try:
+                rows = con.execute(
+                    "SELECT key,value FROM project_meta ORDER BY key LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                hits["project_meta"] += len(rows)
+                semantic_facts.extend(
+                    GraphSemanticFact(
+                        "project_meta",
+                        0,
+                        "",
+                        "",
+                        str(key),
+                        str(value)[:500],
+                        revision=revision,
+                    )
+                    for key, value in rows
                 )
             except sqlite3.Error:
                 pass
@@ -270,6 +429,8 @@ def build_graph_projection(
             symbols=frozenset(symbols),
             node_ids=frozenset(node_ids),
             surface_hits=tuple(sorted((k, v) for k, v in hits.items() if v)),
+            semantic_facts=tuple(semantic_facts),
+            revision=revision,
         )
     finally:
         con.close()

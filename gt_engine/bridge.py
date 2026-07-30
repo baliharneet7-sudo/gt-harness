@@ -58,6 +58,7 @@ Laws honored:
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -470,6 +471,15 @@ class GTBridge:
         # never unrestricted model or tool content.
         self._delivery_texts: dict[str, str] = {}
         self._delivery_metadata: dict[str, dict[str, str]] = {}
+        self._last_response_delivery_ids: tuple[str, ...] = ()
+        self._last_response_action_index = -1
+        self._tool_outcome_signatures: set[str] = set()
+        self._delivery_exposures: dict[str, int] = {}
+        self._expired_delivery_ids: set[str] = set()
+        from gt_engine.progress import ProgressLedger
+
+        self._progress = ProgressLedger()
+        self.iteration_budget = 0
         self._capability_receipts: set[tuple[str, str]] = set()
         # Bash-edit pre-images captured at the pre-dispatch boundary:
         # {rel: before_content_or_None}; None = the target did not exist (a
@@ -504,6 +514,9 @@ class GTBridge:
         self._task_contract: Any | None = None
         self._shipped_obligation_ids: set[str] = set()
         self._verified_obligation_ids: set[str] = set()
+        self._obligation_predicates: dict[str, Any] = {}
+        self._predicate_receipts: dict[str, Any] = {}
+        self._role_pack: Any | None = None
         self._evidence_router: Any | None = None
         self._graph_projection: Any | None = None
         self._last_verification_plan: Any | None = None
@@ -846,6 +859,7 @@ class GTBridge:
             "evidence_type": evidence_type,
             "producer": str(getattr(sealed, "producer", "") or ""),
             "target": str(getattr(sealed, "target", "") or ""),
+            "issued_action": str(self.action_index),
         }
         from gt_engine.attribution import feature_for_evidence
 
@@ -914,6 +928,48 @@ class GTBridge:
             return "\n".join(parts)
         return ""
 
+    def provider_message_view(
+        self, messages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Build a request-only view without capsules from past decisions."""
+        view = copy.deepcopy(messages)
+        expired = {
+            delivery_id: self._delivery_texts.get(delivery_id, "")
+            for delivery_id, metadata in self._delivery_metadata.items()
+            if int(metadata.get("issued_action", -1)) < self.action_index
+        }
+
+        def scrub(value: Any) -> Any:
+            if isinstance(value, str):
+                for text in expired.values():
+                    if text:
+                        value = value.replace(text, "")
+                return value
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, dict):
+                return {key: scrub(item) for key, item in value.items()}
+            return value
+
+        view = scrub(view)
+        for delivery_id, text in expired.items():
+            if not text or delivery_id in self._expired_delivery_ids:
+                continue
+            self._expired_delivery_ids.add(delivery_id)
+            self._trace_record(
+                "capsule.expired",
+                "provider",
+                {
+                    "delivery_id": delivery_id,
+                    "reason": "decision_boundary_complete",
+                    "exposure_count": self._delivery_exposures.get(
+                        delivery_id, 0
+                    ),
+                    "rendered_chars": len(text),
+                },
+            )
+        return view
+
     def trace_model_request(
         self, iteration: int, messages: list[dict[str, Any]]
     ) -> tuple[str, ...]:
@@ -973,6 +1029,9 @@ class GTBridge:
             if not locations:
                 continue
             delivery_ids.append(delivery_id)
+            self._delivery_exposures[delivery_id] = (
+                self._delivery_exposures.get(delivery_id, 0) + 1
+            )
             matches.append({
                 "delivery_id": delivery_id,
                 "locations": locations,
@@ -1026,6 +1085,30 @@ class GTBridge:
     ) -> None:
         """Link the next response/actions to exposure without claiming causality."""
         calls = list(getattr(result, "tool_calls", ()) or ())
+        self._last_response_delivery_ids = tuple(delivery_ids)
+        self._last_response_action_index = self.action_index
+        transition = self._progress.budget_risk(
+            iteration=int(iteration),
+            limit=int(self.iteration_budget or 0),
+            unresolved=bool(
+                self._task_contract is not None
+                and len(self._verified_obligation_ids)
+                < len(self._task_contract.obligations)
+            ),
+        )
+        if transition is not None:
+            self._trace_record(
+                "progress.transition",
+                "model",
+                {
+                    "prior": transition.prior,
+                    "current": transition.current,
+                    "reason": transition.reason,
+                    "streak": transition.streak,
+                    "signature": transition.signature,
+                    "iteration": int(iteration),
+                },
+            )
         payload = {
             "iteration": int(iteration),
             "delivery_ids": list(delivery_ids),
@@ -1187,18 +1270,96 @@ class GTBridge:
         Gated by GT_L6_FRESH == "1" (production's exact read, rl_profile:207;
         Profile-2 fans it to "1"). Correct-or-quiet: any fault keeps the prior
         graph (stale beats broken; producers still abstain on a bad db)."""
+        if os.environ.get("GT_L6_FRESH", "").strip() != "1":
+            return
+        if not any(_has_source_ext(c) for c in changed):
+            return  # bounded: only a source-file edit can move the graph
+        prior_db = self.graph_db or ""
+        prior_projection = self._graph_projection
+        prior_router = self._evidence_router
         try:
-            if os.environ.get("GT_L6_FRESH", "").strip() != "1":
-                return
-            if not any(_has_source_ext(c) for c in changed):
-                return  # bounded: only a source-file edit can move the graph
+            from gt_engine.graph_context import (
+                build_graph_projection,
+                graph_revision,
+            )
             from gt_engine.indexer import ensure_index
 
+            prior_revision = graph_revision(prior_db)
             db = ensure_index(self.repo_root)
-            if db:
-                self.graph_db = db  # wake-from-dormant is this same assignment
-        except Exception:  # noqa: BLE001 - a reindex fault must never break the turn
-            pass
+            if not db:
+                self._trace_record(
+                    "graph.context_refresh_failed",
+                    "post_edit",
+                    {
+                        "reason": "index_unavailable",
+                        "changed_file_count": len(changed),
+                        "prior_revision": prior_revision,
+                    },
+                )
+                return
+
+            # Build every task-dependent consumer before publishing any of the
+            # new context.  The bridge must never expose a new graph pointer
+            # beside an old task projection/router.
+            projection = None
+            router = None
+            if self._task_contract is not None:
+                from gt_engine.evidence_router import EvidenceRouter
+
+                projection = build_graph_projection(db, self._task_contract)
+                router = EvidenceRouter(
+                    self._task_contract,
+                    graph_files=projection.files,
+                    graph_symbols=projection.symbols,
+                    graph_revision=projection.revision,
+                )
+                router.carry_delivery_state_from(prior_router)
+
+            self.graph_db = db
+            self._graph_projection = projection
+            self._evidence_router = router
+            revision = graph_revision(db)
+            payload = {
+                "prior_revision": prior_revision,
+                "revision": revision,
+                "changed_file_count": len(changed),
+                "projection_rebuilt": projection is not None,
+                "router_rebuilt": router is not None,
+                "file_count": len(projection.files) if projection else 0,
+                "symbol_count": len(projection.symbols) if projection else 0,
+                "node_count": len(projection.node_ids) if projection else 0,
+                "surface_hits": (
+                    dict(projection.surface_hits) if projection else {}
+                ),
+                "semantic_fact_count": (
+                    len(projection.semantic_facts) if projection else 0
+                ),
+                "router_revision": (
+                    router.graph_revision if router else ""
+                ),
+            }
+            self._trace_record(
+                "graph.context_refreshed", "post_edit", payload
+            )
+            self._trace_record(
+                "graph.task_projection", "post_edit", payload
+            )
+        except Exception as exc:  # noqa: BLE001 - refresh is correct-or-quiet
+            # No partial in-memory publication occurred.  Reassert the prior
+            # objects explicitly so future refactors cannot accidentally leave
+            # a mixed snapshot.
+            self.graph_db = prior_db or None
+            self._graph_projection = prior_projection
+            self._evidence_router = prior_router
+            self._trace_record(
+                "graph.context_refresh_failed",
+                "post_edit",
+                {
+                    "reason": "context_rebuild_fault",
+                    "fault_type": type(exc).__name__,
+                    "changed_file_count": len(changed),
+                },
+            )
 
     # ------------------------------------------------------------------ #
     # WIRE 2: executed covering-RED at post-edit (GT_VERIFY_EXECUTE).
@@ -1844,29 +2005,36 @@ class GTBridge:
             ):
                 self._last_green_verification_action = self.action_index
                 if self._task_contract is not None:
-                    from gt_engine.task_contract import matching_obligation_ids
+                    from gt_engine.verification_contract import (
+                        evaluate_passing_observation,
+                    )
 
-                    mapped = matching_obligation_ids(
-                        self._task_contract, cmd or "", output or ""
+                    receipts = evaluate_passing_observation(
+                        self._task_contract,
+                        self._obligation_predicates,
+                        cmd or "",
+                        output or "",
+                        action_index=self.action_index,
                     )
-                    # A repository-wide formal runner is the only observed
-                    # model action allowed to claim the whole task contract.
-                    # Targeted checks keep only their lexical obligation map.
-                    full_suite = bool(
-                        re.search(
-                            r"(?i)(?:^|[;&|]\s*)(?:"
-                            r"python\s+-m\s+pytest|pytest|npm\s+test|"
-                            r"cargo\s+test|go\s+test\s+\./\.\.\.)\s*"
-                            r"(?:-[a-zA-Zqvxrs]+\s*)*$",
-                            (cmd or "").strip(),
+                    for receipt in receipts:
+                        self._verified_obligation_ids.add(
+                            receipt.obligation_id
                         )
-                    )
-                    if full_suite:
-                        mapped = {
-                            item.obligation_id
-                            for item in self._task_contract.obligations
-                        }
-                    self._verified_obligation_ids.update(mapped)
+                        self._predicate_receipts[
+                            receipt.predicate_id
+                        ] = receipt
+                        self._trace_record(
+                            "contract.predicate_observed",
+                            "test",
+                            {
+                                "predicate_id": receipt.predicate_id,
+                                "obligation_id": receipt.obligation_id,
+                                "kind": receipt.kind,
+                                "outcome": receipt.outcome,
+                                "command_sha256": receipt.command_sha256,
+                                "output_sha256": receipt.output_sha256,
+                            },
+                        )
             if not self._test_touches_edit(cmd, output):
                 return outcome  # checkpoint is valid; RED attribution is not
             self._observed_red = (
@@ -2072,6 +2240,78 @@ class GTBridge:
                     ).hexdigest(),
                 },
             )
+            from gt_engine.tool_outcomes import classify_tool_outcome
+
+            tool_outcome = classify_tool_outcome(
+                cmd,
+                output,
+                is_error=bool(is_error),
+                returncode=rc,
+            )
+            information_gain = (
+                tool_outcome.information_signature
+                not in self._tool_outcome_signatures
+            )
+            self._tool_outcome_signatures.add(
+                tool_outcome.information_signature
+            )
+            progress = self._progress.observe(
+                tool_outcome.information_signature,
+                information_gain=information_gain,
+                changed=bool(changed),
+                is_error=bool(is_error),
+                contradictory=tool_outcome.classification in {
+                    "useful_red",
+                    "product_failure",
+                },
+            )
+            if changed:
+                # Information novelty is scoped to an unchanged workspace
+                # epoch, matching the progress ledger's reset semantics.
+                self._tool_outcome_signatures = {
+                    tool_outcome.information_signature
+                }
+            if progress is not None:
+                self._trace_record(
+                    "progress.transition",
+                    "tool_result",
+                    {
+                        "prior": progress.prior,
+                        "current": progress.current,
+                        "reason": progress.reason,
+                        "streak": progress.streak,
+                        "signature": progress.signature,
+                    },
+                )
+            active_ids = tuple(self._last_response_delivery_ids)
+            new_ids = tuple(
+                delivery_id
+                for delivery_id in active_ids
+                if int(
+                    self._delivery_metadata.get(delivery_id, {}).get(
+                        "issued_action", -2
+                    )
+                )
+                == self._last_response_action_index
+            )
+            self._trace_record(
+                "tool.outcome_classified",
+                "tool_result",
+                {
+                    "tool_call_id": str(tool_call_id),
+                    "tool_name": str(tool_name),
+                    "classification": tool_outcome.classification,
+                    "harmful": tool_outcome.harmful,
+                    "reason": tool_outcome.reason,
+                    "information_gain": information_gain,
+                    "returncode": rc,
+                    "active_delivery_ids": list(active_ids),
+                    "new_delivery_ids": list(new_ids),
+                    "persistent_delivery_ids": [
+                        item for item in active_ids if item not in new_ids
+                    ],
+                },
+            )
             repository_observation = tool_name == "read_file"
             if tool_name == "bash" and not changed and (cmd or "").strip():
                 try:
@@ -2099,6 +2339,8 @@ class GTBridge:
                     self.edited_files.append(rel)  # submit-gate syntax domain
             if changed:
                 self._last_task_edit_action = self.action_index
+                self._verified_obligation_ids.clear()
+                self._predicate_receipts.clear()
                 source_edit = any(_has_source_ext(rel) for rel in changed)
                 if source_edit:
                     self._last_source_edit_action = self.action_index
@@ -2461,6 +2703,12 @@ class GTBridge:
                 self._verified_obligation_ids.update(
                     str(item)
                     for item in (getattr(plan, "obligations", ()) or ())
+                    if getattr(
+                        self._obligation_predicates.get(str(item)),
+                        "kind",
+                        "",
+                    )
+                    == "behavior"
                 )
 
         # SDLC penultimate gate: syntax success proves parseability, not
@@ -2777,14 +3025,46 @@ class GTBridge:
         from gt_engine.evidence_router import EvidenceRouter
         from gt_engine.graph_context import (
             build_graph_projection,
+            graph_revision,
             graph_surface_receipt,
         )
+        from gt_engine.role_packs import select_role_pack
         from gt_engine.task_contract import (
             extract_task_contract,
             render_task_contract,
         )
+        from gt_engine.verification_contract import (
+            compile_obligation_predicates,
+        )
 
         self._task_contract = extract_task_contract(self.issue_text)
+        self._role_pack = select_role_pack(self._task_contract)
+        self._trace_record(
+            "role_pack.selected",
+            "task_start",
+            {
+                "task_role": self._task_contract.role,
+                "pack_id": self._role_pack.pack_id,
+                "version": self._role_pack.version,
+                "lifecycle": list(self._role_pack.lifecycle),
+                "predicate_kinds": list(self._role_pack.predicate_kinds),
+                "allowed_evidence": list(self._role_pack.allowed_evidence),
+            },
+        )
+        self._obligation_predicates = compile_obligation_predicates(
+            self._task_contract
+        )
+        for predicate in self._obligation_predicates.values():
+            self._trace_record(
+                "contract.predicate_compiled",
+                "task_start",
+                {
+                    "predicate_id": predicate.predicate_id,
+                    "obligation_id": predicate.obligation_id,
+                    "kind": predicate.kind,
+                    "scope": list(predicate.scope),
+                },
+            )
         text, shipped_ids = render_task_contract(
             self._task_contract, max_chars=MAX_DELTA_CHARS
         )
@@ -2825,6 +3105,7 @@ class GTBridge:
             self._task_contract,
             graph_files=self._graph_projection.files,
             graph_symbols=self._graph_projection.symbols,
+            graph_revision=self._graph_projection.revision,
         )
         self._trace_record(
             "graph.task_projection",
@@ -2834,6 +3115,11 @@ class GTBridge:
                 "symbol_count": len(self._graph_projection.symbols),
                 "node_count": len(self._graph_projection.node_ids),
                 "surface_hits": dict(self._graph_projection.surface_hits),
+                "revision": graph_revision(self.graph_db or ""),
+                "router_revision": self._evidence_router.graph_revision,
+                "semantic_fact_count": len(
+                    self._graph_projection.semantic_facts
+                ),
             },
         )
         if not text:
@@ -2895,7 +3181,6 @@ class GTBridge:
             normalize_event,
             render_envelope,
             seal_delivery,
-            select,
         )
         from groundtruth.runtime.gateway import GatewayState, augment
         from groundtruth.runtime.native_render import (
@@ -2990,22 +3275,45 @@ class GTBridge:
                         "outcome": outcome,
                     },
                 )
-        # 4. dose law: <=1 envelope per observation.
-        winners = select(envelopes, max_doses=1, multidose=False)
-        if not winners:
+        # 4. dose + utility law: <=1 envelope, with deterministic abstention.
+        from gt_engine.utility import choose_candidate
+
+        rendered_candidates = {
+            id(envelope): render_envelope(envelope, native=native)
+            for envelope in envelopes
+        }
+        winner, utility_scores = choose_candidate(
+            list(envelopes), rendered_candidates
+        )
+        for scored in utility_scores:
+            self._trace_record(
+                "utility.scored",
+                "gateway",
+                {
+                    "evidence_type": scored.evidence_type,
+                    "severity": scored.severity,
+                    "evidence_strength": scored.evidence_strength,
+                    "actionability": scored.actionability,
+                    "token_cost": scored.token_cost,
+                    "score": scored.score,
+                    "selected": scored.candidate is winner,
+                },
+            )
+        if winner is None:
             self._trace_record(
                 "decision.committed",
                 "gateway",
                 {
                     "decision": "no_delivery",
-                    "reason": "no_candidate",
+                    "reason": (
+                        "utility_abstain" if utility_scores else "no_candidate"
+                    ),
                     "candidate_count": len(envelopes),
                 },
             )
             return output
-        winner = winners[0]
         # 5. render in the seam's channel (GT_GATEWAY_NATIVE keys the form).
-        delta = render_envelope(winner, native=native)
+        delta = rendered_candidates[id(winner)]
         # 6. seam-owned leak guard on the RENDERED bytes: drop WHOLE.
         if not delta:
             self._trace_record(

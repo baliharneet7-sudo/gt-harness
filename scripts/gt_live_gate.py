@@ -47,6 +47,7 @@ def evaluate_live_gate(
     require_task_contract: bool = False,
     require_graph_surface_receipt: bool = False,
     require_verification_plan_on_graph_edit: bool = False,
+    require_improvement_receipts: bool = False,
     required_behavior_flags: tuple[str, ...] = (),
     required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
@@ -64,6 +65,17 @@ def evaluate_live_gate(
     complete_census = True
     complete_profile = True
     observed_behavior_flags: set[str] = set()
+    improvement_totals = {
+        "predicate_observed": 0,
+        "graph_semantic_facts": 0,
+        "graph_refreshes": 0,
+        "capsules_expired": 0,
+        "utility_scored": 0,
+        "utility_abstained": 0,
+        "progress_transitions": 0,
+        "harmful_tool_outcomes": 0,
+        "new_capsule_tool_outcomes": 0,
+    }
     expected_feature_ids = set(DIRECT_FEATURES)
     valid_statuses = {
         "INELIGIBLE",
@@ -138,6 +150,90 @@ def evaluate_live_gate(
                 f"{task_name}: graph-backed edit did not evaluate "
                 "GT_VERIFICATION_PLAN"
             )
+        improvement_totals["predicate_observed"] += int(
+            task.get("predicate_observed_count") or 0
+        )
+        improvement_totals["graph_semantic_facts"] += int(
+            task.get("graph_semantic_fact_count") or 0
+        )
+        improvement_totals["graph_refreshes"] += int(
+            task.get("graph_refresh_count") or 0
+        )
+        improvement_totals["capsules_expired"] += int(
+            task.get("capsule_expired_count") or 0
+        )
+        improvement_totals["utility_scored"] += int(
+            task.get("utility_scored_count") or 0
+        )
+        improvement_totals["utility_abstained"] += int(
+            task.get("utility_abstained_count") or 0
+        )
+        improvement_totals["progress_transitions"] += int(
+            task.get("progress_transition_count") or 0
+        )
+        improvement_totals["harmful_tool_outcomes"] += int(
+            task.get("tool_outcome_harmful_count") or 0
+        )
+        improvement_totals["new_capsule_tool_outcomes"] += int(
+            task.get("tool_outcome_new_capsule_count") or 0
+        )
+        if require_improvement_receipts:
+            obligation_count = int(task.get("obligation_count") or 0)
+            compiled_count = int(
+                task.get("predicate_compiled_count") or 0
+            )
+            classified_count = int(
+                task.get("tool_outcome_classified_count") or 0
+            )
+            tool_results = int(task.get("tool_results") or 0)
+            outcome_counts = task.get("tool_outcome_counts") or {}
+            if (
+                not task.get("role_pack_present")
+                or not task.get("role_pack_id")
+                or not task.get("role_pack_version")
+            ):
+                issues.append(f"{task_name}: missing role-pack receipt")
+            if compiled_count != obligation_count:
+                issues.append(
+                    f"{task_name}: predicate compilation mismatch "
+                    f"({compiled_count}/{obligation_count})"
+                )
+            if classified_count != tool_results:
+                issues.append(
+                    f"{task_name}: tool-outcome census mismatch "
+                    f"({classified_count}/{tool_results})"
+                )
+            if int(outcome_counts.get("unknown") or 0):
+                issues.append(
+                    f"{task_name}: unknown tool outcome(s) remain"
+                )
+            if int(outcome_counts.get("shell_lifecycle") or 0):
+                issues.append(
+                    f"{task_name}: persistent shell lifecycle failure"
+                )
+            if int(task.get("graph_refresh_failure_count") or 0):
+                issues.append(
+                    f"{task_name}: graph context refresh failure"
+                )
+            if task.get("graph_available") and (
+                not task.get("graph_projection_revision")
+                or task.get("graph_projection_revision")
+                != task.get("graph_router_revision")
+            ):
+                issues.append(
+                    f"{task_name}: graph projection/router revision mismatch"
+                )
+            if int(task.get("capsule_repeated_exposure_count") or 0):
+                issues.append(
+                    f"{task_name}: GT capsule repeated across provider "
+                    "decision boundaries"
+                )
+            if int(task.get("utility_selected_count") or 0) > int(
+                task.get("utility_scored_count") or 0
+            ):
+                issues.append(
+                    f"{task_name}: invalid utility selection receipt"
+                )
         task_features = task.get("feature_attribution") or {}
         if require_complete_census:
             actual_ids = set(task_features)
@@ -290,6 +386,8 @@ def evaluate_live_gate(
         "require_verification_plan_on_graph_edit": (
             require_verification_plan_on_graph_edit
         ),
+        "require_improvement_receipts": require_improvement_receipts,
+        "improvement_totals": improvement_totals,
         "required_behavior_flags": sorted(set(required_behavior_flags)),
         "observed_behavior_flags": sorted(observed_behavior_flags),
         "issues": issues,
@@ -314,6 +412,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--require-verification-plan-on-graph-edit", action="store_true"
+    )
+    parser.add_argument(
+        "--require-improvement-receipts", action="store_true"
     )
     parser.add_argument(
         "--require-behavior-flags",
@@ -345,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         require_verification_plan_on_graph_edit=(
             args.require_verification_plan_on_graph_edit
         ),
+        require_improvement_receipts=args.require_improvement_receipts,
         required_behavior_flags=tuple(
             flag.strip()
             for flag in args.require_behavior_flags.split(",")
