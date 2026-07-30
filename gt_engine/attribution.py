@@ -280,8 +280,7 @@ def summarize_features(
                 summary[feature_id]["reasons"].append(reason)
 
     delivery_to_feature: dict[str, str] = {}
-    delivered_feature_actions: list[tuple[int, str]] = []
-    eligible_cap_actions: set[tuple[int, str]] = set()
+    delivered_features: list[str] = []
     exposed_ids: set[str] = set()
     response_ids: set[str] = set()
     producer_terminal_ids = {
@@ -318,9 +317,7 @@ def summarize_features(
                 if delivery_id:
                     delivery_to_feature[delivery_id] = feature_id
                     summary[feature_id]["deliveries"].append(delivery_id)
-                delivered_feature_actions.append(
-                    (int(row.get("action_index", 0) or 0), feature_id)
-                )
+                delivered_features.append(feature_id)
             elif decision == "suppressed" and feature_id:
                 update(feature_id, "SUPPRESSED_WITH_REASON", reason or "suppressed")
             continue
@@ -334,10 +331,6 @@ def summarize_features(
                 ):
                     update(feature_id, "WITNESSED", outcome)
                     continue
-                if DIRECT_FEATURES.get(feature_id, {}).get("kind") == "CAP":
-                    eligible_cap_actions.add(
-                        (int(row.get("action_index", 0) or 0), feature_id)
-                    )
                 update(
                     feature_id,
                     "TRIGGERED_DARK",
@@ -434,14 +427,14 @@ def summarize_features(
         elif delivery_id in exposed_ids:
             update(feature_id, "EXPOSED")
     fact_caps = {
+        "newfile_precedent": ("GT_CHANGE_SURFACE",),
         "localization": ("GT_LOC_RESLOT",),
         "recovery": ("GT_HYPOTHESIS",),
-        "signature_delta": ("GT_PATCH_DELTA", "GT_EDIT_CHECK"),
+        "signature_delta": ("GT_PATCH_DELTA",),
         "submit_refusal": ("GT_SS_SUBMIT_RED", "GT_CERT_DELIVERY"),
         "syntax_result": ("GT_EDIT_CHECK",),
     }
-    for action_index, feature_id in delivered_feature_actions:
+    for feature_id in delivered_features:
         for cap in fact_caps.get(feature_id, ()):
-            if (action_index, cap) in eligible_cap_actions:
-                update(cap, "WITNESSED", f"delivered_{feature_id}")
+            update(cap, "WITNESSED", f"delivered_{feature_id}")
     return summary

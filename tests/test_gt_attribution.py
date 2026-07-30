@@ -167,6 +167,50 @@ def test_feature_summary_distinguishes_delivery_dark_suppressed_and_ineligible()
     assert summary["covering_red"]["status"] == "INELIGIBLE"
 
 
+def test_delivered_facts_witness_their_authoritative_capability_owners():
+    owner_to_fact = {
+        "GT_CHANGE_SURFACE": "newfile_precedent",
+        "GT_PATCH_DELTA": "signature_delta",
+        "GT_LOC_RESLOT": "localization",
+        "GT_SS_SUBMIT_RED": "submit_refusal",
+        "GT_EDIT_CHECK": "syntax_result",
+        "GT_HYPOTHESIS": "recovery",
+        "GT_CERT_DELIVERY": "submit_refusal",
+    }
+    rows = []
+    for action_index, fact_id in enumerate(sorted(set(owner_to_fact.values())), 1):
+        delivery_id = f"d{action_index}"
+        rows.extend([
+            {
+                "event_type": "decision.committed",
+                "action_index": action_index,
+                "payload": {
+                    "decision": "delivered",
+                    "delivery_id": delivery_id,
+                    "feature_id": fact_id,
+                    "evidence_type": fact_id,
+                },
+            },
+            {
+                "event_type": "model.request",
+                "action_index": action_index,
+                "payload": {"delivery_ids": [delivery_id]},
+            },
+            {
+                "event_type": "model.response",
+                "action_index": action_index,
+                "payload": {"delivery_ids": [delivery_id]},
+            },
+        ])
+
+    summary = summarize_features(rows)
+
+    for capability, fact_id in owner_to_fact.items():
+        assert summary[fact_id]["status"] == "WITNESSED"
+        assert summary[capability]["status"] == "WITNESSED"
+        assert summary[capability]["reasons"] == [f"delivered_{fact_id}"]
+
+
 def test_unterminated_producer_invocation_is_telemetry_fault():
     rows = [{
         "event_type": "producer.invocation",
