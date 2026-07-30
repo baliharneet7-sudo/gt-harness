@@ -646,6 +646,150 @@ not, by itself, establish a causal solved-rate or token-cost improvement over
 GT-off because the existing baseline used a different timeout multiplier and
 implicit temperature.
 
+### Complete-contract and graph-context diagnostic: run 30582455019
+
+Run `30582455019` executed commit `4694257` with the same five GT tasks, bare
+`deepseek-v4-flash`, temperature 1, Profile 2, concurrency 4, and timeout
+multiplier 1.0. The workflow and the independently rerun local gate both
+passed. This is a positive wiring result and a negative outcome result: only
+two of five tasks received reward 1.
+
+This run added four proof surfaces that the earlier accepted run did not have:
+
+- a graph-independent complete task contract at task start;
+- a receipt for all 14 trustworthy `graph.db` surfaces;
+- a task projection over lexical, symbol-body, passage, edge, closure,
+  property, assertion, and co-change surfaces; and
+- obligation-mapped verification plus role/relevance admission receipts.
+
+The task contract is not a replacement for the original prompt. It is a
+bounded deterministic checklist carried from task start into the penultimate
+verification boundary. Every one of the five task-start checklists was
+provider-confirmed byte-for-byte.
+
+| Task | Role | Contract shipped | Verified at last submit | Graph at task start | Router suppressed | Reward |
+|---|---|---:|---:|---|---:|---:|
+| `build-cython-ext` | code behavior | 7/7 | no submit reached | no | 0 | 0 |
+| `headless-terminal` | code behavior | 7/7 | 7/7 | yes | 0 | 1 |
+| `llm-inference-batching-scheduler` | data transform | 16/16 | 13/16 | yes | 0 | 0 |
+| `reshard-c4-data` | data transform | 13/13 | 11/13 | no | 0 | 1 |
+| `sanitize-git-repo` | content scan | 7/7 | 0/7 | yes | 13 | 0 |
+
+`build-cython-ext` starts with no repository and clones it during the
+trajectory. `reshard-c4-data` also begins without an indexable source tree.
+Their task-start graph receipts are therefore honestly unavailable rather than
+silently treated as empty evidence. Both later exercised the graph refresh and
+verification-plan control after edits. This exposes a remaining gap: the
+task-level projection and relevance router are not rebuilt after a dormant
+graph wakes.
+
+The three graph-present tasks proved different graph shapes:
+
+| Task | Nonempty stored surfaces | Task projection |
+|---|---:|---|
+| `headless-terminal` | 8/14 | 1 file, 2 symbols, 2 nodes; edge, FTS, and property hits |
+| `llm-inference-batching-scheduler` | 11/14 | 2 files, 16 symbols, 16 nodes; passage, body, edge, closure, and property hits |
+| `sanitize-git-repo` | 14/14 | 40 files, 64 symbols, 80 nodes; passage, edge, closure, property, assertion, and co-change hits |
+
+“Use everything in `graph.db`” must mean inventory every trustworthy surface
+and query the surfaces relevant to the current task. It must not mean dumping
+the whole database into the prompt. Counts and revision receipts prove surface
+availability; bounded projections feed routing and verification; the global
+arbiter still owns the one-dose model-facing budget.
+
+#### Per-task live feature result
+
+All 17 canonical identities were censused on every task. Sixteen had a
+specific evaluation or terminal outcome across the run, nine were
+live-witnessed across the run, and no eligible identity went dark. Per-task
+live-witnessed identities were:
+
+| Task | Witnessed | Identities |
+|---|---:|---|
+| `build-cython-ext` | 5 | `obligations`, `localization`, `caller_contract`, `GT_LOC_RESLOT`, `GT_EDIT_CHECK` |
+| `headless-terminal` | 4 | `obligations`, `localization`, `GT_LOC_RESLOT`, `GT_EDIT_CHECK` |
+| `llm-inference-batching-scheduler` | 7 | `obligations`, `localization`, `caller_contract`, `submit_refusal`, `GT_LOC_RESLOT`, `GT_EDIT_CHECK`, `GT_CERT_DELIVERY` |
+| `reshard-c4-data` | 8 | `obligations`, `localization`, `signature_delta`, `submit_refusal`, `GT_LOC_RESLOT`, `GT_EDIT_CHECK`, `GT_PATCH_DELTA`, `GT_CERT_DELIVERY` |
+| `sanitize-git-repo` | 6 | `obligations`, `localization`, `submit_refusal`, `GT_LOC_RESLOT`, `GT_EDIT_CHECK`, `GT_CERT_DELIVERY` |
+
+This is the correct interpretation of “features working.” It is not valid to
+claim 17 deliveries per task. Features whose positive trigger did not occur
+must remain named `INELIGIBLE`.
+
+Lifecycle timing was also task-specific:
+
+| Task | start | research | pre-edit | post-edit | test | verify | submit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `build-cython-ext` | 1 | 58 | 29 | 28 | 6 | 0 | 0 |
+| `headless-terminal` | 1 | 12 | 8 | 5 | 6 | 2 | 2 |
+| `llm-inference-batching-scheduler` | 1 | 31 | 6 | 2 | 7 | 1 | 1 |
+| `reshard-c4-data` | 1 | 25 | 18 | 14 | 2 | 2 | 2 |
+| `sanitize-git-repo` | 1 | 26 | 4 | 4 | 0 | 2 | 2 |
+
+The missing build submit/verify stages are not a telemetry defect: the model
+hit the 100-iteration cap before attempting completion. Sanitization performed
+shell checks, but none qualified as a trustworthy test mapped to the complete
+contract, so its verified count correctly remained zero.
+
+#### Existing GT-off comparison
+
+The available GT-off observations used the same model and tasks but timeout
+multiplier 2.0 and implicit temperature. The GT-on diagnostic used timeout
+multiplier 1.0 and explicit temperature 1. `headless-terminal` GT-off exited
+137 after seven iterations and was not graded. Consequently these are
+descriptive observations, not causal GT deltas.
+
+| Task | Reward off -> on | Iterations off -> on | Input tokens off -> on | Output tokens off -> on | Tool results off -> on | Tool errors off -> on |
+|---|---:|---:|---:|---:|---:|---:|
+| `build-cython-ext` | 1 -> 0 | 82 -> 100 | 2,680,318 -> 3,985,588 | 21,094 -> 22,903 | 114 -> 128 | 15 -> 19 |
+| `headless-terminal` | ungraded -> 1 | 7 partial -> 39 | 25,235 partial -> 614,460 | 5,005 partial -> 19,881 | 8 partial -> 43 | 0 partial -> 9 |
+| `llm-inference-batching-scheduler` | 1 -> 0 | 21 -> 100 | 557,372 -> 5,043,318 | 33,398 -> 90,001 | 24 -> 109 | 1 -> 17 |
+| `reshard-c4-data` | 1 -> 1 | 57 -> 71 | 1,350,848 -> 2,754,622 | 20,980 -> 39,963 | 67 -> 79 | 0 -> 5 |
+| `sanitize-git-repo` | 1 -> 0 | 35 -> 32 | 1,296,069 -> 808,960 | 14,902 -> 8,276 | 76 -> 30 | 18 -> 1 |
+
+Across the four graded GT-off pairs, GT-on changed:
+
+| Metric | GT-off | GT-on | Observed delta |
+|---|---:|---:|---:|
+| Rewarded tasks | 4/4 | 1/4 | -3 tasks |
+| Iterations | 195 | 303 | +55.4% |
+| Input tokens | 5,884,607 | 12,592,488 | +114.0% |
+| Output tokens | 90,374 | 161,143 | +78.3% |
+| Tool results | 281 | 346 | +23.1% |
+| Tool errors | 34 | 42 | +23.5% |
+
+The result does **not** support an efficiency or solved-rate benefit claim.
+Compared with the immediately preceding matched-config GT-on smoke, reward
+also fell from 4/5 to 2/5, iterations rose from 209 to 342, input tokens rose
+from 6,171,645 to 13,206,948, and output tokens rose from 97,604 to 181,024.
+Temperature-1 sampling means one run cannot isolate causality, but the
+direction and magnitude forbid a positive claim.
+
+#### Exact failure diagnosis
+
+- `build-cython-ext` left `np.int` in `ccomplexity.pyx`; the hidden verifier
+  failed that compiled extension. The model hit the iteration cap before
+  submission. Six caller-contract deliveries and two trace frames did not
+  prevent the omission.
+- The batching scheduler missed only bucket 2's sequential-time threshold:
+  `36,664,059.48` versus the required `32,000,000`. The complete numeric
+  contract was shipped, but after a 13/16 verification refusal the model used
+  the remaining budget without resubmitting.
+- Sanitization explicitly excluded `exp_data/` from its supposedly
+  repository-wide searches. The remaining HF token was in the contaminated
+  JSON there. The router then suppressed 13 localization candidates as
+  ungrounded in that narrowed search. This is over-suppression: graph-grounded
+  content-scan evidence must be allowed to challenge an agent's incomplete
+  search scope.
+
+The run therefore proves complete-contract shipping, graph inventory,
+projection execution, role routing, provider attribution, and lifecycle
+timing. It simultaneously falsifies the claim that those changes already make
+GT more efficient or sufficient. The next implementation must refresh task
+projection when a graph wakes, admit graph-grounded content-scan evidence, and
+make repository-wide scope exclusions a deterministic pre-submit concern
+before spending another five-task smoke.
+
 ### Required engine metrics
 
 | Metric | Required interpretation |
