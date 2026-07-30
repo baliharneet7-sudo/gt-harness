@@ -371,6 +371,46 @@ def test_provider_message_view_exposes_capsule_once_without_mutating_history(
     assert expiry[0]["payload"]["exposure_count"] == 1
 
 
+def test_unexposed_capsule_survives_parallel_sibling_action_indices(tmp_path):
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    capsule = "\nGT evidence produced by the first parallel tool result"
+    bridge._delivery_texts["34"] = capsule
+    bridge._delivery_metadata["34"] = {
+        "evidence_type": "caller_contract_view",
+        "producer": "caller_contract",
+        "target": "pkg/alpha.py",
+        "issued_action": "34",
+    }
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "tool_result",
+            "content": "ordinary output" + capsule,
+        }],
+    }]
+
+    # Five sibling tool results completed before the next provider decision.
+    # Action age is not exposure: the capsule must survive until that request.
+    bridge.action_index = 39
+    active = bridge.provider_message_view(messages)
+    assert capsule in bridge._message_text(active)
+    assert not any(
+        row["event_type"] == "capsule.expired"
+        for row in bridge._attribution.rows
+    )
+
+    bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {"model": "deepseek-v4-flash", "messages": active},
+    )
+    bridge.action_index = 40
+    expired = bridge.provider_message_view(messages)
+    assert capsule not in bridge._message_text(expired)
+
+
 # --------------------------------------------------------------------------- #
 # indexer: code-repo detection (GT dormant on non-code roots)
 # --------------------------------------------------------------------------- #

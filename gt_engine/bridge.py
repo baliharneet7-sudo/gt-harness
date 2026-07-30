@@ -935,8 +935,8 @@ class GTBridge:
         view = copy.deepcopy(messages)
         expired = {
             delivery_id: self._delivery_texts.get(delivery_id, "")
-            for delivery_id, metadata in self._delivery_metadata.items()
-            if int(metadata.get("issued_action", -1)) < self.action_index
+            for delivery_id in self._delivery_metadata
+            if self._delivery_exposures.get(delivery_id, 0) >= 1
         }
 
         def scrub(value: Any) -> Any:
