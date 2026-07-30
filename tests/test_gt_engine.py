@@ -1824,6 +1824,7 @@ def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
     is refused ONCE (native pre-commit form, agent's own command quoted),
     sealed as submit_refusal; the second submit passes (single dose)."""
     monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
     b = indexed_repo
     _edit_and_fail(b, tmp_path)
     nudge = b.submit_probe()
@@ -1836,6 +1837,11 @@ def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
     sealed = b.deliveries[-1]
     assert sealed.evidence_type == "submit_refusal"
     assert sealed.receipt_state == "delivered"
+    from gt_engine.attribution import summarize_features
+    summary = summarize_features(b._attribution.rows)
+    assert summary["submit_refusal"]["status"] == "DELIVERED_UNEXPOSED"
+    assert summary["GT_SS_SUBMIT_RED"]["status"] == "DELIVERED_UNEXPOSED"
+    assert summary["GT_CERT_DELIVERY"]["status"] == "DELIVERED_UNEXPOSED"
     assert b.submit_probe() is None            # single dose: 2nd submit passes
 
 

@@ -2083,7 +2083,12 @@ class GTBridge:
             and submit_block.get("reason") == "observed_red_unresolved"
         ):
             capability_ids.append("GT_SS_SUBMIT_RED")
-        if cert_rendered:
+        # The certificate owns the completion decision whenever it was built
+        # successfully. Its native renderer may legitimately yield no
+        # per-head lines for the broad observed-RED fallback, in which case
+        # the refusal text falls back to render_submit_rejection; that render
+        # fallback does not erase the certificate's applied decision.
+        if cert is not None:
             capability_ids.append("GT_CERT_DELIVERY")
         self._ledger_record(
             sealed,
