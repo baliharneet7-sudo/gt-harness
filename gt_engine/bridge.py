@@ -75,8 +75,8 @@ _AGGREGATE_CHECK_RE = re.compile(
     r"(?im)\b(?:ALL\s+TARGETS\s+MET|OVERALL\s+PASS)\s*[:=]\s*(True|False)\b"
 )
 _ITEM_CHECK_RE = re.compile(
-    r"(?im)^[^\r\n]{0,120}\b(?:ok|pass(?:ed)?|success)"
-    r"\s*[:=]\s*(true|false)\b"
+    r"(?im)\b[A-Za-z][A-Za-z0-9_ -]{0,30}\s*[:=]\s*"
+    r"(true|false|pass|fail)\b"
 )
 _CHECK_EXEC_RE = re.compile(
     r"(?i)(?:^|[;&|]\s*)(?:python\d*|node|pytest|npm\s+test|"
@@ -92,7 +92,7 @@ def _explicit_check_outcome(output: str) -> str | None:
     items = [item.lower() for item in _ITEM_CHECK_RE.findall(output or "")]
     if not items:
         return None
-    return "fail" if "false" in items else "pass"
+    return "fail" if {"false", "fail"} & set(items) else "pass"
 
 
 def _minimal_pair() -> None:
