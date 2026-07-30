@@ -104,9 +104,41 @@ since 89 distinct task images can exhaust the runner disk.
 1. **5-task slice** (now): prove the CI plumbing + model routing end to end.
 2. **Full 89-task baseline** (next): the frozen no-GT reference number.
    Freeze the commit + model + job artifact; all GT comparisons point at it.
-3. **GT arm** (future, not enabled): same workflow shape with the
-   GroundTruth-augmented agent. Blocked on container plumbing in
-   `eval/tb_agent.py` `install()` (upload `gt_engine/`, install the
-   `groundtruth` package, stage the `gt-index` binary, pass `--gt-root`) —
-   see the `TODO(gt)` there. It will be a separate workflow (or a
-   `gt_enabled` input) so the baseline stays byte-for-byte reproducible.
+3. **GT arm** (`tb2_gt.yml`, live — GT delivered in containers on run
+   30501483446): same workflow shape with `eval.tb_agent:GTNanoAgent`, which
+   uploads `gt_engine/` + the vendored `groundtruth` wheel + a CI-built
+   `gt-index` binary into every task container and runs nano with
+   `--gt-root "$PWD"`. Separate workflow so the baseline stays
+   byte-for-byte reproducible.
+
+## `swe_gt.yml` — SWE-bench Verified GT arm (nano + GroundTruth)
+
+Same hardened shape as `tb2_gt.yml` (sanitize ALL provider secrets, retrying
+provider preflight with cause chain, gt-index build + FTS5 smoke, GT artifact
+preflight, artifact-always, score summary), pointed at
+`swebench-verified@1.0` with `eval.swe_agent:GTNanoSweAgent`. Secrets, the
+dispatch pattern, and the results layout match the sections above
+(`-o results/swebench`, artifact `swe-gt-<run id>`).
+
+SWE-specific deltas:
+
+- **`--gt-root /testbed`** by default (the repo location is baked into the
+  SWE task images; override with `--ak gt_root=...` / `NANO_GT_ROOT` only for
+  debugging). GT's `.gt/` index dir is self-gitignored and removed before the
+  model patch is staged, so it can never reach `model_patch.diff` or grading;
+  the GT delivery ledger lands at `<task>/agent/gt_ledger.jsonl` in the
+  artifact.
+- **Disk**: swebench eval images are 1–3 GB EACH, so the free-disk step runs
+  unconditionally and defaults are small: `n_tasks=5`, `concurrency=2`
+  (task.toml wants 1 cpu / 4G per task). The full 500-task dataset does NOT
+  fit one hosted runner — shard with `task_ids` across dispatches.
+- **Model id**: default is the **bare** `deepseek-v4-flash`. The model-id
+  gotcha above applies with extra force here: with `OPENAI_BASE_URL` set the
+  string reaches the gateway verbatim, and DeepSeek 400s the
+  `deepseek/`-prefixed spelling — five dead 3-GB containers instead of one
+  failed preflight if you skip reading this.
+
+```bash
+gh workflow run swe_gt.yml --ref gt-integration                 # 5-task slice
+gh workflow run swe_gt.yml --ref gt-integration -f task_ids="astropy__astropy-7606"
+```
