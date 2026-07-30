@@ -708,6 +708,38 @@ single positive temperature-1 run is promising but inconclusive.
 9. Experiments are matched and repeated.
 10. Tool outcomes are classified and harmful GT-linked misuse is prevented or
     surfaced.
+
+## Live execution receipt and remaining gap
+
+The first post-implementation run,
+[`30589336562`](https://github.com/harneet2512/gt-harness/actions/runs/30589336562)
+at `66c30ed`, found a live-only capsule lifecycle defect: evidence created by
+an early tool result in a parallel batch was expired by later sibling action
+indices before its first provider request. Five deliveries across three tasks
+had exposure count zero. Commit `0d3dd88` changed expiry from action-age to
+provider-exposure state and added a parallel-batch regression test.
+
+The corrective run,
+[`30590129776`](https://github.com/harneet2512/gt-harness/actions/runs/30590129776),
+passed the strict gate. It proves provider-bound lifecycle wiring, complete
+outcome classification, atomic graph refresh, one-exposure capsule expiry,
+role selection, predicate execution, and SDLC boundary coverage.
+
+It does **not** satisfy this plan's outcome definition. Reward was 3/5 overall
+and 2/4 on the valid GT-off pairs, versus 4/4 for GT-off. The next
+dependency-ordered work is:
+
+1. make numeric/content/artifact predicates validate observed semantics rather
+   than command vocabulary;
+2. treat timed-out or incomplete required probes as unresolved positive
+   evidence;
+3. replace the single submit bounce with a bounded unresolved-predicate policy
+   coordinated with nano's remaining pushback budget;
+4. render bounded role-relevant graph facts into applicable feature evidence,
+   not only projection telemetry;
+5. turn calibrated `STALLED`/`BUDGET_RISK` shadow states into one bounded
+   recovery action; and
+6. run the frozen matched repeated protocol before claiming improvement.
 11. All 17 identities retain complete per-task terminal-state accounting.
 12. Every delivery is provider-final attributable and action-linked.
 13. A real nano + GT run passes strict audit with a per-task result report.

@@ -47,6 +47,61 @@ Confidence:
 - **Unknown:** the size or direction of solved-rate, token, iteration, or
   wall-time changes until a controlled live comparison is run.
 
+## Live proof update: run 30590129776
+
+Run
+[`30590129776`](https://github.com/harneet2512/gt-harness/actions/runs/30590129776)
+executed the real nano-harness + GT path at commit `0d3dd88`, using
+`deepseek-v4-flash`, temperature `1`, Profile 2, the frozen five-task slice,
+concurrency `4`, and timeout multiplier `1.0`. The workflow, Harbor execution,
+17-path preflight, artifact upload, attribution audit, and strict live gate all
+passed.
+
+The online result proves wiring and timing, not superiority:
+
+| Task | Reward | Witnessed identities | Action-consistent identities | GT deliveries | Result |
+|---|---:|---:|---:|---:|---|
+| `build-cython-ext` | 1 | 8 | 5 | 6 | solved |
+| `headless-terminal` | 1 | 6 | 1 | 4 | solved |
+| `llm-inference-batching-scheduler` | 0 | 9 | 4 | 6 | bucket-1 cost missed threshold |
+| `reshard-c4-data` | 0 | 6 | 5 | 3 | decompression timed out |
+| `sanitize-git-repo` | 1 | 6 | 3 | 3 | solved |
+
+Every task recorded `task_start`, `research`, `pre_edit`, `post_edit`, `test`,
+`verify`, and `submit`. Across the run:
+
+- 10 of 17 canonical identities were provider-witnessed;
+- 15 of 17 were exercised with a named terminal outcome;
+- no eligible trigger was dark, no delivery was unexposed, and no telemetry
+  fault occurred;
+- all 22 exposed capsules were unique, exposed exactly once, subsequently
+  expired, and never repeated;
+- 44 atomic graph refreshes completed with zero refresh faults and 373 bounded
+  semantic graph facts in task projections;
+- 62 typed predicate observations, 16 utility scores, and 9 progress
+  transitions were recorded;
+- all 277 tool outcomes were classified: 9 harmful, 13 useful RED observations,
+  and zero persistent-shell lifecycle failures.
+
+The existing GT-off data is not a fully matched experiment: its headless task
+crashed and its timeout/temperature controls differ. On the four graded pairs,
+however, GT-off solved 4/4 while this GT-on run solved 2/4. GT-on used 7.7%
+more iterations, 53.5% more input tokens, and 70.2% more output tokens, while
+using 9.3% fewer tool results and producing 11.8% fewer raw tool errors.
+Therefore there is no benefit claim.
+
+The two live failures expose the remaining engine defects:
+
+1. numeric predicates can witness threshold-shaped checks without proving the
+   final measured inequalities;
+2. a bounded runtime probe can time out while later prose still claims it
+   passed;
+3. one submit refusal is insufficient when positive unresolved evidence
+   remains;
+4. role packs and semantic graph facts are measured but do not yet govern every
+   verification and evidence decision; and
+5. repeated matched runs remain outstanding.
+
 ## What GT is in the Mini-SWE system
 
 GT is not a post-run trace analyzer attached as an afterthought. In the current
