@@ -586,3 +586,48 @@ def test_registry_abstention_is_named_suppression_not_ineligible():
 
     assert summary["caller_contract"]["status"] == "SUPPRESSED_WITH_REASON"
     assert summary["caller_contract"]["reasons"] == ["producer_disabled"]
+
+
+def test_carried_delivery_does_not_overwrite_immediate_response_action():
+    """Old GT bytes remain in later conversation history. The first linked
+    response is the causal boundary; later actions must not overwrite it."""
+    rows = [
+        {
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "d1",
+                "feature_id": "localization",
+                "evidence_type": "localization",
+            },
+        },
+        {
+            "event_type": "provider.request",
+            "payload": {"delivery_ids": ["d1"]},
+        },
+        {
+            "event_type": "model.response",
+            "payload": {"delivery_ids": ["d1"]},
+        },
+        {
+            "event_type": "response.action",
+            "payload": {
+                "delivery_id": "d1",
+                "feature_id": "localization",
+                "classification": "target_referenced",
+            },
+        },
+        {
+            "event_type": "response.action",
+            "payload": {
+                "delivery_id": "d1",
+                "feature_id": "localization",
+                "classification": "no_tool_action",
+            },
+        },
+    ]
+
+    summary = summarize_features(rows)
+
+    assert summary["localization"]["action_observed"] is True
+    assert summary["localization"]["action_consistent"] is True

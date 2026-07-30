@@ -478,8 +478,14 @@ def summarize_features(
         if event_type == "response.action":
             delivery_id = str(payload.get("delivery_id") or "")
             if delivery_id:
-                action_by_delivery[delivery_id] = str(
-                    payload.get("classification") or ""
+                # A sealed block remains in later conversation history, so
+                # subsequent responses can mention the same delivery id. The
+                # first linked response is the causal boundary verified by
+                # ``verify_lifecycle_rows``; never overwrite it with a later
+                # carried-context action.
+                action_by_delivery.setdefault(
+                    delivery_id,
+                    str(payload.get("classification") or ""),
                 )
             continue
         if event_type == "capability.applied":
