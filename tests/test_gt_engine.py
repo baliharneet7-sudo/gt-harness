@@ -768,6 +768,43 @@ def test_covering_green_stays_quiet_and_latches(covering_repo, tmp_path):
 
 
 @requires_gt
+def test_covering_latch_not_burned_on_unexecuted_run(covering_repo, tmp_path):
+    """Covering-latch fix: a run that never EXECUTED (unavailable — spawn
+    fault, timeout, empty selection) must not burn the per-file latch; the
+    next edit re-attempts. A run that DID execute (pass/fail) latches."""
+    b = covering_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+
+    def _edit(n: int) -> None:
+        before = alpha.read_text(encoding="utf-8")
+        after = before + f"\n# attempt {n}\n"
+        alpha.write_text(after, encoding="utf-8")
+        b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
+                 edit_before=before, edit_after=after)
+
+    calls: list[str] = []
+    b._run_covering = (  # type: ignore[method-assign]
+        lambda changed: (calls.append("unavail"),
+                         ({"verdict": "unavailable", "ran": []},
+                          ["test_alpha.py"]))[1])
+    _edit(1)
+    assert calls == ["unavail"]
+    assert "pkg/alpha.py" not in b._covering_fired   # fault: latch NOT set
+    _edit(2)
+    assert calls == ["unavail", "unavail"]           # bounded retry happened
+    # Now an EXECUTED (pass) run: the latch sets and holds.
+    b._run_covering = (  # type: ignore[method-assign]
+        lambda changed: (calls.append("pass"),
+                         ({"verdict": "pass", "ran": ["test_alpha.py"]},
+                          ["test_alpha.py"]))[1])
+    _edit(3)
+    assert calls == ["unavail", "unavail", "pass"]
+    assert "pkg/alpha.py" in b._covering_fired       # executed: latched
+    _edit(4)
+    assert calls == ["unavail", "unavail", "pass"]   # latch holds: no re-run
+
+
+@requires_gt
 def test_covering_off_by_flag(covering_repo, tmp_path, monkeypatch):
     monkeypatch.delenv("GT_VERIFY_EXECUTE", raising=False)
     b = covering_repo
@@ -1008,14 +1045,40 @@ _RECOVERY_STEER = ("The last edit did not change the failing result — form a "
 
 
 def test_failure_fingerprint_normalization():
-    """Production's scrub: numbers/hex and path tokens are volatile; a passing
-    observation has no signature."""
+    """The scrub keeps genuinely-volatile numerics out of the key: path
+    tokens, hex addresses, durations; a passing observation has no
+    signature."""
     a = failure_fingerprint("FAILED pkg/x.py::t - AssertionError: assert 4 == 3")
-    b = failure_fingerprint("FAILED src/y.py::t - AssertionError: assert 7 == 9")
-    assert a and a == b                       # same failure shape, same key
+    b = failure_fingerprint("FAILED src/y.py::t - AssertionError: assert 4 == 3")
+    assert a and a == b                       # same failure, path drift only
     assert failure_fingerprint("5 passed in 0.01s") == ""
     assert failure_fingerprint("") == ""
     assert failure_fingerprint(_FAIL_X) != failure_fingerprint(_FAIL_Y)
+
+
+def test_failure_fingerprint_discriminates_assertion_values():
+    """W2-R6 fix: two DIFFERENT failing values must fingerprint DIFFERENTLY —
+    `expected 5 got 3` -> edit -> `expected 5 got 4` is numeric PROGRESS, and
+    a false-same key would deliver a false 'the edit changed nothing' steer.
+    Volatile numerics (file:line locators, hex addresses, durations, `line N`
+    traceback refs) stay scrubbed — flaky drift there must NOT read as
+    progress (the failure mode the scrub existed for)."""
+    a = failure_fingerprint(
+        "FAILED test_m.py::t - AssertionError: expected 5 got 3\n[exit code 1]")
+    b = failure_fingerprint(
+        "FAILED test_m.py::t - AssertionError: expected 5 got 4\n[exit code 1]")
+    assert a and b and a != b                 # value drift IS a state change
+    # Guards on the scrub's original purpose — each pair must stay SAME:
+    assert (failure_fingerprint("Error: boom at pkg/foo.py:12")
+            == failure_fingerprint("Error: boom at pkg/foo.py:13"))
+    assert (failure_fingerprint("Error: boom at foo.py:12:1")
+            == failure_fingerprint("Error: boom at foo.py:13:7"))
+    assert (failure_fingerprint('AssertionError at line 42 in helper')
+            == failure_fingerprint('AssertionError at line 43 in helper'))
+    assert (failure_fingerprint("fatal: segfault at 0xdeadbeef")
+            == failure_fingerprint("fatal: segfault at 0xcafe12"))
+    assert (failure_fingerprint("AssertionError: got 3\n1 failed in 0.12s")
+            == failure_fingerprint("AssertionError: got 3\n1 failed in 0.87s"))
 
 
 def _edit_alpha(b, tmp_path, marker: str):
@@ -1230,6 +1293,36 @@ def test_submit_red_ignores_failure_on_unedited_surface(indexed_repo,
     b = indexed_repo
     b.enrich("bash", {"command": _PYTEST_CMD}, _RED_TOUCH, True)  # no edits yet
     assert b._observed_red is None
+    assert b.submit_probe() is None
+
+
+@requires_gt
+def test_submit_bounce_not_burned_by_suppressed_refusal(indexed_repo, tmp_path,
+                                                        monkeypatch):
+    """W2-R4 fix: a refusal SUPPRESSED by the seam guards (leak-tripping
+    render here) is a silent allow and must NOT spend the single bounce —
+    the next submit with a real block still refuses. The bounce is counted
+    only when refusal text actually ships (fail-open economics preserved:
+    the probe AFTER a shipped refusal passes)."""
+    monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
+    b = indexed_repo
+    _edit_and_fail(b, tmp_path)
+    import groundtruth.runtime.native_render as nr
+    real_render = nr.render_submit_rejection
+    # Probe 1: the rendered refusal trips contains_test_identity -> suppressed.
+    monkeypatch.setattr(
+        nr, "render_submit_rejection",
+        lambda *a, **k: "FAILED tests/test_math.py::test_helper_sum")
+    assert b.submit_probe() is None            # guard-suppressed: silent allow
+    assert b.submit_bounces == 0               # ...and the bounce is NOT spent
+    assert all(d.evidence_type != "submit_refusal" for d in b.deliveries)
+    # Probe 2: renderer healthy again — the real block must still ship.
+    monkeypatch.setattr(nr, "render_submit_rejection", real_render)
+    nudge = b.submit_probe()
+    assert nudge is not None
+    assert "never re-run green" in nudge
+    assert b.submit_bounces == 1               # spent exactly at the ship
+    # Probe 3: genuinely-shipped refusal -> max_bounces=1 fail-open holds.
     assert b.submit_probe() is None
 
 

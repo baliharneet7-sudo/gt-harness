@@ -140,8 +140,10 @@ def parse_exit_code(output: str, is_error: bool) -> int | None:
 # --------------------------------------------------------------------------- #
 # Recovery / GT_HYPOTHESIS lane (FIX B): failure-signature normalization.
 # Port of production ``_hypothesis_failure_fingerprint``
-# (gt_mini_patch.py:12658-12686), byte-for-byte mechanism: marker-line
-# extraction (last 8), number/hex + path-token scrub, sha256[:16]. HOST-ONLY:
+# (gt_mini_patch.py:12658-12686): marker-line extraction (last 8), volatile-
+# numeric + path-token scrub, sha256[:16] — with ONE deliberate divergence
+# (W2-R6 fix, see inline): assertion-value numerals are PRESERVED so numeric
+# progress never fingerprints as an unchanged failure. HOST-ONLY:
 # the hash is the repeat key in EpisodeState.failure_fingerprints — it is
 # NEVER emitted to the model (the model surface is the generic imperative).
 # The W4 infra-noise guard (GT_INFRA_NOISE_GUARD, Profile-2 member) keeps
@@ -171,7 +173,27 @@ def failure_fingerprint(observation: str) -> str:
     if not sig_lines:
         return ""
     sig = "\n".join(sig_lines[-8:])
-    sig = re.sub(r"0x[0-9a-fA-F]+|\d+", "", sig)      # numbers/hex are volatile
+    # DIVERGENCE from production (W2-R6 fix): production scrubs ALL numerals,
+    # which collides genuinely DIFFERENT failing values ("expected 5 got 3"
+    # vs "... got 4") into one key — the recurrence steer then falsely tells
+    # a numerically-PROGRESSING agent "the last edit did not change the
+    # failing result". We scrub only the numeric classes that are volatile
+    # across identical failures — hex addresses, file:line(:col) locators,
+    # `line N` traceback refs, durations, timestamps — and PRESERVE the
+    # remaining numeric literals (assertion values). Tradeoff: any OTHER
+    # volatile numeral (a PID, a port) now shifts the key -> repeat missed ->
+    # quiet no-fire; that degrades toward SILENCE, never toward the false
+    # steer, while flaky path:line/duration drift still reads as the SAME
+    # failure (the failure mode the blanket scrub existed for).
+    sig = re.sub(r"0x[0-9a-fA-F]+", "", sig)               # addresses
+    sig = re.sub(                                          # file:line(:col)
+        r"(?:[\w.-]+[/\\])*[\w-][\w.-]*\.\w+:\d+(?::\d+)?", "", sig)
+    sig = re.sub(r"\bline \d+\b", "line", sig)             # traceback refs
+    sig = re.sub(                                          # durations
+        r"\b\d+(?:\.\d+)?\s*(?:ns|us|ms|s|secs?|seconds?|mins?|minutes?)\b",
+        "", sig)
+    sig = re.sub(r"\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b", "", sig)   # clock times
+    sig = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", "", sig)               # ISO dates
     sig = re.sub(r"[\w.]*[/\\][\w./\\-]+", "", sig)   # path-ish tokens are volatile
     sig = " ".join(sig.split())
     if not sig:
@@ -477,12 +499,12 @@ class GTBridge:
             if not path:
                 return
             dpath = os.path.join(os.path.dirname(path), "gt_deliveries.txt")
-            header = "--- event_id=%s boundary=%s evidence_type=%s rendered_bytes_hash=%s ---" % (
-                str(getattr(sealed, "event_id", "") or ""),
-                boundary,
-                str(getattr(sealed, "evidence_type", "") or ""),
-                str(getattr(sealed, "rendered_bytes_hash", "") or ""),
-            )
+            header = (
+                f"--- event_id={getattr(sealed, 'event_id', '') or ''}"
+                f" boundary={boundary}"
+                f" evidence_type={getattr(sealed, 'evidence_type', '') or ''}"
+                f" rendered_bytes_hash="
+                f"{getattr(sealed, 'rendered_bytes_hash', '') or ''} ---")
             with open(dpath, "ab") as fh:
                 fh.write(header.encode("utf-8") + b"\n"
                          + shipped.encode("utf-8", "surrogatepass") + b"\n\n")
@@ -609,13 +631,22 @@ class GTBridge:
         src = [c for c in changed if c and _has_source_ext(c)]
         if not src or all(c in self._covering_fired for c in src):
             return None  # cost bound: fire at most once per file per episode
-        self._covering_fired.update(src)
         from groundtruth.runtime.covering_runner import is_red_attributable
         from groundtruth.runtime.native_render import (
             render_covering_failure_native,
         )
 
         cres, files = self._run_covering(changed)
+        # Latch ONLY after a run that actually EXECUTED (verdict pass/fail).
+        # A transient fault (spawn error, timeout, empty selection -> None/
+        # unavailable) leaves the latch unset so the NEXT edit re-attempts —
+        # burning it before the run permanently muted the file's edit-lane
+        # covering for the episode on one transient fault. Cost bound: each
+        # retry is capped by the runner's own budgets (20s/file, 35s total),
+        # and a never-selectable file costs only the sqlite selection query
+        # per edit turn — bounded, and strictly cheaper than a muted lane.
+        if cres and cres.get("verdict") in ("pass", "fail"):
+            self._covering_fired.update(src)
         if not cres or cres.get("verdict") != "fail":
             return None
         ran = list(cres.get("ran") or files)
@@ -1210,7 +1241,6 @@ class GTBridge:
                 cert = None
         if verdict.allow:
             return None  # clean / unavailable / failed-open: quiet
-        self.submit_bounces += 1
         # BLOCK render: the NOT-CLEAN cert as the native per-head pre-commit
         # block (D7 headline); an empty cert render (or cert off/fault) falls
         # back to the existing single-line native refusal — never silent on a
@@ -1234,6 +1264,14 @@ class GTBridge:
         if (not text or contains_gt_tag(text) or contains_test_identity(text)
                 or not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS)):
             return None
+        # W2-R4 fix: the bounce is spent ONLY when refusal text actually
+        # ships (all guards above passed). A guard-suppressed refusal (empty
+        # render, leak trip, over budget) is a silent allow and must not burn
+        # the single bounce — otherwise the NEXT submit fails open
+        # unconditionally and a real block never ships at all. max_bounces=1
+        # semantics are unchanged for genuinely-shipped refusals: the probe
+        # after a shipped refusal is gate_overridden (fail-open, no deadlock).
+        self.submit_bounces += 1
         # The cert block / a covering block / the SS-2 observed-RED block is
         # the submit_refusal fact class (production's lineage binding,
         # gt_mini_patch.py:22415; gt_gt.md: GT_SS_SUBMIT_RED owns
