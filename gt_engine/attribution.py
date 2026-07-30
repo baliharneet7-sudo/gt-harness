@@ -282,8 +282,8 @@ def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
     """
     materialized = [dict(row) for row in rows]
     deliveries: dict[str, dict[str, Any]] = {}
-    provider_rows: dict[str, list[dict[str, Any]]] = {}
-    response_rows: dict[str, list[dict[str, Any]]] = {}
+    provider_rows: list[dict[str, Any]] = []
+    response_rows: list[dict[str, Any]] = []
     for position, row in enumerate(materialized, 1):
         row.setdefault("sequence", position)
         payload = row.get("payload")
@@ -298,19 +298,16 @@ def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
             if delivery_id:
                 deliveries[delivery_id] = row
         elif event_type == "provider.request":
-            for delivery_id in payload.get("delivery_ids", ()):
-                provider_rows.setdefault(str(delivery_id), []).append(row)
+            provider_rows.append(row)
         elif event_type == "model.response":
-            for delivery_id in payload.get("delivery_ids", ()):
-                response_rows.setdefault(str(delivery_id), []).append(row)
+            response_rows.append(row)
 
     issues: list[str] = []
     for delivery_id, delivery in deliveries.items():
         delivery_payload = delivery.get("payload", {})
         delivery_sequence = int(delivery.get("sequence") or 0)
-        delivery_action = int(delivery.get("action_index") or 0)
         providers = [
-            row for row in provider_rows.get(delivery_id, ())
+            row for row in provider_rows
             if int(row.get("sequence") or 0) > delivery_sequence
         ]
         provider = providers[0] if providers else None
@@ -319,13 +316,16 @@ def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
                 f"delivery {delivery_id}: missing provider-final request receipt"
             )
         else:
-            provider_action = int(provider.get("action_index") or 0)
-            if provider_action != delivery_action:
-                issues.append(
-                    f"delivery {delivery_id}: provider request action "
-                    f"{provider_action} != delivery action {delivery_action}"
-                )
             provider_payload = provider.get("payload", {})
+            provider_delivery_ids = {
+                str(value)
+                for value in provider_payload.get("delivery_ids", ())
+            }
+            if delivery_id not in provider_delivery_ids:
+                issues.append(
+                    f"delivery {delivery_id}: missing from immediate "
+                    "provider-final request"
+                )
             matches = [
                 item for item in provider_payload.get("matches", ())
                 if isinstance(item, dict)
@@ -352,13 +352,24 @@ def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
             else delivery_sequence
         )
         responses = [
-            row for row in response_rows.get(delivery_id, ())
+            row for row in response_rows
             if int(row.get("sequence") or 0) > provider_sequence
         ]
         response = responses[0] if responses else None
         if response is None:
             issues.append(f"delivery {delivery_id}: missing linked model response")
         elif provider is not None:
+            response_delivery_ids = {
+                str(value)
+                for value in response.get("payload", {}).get(
+                    "delivery_ids", ()
+                )
+            }
+            if delivery_id not in response_delivery_ids:
+                issues.append(
+                    f"delivery {delivery_id}: missing from immediate "
+                    "model response"
+                )
             provider_iteration = int(
                 provider.get("payload", {}).get("iteration") or 0
             )

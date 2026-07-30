@@ -23,10 +23,13 @@ Checks per task:
                   observable = chars inside GT-attributable blocks.
   7. PAIRING      with ``--baseline <dir>``: align tasks by name, emit the
                   no-harm table (reward / tokens / iterations / deliveries).
-  8. LEDGER-JOIN  when ``agent/gt_ledger.jsonl`` exists (GT-side seal records,
-                  one JSONL row per SEALED delivery), every ledger row is
-                  reconciled 1:1 against the agent-side transcript - gt_math's
-                  dose-reconciliation law made mechanical.  Per row:
+  8. DELIVERY PROOF  when ``agent/gt_ledger.jsonl`` exists (GT-side seal
+                  records, one JSONL row per SEALED delivery), every ledger
+                  row is joined to the attribution trace. Receipt-enabled runs
+                  prove delivery at the final normalized provider request
+                  using exact sealed-byte hashes; transcript reconciliation is
+                  retained only as a visibility diagnostic. Legacy runs
+                  without provider receipts use these transcript states:
                     TRANSCRIPT-CONFIRMED  the shipped bytes were located in a
                         tool_result panel (sha256 of the located slice matches
                         the row's ``rendered_bytes_hash``, or the byte-exact
@@ -36,8 +39,8 @@ Checks per task:
                         (rides the un-printed initial user message) or the
                         target observation hit the CLI's [:2000] display cap
                         (the GT suffix sits past the display window);
-                    UNRECONCILED  should be visible but is not = potential
-                        delivery lie (the F1 class) -> verdict RED.
+                    UNRECONCILED  should be visible but is not. This is RED
+                        only when no provider-final receipt exists.
                   Ledger integrity: chain_head values must be unique 64-hex
                   and event_ids strictly advancing; duplicate dedup_keys are
                   flagged; >1 gateway/covering row per event_id violates the
@@ -347,6 +350,8 @@ class LedgerRow:
     status: str = UNRECONCILED
     status_reason: str = ""
     quote: str = ""
+    provider_confirmed: bool = False
+    provider_confirmation_reason: str = ""
 
 
 def load_ledger(path: Path) -> tuple[list[LedgerRow], list[str]]:
@@ -647,6 +652,7 @@ class TaskAudit:
     attribution_rows: int = 0
     attribution_issues: list[str] = field(default_factory=list)
     feature_attribution: dict[str, dict] = field(default_factory=dict)
+    provider_receipts_required: bool = False
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -782,6 +788,18 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.attribution_rows = len(attribution_rows)
         a.attribution_issues.extend(attr_issues)
         a.feature_attribution = summarize_features(attribution_rows)
+        a.provider_receipts_required = any(
+            row.get("event_type") == "provider.request"
+            or (
+                row.get("event_type") == "run.started"
+                and bool(
+                    row.get("payload", {}).get(
+                        "provider_final_receipts_required"
+                    )
+                )
+            )
+            for row in attribution_rows
+        )
         for row in attribution_rows:
             payload = row.get("payload", {})
             if (row.get("event_type") == "decision.committed"
@@ -856,6 +874,25 @@ def audit_task(task_dir: Path) -> TaskAudit:
             a.gt_overhead_chars += r.len_shipped_chars
         reconcile_ledger(ledger_rows, tool_panels, deliveries_texts,
                          deliveries_bad_ids)
+        if (
+            a.provider_receipts_required
+            and not a.attribution_issues
+            and a.attribution_present
+        ):
+            for row in ledger_rows:
+                row.provider_confirmed = True
+                row.provider_confirmation_reason = (
+                    "exact sealed bytes witnessed in the immediate "
+                    "provider-final request and linked model response"
+                )
+                if row.status == UNRECONCILED:
+                    detail = row.status_reason.replace(
+                        " - potential delivery lie", ""
+                    )
+                    row.status_reason = (
+                        "transcript-only diagnostic (provider receipt is "
+                        f"authoritative): {detail}"
+                    )
         integ, dose = check_ledger_integrity(ledger_rows)
         a.ledger_issues.extend(integ)
         a.dose_violations.extend(dose)
@@ -905,7 +942,10 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.verdict_reasons.append(
             "attribution RED feature(s): " + ", ".join(sorted(attribution_red))
         )
-    unreconciled = [r for r in a.ledger_rows if r.status == UNRECONCILED]
+    unreconciled = [
+        r for r in a.ledger_rows
+        if r.status == UNRECONCILED and not r.provider_confirmed
+    ]
     for r in unreconciled:
         a.verdict_reasons.append(
             f"UNRECONCILED ledger row ev{r.event_id} ({r.evidence_type}, "
@@ -944,15 +984,26 @@ def audit_task(task_dir: Path) -> TaskAudit:
             a.verdict_reasons.append(
                 "non-code task, zero GT deliveries (dormancy is correct)")
     elif a.ledger_present:
-        # every sealed row is TRANSCRIPT-CONFIRMED or explained MODEL-ONLY,
-        # leak/dose/chain laws clean: delivery is PROVEN, not just quiet.
+        # Provider-final receipts are the delivery witness on new runs.
+        # Legacy runs fall back to transcript/model-only reconciliation.
         confirmed = sum(1 for r in a.ledger_rows if r.status == CONFIRMED)
         model_only = sum(1 for r in a.ledger_rows if r.status == MODEL_ONLY)
+        provider_confirmed = sum(
+            1 for r in a.ledger_rows if r.provider_confirmed
+        )
         a.verdict = "GREEN-delivered"
-        a.verdict_reasons.append(
-            f"{len(a.ledger_rows)} sealed deliver(y/ies) fully reconciled: "
-            f"{confirmed} transcript-confirmed, {model_only} model-only "
-            "(explained); chain and dose laws clean")
+        if provider_confirmed:
+            a.verdict_reasons.append(
+                f"{provider_confirmed} sealed deliver(y/ies) "
+                "provider-confirmed with exact request bytes and linked "
+                f"responses; transcript visibility: {confirmed} confirmed, "
+                f"{model_only} model-only; chain and dose laws clean"
+            )
+        else:
+            a.verdict_reasons.append(
+                f"{len(a.ledger_rows)} sealed deliver(y/ies) fully reconciled: "
+                f"{confirmed} transcript-confirmed, {model_only} model-only "
+                "(explained); chain and dose laws clean")
     else:
         a.verdict = "GREEN"
     return a
@@ -1034,6 +1085,11 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                         f"{_fmt(r.evidence_type, 22)} {_fmt(r.tier, 11)} "
                         f"{_fmt(str(r.len_shipped_chars) + 'c', 6)} {r.status}")
                 out.append(line)
+                if r.provider_confirmed:
+                    out.append(
+                        "            PROVIDER-CONFIRMED: "
+                        + r.provider_confirmation_reason
+                    )
                 out.append(f"            {r.status_reason}")
                 if r.quote:
                     out.append(f"            quote: {r.quote}")

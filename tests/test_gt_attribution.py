@@ -124,7 +124,7 @@ def test_sensitive_payload_values_are_hashed_not_persisted(tmp_path):
     assert len(row["payload"]["content_sha256"]) == 64
 
 
-def test_lifecycle_verifier_requires_same_action_provider_and_response_chain():
+def test_lifecycle_verifier_allows_provider_after_multi_tool_batch():
     rows = [
         {
             "sequence": 1,
@@ -160,9 +160,65 @@ def test_lifecycle_verifier_requires_same_action_provider_and_response_chain():
 
     assert verify_lifecycle_rows(rows) == []
 
-    rows[1]["action_index"] = 5
+    rows[1]["action_index"] = 7
+    rows[2]["action_index"] = 7
+    assert verify_lifecycle_rows(rows) == []
+
+
+def test_lifecycle_verifier_requires_immediate_provider_and_response_link():
+    rows = [
+        {
+            "sequence": 1,
+            "action_index": 4,
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "d4",
+                "rendered_bytes_hash": "a" * 64,
+            },
+        },
+        {
+            "sequence": 2,
+            "action_index": 7,
+            "event_type": "provider.request",
+            "payload": {
+                "iteration": 5,
+                "delivery_ids": [],
+                "matches": [],
+            },
+        },
+        {
+            "sequence": 3,
+            "action_index": 7,
+            "event_type": "model.response",
+            "payload": {"iteration": 5, "delivery_ids": []},
+        },
+        {
+            "sequence": 4,
+            "action_index": 8,
+            "event_type": "provider.request",
+            "payload": {
+                "iteration": 6,
+                "delivery_ids": ["d4"],
+                "matches": [{
+                    "delivery_id": "d4",
+                    "rendered_sha256": "a" * 64,
+                    "locations": ["1.content"],
+                }],
+            },
+        },
+        {
+            "sequence": 5,
+            "action_index": 8,
+            "event_type": "model.response",
+            "payload": {"iteration": 6, "delivery_ids": ["d4"]},
+        },
+    ]
+
     assert verify_lifecycle_rows(rows) == [
-        "delivery d4: provider request action 5 != delivery action 4"
+        "delivery d4: missing from immediate provider-final request",
+        "delivery d4: provider byte match missing",
+        "delivery d4: missing from immediate model response",
     ]
 
 

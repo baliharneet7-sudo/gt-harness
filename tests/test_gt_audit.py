@@ -530,6 +530,77 @@ def test_tampered_ledger_row_is_unreconciled_red(tmp_path):
     assert any("UNRECONCILED ledger row ev1" in r for r in a.verdict_reasons)
 
 
+def test_provider_receipt_is_delivery_witness_not_transcript(monkeypatch, tmp_path):
+    run = copy_smoke(tmp_path)
+    agent_dir = smoke_task_agent(run)
+    (agent_dir / "gt_attribution.jsonl").write_text("", encoding="utf-8")
+    ledger = [
+        json.loads(line)
+        for line in (agent_dir / "gt_ledger.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    delivery_ids = [row["event_id"] for row in ledger]
+    rows = [{
+        "event_type": "run.started",
+        "payload": {"provider_final_receipts_required": True},
+    }]
+    rows.extend({
+        "event_type": "decision.committed",
+        "payload": {
+            "decision": "delivered",
+            "delivery_id": row["event_id"],
+            "evidence_type": row["evidence_type"],
+            "rendered_bytes_hash": row["rendered_bytes_hash"],
+        },
+    } for row in ledger)
+    rows.extend([
+        {
+            "event_type": "provider.request",
+            "payload": {
+                "iteration": 2,
+                "delivery_ids": delivery_ids,
+                "matches": [
+                    {
+                        "delivery_id": row["event_id"],
+                        "rendered_sha256": row["rendered_bytes_hash"],
+                    }
+                    for row in ledger
+                ],
+            },
+        },
+        {
+            "event_type": "model.response",
+            "payload": {
+                "iteration": 2,
+                "delivery_ids": delivery_ids,
+            },
+        },
+    ])
+    monkeypatch.setattr(
+        gt_audit, "load_attribution", lambda _path: (rows, [])
+    )
+    original_reconcile = gt_audit.reconcile_ledger
+
+    def force_transcript_miss(*args, **kwargs):
+        original_reconcile(*args, **kwargs)
+        args[0][1].status = "UNRECONCILED"
+        args[0][1].status_reason = "synthetic transcript omission"
+
+    monkeypatch.setattr(gt_audit, "reconcile_ledger", force_transcript_miss)
+
+    audit = gt_audit.audit_run(run)[0]
+
+    assert audit.verdict == "GREEN-delivered"
+    missed = audit.ledger_rows[1]
+    assert missed.status == "UNRECONCILED"
+    assert missed.provider_confirmed is True
+    assert not any(
+        "UNRECONCILED ledger row" in reason
+        for reason in audit.verdict_reasons
+    )
+
+
 def test_chain_head_duplicate_is_flagged(tmp_path):
     run = copy_smoke(tmp_path)
     lp = smoke_task_agent(run) / "gt_ledger.jsonl"

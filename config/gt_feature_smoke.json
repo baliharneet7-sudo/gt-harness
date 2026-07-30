@@ -4,47 +4,67 @@
   "profile": "2",
   "temperature_note": "The provider default is stochastic; no replay claim is made.",
   "selection_source": "local 89-task DeepSeek V4 Flash GT-off baseline corpus",
-  "selection_rule": "Maximize distinct natural GT trigger opportunities in existing GT-off trajectories without using GT outcomes.",
+  "selection_rule": "Pair structured tool-call blocks with their following structured tool-result blocks, then maximize canonical GT predicates observed in the historical action sequence. Raw substring counts are not accepted.",
   "task_ids": [
     "build-cython-ext",
-    "cancel-async-tasks",
-    "fix-code-vulnerability",
-    "filter-js-from-html",
-    "torch-tensor-parallelism"
+    "gcode-to-text",
+    "llm-inference-batching-scheduler",
+    "prove-plus-comm",
+    "tune-mjcf"
   ],
   "historical_opportunities": {
     "build-cython-ext": [
       "search",
       "file_view",
-      "callable_edit",
-      "test",
-      "failed_test",
-      "retest"
+      "verified_caller_surface",
+      "formal_failure",
+      "intervening_source_edit",
+      "same_formal_failure_recurred"
     ],
-    "cancel-async-tasks": [
-      "file_view",
-      "new_source_file",
-      "callable_edit"
+    "gcode-to-text": [
+      "repeated_failed_search",
+      "new_file_creation"
     ],
-    "fix-code-vulnerability": [
-      "search",
+    "llm-inference-batching-scheduler": [
+      "indexed_code_root",
+      "task_start_obligations",
+      "ranked_localization",
       "file_view",
-      "callable_edit",
-      "test",
-      "failed_test",
-      "retest"
+      "verified_caller_surface",
+      "source_edit"
     ],
-    "filter-js-from-html": [
-      "search",
-      "file_view",
-      "new_source_file",
-      "callable_edit"
+    "prove-plus-comm": [
+      "source_edit",
+      "formal_failure_touching_edited_file",
+      "submission_after_unresolved_red"
     ],
-    "torch-tensor-parallelism": [
-      "search",
-      "file_view",
-      "new_source_file",
-      "callable_edit"
+    "tune-mjcf": [
+      "new_file_creation",
+      "formal_failure",
+      "intervening_source_edit",
+      "same_formal_failure_recurred"
+    ]
+  },
+  "expected_identity_clusters": {
+    "indexed_success_path": [
+      "obligations",
+      "localization",
+      "GT_LOC_RESLOT",
+      "caller_contract",
+      "GT_EDIT_CHECK"
+    ],
+    "change_surface_path": [
+      "newfile_precedent",
+      "GT_CHANGE_SURFACE"
+    ],
+    "recovery_path": [
+      "recovery",
+      "GT_HYPOTHESIS"
+    ],
+    "unresolved_red_submit_path": [
+      "submit_refusal",
+      "GT_SS_SUBMIT_RED",
+      "GT_CERT_DELIVERY"
     ]
   },
   "acceptance": {

@@ -48,7 +48,7 @@ on:
       task_ids:
         description: "Comma-separated trigger-opportunity smoke slice; overrides n_tasks"
         type: string
-        default: "build-cython-ext,cancel-async-tasks,fix-code-vulnerability,filter-js-from-html,torch-tensor-parallelism"
+        default: "build-cython-ext,gcode-to-text,llm-inference-batching-scheduler,prove-plus-comm,tune-mjcf"
       timeout_multiplier:
         description: "harbor --agent-timeout-multiplier. MUST match the baseline arm being paired against (frozen full-89 baseline = 1.0; early smokes = 2.0)"
         type: string
