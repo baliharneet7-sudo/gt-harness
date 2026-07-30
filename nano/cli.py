@@ -14,7 +14,12 @@ from .providers import AnthropicProvider, OpenAIProvider, Provider
 _console = Console()
 
 
-def build_provider(*, model: str, base_url: str | None) -> Provider:
+def build_provider(
+    *,
+    model: str,
+    base_url: str | None,
+    temperature: float | None = None,
+) -> Provider:
     if base_url:
         # Local OpenAI-compatible servers (vLLM, ollama, llama.cpp) accept any
         # api_key. The openai SDK requires one to instantiate, so supply a
@@ -22,10 +27,15 @@ def build_provider(*, model: str, base_url: str | None) -> Provider:
         import openai
         key = os.environ.get("OPENAI_API_KEY") or "sk-local"
         client = openai.OpenAI(base_url=base_url, api_key=key)
-        return OpenAIProvider(model=model, base_url=base_url, client=client)
+        return OpenAIProvider(
+            model=model,
+            base_url=base_url,
+            client=client,
+            temperature=temperature,
+        )
     if model.startswith(("claude", "anthropic")):
         return AnthropicProvider(model=model)
-    return OpenAIProvider(model=model)
+    return OpenAIProvider(model=model, temperature=temperature)
 
 
 def _print_event(event: dict) -> None:
@@ -63,6 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--base-url", default=None,
                      help="OpenAI-compatible base URL (Together, vLLM, etc.).")
     run.add_argument("--max-iterations", type=int, default=30)
+    run.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Explicit OpenAI-compatible sampling temperature.",
+    )
     run.add_argument("--gt-root", default=None,
                      help="Codebase root for GroundTruth evidence enrichment. "
                           "Omit to run stock nano (GT off).")
@@ -71,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
     # Construction failures (missing SDK/key, no usable shell) happen before
     # Agent.run()'s error boundary - turn them into a clean nonzero exit.
     try:
-        provider = build_provider(model=args.model, base_url=args.base_url)
+        provider = build_provider(
+            model=args.model,
+            base_url=args.base_url,
+            temperature=args.temperature,
+        )
         # The GT sentence is added ONLY when GT is requested: a GT-off run must
         # send byte-identical prompts to stock nano-harness.
         system = SYSTEM_PROMPT + (GT_PROMPT_SUFFIX if args.gt_root else "")

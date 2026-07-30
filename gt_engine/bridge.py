@@ -870,6 +870,7 @@ class GTBridge:
                 "iteration": int(iteration),
                 "provider": str(provider),
                 "model": str(payload.get("model") or ""),
+                "temperature": payload.get("temperature"),
                 "delivery_ids": delivery_ids,
                 "matches": matches,
                 "message_count": len(messages) if isinstance(messages, list) else 0,

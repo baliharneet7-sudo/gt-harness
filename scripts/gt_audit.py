@@ -653,6 +653,7 @@ class TaskAudit:
     attribution_issues: list[str] = field(default_factory=list)
     feature_attribution: dict[str, dict] = field(default_factory=dict)
     lifecycle_checkpoints: dict[str, dict] = field(default_factory=dict)
+    provider_temperatures: list[float] = field(default_factory=list)
     provider_receipts_required: bool = False
     # laws
     leak_tag_count: int = 0
@@ -812,6 +813,15 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.lifecycle_checkpoints = {
             phase: lifecycle[phase] for phase in sorted(lifecycle)
         }
+        for row in attribution_rows:
+            if row.get("event_type") != "provider.request":
+                continue
+            value = row.get("payload", {}).get("temperature")
+            if isinstance(value, int | float):
+                temperature = float(value)
+                if temperature not in a.provider_temperatures:
+                    a.provider_temperatures.append(temperature)
+        a.provider_temperatures.sort()
         a.provider_receipts_required = any(
             row.get("event_type") == "provider.request"
             or (

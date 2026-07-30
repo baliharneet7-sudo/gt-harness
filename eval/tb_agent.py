@@ -120,9 +120,14 @@ class NanoAgent(BaseInstalledAgent):
         # `|| true`: a partial run (max_iterations) may still pass the tests —
         # never let the agent's exit code abort the trial before grading.
         # extra_args, when non-empty, must end with a space.
+        temperature = (os.environ.get("NANO_TEMPERATURE") or "").strip()
+        temperature_arg = (
+            f"--temperature {shlex.quote(temperature)} " if temperature else ""
+        )
         return (
             f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
-            f"--model {shlex.quote(model)} --max-iterations 100 {extra_args}"
+            f"--model {shlex.quote(model)} --max-iterations 100 "
+            f"{temperature_arg}{extra_args}"
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
         )
 

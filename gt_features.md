@@ -1,0 +1,593 @@
+# Groundtruth Features: Unified SDLC Engine and Live-Proof Contract
+
+Date: 2026-07-30
+Repository scope: `gt-harness`
+Status: researched design and verified current-state inventory; benchmark benefit not yet established
+
+## Executive conclusion
+
+Combining Groundtruth's historical lifecycle layers with its current typed
+FACTs, capability owners, gates, mediators, and behavior switches is the right
+architecture. It can make GT materially stronger, but only if the combined
+model becomes executable orchestration.
+
+A unified table or renamed inventory improves comprehension and measurement. It
+does not, by itself, improve Mini-SWE's behavior. GT becomes a stronger engine
+when it:
+
+1. executes the applicable deterministic mechanisms at the correct SDLC
+   boundary;
+2. evaluates the latest artifact, graph, failure, and test state;
+3. records a terminal outcome for every mechanism that had an opportunity to
+   run;
+4. ranks positive evidence by correctness risk, specificity, freshness, and
+   actionability;
+5. sends no more than one bounded intervention at a boundary; and
+6. proves the intervention was present in the provider request that produced
+   the next model response.
+
+The target lifecycle is:
+
+```text
+orient -> research -> pre_edit -> post_edit -> test
+       -> recovery -> verify -> submit
+```
+
+This does not ask GT to perform deep or generative reasoning. Mini-SWE remains
+the reasoner and actor. GT deterministically observes, derives, validates,
+prioritizes, delivers, and records evidence.
+
+Confidence:
+
+- **High:** this architecture improves GT's timing, coverage, coherence,
+  diagnosability, and attribution.
+- **High:** taxonomy or telemetry alone does not improve the engine's behavior.
+- **Moderate:** correctly implemented pre-edit, post-edit, recovery, and submit
+  controls should improve agent efficiency and defect avoidance.
+- **Unknown:** the size or direction of solved-rate, token, iteration, or
+  wall-time changes until a controlled live comparison is run.
+
+## What GT is in the Mini-SWE system
+
+GT is not a post-run trace analyzer attached as an afterthought. In the current
+harness it wraps the Mini-SWE provider boundary, observes tool and lifecycle
+events, derives deterministic evidence, and can add a bounded capsule to the
+actual API request.
+
+The evidence chain required for a model-facing GT action is:
+
+```text
+triggering event
+  -> deterministic producer/check
+  -> eligibility and authority decision
+  -> sealed delivery bytes
+  -> provider-final request receipt
+  -> provider response
+  -> next model action classification
+```
+
+Trajectories are not the delivery witness. Request-path capsules are proven
+from the delivery ledger and its `bound_provider_payload_json`. Provider
+messages may contain block lists, so a naive substring check against the
+stringified message object is invalid.
+
+The distinction between the three proof levels must remain explicit:
+
+| Proof level | What it establishes | What it does not establish |
+|---|---|---|
+| Executed | GT ran a check at the boundary | The check found actionable evidence |
+| Delivered | Exact GT bytes reached the provider request and response | The model acted because of those bytes |
+| Action-consistent | The next action was consistent with the intended GT action | Counterfactual causal benefit or task success |
+
+## Why the historical and current names looked contradictory
+
+GT has used two overlapping vocabularies:
+
+1. **Lifecycle/architectural layers** describe when GT operates.
+2. **Runtime identities and controls** describe what mechanism operates and
+   which component owns the result.
+
+They are orthogonal. A feature such as `signature_delta` belongs at the
+`post_edit` stage. `GT_PATCH_DELTA` owns the bytes for that fact. Eligibility
+gates decide whether it may run or deliver. Mediators control authority,
+deduplication, cooldown, and dose. None of those should be counted as four
+independent model-facing features.
+
+The current "17 features" are therefore not the complete historical GT system.
+They are a deliberately selected attribution census:
+
+- 10 model-facing canonical FACT identities; and
+- 7 byte-owning capability identities.
+
+The installed canonical registry also contains `cochange_prior`, an internal
+support FACT excluded from the 10 model-facing identities. The broader runtime
+contains eligibility gates, mediators, and behavior switches beyond the 17.
+
+## Historical layers mapped to the current harness
+
+| Historical layer or name | Purpose | Current boundary or mechanism | Current assessment |
+|---|---|---|---|
+| L1 localization | Rank relevant files and symbols | `localization` at task start/search; `GT_LOC_RESLOT` | Wired |
+| L2 brief / `L1_brief` | Orient the task and extract requirements | `task_start`, `obligations`, initial localization | Wired |
+| `post_view` / L3b | Caller, callee, importer, and similar-pattern evidence after navigation | `research`, `caller_contract`, `def_partition`, search localization | Partially consolidated |
+| Historical pre-edit navigation | Inspect related surfaces before changing code | `research`, then explicit `pre_edit` checkpoint | Explicitly wired now |
+| Preimage capture | Capture the old artifact before an edit | edit-before bridge and `pre_edit_checkpoint` | Wired |
+| L3 post-edit | Inspect the actual patch, contract drift, callers, siblings, and verification implications | `post_edit`, `GT_EDIT_CHECK`, `signature_delta`, `newfile_precedent`, caller and covering lanes | Wired |
+| L4 prefetch/endpoints | Fetch precedents, constraints, and graph evidence | Gateway producers for localization, caller contracts, and new-file precedents | Partial |
+| L5 trajectory governor | Detect loops, repeated failure, premature completion, and unverified patches | `recovery`, `GT_HYPOTHESIS`, observed-RED tracking, SDLC verify gate | Partial subset |
+| L5b intervention | Deliver a bounded correction | recovery or submit-refusal delivery | Partial subset |
+| L6 reindex | Refresh graph state after edits | graph-refresh path | Invoked; success needs an explicit receipt |
+| L6 verify | Check changed code before completion | test, covering lane, syntax check, verify | Wired |
+| Finish gate | Refuse completion with unresolved positive evidence | submit, `submit_refusal`, `GT_CERT_DELIVERY`, `GT_SS_SUBMIT_RED` | Wired |
+| Hygiene/curation | Remove scaffolding or block a dirty completion state | no equivalent passed to submit today; `hygiene=None` | Missing parity |
+
+There was no universal historical model-facing layer named `pre_edit`.
+Historical GT had post-view navigation that usually happened before editing,
+the `pre_edit_nav_actions` metric, and preimage capture. The current harness
+adds a real, explicitly recorded `pre_edit` lifecycle boundary before tool
+dispatch. Historical L3 post-edit was real and remains a real `post_edit`
+boundary.
+
+## The current 17-identity attribution census
+
+The source of truth for this projection is `gt_engine/attribution.py`.
+
+| Identity | Role | Trigger | Correct timing | Intended model action |
+|---|---|---|---|---|
+| `obligations` | FACT | Issue text yields evidence-backed requirements | Orient/task start | Satisfy issue-derived requirements |
+| `localization` | FACT | Indexed task or search yields ranked relevant locations | Orient or research | Inspect ranked locations |
+| `caller_contract` | FACT | A viewed or signature-edited callable has verified callers | Research or post-edit | Inspect or update proven callers |
+| `def_partition` | FACT | Search results contain separable definitions and references | Research/search | Distinguish definitions from references |
+| `newfile_precedent` | FACT | Repeated failed search or a new file exposes a verified precedent | Research or pre/post-edit | Follow repository precedent |
+| `signature_delta` | FACT | Before/after edit changes a callable signature with verified call sites | Post-edit | Repair affected call sites |
+| `syntax_result` | FACT | Executed syntax/compiler check fails on edited source | Post-edit or submit | Repair the syntax failure |
+| `covering_red` | FACT | A covering test fails because of an edited source file | Post-edit or submit | Repair the attributable regression |
+| `recovery` | FACT | The same formal failure recurs after an intervening edit | Test/tool result | Abandon the falsified hypothesis |
+| `submit_refusal` | FACT | Submission has unresolved positive failing evidence | Submit | Resolve the evidence before resubmitting |
+| `GT_LOC_RESLOT` | Byte owner | Ranked localization is placed in the next request | Research/search | Make localization model-visible |
+| `GT_EDIT_CHECK` | Capability owner | Deterministic edit checker executes; it delivers only on a positive failure | Post-edit or submit | Validate the edited code |
+| `GT_CERT_DELIVERY` | Byte owner | Completion certificate owns a submit-refusal delivery | Submit | Name completion evidence state |
+| `GT_CHANGE_SURFACE` | Byte owner | Change-surface producer yields a new-file precedent | Research/edit | Deliver proven change-surface evidence |
+| `GT_PATCH_DELTA` | Byte owner | Patch-delta producer yields a signature delta | Post-edit | Deliver evidence from the actual patch |
+| `GT_HYPOTHESIS` | Byte owner | Governor yields repeated-failure recovery evidence | Test/tool result | Deliver a new-hypothesis intervention |
+| `GT_SS_SUBMIT_RED` | Byte owner | Submit gate yields an unresolved-RED refusal | Submit | Refuse completion once |
+
+Aliases such as `trace_frame`, `brief_localization`, `name_fold`,
+`caller_contract_view`, and `companion_surface` are concrete evidence types.
+They map to canonical identities; they are not additional top-level features.
+
+### Correct interpretation of a clean run
+
+All 17 identities should not be forced to deliver in every task. That would be
+incorrect and would flood Mini-SWE with irrelevant bytes.
+
+Examples:
+
+- `newfile_precedent` should not fire when no new-file or failed-search
+  opportunity exists.
+- `signature_delta` should not fire when the patch changes no callable
+  signature.
+- `syntax_result` should remain quiet when the executed syntax check is green.
+- `covering_red` should remain quiet when no attributable covering test fails.
+- `recovery` should remain quiet when a formal failure does not recur after an
+  edit.
+- `submit_refusal` should remain quiet when completion has no unresolved
+  positive RED evidence.
+
+The correct requirement is:
+
+> Every feature with a real trigger opportunity must execute or receive a
+> named terminal disposition. Every delivered feature must be byte-proven,
+> provider-bound, on time, and attributable to its intended action.
+
+## The full control inventory must not be flattened into 17
+
+The unified model should preserve these runtime roles:
+
+| Role | Responsibility | Model-facing by default? |
+|---|---|---|
+| FACT | Typed semantic evidence | Only when positive and actionable |
+| Byte owner | Owns the rendered delivery for a FACT | Yes, when its FACT is delivered |
+| Eligibility gate | Decides whether required trigger inputs exist | No |
+| Mediator | Applies authority, deduplication, cooldown, suppression, and arbitration | No |
+| Behavior switch | Enables a deterministic runtime behavior | No |
+| Lifecycle checkpoint | Establishes when evaluation occurred | No |
+
+Current inventory analysis found 48 capability IDs in the installed canonical
+runtime:
+
+- 7 byte owners;
+- 14 eligibility controls; and
+- 27 mediators.
+
+The harness profile intentionally omits one eligibility control and one
+mediator, leaving 46 active capability controls. Seven behavior flags are also
+enabled by the profile. The workflow adds the harness-local
+`GT_SDLC_VERIFY`, yielding 54 effective GT-related toggles in that execution
+configuration.
+
+Those numbers describe runtime controls, not 54 pieces of model-facing advice.
+Counting every switch as a feature would double-count implementation machinery
+and make live attribution meaningless.
+
+## Proposed unified executable architecture
+
+### 1. One capability manifest
+
+Every mechanism should have a machine-readable manifest entry:
+
+```yaml
+feature_id: signature_delta
+historical_layer: L3
+stage: post_edit
+role: fact
+owner: GT_PATCH_DELTA
+trigger: callable signature changed and verified call sites exist
+required_inputs:
+  - before_artifact_hash
+  - after_artifact_hash
+  - fresh_graph_revision
+intended_action: repair affected call sites
+provider_delivery_required: true
+terminal_outcomes:
+  - APPLIED_QUIET
+  - DELIVERED
+  - INELIGIBLE
+  - SUPPRESSED
+  - FAULT
+```
+
+This manifest should extend the existing registry and attribution trace. A new
+external framework is unnecessary.
+
+### 2. A deterministic stage transaction
+
+Each lifecycle boundary should run as one transaction:
+
+```text
+observe boundary and artifact version
+  -> identify applicable mechanisms
+  -> execute every eligible deterministic check
+  -> record one terminal receipt per mechanism
+  -> rank positive evidence
+  -> arbiter selects at most one visible dose
+  -> seal exact bytes
+  -> bind bytes to provider request and response
+  -> classify the immediate next action
+```
+
+This provides both behavior and proof. Recording a checkpoint without running
+the mechanisms gives only observability. Running mechanisms without terminal
+receipts gives behavior that cannot be audited.
+
+### 3. Terminal outcomes
+
+Every applicable mechanism must terminate in exactly one state:
+
+| Outcome | Meaning |
+|---|---|
+| `APPLIED_QUIET` | Check executed successfully and found no positive actionable evidence |
+| `DELIVERED` | Positive evidence was selected, sealed, and sent |
+| `INELIGIBLE` | Required trigger inputs or opportunity were absent |
+| `SUPPRESSED` | Positive evidence existed but authority, deduplication, cooldown, or arbitration blocked delivery |
+| `FAULT` | The mechanism should have evaluated but its execution or telemetry failed |
+
+The existing attribution statuses can remain as derived audit projections.
+The stage transaction needs the smaller terminal contract above so that a clean
+check is not confused with an absent check.
+
+### 4. One bounded arbiter
+
+All eligible deterministic checks should run, but GT should deliver no more
+than one intervention at a lifecycle boundary. Suggested priority:
+
+```text
+unresolved correctness blocker / RED
+  > precise patch or caller repair evidence
+  > recovery from repeated failure
+  > navigation and context evidence
+  > quiet success
+```
+
+Selection requirements:
+
+- evidence is tied to the latest relevant artifact;
+- evidence is specific enough to imply an action;
+- evidence is fresh relative to the current graph and patch;
+- duplicate evidence is suppressed by evidence and artifact hash;
+- suppression has a named reason; and
+- blocking interventions are based on positive evidence, not missing
+  telemetry or low-confidence inference.
+
+This keeps GT deterministic and useful without turning it into a second
+reasoner or an unbounded prompt generator.
+
+## Stage-by-stage behavior
+
+| Stage | Inputs | Mechanisms that should run | Visible result only when |
+|---|---|---|---|
+| Orient | Issue text, indexed repository, graph revision | obligations, initial localization | Requirements or ranked locations are supported |
+| Research | Search/view result, symbols, graph | definition/reference partition, caller contracts, localization reslot, precedents | Evidence narrows the next inspection |
+| Pre-edit | Proposed operation, target path, preimage, graph | change-surface, callers, repository precedent, precondition checks | A specific risk or required companion edit exists |
+| Post-edit | Exact before/after artifacts, patch, refreshed graph | syntax, signature delta, callers, new-file precedent, covering-test selection | A defect or concrete impact exists |
+| Test | Command, result, affected artifacts, failure identity | covering RED, failure classification, freshness | Failure is attributable and actionable |
+| Recovery | Failure identity, edit history, prior hypothesis | repeated-failure governor | The same failure persisted after an intervening edit |
+| Verify | Latest patch version, post-edit checks, test evidence | freshness and verification sufficiency | Verification is missing, stale, or RED |
+| Submit | Latest patch, unresolved evidence, hygiene, certificate | submit gate, completion certificate, curation | Positive unresolved evidence or dirty completion state exists |
+
+### Pre-edit and post-edit are both required
+
+Pre-edit and post-edit answer different questions:
+
+- **Pre-edit:** what must be understood or preserved before this proposed
+  change is executed?
+- **Post-edit:** what did the actual patch change, break, or require us to
+  verify?
+
+Pre-edit should not predict a patch that has not happened. Post-edit should not
+rely on stale pre-edit assumptions. Both must refer to artifact hashes so the
+audit can reject evidence computed against an obsolete file version.
+
+## What the research confirms
+
+The design is consistent with primary software-engineering research:
+
+- Agentless demonstrates a deliberately staged
+  localization -> repair -> validation process. It supports explicit phase
+  separation rather than a flat always-on feature bundle.
+  [Agentless](https://arxiv.org/abs/2407.01489)
+- SWE-agent reports that a purpose-built agent-computer interface materially
+  affects repository navigation, editing, testing, behavior, and performance.
+  GT must therefore be wired into the actual tool/request path, not appended
+  only to a post-run audit.
+  [SWE-agent](https://arxiv.org/abs/2405.15793)
+- CodePlan combines incremental dependency analysis, change-impact analysis,
+  previous changes, and adaptive planning across repository edits. This
+  supports fresh pre-edit impact evidence, post-edit graph refresh, and
+  re-evaluation after the real patch.
+  [CodePlan](https://arxiv.org/abs/2309.12499)
+- Spectrum-based fault-localization research supports ranking compact
+  suspicious sets from execution evidence while balancing evidence precision
+  and collection cost. This supports ranked, bounded localization rather than
+  dumping all potentially related code.
+  [Spectrum-based fault localization survey](https://arxiv.org/abs/1607.04347)
+- Automated program-repair research describes fault localization, patching,
+  and patch validation, and motivates selecting regression tests affected by a
+  patch. This supports an attributable covering-test lane.
+  [APR regression testing](https://www.cs.purdue.edu/homes/lintan/publications/apr-regression-tosem24.pdf)
+- Passing the available or generated tests does not establish semantic
+  correctness; test-suite-based repair can overfit. GT should combine
+  obligations, caller contracts, patch impact, syntax checks, and behavioral
+  tests rather than treating one green result as a universal certificate.
+  [Test generation for program repair](https://arxiv.org/abs/1703.00198)
+
+The provenance design also follows mature primary standards:
+
+- W3C PROV supplies Entity, Activity, Agent, usage, generation, derivation, and
+  attribution relationships. GT artifacts and evidence can be modeled as
+  entities; checks, deliveries, requests, responses, and actions as activities;
+  and GT, tools, and Mini-SWE as agents.
+  [PROV-O](https://www.w3.org/TR/prov-o/)
+- W3C PROV constraints support validating event order and causal consistency.
+  The audit should reject impossible chains such as post-edit evidence before
+  the edit, verification that predates the latest patch, or a response
+  attribution without a bound request.
+  [PROV constraints](https://www.w3.org/TR/prov-constraints/)
+- OpenTelemetry's operation, span, event, status, and causal-link model is a
+  useful pattern for stage and mechanism receipts. It is a design pattern here,
+  not a required runtime dependency.
+  [OpenTelemetry Trace API](https://opentelemetry.io/docs/specs/otel/trace/api/)
+- CloudEvents' typed, uniquely identified event envelope is a useful pattern
+  for idempotent lifecycle receipts.
+  [CloudEvents specification](https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md)
+
+These sources support the architecture. They do not prove a GT benchmark delta.
+That conclusion requires a live controlled experiment.
+
+## Current live evidence
+
+### Historical comparison in the handoff
+
+| Run | State | Direct-delivery result | Interpretation |
+|---|---|---|---|
+| `30478454517` (`smoke5`) | Pre-fix | 1/17 delivering | Major delivery and observability gaps |
+| `30507453355` (`smoke6`) | Post F1-F3 | 3/17 delivering; invoked absences named | Attribution improved; many triggers absent |
+| `30510979443` (`smoke7`) | Success, 5/5 workflow tasks, 0 workflow failures; commit `4b8df3c87` | Audit target in the handoff | Commit/substrate parity held |
+
+The handoff also records that task rewards were 0/5 for smoke5 and smoke6
+because the agents hit the 150-step cap. Workflow success is not SWE task
+success, and feature delivery is a separate measurement axis from both.
+
+### Later supplied audit snapshot
+
+The later live-run snapshot for `30567497685` reports:
+
+- lifecycle checkpoints: task start 5, research 136, pre-edit 100, post-edit
+  67, test 35, verify 10, submit 10;
+- 7 of the 17 direct identities witnessed:
+  `GT_CERT_DELIVERY`, `GT_EDIT_CHECK`, `GT_LOC_RESLOT`,
+  `caller_contract`, `localization`, `obligations`, and `submit_refusal`;
+- all 17 identities received terminal states, with no dark, fault, or
+  unexposed state;
+- 20 provider-confirmed deliveries and 4,334 attribution rows; and
+- 6 of 7 witnessed identities had an action-consistent next response;
+  `GT_EDIT_CHECK` was quiet on clean checks.
+
+This is evidence that the lifecycle boundaries and direct attribution model
+work. It is not evidence that the complete control plane is covered. The same
+snapshot exposes control decisions for only a small subset of active controls,
+so the remaining gates, mediators, and behavior switches still need terminal
+receipts.
+
+## Current gaps that prevent a complete claim
+
+1. **L4 is partial.** Gateway producers provide some localization, caller, and
+   precedent evidence, but the historical prefetch/endpoint surface is not
+   represented as a complete, independently audited suite.
+2. **L5/L5b is partial.** Repeated-failure recovery and submit refusal exist,
+   but the broader trajectory governor is not fully represented.
+3. **Hygiene/curation is missing.** Submit currently passes `hygiene=None`.
+4. **Control-plane receipts are incomplete.** Most active eligibility,
+   mediator, and behavior controls are not given an independently auditable
+   terminal outcome.
+5. **L3b evidence is consolidated.** Caller, peer, similar-pattern, and
+   navigation evidence maps to canonical identities, which is valid, but
+   sub-capability coverage is not separately visible.
+6. **Graph refresh success is under-attested.** The refresh path is invoked;
+   an explicit receipt should prove which graph revision resulted.
+7. **Live opportunity coverage is limited.** A five-task smoke cannot prove a
+   feature whose trigger did not occur. The task set must be selected from
+   structured historical actions to create genuine trigger opportunities.
+8. **Behavioral benefit is not yet causal.** Action consistency is stronger
+   than delivery proof, but weaker than a matched GT-off counterfactual.
+
+## Implementation order
+
+### P0: Make the inventory truthful
+
+- Add the unified capability manifest.
+- Preserve role distinctions.
+- Map every alias to one canonical identity.
+- Define trigger inputs and intended action.
+- Validate that every feature has one owner and one stage contract.
+
+This improves measurement and prevents double counting. It does not yet make
+the engine behaviorally stronger.
+
+### P1: Make lifecycle execution atomic and auditable
+
+- Implement stage transactions.
+- Issue terminal receipts for all applicable mechanisms.
+- Bind every receipt to artifact and graph revisions.
+- Add a single arbiter and named suppression.
+- Preserve correct-or-quiet behavior for clean checks.
+
+This is the first phase that directly strengthens the engine.
+
+### P2: Restore missing historical value
+
+- Complete L4 change-surface/prefetch coverage.
+- Expand L5/L5b loop and premature-finish controls using positive evidence.
+- Add submit hygiene/curation.
+- Add explicit graph-refresh success receipts.
+- Expose sub-capability coverage without inventing new top-level FACTs.
+
+### P3: Prove behavior in live runs
+
+- Select tasks with structured, pre-existing trigger opportunities.
+- Audit every opportunity, terminal outcome, delivery, provider binding, and
+  next action.
+- Run matched GT-off, current-GT, and unified-GT comparisons.
+- Add suite ablations only after the integrated system is stable.
+
+## Live-run proof protocol
+
+The strongest feasible comparison uses three arms:
+
+1. **GT off:** existing baseline.
+2. **Current GT:** current lifecycle plus 17-identity attribution.
+3. **Unified GT:** stage transactions, full receipts, arbiter, and restored
+   missing suites.
+
+Hold constant:
+
+- identical task IDs;
+- identical Mini-SWE code and tool interface;
+- `deepseek/deepseek-v4-flash`;
+- temperature 1 if that is the provider configuration;
+- identical timeout and step cap;
+- `max_parallel=20`;
+- identical substrate and GT commit within an arm;
+- identical prompt and provider settings; and
+- repeated trials or an explicit statement that stochastic single runs are not
+  replay-equivalent.
+
+The current trigger-oriented smoke configuration already identifies five tasks
+from structured GT-off tool-call/tool-result pairs. It targets indexed success,
+change-surface, unresolved-RED submit, and search-partition opportunities. Its
+acceptance target is at least 9 witnessed identities, a target of 12, zero
+triggered-dark identities, zero telemetry faults, and a provider-final receipt
+for every delivery.
+
+### Required engine metrics
+
+| Metric | Required interpretation |
+|---|---|
+| Stage coverage | Did each stage that had an opportunity execute? |
+| Mechanism opportunity coverage | Which triggers actually occurred? |
+| Terminal-state coverage | Did every applicable mechanism end in a named state? |
+| Provider-bound delivery | Did exact sealed bytes reach the immediate provider request? |
+| Response linkage | Did that request produce the linked response? |
+| Action consistency | Was the immediate next action compatible with the evidence? |
+| False intervention rate | Did GT deliver irrelevant, stale, or unsupported advice? |
+| Dose and suppression | Did arbitration prevent duplicate or lower-value deliveries? |
+| Artifact freshness | Was evidence computed from the latest relevant patch and graph? |
+
+### Required outcome and cost metrics
+
+- solved tasks and reward;
+- provider input, output, and cache tokens;
+- provider calls and Mini-SWE iterations;
+- edit operations and unique changed files;
+- tests and verification commands;
+- repeated identical failures;
+- submit attempts and refusals;
+- wall time; and
+- task-level paired deltas, not only aggregate totals.
+
+### Acceptance for the unified engine
+
+A live run supports a **wiring claim** when:
+
+- every observed lifecycle opportunity has a stage receipt;
+- every applicable mechanism has one terminal outcome;
+- no triggered mechanism is dark;
+- no terminal producer receipt is missing;
+- every delivery is byte-proven in the provider-final payload;
+- every delivery is linked to the immediate model response;
+- artifact and graph revisions are fresh; and
+- every suppression has a specific reason.
+
+A live run supports a **behavior claim** when, in addition:
+
+- immediate actions are consistent with delivered evidence;
+- interventions are not stale, duplicative, or unsupported; and
+- the behavior expected at each trigger occurs at the correct time.
+
+A live experiment supports a **benefit claim** only when matched comparisons
+show an improvement in solved rate, cost, iterations, repeated failures, or
+verification quality. One stochastic five-task smoke can demonstrate wiring
+and examples; it cannot establish a general performance effect.
+
+## Failure modes to prevent
+
+| Failure mode | Required control |
+|---|---|
+| All features forced to fire | Opportunity-based eligibility and `APPLIED_QUIET` |
+| Prompt flooding | One arbiter; at most one intervention per boundary |
+| Alias double counting | Canonical identity mapping |
+| Owner counted as a separate semantic fact | Preserve FACT/owner role distinction |
+| Stale post-edit advice | Artifact and graph revision binding |
+| Weak evidence blocks submission | Positive-evidence requirement and bounded single refusal |
+| Green syntax treated as full correctness | Multi-technique verification |
+| Trajectory mistaken for delivery proof | Provider-final byte receipt |
+| Stringification misses block-list messages | Structural payload traversal and byte hashes |
+| Workflow success mistaken for solved task | Report workflow, task reward, and attribution separately |
+| Feature absence mistaken for failure | Named `INELIGIBLE` with trigger inputs |
+| Missing telemetry mistaken for clean execution | `FAULT`, never `APPLIED_QUIET` |
+
+## Final decision
+
+Proceed with the unified design, but define success precisely:
+
+- The historical layers become lifecycle stages.
+- The canonical FACTs remain semantic evidence.
+- Capability owners remain byte and behavior owners.
+- Eligibility gates and mediators remain control-plane mechanisms.
+- Every stage runs applicable deterministic checks against fresh state.
+- Every mechanism receives a terminal receipt.
+- One arbiter controls the visible dose.
+- Provider-bound provenance proves what GT actually sent and when.
+
+That architecture makes GT more powerful as an SDLC engine. Merely combining
+names into a larger "feature list" does not.

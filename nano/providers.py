@@ -211,6 +211,7 @@ class OpenAIProvider:
     client: Any = None
     base_url: str | None = None
     max_completion_tokens: int = 8192  # match AnthropicProvider; fewer mid-write cuts
+    temperature: float | None = None
     request_observer: Callable[[str, dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
@@ -244,6 +245,8 @@ class OpenAIProvider:
             "messages": oai_messages,
             "max_completion_tokens": self.max_completion_tokens,
         }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         if oai_tools:
             kwargs["tools"] = oai_tools
 

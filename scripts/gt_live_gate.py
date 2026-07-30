@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from gt_engine.attribution import DIRECT_FEATURES
+
 
 def _model_values(value: Any) -> set[str]:
     found: set[str] = set()
@@ -31,8 +33,11 @@ def evaluate_live_gate(
     audit: dict[str, Any],
     *,
     min_witnessed: int,
+    min_action_consistent: int = 0,
     expected_tasks: int,
     expected_model: str,
+    expected_temperature: float | None = None,
+    require_complete_census: bool = False,
     required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
 ) -> dict[str, Any]:
@@ -44,6 +49,18 @@ def evaluate_live_gate(
     unexposed: list[str] = []
     actions_consistent: set[str] = set()
     lifecycle_observed: set[str] = set()
+    provider_temperatures: set[float] = set()
+    complete_census = True
+    expected_feature_ids = set(DIRECT_FEATURES)
+    valid_statuses = {
+        "INELIGIBLE",
+        "TRIGGERED_DARK",
+        "SUPPRESSED_WITH_REASON",
+        "DELIVERED_UNEXPOSED",
+        "EXPOSED",
+        "WITNESSED",
+        "TELEMETRY_FAULT",
+    }
 
     if len(tasks) != expected_tasks:
         issues.append(
@@ -63,7 +80,26 @@ def evaluate_live_gate(
             str(phase)
             for phase in (task.get("lifecycle_checkpoints") or {})
         )
-        for feature_id, item in (task.get("feature_attribution") or {}).items():
+        task_features = task.get("feature_attribution") or {}
+        if require_complete_census:
+            actual_ids = set(task_features)
+            missing = sorted(expected_feature_ids - actual_ids)
+            extra = sorted(actual_ids - expected_feature_ids)
+            invalid = sorted(
+                feature_id
+                for feature_id, item in task_features.items()
+                if str(item.get("status") or "") not in valid_statuses
+            )
+            if missing or extra or invalid:
+                complete_census = False
+                issues.append(
+                    f"{task_name}: incomplete feature census "
+                    f"(missing={missing}, extra={extra}, invalid={invalid})"
+                )
+        for value in task.get("provider_temperatures") or ():
+            if isinstance(value, int | float):
+                provider_temperatures.add(float(value))
+        for feature_id, item in task_features.items():
             status = str(item.get("status") or "")
             if status == "WITNESSED":
                 witnessed.add(feature_id)
@@ -86,6 +122,18 @@ def evaluate_live_gate(
         issues.append(
             f"witnessed identities {len(witnessed)} < required "
             f"{min_witnessed}"
+        )
+    if len(actions_consistent) < min_action_consistent:
+        issues.append(
+            f"action-consistent identities {len(actions_consistent)} < required "
+            f"{min_action_consistent}"
+        )
+    if expected_temperature is not None and provider_temperatures != {
+        float(expected_temperature)
+    }:
+        issues.append(
+            f"provider temperature must be exactly {float(expected_temperature)}; "
+            f"observed={sorted(provider_temperatures)}"
         )
     missing_lifecycle = sorted(set(required_lifecycle) - lifecycle_observed)
     if missing_lifecycle:
@@ -115,6 +163,7 @@ def evaluate_live_gate(
         "task_count": len(tasks),
         "expected_tasks": expected_tasks,
         "min_witnessed": min_witnessed,
+        "min_action_consistent": min_action_consistent,
         "witnessed_count": len(witnessed),
         "witnessed_features": sorted(witnessed),
         "action_consistent_features": sorted(actions_consistent),
@@ -125,6 +174,9 @@ def evaluate_live_gate(
         "faults": faults,
         "unexposed": unexposed,
         "observed_models": sorted(observed_models),
+        "expected_temperature": expected_temperature,
+        "provider_temperatures": sorted(provider_temperatures),
+        "complete_census": complete_census,
         "issues": issues,
     }
 
@@ -134,8 +186,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("audit_json")
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--min-witnessed", type=int, default=9)
+    parser.add_argument("--min-action-consistent", type=int, default=0)
     parser.add_argument("--expected-tasks", type=int, default=5)
     parser.add_argument("--expected-model", default="deepseek-v4-flash")
+    parser.add_argument("--expected-temperature", type=float)
+    parser.add_argument("--require-complete-census", action="store_true")
     parser.add_argument(
         "--require-lifecycle",
         default="",
@@ -149,8 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     report = evaluate_live_gate(
         audit,
         min_witnessed=args.min_witnessed,
+        min_action_consistent=args.min_action_consistent,
         expected_tasks=args.expected_tasks,
         expected_model=args.expected_model,
+        expected_temperature=args.expected_temperature,
+        require_complete_census=args.require_complete_census,
         required_lifecycle=tuple(
             phase.strip()
             for phase in args.require_lifecycle.split(",")

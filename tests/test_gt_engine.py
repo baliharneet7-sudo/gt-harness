@@ -305,6 +305,25 @@ def test_provider_receipt_binds_block_list_delivery_without_persisting_payload(
     assert "ordinary output" not in raw
 
 
+def test_provider_receipt_records_explicit_temperature(tmp_path):
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "task"}],
+            "temperature": 1.0,
+        },
+    )
+
+    row = bridge._attribution.rows[-1]
+    assert row["event_type"] == "provider.request"
+    assert row["payload"]["temperature"] == 1.0
+
+
 # --------------------------------------------------------------------------- #
 # indexer: code-repo detection (GT dormant on non-code roots)
 # --------------------------------------------------------------------------- #

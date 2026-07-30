@@ -135,6 +135,39 @@ def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
     assert audit.feature_attribution["recovery"]["status"] == "TRIGGERED_DARK"
 
 
+def test_audit_reports_provider_temperature_from_request_receipt(tmp_path):
+    from gt_engine.attribution import AttributionTrace
+
+    task = make_task_dir(
+        tmp_path,
+        "code-task__temperature",
+        "code-task",
+        "\n".join([stop_line(iters=1, in_t=10, out_t=2), ""]),
+    )
+    trace = AttributionTrace(
+        lambda: task / "agent" / "gt_attribution.jsonl",
+        trace_id="a" * 32,
+    )
+    trace.record(
+        "provider.request",
+        action_index=0,
+        boundary="provider",
+        payload={
+            "iteration": 1,
+            "provider": "openai.chat.completions",
+            "model": "deepseek-v4-flash",
+            "temperature": 1.0,
+            "delivery_ids": [],
+            "matches": [],
+        },
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.attribution_issues == []
+    assert audit.provider_temperatures == [1.0]
+
+
 def test_attribution_integrity_failure_is_red(tmp_path):
     from gt_engine.attribution import AttributionTrace
 

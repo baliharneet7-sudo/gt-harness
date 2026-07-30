@@ -41,6 +41,10 @@ on:
         description: "Concurrent trials (harbor -n)"
         type: string
         default: "4"
+      temperature:
+        description: "Explicit OpenAI-compatible sampling temperature"
+        type: string
+        default: "1"
       job_name:
         description: "Harbor job name (default: auto tb2-gt-<run id>)"
         type: string
@@ -61,6 +65,10 @@ on:
         description: "Minimum distinct GT identities required by the live attribution gate"
         type: string
         default: "9"
+      min_action_consistent:
+        description: "Minimum distinct identities whose immediate next action matches the GT delivery"
+        type: string
+        default: "5"
       expected_tasks:
         description: "Exact task count required by the live attribution gate"
         type: string
@@ -87,6 +95,7 @@ jobs:
       # one existing advisory bounce and then fails open, so it cannot deadlock
       # completion. Kept outside Groundtruth's canonical Profile-2 inventory.
       GT_SDLC_VERIFY: "1"
+      NANO_TEMPERATURE: ${{ inputs.temperature }}
       PYTHONUTF8: "1"
     steps:
       - name: Checkout
@@ -155,7 +164,12 @@ jobs:
       - name: Install nano-harness + harbor
         run: |
           python -m pip install --upgrade pip
-          pip install -e . "harbor==0.20.0"
+          pip install -e . "harbor==0.20.0" vendor/groundtruth_mcp-*.whl numpy pytest
+
+      - name: Audit all 17 deterministic trigger paths
+        env:
+          GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+        run: python -m pytest -m gt_all17 -q
 
       # Substrate-era assumption, corrected: credentials used to be baked ONCE
       # into the substrate image; now every dispatch re-imports them from
@@ -222,7 +236,11 @@ jobs:
           last = None
           for attempt in range(1, 4):
               try:
-                  provider = build_provider(model=model, base_url=None)
+                  provider = build_provider(
+                      model=model,
+                      base_url=None,
+                      temperature=float(os.environ["NANO_TEMPERATURE"]),
+                  )
                   r = provider.step(
                       messages=[{"role": "user", "content": "Reply with the single word: ok"}],
                       tools=TOOLS, system=SYSTEM_PROMPT,
@@ -311,7 +329,9 @@ jobs:
         env:
           JOB_NAME: ${{ steps.harbor.outputs.job_name }}
           MIN_WITNESSED: ${{ inputs.min_witnessed }}
+          MIN_ACTION_CONSISTENT: ${{ inputs.min_action_consistent }}
           EXPECTED_TASKS: ${{ inputs.expected_tasks }}
+          EXPECTED_TEMPERATURE: ${{ inputs.temperature }}
         run: |
           set -uo pipefail
           run_dir="results/terminal-bench/${JOB_NAME}"
@@ -325,8 +345,11 @@ jobs:
             python scripts/gt_live_gate.py "$audit_json" \
               --run-dir "$run_dir" \
               --min-witnessed "$MIN_WITNESSED" \
+              --min-action-consistent "$MIN_ACTION_CONSISTENT" \
               --expected-tasks "$EXPECTED_TASKS" \
               --expected-model "deepseek-v4-flash" \
+              --expected-temperature "$EXPECTED_TEMPERATURE" \
+              --require-complete-census \
               --require-lifecycle "task_start,research,pre_edit,post_edit,test,verify,submit" \
               --json "$gate_json" || gate_rc=$?
           else

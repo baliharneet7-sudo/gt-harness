@@ -284,6 +284,32 @@ def test_openai_provider_observer_receives_final_normalized_payload():
     }
 
 
+def test_openai_provider_sends_explicit_temperature():
+    resp = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="done", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = resp
+    p = OpenAIProvider(
+        model="deepseek-v4-flash",
+        client=fake_client,
+        temperature=1.0,
+    )
+
+    p.step(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        system="SYS",
+    )
+
+    kwargs = fake_client.chat.completions.create.call_args.kwargs
+    assert kwargs["temperature"] == 1.0
+
+
 def test_normalize_for_openai_round_trips_assistant_tool_calls():
     from nano.providers import _normalize_for_openai
     out = _normalize_for_openai({
