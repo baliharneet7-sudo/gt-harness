@@ -83,12 +83,12 @@ class Agent:
           while True:
             iteration += 1
             if iteration > self.max_iterations:
-                return AgentResult(
+                return self._finish(AgentResult(
                     final_text=None, stop_reason="max_iterations",
                     iterations=iteration - 1,
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
-                )
+                ))
 
             # GT integration point 3: evidence-aware truncation. Stock path
             # (and stock bytes) whenever the GT bridge is absent; the GT path
@@ -103,7 +103,18 @@ class Agent:
                     self._truncate_if_needed(messages, transcript)
             else:
                 self._truncate_if_needed(messages, transcript)
+            gt_exposure_ids: tuple[str, ...] = ()
+            if self._gt is not None:
+                try:
+                    gt_exposure_ids = self._gt.trace_model_request(iteration, messages)
+                except Exception:  # noqa: BLE001 - telemetry never blocks inference
+                    gt_exposure_ids = ()
             sr: StepResult = self.provider.step(messages, TOOLS, self.system)
+            if self._gt is not None:
+                try:
+                    self._gt.trace_model_response(iteration, sr, gt_exposure_ids)
+                except Exception:  # noqa: BLE001 - telemetry never changes the loop
+                    pass
             total_in += sr.usage.input_tokens
             total_out += sr.usage.output_tokens
             total_cache += sr.usage.cache_read_tokens
@@ -127,12 +138,12 @@ class Agent:
             # silently end long tasks after a handful of steps. Cap breach takes
             # priority over natural completion even if the model said end_turn.
             if sr.usage.input_tokens >= self.max_input_tokens:
-                return AgentResult(
+                return self._finish(AgentResult(
                     final_text=sr.text, stop_reason="max_tokens",
                     iterations=iteration,
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
-                )
+                ))
 
             # Output cut off mid-response (often mid-tool-call JSON): nudge a
             # continuation instead of misreporting success.
@@ -157,7 +168,7 @@ class Agent:
                 # ONE pushback delivering that evidence as the nudge text.
                 # No evidence / any fault: the stock gate proceeds unchanged.
                 if (self._gt is not None and gt_submit_dirty
-                        and used_tools and pushbacks_left > 0
+                        and pushbacks_left > 0
                         and (self.max_iterations - iteration) > 0):
                     gt_submit_dirty = False
                     from gt_engine.verify import submit_evidence
@@ -197,25 +208,25 @@ class Agent:
                 # but report "unverified" so the caller knows.
                 verified = (not self.verify or not used_tools
                             or tools_since_nudge)
-                return AgentResult(
+                return self._finish(AgentResult(
                     final_text=sr.text,
                     stop_reason="end_turn" if verified else "unverified",
                     iterations=iteration,
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
-                )
+                ))
 
             # Stopped with no tool calls but not a clean end_turn: refusal,
             # content_filter, or an unmapped provider reason. Never report that
             # as success - surface the reason so the caller (and CLI exit code)
             # knows the run did not complete.
             if not sr.tool_calls:
-                return AgentResult(
+                return self._finish(AgentResult(
                     final_text=sr.text, stop_reason=sr.stop_reason,
                     iterations=iteration,
                     total_input_tokens=total_in, total_output_tokens=total_out,
                     total_cache_read_tokens=total_cache, transcript=transcript,
-                )
+                ))
 
             used_tools = True
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
@@ -228,12 +239,21 @@ class Agent:
             messages.append({"role": "user", "content": tool_results})
         except Exception as e:  # noqa: BLE001 - any failure becomes a result, not a crash
             transcript.append({"type": "error", "message": f"{type(e).__name__}: {e}"})
-            return AgentResult(
+            return self._finish(AgentResult(
                 final_text=f"agent error: {type(e).__name__}: {e}",
                 stop_reason="error", iterations=iteration,
                 total_input_tokens=total_in, total_output_tokens=total_out,
                 total_cache_read_tokens=total_cache, transcript=transcript,
-            )
+            ))
+
+    def _finish(self, result: AgentResult) -> AgentResult:
+        """Record the terminal agent outcome without changing result identity."""
+        if self._gt is not None:
+            try:
+                self._gt.trace_run_completed(result)
+            except Exception:  # noqa: BLE001 - telemetry never changes completion
+                pass
+        return result
 
     def _truncate_if_needed(self, messages: list[dict[str, Any]],
                             transcript: list[dict[str, Any]]) -> None:
@@ -353,7 +373,8 @@ class Agent:
                 try:
                     output = self._gt.enrich(
                         call.name, call.arguments, output, is_error,
-                        edit_before=gt_edit_before, edit_after=gt_edit_after)
+                        edit_before=gt_edit_before, edit_after=gt_edit_after,
+                        tool_call_id=call.id)
                 except Exception:  # noqa: BLE001 - GT must never break a tool turn
                     pass
             transcript.append({"type": "tool_result", "id": call.id,

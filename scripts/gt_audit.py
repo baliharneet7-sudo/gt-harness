@@ -86,6 +86,12 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from gt_engine.attribution import summarize_features, verify_trace_rows  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # transcript parsing (nano CLI rich-panel format, tee'd without ANSI)
 # --------------------------------------------------------------------------- #
@@ -632,6 +638,11 @@ class TaskAudit:
     deliveries_file_present: bool = False
     ledger_rows: list[LedgerRow] = field(default_factory=list)
     ledger_issues: list[str] = field(default_factory=list)
+    # complete opportunity/decision/exposure trace (new runs only)
+    attribution_present: bool = False
+    attribution_rows: int = 0
+    attribution_issues: list[str] = field(default_factory=list)
+    feature_attribution: dict[str, dict] = field(default_factory=dict)
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -659,6 +670,29 @@ def _load_result_json(task_dir: Path) -> dict:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def load_attribution(path: Path) -> tuple[list[dict], list[str]]:
+    """Load and integrity-check the append-only GT attribution stream."""
+    rows: list[dict] = []
+    issues: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [], [f"gt_attribution.jsonl: unreadable ({type(exc).__name__})"]
+    for index, line in enumerate(lines, 1):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            issues.append(f"gt_attribution.jsonl line {index}: unparseable")
+            continue
+        if not isinstance(value, dict):
+            issues.append(f"gt_attribution.jsonl line {index}: not an object")
+            continue
+        rows.append(value)
+    if len(rows) == len(lines):
+        issues.extend(verify_trace_rows(rows))
+    return rows, issues
 
 
 def audit_task(task_dir: Path) -> TaskAudit:
@@ -720,6 +754,47 @@ def audit_task(task_dir: Path) -> TaskAudit:
             m = re.search(r"event (\S+):", msg)
             if m:
                 deliveries_bad_ids.add(m.group(1))
+
+    # ATTRIBUTION-JOIN inputs --------------------------------------------- #
+    attribution_path = task_dir / "agent" / "gt_attribution.jsonl"
+    a.attribution_present = attribution_path.is_file()
+    attribution_rows: list[dict] = []
+    if a.attribution_present:
+        attribution_rows, attr_issues = load_attribution(attribution_path)
+        a.attribution_rows = len(attribution_rows)
+        a.attribution_issues.extend(attr_issues)
+        a.feature_attribution = summarize_features(attribution_rows)
+        for row in attribution_rows:
+            payload = row.get("payload", {})
+            if (row.get("event_type") == "decision.committed"
+                    and payload.get("decision") == "telemetry_fault"):
+                a.attribution_issues.append(
+                    f"trace event {row.get('sequence', '?')}: "
+                    f"{payload.get('reason') or 'telemetry_fault'} "
+                    f"({payload.get('fault_type') or 'unknown fault'})"
+                )
+        if a.ledger_present and not attr_issues:
+            traced = {
+                (
+                    str(row.get("payload", {}).get("delivery_id") or ""),
+                    str(row.get("payload", {}).get("evidence_type") or ""),
+                    str(row.get("payload", {}).get("rendered_bytes_hash") or ""),
+                )
+                for row in attribution_rows
+                if row.get("event_type") == "decision.committed"
+                and row.get("payload", {}).get("decision") == "delivered"
+            }
+            sealed = {
+                (row.event_id, row.evidence_type, row.rendered_bytes_hash)
+                for row in ledger_rows
+            }
+            if traced != sealed:
+                missing = len(sealed - traced)
+                extra = len(traced - sealed)
+                a.attribution_issues.append(
+                    "delivery/attribution join mismatch: "
+                    f"{missing} sealed row(s) missing, {extra} trace-only row(s)"
+                )
 
     # 2-6. per-panel checks ------------------------------------------------ #
     all_blocks: list[GTBlock] = []
@@ -796,13 +871,30 @@ def audit_task(task_dir: Path) -> TaskAudit:
     if a.leak_tag_count:
         a.verdict_reasons.append(
             f"LEAK: <gt-*> tag visible in observations x{a.leak_tag_count}")
+    if a.attribution_issues:
+        a.verdict_reasons.extend(a.attribution_issues)
+    attribution_red = [
+        feature_id
+        for feature_id, item in a.feature_attribution.items()
+        if item.get("status") in {
+            "TRIGGERED_DARK",
+            "TELEMETRY_FAULT",
+            "DELIVERED_UNEXPOSED",
+            "EXPOSED",
+        }
+    ]
+    if attribution_red:
+        a.verdict_reasons.append(
+            "attribution RED feature(s): " + ", ".join(sorted(attribution_red))
+        )
     unreconciled = [r for r in a.ledger_rows if r.status == UNRECONCILED]
     for r in unreconciled:
         a.verdict_reasons.append(
             f"UNRECONCILED ledger row ev{r.event_id} ({r.evidence_type}, "
             f"{r.len_shipped_chars}c): {r.status_reason}")
     if (a.agent_error or a.exception_info or a.leak_tag_count
-            or a.stop_reason == "error" or unreconciled):
+            or a.stop_reason == "error" or unreconciled
+            or a.attribution_issues or attribution_red):
         a.verdict = "RED"
         return a
 
@@ -929,6 +1021,11 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                     out.append(f"            quote: {r.quote}")
             for s in a.ledger_issues:
                 out.append(f"  - LEDGER-ISSUE {s}")
+        if a.attribution_present:
+            out.append(
+                f"  - ATTRIBUTION: {a.attribution_rows} hash-chained event(s), "
+                f"{len(a.attribution_issues)} integrity issue(s)"
+            )
         for n in a.notes:
             out.append(f"  - note: {n}")
         for s in a.unparsed_samples:
@@ -938,6 +1035,49 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
     counts: dict[str, int] = {}
     for a in audits:
         counts[a.verdict] = counts.get(a.verdict, 0) + 1
+    feature_ids = sorted({
+        feature_id
+        for audit in audits
+        for feature_id in audit.feature_attribution
+    })
+    if feature_ids:
+        out.append("\n17-FEATURE ATTRIBUTION")
+        out.append("=" * 104)
+        out.append(
+            _fmt("feature", 25) + _fmt("kind", 7) + _fmt("W", 5)
+            + _fmt("EXP", 5) + _fmt("UNEXP", 7) + _fmt("DARK", 7)
+            + _fmt("SUP", 5) + _fmt("N/A", 5) + _fmt("FAULT", 7)
+            + _fmt("delivery", 10) + _fmt("exposed", 9) + "response"
+        )
+        out.append("-" * 104)
+        for feature_id in feature_ids:
+            items = [
+                audit.feature_attribution[feature_id]
+                for audit in audits if feature_id in audit.feature_attribution
+            ]
+            status_counts = {
+                status: sum(item["status"] == status for item in items)
+                for status in (
+                    "WITNESSED", "EXPOSED", "DELIVERED_UNEXPOSED",
+                    "TRIGGERED_DARK", "SUPPRESSED_WITH_REASON", "INELIGIBLE",
+                    "TELEMETRY_FAULT",
+                )
+            }
+            out.append(
+                _fmt(feature_id, 25)
+                + _fmt(items[0]["kind"] if items else "-", 7)
+                + _fmt(status_counts["WITNESSED"], 5)
+                + _fmt(status_counts["EXPOSED"], 5)
+                + _fmt(status_counts["DELIVERED_UNEXPOSED"], 7)
+                + _fmt(status_counts["TRIGGERED_DARK"], 7)
+                + _fmt(status_counts["SUPPRESSED_WITH_REASON"], 5)
+                + _fmt(status_counts["INELIGIBLE"], 5)
+                + _fmt(status_counts["TELEMETRY_FAULT"], 7)
+                + _fmt(sum(len(item["deliveries"]) for item in items), 10)
+                + _fmt(sum(bool(item["exposed"]) for item in items), 9)
+                + str(sum(bool(item["response_observed"]) for item in items))
+            )
+        out.append("-" * 104)
     out.append("\nSUMMARY: " + "  ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return "\n".join(out)
 

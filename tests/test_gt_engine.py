@@ -5,6 +5,8 @@ GT-off agent-loop smoke with a stubbed provider (no API key required)."""
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 from typing import Any
 
@@ -166,6 +168,82 @@ def test_smart_truncate_keeps_phase_two():
     tr: list[dict[str, Any]] = []
     smart_truncate(msgs, tr, char_budget=500, delivered_spans=[])
     assert str(msgs[1]["content"][0]["input"]["new"]).startswith("[truncated")
+
+
+def test_bridge_records_gateway_no_candidate_reason(tmp_path):
+    """A quiet gateway observation must be explainable, not absent from telemetry."""
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+
+    assert bridge.enrich("bash", {"command": "echo ok"}, "ok", False) == "ok"
+
+    trace_path = tmp_path / ".gt" / "gt_attribution.jsonl"
+    rows = [json.loads(line)
+            for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert any(row["event_type"] == "observation.received" for row in rows)
+    terminal = [row for row in rows if row["event_type"] == "decision.committed"]
+    assert terminal[-1]["payload"]["decision"] == "no_delivery"
+    assert terminal[-1]["payload"]["reason"] == "no_candidate"
+
+
+def test_bridge_proves_exact_delivery_exposure(tmp_path):
+    from types import SimpleNamespace
+
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    sealed = SimpleNamespace(
+        event_id="7",
+        evidence_type="localization",
+        tier="VERIFIED",
+        dedup_key="dedup-7",
+        rendered_bytes_hash=hashlib.sha256(b"EVIDENCE").hexdigest(),
+    )
+    bridge._ledger_record(sealed, "EVIDENCE", "gateway")
+
+    ids = bridge.trace_model_request(
+        2, [{"role": "user", "content": "tool output\nEVIDENCE"}]
+    )
+
+    assert ids == ("7",)
+
+
+@requires_gt
+def test_model_action_is_bound_to_gt_exposure_without_persisting_arguments(
+        tmp_path):
+    """The next action is attributable to an exposed GT delivery, while raw
+    provider/tool payload values remain outside the durable trace."""
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    bridge._delivery_texts["7"] = "\nverified evidence"
+    delivery_ids = bridge.trace_model_request(2, [
+        {"role": "user", "content": [
+            {"type": "tool_result", "content": "output\nverified evidence"},
+        ]},
+    ])
+    secret_path = "src/provider-secret-value.py"
+    result = StepResult(
+        text="I will inspect the evidence target",
+        tool_calls=[ToolCall(
+            id="next-1", name="read_file", arguments={"path": secret_path},
+        )],
+        stop_reason="tool_use", usage=_usage(),
+    )
+    bridge.trace_model_response(2, result, delivery_ids)
+
+    row = bridge._attribution.rows[-1]
+    assert delivery_ids == ("7",)
+    assert row["event_type"] == "model.response"
+    assert row["payload"]["delivery_ids"] == ["7"]
+    assert row["payload"]["tool_calls"] == [
+        {"id": "next-1", "name": "read_file"},
+    ]
+    raw = (tmp_path / ".gt" / "gt_attribution.jsonl").read_text(
+        encoding="utf-8")
+    assert secret_path not in raw
+    assert "I will inspect the evidence target" not in raw
 
 
 # --------------------------------------------------------------------------- #
@@ -463,6 +541,20 @@ def test_submit_probe_blocks_on_real_syntax_error(indexed_repo, tmp_path):
 def test_submit_probe_quiet_on_clean_or_unedited(indexed_repo):
     b = indexed_repo
     assert b.submit_probe() is None          # nothing edited: clean allow
+    census = [
+        row for row in b._attribution.rows
+        if row["event_type"] == "run.feature_census"
+    ]
+    assert len(census[-1]["payload"]["features"]) == 17
+    assert {
+        item["feature_id"] for item in census[-1]["payload"]["features"]
+    } == {
+        "caller_contract", "covering_red", "def_partition", "localization",
+        "newfile_precedent", "obligations", "recovery", "signature_delta",
+        "submit_refusal", "syntax_result", "GT_CERT_DELIVERY",
+        "GT_CHANGE_SURFACE", "GT_EDIT_CHECK", "GT_HYPOTHESIS",
+        "GT_LOC_RESLOT", "GT_PATCH_DELTA", "GT_SS_SUBMIT_RED",
+    }
     b.edited_files.append("pkg/alpha.py")    # syntactically fine
     assert b.submit_probe() is None
 
@@ -634,6 +726,41 @@ def test_agent_gt_root_on_non_code_dir_gets_dormant_bridge(tmp_path):
     # (task_start abstains without a graph) and no evidence was sealed.
     assert result.transcript[0]["content"] == "t"
     assert agent._gt.deliveries == []
+    trace_rows = [
+        json.loads(line)
+        for line in (tmp_path / ".gt" / "gt_attribution.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(row["event_type"] == "run.started" for row in trace_rows)
+    assert any(row["event_type"] == "run.completed" for row in trace_rows)
+    assert any(row["event_type"] == "run.feature_census" for row in trace_rows)
+
+
+@requires_gt
+def test_real_indexed_agent_proves_task_start_exposure(indexed_repo):
+    from gt_engine.attribution import summarize_features, verify_trace_rows
+
+    pytest.importorskip("numpy")
+    steps = [StepResult(text="I will inspect helper.", tool_calls=[],
+                        stop_reason="end_turn", usage=_usage())]
+    agent = Agent(
+        provider=_ScriptedProvider(steps),
+        system="s",
+        gt_root=indexed_repo.repo_root,
+        verify=False,
+    )
+
+    result = agent.run(
+        "helper in pkg/alpha.py returns the wrong sum; preserve its callers"
+    )
+
+    assert result.stop_reason == "end_turn"
+    rows = agent._gt._attribution.rows
+    assert verify_trace_rows(rows) == []
+    features = summarize_features(rows)
+    assert features["obligations"]["status"] == "WITNESSED"
+    assert features["obligations"]["exposed"] is True
+    assert features["obligations"]["response_observed"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -1006,7 +1133,6 @@ def test_ledger_absent_when_gt_off(tmp_path):
 # --------------------------------------------------------------------------- #
 # FIX A: gt_deliveries.txt - verbatim shipped bytes alongside the ledger
 # --------------------------------------------------------------------------- #
-import hashlib  # noqa: E402
 import re as _re  # noqa: E402
 
 _DELIV_HDR = _re.compile(

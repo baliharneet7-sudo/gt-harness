@@ -28,6 +28,29 @@ efficiency lives and where it leaks.
 5. **Result** — `AgentResult` with stop reason, iteration count, token totals,
    and a full transcript (every message, tool call, and tool result).
 
+## GroundTruth engine lifecycle
+
+When `gt_root` is set, GroundTruth participates at the decision boundaries of
+the loop itself: task start, every completed tool observation, request
+construction, the next model response, and the penultimate submit decision.
+It is therefore the deterministic evidence engine for the GT arm, not a
+post-run tracer. The language model still supplies reasoning; GT supplies
+repository facts, deterministic checks, routing, and completion evidence.
+
+The two audit streams answer different questions:
+
+- `gt_ledger.jsonl`: which exact evidence bytes were sealed and delivered.
+- `gt_attribution.jsonl`: which of the 17 direct mechanisms had an opportunity,
+  fired, stayed dark, was suppressed, reached the provider request, and was
+  linked to the next response.
+
+Request exposure is found by structurally reading message block lists.
+Trajectories are not used as the delivery witness, and response linkage is not
+overclaimed as semantic consumption or benchmark causality. The next response's
+tool-call IDs and names are linked to the exposed delivery IDs without retaining
+raw model text or tool arguments. A paired GT-off run is the comparison needed
+to attribute a behavior or reward delta to the GT arm.
+
 ## The main loop
 
 ```mermaid

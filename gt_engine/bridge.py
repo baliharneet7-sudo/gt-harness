@@ -369,6 +369,13 @@ class GTBridge:
 
     def __post_init__(self) -> None:
         self.repo_root = self._fwd(self.repo_root)
+        from gt_engine.attribution import AttributionTrace
+
+        self._attribution = AttributionTrace(self._attribution_path)
+        # Exact shipped text is kept only in memory so exposure can be proven
+        # against the provider request. The attribution file stores IDs/hashes,
+        # never unrestricted model or tool content.
+        self._delivery_texts: dict[str, str] = {}
         # Bash-edit pre-images captured at the pre-dispatch boundary:
         # {rel: before_content_or_None}; None = the target did not exist (a
         # creation); an ABSENT key = unreadable/huge -> downstream stays quiet.
@@ -430,6 +437,78 @@ class GTBridge:
     # ------------------------------------------------------------------ #
     _LEDGER_CONTAINER_DIR = "/logs/agent"  # harbor containers' artifact tree
 
+    def _attribution_path(self) -> str | None:
+        path = self._ledger_path()
+        if not path:
+            return None
+        return os.path.join(os.path.dirname(path), "gt_attribution.jsonl")
+
+    def _trace_record(
+        self,
+        event_type: str,
+        boundary: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Record behavior-neutral host telemetry; never raise into GT."""
+        try:
+            self._attribution.record(
+                event_type,
+                action_index=self.action_index,
+                boundary=boundary,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 - observability is always fail-open
+            pass
+
+    def _record_feature_census(self) -> None:
+        """Snapshot all 17 mechanisms at the penultimate submit boundary."""
+        try:
+            from gt_engine.attribution import census_trace_rows
+
+            self._trace_record(
+                "run.feature_census",
+                "submit",
+                {"features": census_trace_rows(self._attribution.rows)},
+            )
+        except Exception:  # noqa: BLE001 - census cannot affect submission
+            pass
+
+    def _producer_record(self, row: dict[str, Any]) -> None:
+        """Adapter for GT core's ``gt.producer_invocation.v1`` hook."""
+        safe = dict(row)
+        self._trace_record(
+            "producer.invocation",
+            str(safe.get("event_type") or "gateway"),
+            safe,
+        )
+
+    def _control_record(
+        self,
+        feature_id: str,
+        decision_site: str,
+        decision: str,
+        **extra: Any,
+    ) -> None:
+        """Adapter for GT core control decisions, excluding candidate bytes."""
+        candidate = str(extra.pop("candidate_bytes", "") or "")
+        if candidate:
+            import hashlib
+
+            extra["candidate_sha256"] = hashlib.sha256(
+                candidate.encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            extra["candidate_chars"] = len(candidate)
+        self._trace_record(
+            "control.decision",
+            "gateway",
+            {
+                "feature_id": str(feature_id),
+                "decision_site": str(decision_site),
+                "decision": str(decision),
+                **extra,
+            },
+        )
+
     def _ledger_path(self) -> str | None:
         try:
             if os.path.isdir(self._LEDGER_CONTAINER_DIR):
@@ -450,6 +529,8 @@ class GTBridge:
         """Append one delivery line (+ the verbatim shipped-bytes block, FIX A).
         Never raises; a failed write does NOT unseal the delivery (the seal
         already happened). ``shipped`` is the EXACT appended suffix text."""
+        event_id = str(getattr(sealed, "event_id", "") or "")
+        evidence_type = str(getattr(sealed, "evidence_type", "") or "")
         try:
             path = self._ledger_path()
             if not path:
@@ -457,8 +538,8 @@ class GTBridge:
             import json
 
             line = json.dumps({
-                "event_id": str(getattr(sealed, "event_id", "") or ""),
-                "evidence_type": str(getattr(sealed, "evidence_type", "") or ""),
+                "event_id": event_id,
+                "evidence_type": evidence_type,
                 "tier": str(getattr(sealed, "tier", "") or ""),
                 "dedup_key": str(getattr(sealed, "dedup_key", "") or ""),
                 "rendered_bytes_hash": str(
@@ -473,6 +554,111 @@ class GTBridge:
         except Exception:  # noqa: BLE001 - ledger failure must never break delivery
             pass
         self._deliveries_record(sealed, shipped, boundary)
+        self._delivery_texts[event_id] = shipped
+        from gt_engine.attribution import feature_for_evidence
+
+        self._trace_record(
+            "decision.committed",
+            boundary,
+            {
+                "decision": "delivered",
+                "reason": "sealed_and_delivered",
+                "delivery_id": event_id,
+                "evidence_type": evidence_type,
+                "feature_id": feature_for_evidence(evidence_type) or "",
+                "rendered_bytes_hash": str(
+                    getattr(sealed, "rendered_bytes_hash", "") or ""
+                ),
+                "shipped_chars": len(shipped),
+            },
+        )
+
+    @staticmethod
+    def _message_text(value: Any) -> str:
+        """Flatten only model-visible text fields for exact exposure checks."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            return "\n".join(GTBridge._message_text(item) for item in value)
+        if isinstance(value, dict):
+            parts = []
+            for key in ("content", "text"):
+                if key in value:
+                    parts.append(GTBridge._message_text(value[key]))
+            return "\n".join(parts)
+        return ""
+
+    def trace_model_request(
+        self, iteration: int, messages: list[dict[str, Any]]
+    ) -> tuple[str, ...]:
+        """Prove which sealed delivery bytes were in the actual model request."""
+        visible = self._message_text(messages)
+        delivery_ids = tuple(
+            delivery_id
+            for delivery_id, text in self._delivery_texts.items()
+            if text and text in visible
+        )
+        self._trace_record(
+            "model.request",
+            "model",
+            {
+                "iteration": int(iteration),
+                "delivery_ids": list(delivery_ids),
+                "message_count": len(messages),
+                "visible_chars": len(visible),
+            },
+        )
+        return delivery_ids
+
+    def trace_model_response(
+        self, iteration: int, result: Any, delivery_ids: tuple[str, ...]
+    ) -> None:
+        """Link the next response/actions to exposure without claiming causality."""
+        calls = list(getattr(result, "tool_calls", ()) or ())
+        payload = {
+            "iteration": int(iteration),
+            "delivery_ids": list(delivery_ids),
+            "stop_reason": str(getattr(result, "stop_reason", "") or ""),
+            "tool_calls": [
+                {
+                    "id": str(getattr(call, "id", "") or ""),
+                    "name": str(getattr(call, "name", "") or ""),
+                }
+                for call in calls
+            ],
+        }
+        try:
+            self._attribution.record_content(
+                "model.response",
+                content=str(getattr(result, "text", "") or ""),
+                action_index=self.action_index,
+                boundary="model",
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 - observability is always fail-open
+            pass
+
+    def trace_run_completed(self, result: Any) -> None:
+        """Record nano's terminal state; the benchmark reward joins offline."""
+        self._trace_record(
+            "run.completed",
+            "run",
+            {
+                "stop_reason": str(getattr(result, "stop_reason", "") or ""),
+                "iterations": int(getattr(result, "iterations", 0) or 0),
+                "input_tokens": int(
+                    getattr(result, "total_input_tokens", 0) or 0
+                ),
+                "output_tokens": int(
+                    getattr(result, "total_output_tokens", 0) or 0
+                ),
+                "cache_read_tokens": int(
+                    getattr(result, "total_cache_read_tokens", 0) or 0
+                ),
+                "delivery_count": len(self.deliveries),
+            },
+        )
+        self._record_feature_census()
 
     def _deliveries_record(self, sealed: Any, shipped: str, boundary: str) -> None:
         """FIX A: gt_deliveries.txt — the VERBATIM shipped bytes, one framed
@@ -624,11 +810,23 @@ class GTBridge:
         question the seam asks). A pass/unavailable/unattributed run caches its
         verdict for the submit head and stays quiet."""
         if os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+            self._trace_record(
+                "feature.evaluated", "covering",
+                {"feature_id": "covering_red", "eligible": False,
+                 "outcome": "feature_disabled"})
             return None
         if not self.graph_db:
+            self._trace_record(
+                "feature.evaluated", "covering",
+                {"feature_id": "covering_red", "eligible": False,
+                 "outcome": "graph_unavailable"})
             return None
         src = [c for c in changed if c and _has_source_ext(c)]
         if not src:
+            self._trace_record(
+                "feature.evaluated", "covering",
+                {"feature_id": "covering_red", "eligible": False,
+                 "outcome": "no_source_edit"})
             return None
         from groundtruth.runtime.covering_runner import is_red_attributable
         from groundtruth.runtime.native_render import (
@@ -647,6 +845,13 @@ class GTBridge:
         if cres and cres.get("verdict") in ("pass", "fail"):
             self._covering_fired.update(src)
         if not cres or cres.get("verdict") != "fail":
+            self._trace_record(
+                "feature.evaluated", "covering",
+                {"feature_id": "covering_red", "eligible": False,
+                 "outcome": (
+                     "covering_pass" if cres and cres.get("verdict") == "pass"
+                     else "covering_unavailable"
+                 )})
             return None
         ran = list(cres.get("ran") or files)
         if not is_red_attributable(
@@ -654,12 +859,21 @@ class GTBridge:
                 repo_root=self.repo_root, covering_files=files,
                 per_file_timeout=self._COV_PER_FILE_TIMEOUT,
                 total_budget_seconds=self._COV_TOTAL_BUDGET):
+            self._trace_record(
+                "feature.evaluated", "covering",
+                {"feature_id": "covering_red", "eligible": False,
+                 "outcome": "red_not_attributable"})
             return None  # a red the edit did not plausibly cause never ships
         # No edited_symbol claim: nano has no span-derived symbol proof, and an
         # unproven name in model-facing text is worse than the generic head
         # (production's _verified_edited_symbol_for_rendering rule).
-        return render_covering_failure_native(
+        rendered = render_covering_failure_native(
             cres, test_files=ran, repo_root=self.repo_root) or None
+        self._trace_record(
+            "feature.evaluated", "covering",
+            {"feature_id": "covering_red", "eligible": True,
+             "outcome": "candidate_returned" if rendered else "render_empty"})
+        return rendered
 
     def _deliver_covering(self, output: str, text: str, target: str) -> str:
         """Seal + append the covering-RED as THIS observation's one dose (the
@@ -676,10 +890,27 @@ class GTBridge:
         )
 
         native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
-        if (not text or (native and contains_gt_tag(text))
-                or contains_test_identity(text)):
+        if not text:
+            self._trace_record(
+                "decision.committed", "covering",
+                {"decision": "suppressed", "reason": "render_empty",
+                 "evidence_type": "covering_verdict",
+                 "feature_id": "covering_red"})
+            return output
+        if (native and contains_gt_tag(text)) or contains_test_identity(text):
+            self._trace_record(
+                "decision.committed", "covering",
+                {"decision": "suppressed", "reason": "leak_guard",
+                 "evidence_type": "covering_verdict",
+                 "feature_id": "covering_red"})
             return output
         if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            self._trace_record(
+                "decision.committed", "covering",
+                {"decision": "suppressed", "reason": "over_budget",
+                 "evidence_type": "covering_verdict",
+                 "feature_id": "covering_red",
+                 "rendered_chars": len(text)})
             return output
         env = EvidenceEnvelope.build(
             producer="covering_runner", fact_id=target or "covering",
@@ -818,10 +1049,24 @@ class GTBridge:
         )
 
         native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
-        if (not text or (native and contains_gt_tag(text))
-                or contains_test_identity(text)):
+        if not text:
+            self._trace_record(
+                "decision.committed", "recovery",
+                {"decision": "suppressed", "reason": "render_empty",
+                 "evidence_type": "recovery", "feature_id": "recovery"})
+            return output
+        if (native and contains_gt_tag(text)) or contains_test_identity(text):
+            self._trace_record(
+                "decision.committed", "recovery",
+                {"decision": "suppressed", "reason": "leak_guard",
+                 "evidence_type": "recovery", "feature_id": "recovery"})
             return output
         if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            self._trace_record(
+                "decision.committed", "recovery",
+                {"decision": "suppressed", "reason": "over_budget",
+                 "evidence_type": "recovery", "feature_id": "recovery",
+                 "rendered_chars": len(text)})
             return output
         env = EvidenceEnvelope.build(
             producer="hypothesis_ledger", fact_id=signature or "recovery",
@@ -1023,6 +1268,7 @@ class GTBridge:
         *,
         edit_before: str | None = None,
         edit_after: str | None = None,
+        tool_call_id: str = "",
     ) -> str:
         """Complete this observation with at most one gateway dose.
 
@@ -1032,6 +1278,27 @@ class GTBridge:
         try:
             cmd, rc, changed, viewed, eba = self._event_parts(
                 tool_name, tool_args, output, is_error, edit_before, edit_after)
+            import hashlib
+
+            self._trace_record(
+                "observation.received",
+                "gateway",
+                {
+                    "tool_call_id": str(tool_call_id),
+                    "tool_name": str(tool_name),
+                    "command_sha256": hashlib.sha256(
+                        cmd.encode("utf-8", "surrogatepass")
+                    ).hexdigest(),
+                    "returncode": rc,
+                    "is_error": bool(is_error),
+                    "changed_files": list(changed),
+                    "viewed_files": list(viewed),
+                    "output_chars": len(output),
+                    "output_sha256": hashlib.sha256(
+                        output.encode("utf-8", "surrogatepass")
+                    ).hexdigest(),
+                },
+            )
             for rel in changed:
                 if rel and rel not in self.edited_files:
                     self.edited_files.append(rel)  # submit-gate syntax domain
@@ -1051,8 +1318,52 @@ class GTBridge:
             # memory and names this turn's recovery candidate, if any.
             try:
                 recovery = self._recovery_classify(cmd, output, rc)
-            except Exception:  # noqa: BLE001 - classification fault: no candidate
+                self._trace_record(
+                    "feature.evaluated",
+                    "recovery",
+                    {
+                        "feature_id": "recovery",
+                        "eligible": bool(recovery),
+                        "outcome": (
+                            "candidate_returned" if recovery
+                            else "trigger_not_satisfied"
+                        ),
+                    },
+                )
+                self._trace_record(
+                    "feature.evaluated",
+                    "recovery",
+                    {
+                        "feature_id": "GT_HYPOTHESIS",
+                        "eligible": bool(recovery),
+                        "outcome": (
+                            "candidate_returned" if recovery
+                            else "trigger_not_satisfied"
+                        ),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - classification fault: no candidate
                 recovery = None
+                self._trace_record(
+                    "feature.evaluated",
+                    "recovery",
+                    {
+                        "feature_id": "recovery",
+                        "eligible": True,
+                        "outcome": "producer_fault",
+                        "fault_type": type(exc).__name__,
+                    },
+                )
+                self._trace_record(
+                    "feature.evaluated",
+                    "recovery",
+                    {
+                        "feature_id": "GT_HYPOTHESIS",
+                        "eligible": True,
+                        "outcome": "producer_fault",
+                        "fault_type": type(exc).__name__,
+                    },
+                )
             # FIX D: SS-2 observed-RED latch — real executions only (the
             # read_file `cat` carrier is a VIEW; a viewed log containing a
             # runner frame must never latch a phantom RED).
@@ -1081,7 +1392,16 @@ class GTBridge:
                 # it defers to every higher producer) or no candidate: done.
                 return enriched
             return self._deliver_recovery(output, recovery[0], recovery[1])
-        except Exception:  # noqa: BLE001 - GT failure must never break the harness
+        except Exception as exc:  # noqa: BLE001 - GT failure must never break the harness
+            self._trace_record(
+                "decision.committed",
+                "gateway",
+                {
+                    "decision": "telemetry_fault",
+                    "reason": "bridge_exception",
+                    "fault_type": type(exc).__name__,
+                },
+            )
             return output
 
     def submit_probe(self) -> str | None:
@@ -1101,9 +1421,32 @@ class GTBridge:
         completion (the agent spends one EXISTING pushback on it, advisory)."""
         self.action_index += 1
         try:
-            return self._submit_gate()
-        except Exception:  # noqa: BLE001 - advisory: any fault abstains
+            self._trace_record(
+                "observation.received",
+                "submit",
+                {"edited_files": list(self.edited_files)},
+            )
+            result = self._submit_gate()
+            if result is None:
+                self._trace_record(
+                    "decision.committed",
+                    "submit",
+                    {"decision": "no_delivery", "reason": "gate_allowed_or_unavailable"},
+                )
+            return result
+        except Exception as exc:  # noqa: BLE001 - advisory: any fault abstains
+            self._trace_record(
+                "decision.committed",
+                "submit",
+                {
+                    "decision": "telemetry_fault",
+                    "reason": "submit_probe_exception",
+                    "fault_type": type(exc).__name__,
+                },
+            )
             return None
+        finally:
+            self._record_feature_census()
 
     # Syntax-check at most this many edited files at the submit boundary.
     _MAX_SUBMIT_SYNTAX_FILES = 10
@@ -1144,6 +1487,7 @@ class GTBridge:
             return None
 
     def _submit_gate(self) -> str | None:
+        from gt_engine.attribution import feature_for_evidence
         from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
         from groundtruth.runtime.edit_check import check_edit_syntax
         from groundtruth.runtime.evidence_envelope import (
@@ -1177,6 +1521,32 @@ class GTBridge:
                 break
             if syntax_res is None and res.get("verdict") == "ok":
                 syntax_res = res  # an executed PASS is honest cert evidence
+        syntax_outcome = (
+            str(syntax_res.get("verdict") or "")
+            if isinstance(syntax_res, dict)
+            else "no_edited_syntax_target"
+        )
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "GT_EDIT_CHECK",
+                "eligible": bool(self.edited_files),
+                "outcome": syntax_outcome,
+            },
+        )
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "syntax_result",
+                "eligible": bool(submit_block and bad_rel),
+                "outcome": (
+                    "candidate_returned" if submit_block and bad_rel
+                    else syntax_outcome
+                ),
+            },
+        )
         # FIX D (SS-2 broad fallback, GT_SS_SUBMIT_RED): the agent's OWN
         # unresolved observed RED — fires exactly where graph coverage is
         # dark (production's conan-17092 class: the agent watched a test on
@@ -1209,9 +1579,43 @@ class GTBridge:
                 "reason": "observed_red_unresolved",
                 "detail": detail,
             }
+        observed_red_eligible = bool(
+            self._observed_red is not None
+            and self.edited_files
+            and os.environ.get("GT_SS_SUBMIT_RED", "").strip().lower()
+            not in ("", "0", "false", "no", "off")
+        )
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "GT_SS_SUBMIT_RED",
+                "eligible": observed_red_eligible,
+                "outcome": (
+                    "candidate_returned"
+                    if submit_block
+                    and submit_block.get("reason") == "observed_red_unresolved"
+                    else "trigger_not_satisfied"
+                ),
+            },
+        )
         # WIRE 2 (submit head): the executed covering verdict — fresh by the
         # G-2 staleness law, attribution-gated. None never blocks.
         covering = self._submit_covering()
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "covering_red",
+                "eligible": bool(
+                    covering and covering.get("verdict") == "fail"
+                ),
+                "outcome": (
+                    f"covering_{covering.get('verdict')}"
+                    if covering else "covering_unavailable"
+                ),
+            },
+        )
         verdict = safe_gate_verdict(
             covering=covering, hygiene=None, submit_block=submit_block,
             bounce_count=self.submit_bounces, max_bounces=1)
@@ -1235,6 +1639,34 @@ class GTBridge:
                     syntax=syntax_res, obligations=None)
             except Exception:  # noqa: BLE001 - a cert fault degrades to the head
                 cert = None
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "GT_CERT_DELIVERY",
+                "eligible": bool(
+                    os.environ.get("GT_CERT_DELIVERY") == "1" and not verdict.allow
+                ),
+                "outcome": (
+                    "candidate_returned" if cert is not None
+                    else (
+                        "gate_allowed" if verdict.allow
+                        else "certificate_unavailable"
+                    )
+                ),
+            },
+        )
+        self._trace_record(
+            "feature.evaluated",
+            "submit",
+            {
+                "feature_id": "submit_refusal",
+                "eligible": not verdict.allow,
+                "outcome": (
+                    "candidate_returned" if not verdict.allow else "gate_allowed"
+                ),
+            },
+        )
         if verdict.allow:
             return None  # clean / unavailable / failed-open: quiet
         # BLOCK render: the NOT-CLEAN cert as the native per-head pre-commit
@@ -1256,9 +1688,33 @@ class GTBridge:
                 text = ""
         if not text:
             text = render_submit_rejection(verdict.reason, verdict.detail)
+        ev_type = ("submit_refusal"
+                   if cert_rendered
+                   or verdict.reason in ("covering_test_failed",
+                                         "observed_red_unresolved")
+                   else "syntax_result")
         # Seam-owned leak guard + law 8 on the rendered bytes, same as a delta.
-        if (not text or contains_gt_tag(text) or contains_test_identity(text)
-                or not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS)):
+        if not text:
+            self._trace_record(
+                "decision.committed", "submit",
+                {"decision": "suppressed", "reason": "render_empty",
+                 "evidence_type": ev_type,
+                 "feature_id": feature_for_evidence(ev_type) or ""})
+            return None
+        if contains_gt_tag(text) or contains_test_identity(text):
+            self._trace_record(
+                "decision.committed", "submit",
+                {"decision": "suppressed", "reason": "leak_guard",
+                 "evidence_type": ev_type,
+                 "feature_id": feature_for_evidence(ev_type) or ""})
+            return None
+        if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            self._trace_record(
+                "decision.committed", "submit",
+                {"decision": "suppressed", "reason": "over_budget",
+                 "evidence_type": ev_type,
+                 "feature_id": feature_for_evidence(ev_type) or "",
+                 "rendered_chars": len(text)})
             return None
         # W2-R4 fix: the bounce is spent ONLY when refusal text actually
         # ships (all guards above passed). A guard-suppressed refusal (empty
@@ -1273,11 +1729,6 @@ class GTBridge:
         # gt_mini_patch.py:22415; gt_gt.md: GT_SS_SUBMIT_RED owns
         # submit_refusal); the legacy syntax-only fallback keeps its executed
         # syntax_result identity.
-        ev_type = ("submit_refusal"
-                   if cert_rendered
-                   or verdict.reason in ("covering_test_failed",
-                                         "observed_red_unresolved")
-                   else "syntax_result")
         env = EvidenceEnvelope.build(
             producer="submit_gate", fact_id=bad_rel or "submit",
             target=bad_rel or "submit", evidence_type=ev_type,
@@ -1311,17 +1762,63 @@ class GTBridge:
         SEALED capsule string, or None (no issue text, empty brief, guard
         drop, or ANY fault - correct-or-quiet). Never raises."""
         try:
-            return self._task_start()
-        except Exception:  # noqa: BLE001 - a brief fault must never break task start
+            self._trace_record(
+                "run.started",
+                "task_start",
+                {
+                    "gt_enabled": True,
+                    "graph_available": bool(self.graph_db),
+                    "feature_count": 17,
+                },
+            )
+            result = self._task_start()
+            if result is None:
+                self._trace_record(
+                    "decision.committed",
+                    "task_start",
+                    {
+                        "decision": "no_delivery",
+                        "reason": (
+                            "required_input_absent"
+                            if not self.graph_db or not (self.issue_text or "").strip()
+                            else "producer_abstained_or_guarded"
+                        ),
+                        "feature_id": "obligations",
+                    },
+                )
+            return result
+        except Exception as exc:  # noqa: BLE001 - a brief fault must never break task start
+            self._trace_record(
+                "decision.committed",
+                "task_start",
+                {
+                    "decision": "telemetry_fault",
+                    "reason": "task_start_exception",
+                    "fault_type": type(exc).__name__,
+                    "feature_id": "obligations",
+                },
+            )
             return None
 
     def _task_start(self) -> str | None:
         if not (self.issue_text or "").strip():
+            self._trace_record(
+                "feature.evaluated", "task_start",
+                {"feature_id": "obligations", "eligible": False,
+                 "outcome": "issue_text_absent"})
             return None
         if not self.graph_db:
+            self._trace_record(
+                "feature.evaluated", "task_start",
+                {"feature_id": "obligations", "eligible": False,
+                 "outcome": "graph_unavailable"})
             return None  # DORMANT bridge: no graph substrate, no honest brief
         if os.environ.get("GT_GATEWAY", "").strip().lower() in (
                 "", "0", "false", "no", "off"):
+            self._trace_record(
+                "feature.evaluated", "task_start",
+                {"feature_id": "obligations", "eligible": False,
+                 "outcome": "feature_disabled"})
             return None
         import contextlib
         import io
@@ -1346,13 +1843,28 @@ class GTBridge:
         text = re.sub(r"^\s*<gt-task-brief>\s*", "", text)
         text = re.sub(r"\s*</gt-task-brief>\s*$", "", text).strip()
         if not text:
+            self._trace_record(
+                "feature.evaluated", "task_start",
+                {"feature_id": "obligations", "eligible": True,
+                 "outcome": "producer_abstained"})
             return None
         # Seam leak guard on the rendered bytes: in the native channel a
         # <gt-*> tag must never reach the model; test identity never may.
         native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
         if (native and contains_gt_tag(text)) or contains_test_identity(text):
+            self._trace_record(
+                "decision.committed", "task_start",
+                {"decision": "suppressed", "reason": "leak_guard",
+                 "evidence_type": "obligations",
+                 "feature_id": "obligations"})
             return None
         if not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS):
+            self._trace_record(
+                "decision.committed", "task_start",
+                {"decision": "suppressed", "reason": "over_budget",
+                 "evidence_type": "obligations",
+                 "feature_id": "obligations",
+                 "rendered_chars": len(text)})
             return None  # law 8: over-budget dropped WHOLE, never clipped
         env = EvidenceEnvelope.build(
             producer="v1r_brief", fact_id="task_start", target="task_start",
@@ -1405,24 +1917,70 @@ class GTBridge:
         # 2. per-turn state over the ONE shared episode (production pattern).
         st = GatewayState(
             graph_db=self.graph_db, repo_root=self.repo_root,
-            issue_text=self.issue_text, episode=self.episode)
+            issue_text=self.issue_text, episode=self.episode,
+            control_recorder=self._control_record,
+            producer_recorder=self._producer_record,
+            producer_audit_context={
+                "observation_id": f"{self._attribution.trace_id}:{self.action_index}",
+                "decision_id": f"gateway:{self.action_index}",
+                "decision_context": "nano.tool_result",
+                "decision_open": True,
+            })
         # 3. THE ONE CALL.
         envelopes = augment(ev, st)
         # 4. dose law: <=1 envelope per observation.
         winners = select(envelopes, max_doses=1, multidose=False)
         if not winners:
+            self._trace_record(
+                "decision.committed",
+                "gateway",
+                {
+                    "decision": "no_delivery",
+                    "reason": "no_candidate",
+                    "candidate_count": len(envelopes),
+                },
+            )
             return output
         winner = winners[0]
         # 5. render in the seam's channel (GT_GATEWAY_NATIVE keys the form).
         native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
         delta = render_envelope(winner, native=native)
         # 6. seam-owned leak guard on the RENDERED bytes: drop WHOLE.
-        if (not delta or (native and contains_gt_tag(delta))
-                or contains_test_identity(delta)):
+        if not delta:
+            self._trace_record(
+                "decision.committed",
+                "gateway",
+                {
+                    "decision": "suppressed",
+                    "reason": "render_empty",
+                    "evidence_type": winner.evidence_type or "",
+                },
+            )
+            return output
+        if (native and contains_gt_tag(delta)) or contains_test_identity(delta):
+            self._trace_record(
+                "decision.committed",
+                "gateway",
+                {
+                    "decision": "suppressed",
+                    "reason": "leak_guard",
+                    "evidence_type": winner.evidence_type or "",
+                },
+            )
             return output
         # 7. law 8: over-budget delta dropped WHOLE (checked on the delta,
         #    BEFORE the newline join - the seam then seals the joined suffix).
         if not fits_budget(delta, max_delta_chars=MAX_DELTA_CHARS):
+            self._trace_record(
+                "decision.committed",
+                "gateway",
+                {
+                    "decision": "suppressed",
+                    "reason": "over_budget",
+                    "evidence_type": winner.evidence_type or "",
+                    "rendered_chars": len(delta),
+                },
+            )
             return output
         # 8. SEAL BEFORE APPEND (B-33). Seal the EXACT shipped suffix bytes,
         #    including the single '\n' boundary inserted only when needed.

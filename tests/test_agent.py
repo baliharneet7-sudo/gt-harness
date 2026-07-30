@@ -39,6 +39,49 @@ def test_agent_one_shot_end_turn():
     assert result.total_output_tokens == 5
 
 
+def test_agent_links_gt_exposure_to_the_next_model_response():
+    class _TraceGT:
+        issue_text = ""
+        delivered_spans = []
+
+        def __init__(self):
+            self.requests = []
+            self.responses = []
+            self.completed = []
+
+        def task_start(self):
+            return "GT evidence"
+
+        def trace_model_request(self, iteration, messages):
+            self.requests.append((iteration, messages))
+            return ("0",)
+
+        def trace_model_response(self, iteration, result, delivery_ids):
+            self.responses.append((iteration, result.text, delivery_ids))
+
+        def trace_run_completed(self, result):
+            self.completed.append(
+                (result.stop_reason, result.iterations,
+                 result.total_input_tokens, result.total_output_tokens)
+            )
+
+    fp = FakeProvider([
+        StepResult(text="used evidence", tool_calls=[], stop_reason="end_turn",
+                   usage=_u(10, 5)),
+    ])
+    agent = Agent(provider=fp, system="sys", max_iterations=10)
+    gt = _TraceGT()
+    agent._gt = gt
+
+    result = agent.run("solve x")
+
+    assert result.stop_reason == "end_turn"
+    assert gt.requests and gt.requests[0][0] == 1
+    assert "GT evidence" in str(gt.requests[0][1])
+    assert gt.responses == [(1, "used evidence", ("0",))]
+    assert gt.completed == [("end_turn", 1, 10, 5)]
+
+
 def test_agent_executes_tool_then_completes(tmp_workdir):
     p = tmp_workdir / "a.txt"
     p.write_text("hello\n")

@@ -1,7 +1,9 @@
 # GT-Harness — GroundTruth × nano-harness
 
-> **The main harness here is [nano-harness](https://github.com/TroyJLorents-GH/nano-harness)
-> by Troy J Lorents — we are adding [GroundTruth](https://github.com/harneet2512/groundtruth) on top.**
+> **[nano-harness](https://github.com/TroyJLorents-GH/nano-harness) by Troy J
+> Lorents supplies the small agent loop. In GT-enabled runs, GroundTruth is the
+> deterministic evidence engine inside that loop—not an after-the-fact trace
+> annotator.**
 
 This repository embeds **GroundTruth (GT)** — a deterministic, LLM-free codebase-evidence
 engine — inside the nano-harness agent loop. GT pre-computes a complete call graph of the
@@ -12,7 +14,26 @@ dose per observation, append-only, sealed with a hash chain, and silent when it 
 verified to say.
 
 The integration lives in `gt_engine/` (bridge, indexer, evidence-aware context management,
-advisory verify gate) plus three surgical touch points in `nano/agent.py`. **With GT disabled
+advisory verify gate) plus the lifecycle boundaries in `nano/agent.py`. A GT-enabled request
+therefore follows a deterministic coding SDLC:
+
+1. **Ideate/plan:** task-start obligations and ranked localization are inserted before the
+   first model decision.
+2. **Code:** pre-edit, edit, and post-edit observations are normalized through the GT gateway;
+   applicable structural facts compete under the one-dose law.
+3. **Verify/test:** executed syntax, covering-test, and observed-RED evidence update the
+   completion decision; unavailable evidence is named and fails open.
+4. **Penultimate submit check:** every GT-enabled completion is probed before acceptance.
+   Positive failing evidence can refuse once; the second attempt cannot deadlock.
+5. **Proof:** `gt_ledger.jsonl` proves sealed delivery bytes, while the hash-chained
+   `gt_attribution.jsonl` records all 17 mechanisms as witnessed, dark, suppressed, faulted,
+   or ineligible. Provider-request block lists—not trajectories—prove exposure to the next
+   model response, whose resulting tool-call IDs/names are linked to those delivery IDs.
+   Raw model text and tool arguments are never persisted. Exposure is not mislabeled as
+   semantic consumption or causal benefit; a controlled GT-off baseline supplies the
+   behavior/reward delta.
+
+**With GT disabled
 (no `--gt-root`), this harness is byte-identical to stock nano-harness** — that property is
 enforced by tests, and it is what makes clean GT-on vs. GT-off benchmark comparisons possible.
 

@@ -99,6 +99,101 @@ def test_crashed_run_is_red():
     assert not a.unparsed_structures
 
 
+def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
+    from gt_engine.attribution import AttributionTrace
+
+    task = make_task_dir(
+        tmp_path,
+        "code-task__trace",
+        "code-task",
+        "\n".join([
+            panel("tool_call", "bash(command='pytest')"),
+            "iter=1 in=10 out=2",
+            panel("tool_result", "ok"),
+            stop_line(iters=1, in_t=10, out_t=2),
+            "",
+        ]),
+    )
+    trace = AttributionTrace(lambda: task / "agent" / "gt_attribution.jsonl",
+                             trace_id="d" * 32)
+    trace.record(
+        "feature.evaluated",
+        action_index=1,
+        boundary="recovery",
+        payload={
+            "feature_id": "recovery",
+            "eligible": True,
+            "outcome": "producer_abstained",
+        },
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.attribution_present is True
+    assert audit.attribution_issues == []
+    assert len(audit.feature_attribution) == 17
+    assert audit.feature_attribution["recovery"]["status"] == "TRIGGERED_DARK"
+
+
+def test_attribution_integrity_failure_is_red(tmp_path):
+    from gt_engine.attribution import AttributionTrace
+
+    task = make_task_dir(
+        tmp_path,
+        "code-task__badtrace",
+        "code-task",
+        "\n".join([stop_line(iters=1, in_t=10, out_t=2), ""]),
+    )
+    path = task / "agent" / "gt_attribution.jsonl"
+    trace = AttributionTrace(lambda: path, trace_id="e" * 32)
+    trace.record(
+        "decision.committed",
+        action_index=1,
+        boundary="gateway",
+        payload={"decision": "no_delivery", "reason": "no_candidate"},
+    )
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row["payload"]["reason"] = "tampered"
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert audit.attribution_issues == ["row 1: row_hash mismatch"]
+
+
+def test_bridge_fault_event_is_not_silently_green(tmp_path):
+    from gt_engine.attribution import AttributionTrace
+
+    task = make_task_dir(
+        tmp_path,
+        "code-task__faulttrace",
+        "code-task",
+        "\n".join([stop_line(iters=1, in_t=10, out_t=2), ""]),
+    )
+    trace = AttributionTrace(
+        lambda: task / "agent" / "gt_attribution.jsonl",
+        trace_id="f" * 32,
+    )
+    trace.record(
+        "decision.committed",
+        action_index=1,
+        boundary="gateway",
+        payload={
+            "decision": "telemetry_fault",
+            "reason": "bridge_exception",
+            "fault_type": "RuntimeError",
+        },
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.verdict == "RED"
+    assert audit.attribution_issues == [
+        "trace event 1: bridge_exception (RuntimeError)"
+    ]
+
+
 def test_cli_end_to_end_on_crashed_fixture(tmp_path):
     out_json = tmp_path / "audit.json"
     proc = subprocess.run(
