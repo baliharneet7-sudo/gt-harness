@@ -71,6 +71,28 @@ MAX_DELTA_CHARS = 4000
 # "[exit code N]". nano gives the agent only (output_string, is_error) - the
 # exit code must be parsed back out of the string.
 _EXIT_CODE_RE = re.compile(r"\[exit code (-?\d+)\]\s*$")
+_AGGREGATE_CHECK_RE = re.compile(
+    r"(?im)\b(?:ALL\s+TARGETS\s+MET|OVERALL\s+PASS)\s*[:=]\s*(True|False)\b"
+)
+_ITEM_CHECK_RE = re.compile(
+    r"(?im)^[^\r\n]{0,120}\b(?:ok|pass(?:ed)?|success)"
+    r"\s*[:=]\s*(true|false)\b"
+)
+_CHECK_EXEC_RE = re.compile(
+    r"(?i)(?:^|[;&|]\s*)(?:python\d*|node|pytest|npm\s+test|"
+    r"(?:bash|sh)\s+\S*(?:test|check|verify)\S*)\b"
+)
+
+
+def _explicit_check_outcome(output: str) -> str | None:
+    """Classify explicit boolean verifier output without reading prose."""
+    aggregate = _AGGREGATE_CHECK_RE.findall(output or "")
+    if aggregate:
+        return "pass" if aggregate[-1].lower() == "true" else "fail"
+    items = [item.lower() for item in _ITEM_CHECK_RE.findall(output or "")]
+    if not items:
+        return None
+    return "fail" if "false" in items else "pass"
 
 
 def _minimal_pair() -> None:
@@ -1188,6 +1210,15 @@ class GTBridge:
                     outcome = "fail"
                 elif rc == 0:
                     outcome = "pass"
+            # A deterministic self-check can report its boolean verdict while
+            # incorrectly exiting zero. Honor only explicit verdict sentinels
+            # from an executed checker; passive cat/grep views must never
+            # create or clear the unresolved-RED latch.
+            if (
+                outcome not in ("fail", "pass")
+                and _CHECK_EXEC_RE.search(cmd or "")
+            ):
+                outcome = _explicit_check_outcome(output or "") or outcome
             if outcome not in ("fail", "pass"):
                 return  # env_fail / no-tests / non-test: latch unchanged
             if not self._test_touches_edit(cmd, output):

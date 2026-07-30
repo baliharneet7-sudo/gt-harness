@@ -390,8 +390,17 @@ def summarize_features(
                         "TELEMETRY_FAULT",
                         reason_names[0] if reason_names else "producer_audit_fault",
                     )
+                elif categories & {
+                    "authority",
+                    "registry",
+                    "dedup",
+                    "cooldown",
+                    "suppression",
+                }:
+                    for reason in reason_names or ["authority_suppressed"]:
+                        update(feature_id, "SUPPRESSED_WITH_REASON", reason)
                 elif categories and categories <= {
-                    "correct_quiet", "dependency_failure", "registry"
+                    "correct_quiet", "dependency_failure"
                 }:
                     for reason in reason_names or ["required_input_absent"]:
                         update(feature_id, "INELIGIBLE", reason)

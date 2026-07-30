@@ -257,3 +257,41 @@ def test_named_correct_quiet_outcome_is_retained_for_ineligible_feature():
 
     assert summary["obligations"]["status"] == "INELIGIBLE"
     assert summary["obligations"]["reasons"] == ["brief_empty"]
+
+
+def test_authority_abstention_is_named_suppression_not_triggered_dark():
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["caller_contract_view"],
+            "abstention_reasons": [{
+                "category": "authority",
+                "reason": "viewed_file_leaky",
+            }],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["caller_contract"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["caller_contract"]["reasons"] == ["viewed_file_leaky"]
+
+
+def test_registry_abstention_is_named_suppression_not_ineligible():
+    rows = [{
+        "event_type": "producer.invocation",
+        "payload": {
+            "outcome": "returned_nothing",
+            "evidence_types": ["caller_contract_view"],
+            "abstention_reasons": [{
+                "category": "registry",
+                "reason": "producer_disabled",
+            }],
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["caller_contract"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["caller_contract"]["reasons"] == ["producer_disabled"]
