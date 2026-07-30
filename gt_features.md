@@ -2,7 +2,7 @@
 
 Date: 2026-07-30
 Repository scope: `gt-harness`
-Status: researched design and verified current-state inventory; benchmark benefit not yet established
+Status: live wiring/behavior proof passed; comparative benchmark benefit not yet established
 
 ## Executive conclusion
 
@@ -584,6 +584,62 @@ replaces the timeout-prone `crack-7z-hash` trajectory with
 `reshard-c4-data`; it does not weaken the timeout multiplier or hide unhealthy
 tasks. Post-change deterministic verification is 15/15 canonical trigger tests
 and 268 passed repository tests (the same two Windows-only capability skips).
+
+### Accepted live proof: run 30575786568
+
+Run `30575786568` passed the full live gate on commit `051eedb` with the
+following frozen configuration:
+
+- tasks: `build-cython-ext`, `headless-terminal`,
+  `llm-inference-batching-scheduler`, `reshard-c4-data`, and
+  `sanitize-git-repo`;
+- model: bare `deepseek-v4-flash`;
+- temperature: 1;
+- Profile 2;
+- Harbor concurrency: 4; and
+- agent timeout multiplier: 1.0.
+
+All five task executions were healthy and audited `GREEN-delivered`; four
+received reward 1. The run produced 18 sealed GT deliveries. Every delivery’s
+exact byte hash was present in the immediate provider-final request and linked
+model response. The aggregate live result was:
+
+| Measure | Result |
+|---|---:|
+| Complete feature census | 17/17 on every task |
+| Active Profile-2 controls | 53/53 on every task |
+| Active behavior flags | 7/7 on every task |
+| Exercised identities | 16/17 |
+| Provider-witnessed identities | 9/17 |
+| Action-consistent identities | 8/17 |
+| Lifecycle stages observed | 7/7 |
+| Sealed deliveries | 18 |
+| Triggered-dark identities | 0 |
+| Telemetry faults | 0 |
+| Unexposed deliveries | 0 |
+| Gate issues | 0 |
+| Tasks rewarded | 4/5 |
+| Mini-SWE iterations | 209 |
+| Provider input tokens | 6,171,645 |
+| Provider output tokens | 97,604 |
+| Sealed GT characters | 5,670 |
+
+The nine provider-witnessed identities were `obligations`, `localization`,
+`caller_contract`, `signature_delta`, `submit_refusal`, `GT_LOC_RESLOT`,
+`GT_EDIT_CHECK`, `GT_PATCH_DELTA`, and `GT_CERT_DELIVERY`.
+
+The correct-quiet path was also proven live. `headless-terminal` and
+`reshard-c4-data` each created a file; both `newfile_precedent` and
+`GT_CHANGE_SURFACE` recorded `producer_abstained_correct_quiet` because no
+nonredundant post-creation precedent was available. This is a successful
+execution, not a missing feature and not a fabricated delivery.
+
+The locally re-run auditor reproduced the downloaded artifact exactly except
+for the serialized `run_dir` path (GitHub runner path versus local download
+path). This result supports the wiring and immediate behavior claims. It does
+not, by itself, establish a causal solved-rate or token-cost improvement over
+GT-off because the existing baseline used a different timeout multiplier and
+implicit temperature.
 
 ### Required engine metrics
 
