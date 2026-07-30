@@ -1,8 +1,6 @@
-import pytest
 
 from nano.agent import Agent, AgentResult
 from nano.providers import StepResult, ToolCall, Usage
-from nano.tools import BashTool
 
 
 class FakeProvider:
@@ -123,7 +121,6 @@ def test_agent_cumulative_spend_does_not_kill_long_tasks():
 def test_agent_reports_tool_error_back_to_model():
     """When dispatch raises ToolError, the loop continues with is_error=True
     in the tool_result, and the model gets to retry."""
-    from nano.tools import ToolError
 
     fp = FakeProvider([
         StepResult(
@@ -384,7 +381,7 @@ def test_agent_failed_tool_does_not_satisfy_verify_gate():
                    usage=_u(50, 5)),
     ])
     agent = Agent(provider=fp, system="sys", max_iterations=20)
-    result = agent.run("fix it")
+    agent.run("fix it")
     # The failing-tool 'done' was challenged, so more than 2 pushbacks happened.
     challenges = sum(1 for m in fp.calls[-1]["messages"]
                      if m["role"] == "user"

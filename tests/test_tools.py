@@ -1,4 +1,3 @@
-import os
 import sys
 
 import pytest
@@ -334,6 +333,27 @@ def test_edit_file_preserves_unix_mode(tmp_workdir):
     p.chmod(0o755)
     edit_file(str(p), old="echo hi", new="echo bye")
     assert (p.stat().st_mode & 0o777) == 0o755, oct(p.stat().st_mode)
+
+
+def test_file_tools_follow_persistent_shell_cwd(tmp_path):
+    """Relative file-tool paths resolve where the persistent shell has cd'd."""
+    sub = tmp_path / "nested"
+    sub.mkdir()
+    (sub / "note.txt").write_text("before\n", encoding="utf-8")
+    bash = BashTool()
+    try:
+        bash.run(f'cd "{sub.as_posix()}"')
+        observed = dispatch("read_file", {"path": "note.txt"}, bash=bash)
+        dispatch(
+            "edit_file",
+            {"path": "note.txt", "old": "before", "new": "after"},
+            bash=bash,
+        )
+    finally:
+        bash.close()
+
+    assert "before" in observed
+    assert (sub / "note.txt").read_text(encoding="utf-8") == "after\n"
 
 
 def test_edit_file_edits_through_symlink(tmp_workdir):

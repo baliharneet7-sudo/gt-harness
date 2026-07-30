@@ -1,4 +1,3 @@
-import re
 
 from nano.prompts import SYSTEM_PROMPT, count_tokens_approx
 

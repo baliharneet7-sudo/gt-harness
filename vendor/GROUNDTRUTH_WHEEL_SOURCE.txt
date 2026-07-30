@@ -1,0 +1,9 @@
+artifact=groundtruth_mcp-1.0.0-py3-none-any.whl
+source_repository=https://github.com/harneet2512/groundtruth
+source_commit=9c535dd7c135d6e250615382561d338311b892927
+sha256=b0124dcae01107cd8726c5b7d8deca1358b36277fc8fc15d4d279755239a8791
+build_command=python -m build --wheel
+
+The wheel was built from a detached clean worktree at source_commit, not from
+the developer checkout. Its four 2026-07-29 correctness markers were verified
+inside the archive and through imports in a fresh isolated virtual environment.

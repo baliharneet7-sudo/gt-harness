@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .providers import Provider, StepResult, ToolCall
 from .tools import TOOLS, BashTool, ToolError, dispatch
@@ -73,7 +74,10 @@ class Agent:
         pushbacks_left = self.max_pushbacks if self.verify else 0
         challenged = False  # has any "done" been pushed back yet?
         tools_since_nudge = False  # successful tool evidence since last pushback
-        gt_submit_checked = False  # GT submit-boundary probe spent (once per run)
+        # Re-arm after every later tool round. A clean probe describes only
+        # the repository state at that boundary; stock verification can ask
+        # the model to do more work and invalidate that clean decision.
+        gt_submit_dirty = True
 
         try:
           while True:
@@ -152,10 +156,10 @@ class Agent:
                 # submit_refusal/syntax_result evidence exists. If yes, spend
                 # ONE pushback delivering that evidence as the nudge text.
                 # No evidence / any fault: the stock gate proceeds unchanged.
-                if (self._gt is not None and not gt_submit_checked
+                if (self._gt is not None and gt_submit_dirty
                         and used_tools and pushbacks_left > 0
                         and (self.max_iterations - iteration) > 0):
-                    gt_submit_checked = True
+                    gt_submit_dirty = False
                     from gt_engine.verify import submit_evidence
                     gt_nudge = submit_evidence(self._gt)  # None on abstain/fault
                     if gt_nudge:
@@ -215,6 +219,8 @@ class Agent:
 
             used_tools = True
             tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
+            if self._gt is not None:
+                gt_submit_dirty = True
             # Only a *successful* tool counts as verification evidence - a
             # failed-only round must not satisfy the verify gate.
             if any(not r["is_error"] for r in tool_results):

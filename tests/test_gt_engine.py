@@ -539,6 +539,57 @@ def _usage():
     return Usage(input_tokens=10, output_tokens=5, cache_read_tokens=0)
 
 
+def test_agent_rechecks_gt_submit_after_clean_probe_and_later_tool_work():
+    """A clean probe must not disarm GT after later repository work."""
+    class _LateBlockBridge:
+        issue_text = ""
+        delivered_spans: list[Any] = []
+
+        def __init__(self):
+            self.probes = 0
+
+        def task_start(self):
+            return None
+
+        def capture_bash_preimage(self, _args):
+            return None
+
+        def enrich(self, _name, _args, output, _is_error, **_kwargs):
+            return output
+
+        def submit_probe(self):
+            self.probes += 1
+            return "LATE BLOCK" if self.probes == 2 else None
+
+    steps = [
+        StepResult(text=None, tool_calls=[ToolCall(
+            id="c1", name="bash", arguments={"command": "echo initial"})],
+            stop_reason="tool_use", usage=_usage()),
+        StepResult(text="done once", tool_calls=[], stop_reason="end_turn",
+                   usage=_usage()),
+        StepResult(text=None, tool_calls=[ToolCall(
+            id="c2", name="bash", arguments={"command": "echo later-work"})],
+            stop_reason="tool_use", usage=_usage()),
+        StepResult(text="done twice", tool_calls=[], stop_reason="end_turn",
+                   usage=_usage()),
+        StepResult(text=None, tool_calls=[ToolCall(
+            id="c3", name="bash", arguments={"command": "echo repaired"})],
+            stop_reason="tool_use", usage=_usage()),
+        StepResult(text="verified", tool_calls=[], stop_reason="end_turn",
+                   usage=_usage()),
+    ]
+    bridge = _LateBlockBridge()
+    agent = Agent(provider=_ScriptedProvider(steps), system="s")
+    agent._gt = bridge
+
+    result = agent.run("fix it")
+
+    assert bridge.probes == 3
+    assert any(m.get("content") == "LATE BLOCK" for m in result.transcript
+               if m.get("type") == "user")
+    assert result.stop_reason == "end_turn"
+
+
 def test_agent_gt_off_smoke_end_to_end():
     steps = [
         StepResult(text=None, tool_calls=[ToolCall(
@@ -741,10 +792,9 @@ def test_covering_red_fires_at_post_edit(covering_repo, tmp_path):
 
 
 @requires_gt
-def test_covering_green_stays_quiet_and_latches(covering_repo, tmp_path):
-    """A green covering run delivers nothing (correct-or-quiet), caches the
-    non-fail verdict for the submit fast-path, and the per-file latch bounds
-    the cost: a second edit to the same file never re-runs the tests."""
+def test_covering_green_stays_quiet_and_rechecks_after_later_edit(
+        covering_repo, tmp_path):
+    """A green run stays quiet, but a later edit revalidates the file."""
     b = covering_repo
     alpha = tmp_path / "pkg" / "alpha.py"
     before = alpha.read_text(encoding="utf-8")
@@ -756,22 +806,20 @@ def test_covering_green_stays_quiet_and_latches(covering_repo, tmp_path):
     assert b._last_covering is not None
     assert b._last_covering.get("verdict") == "pass"
     assert "pkg/alpha.py" in b._covering_fired
-    # Latch: instrument _run_covering - a second edit to the SAME file must
-    # never re-run the covering tests (production's fire-once cost bound).
+    # A second edit changes repository state and must execute again.
     calls: list[int] = []
     b._run_covering = (  # type: ignore[method-assign]
         lambda changed: (calls.append(1), (None, []))[1])
     out2 = b.enrich("edit_file", {"path": str(alpha)}, "edited", False,
                     edit_before=after, edit_after=after)
     assert out2.startswith("edited")
-    assert calls == []
+    assert calls == [1]
 
 
 @requires_gt
-def test_covering_latch_not_burned_on_unexecuted_run(covering_repo, tmp_path):
-    """Covering-latch fix: a run that never EXECUTED (unavailable — spawn
-    fault, timeout, empty selection) must not burn the per-file latch; the
-    next edit re-attempts. A run that DID execute (pass/fail) latches."""
+def test_covering_rechecks_each_edit_after_unavailable_or_pass(
+        covering_repo, tmp_path):
+    """Every edit is a new covering opportunity, whatever the prior verdict."""
     b = covering_repo
     alpha = tmp_path / "pkg" / "alpha.py"
 
@@ -792,16 +840,16 @@ def test_covering_latch_not_burned_on_unexecuted_run(covering_repo, tmp_path):
     assert "pkg/alpha.py" not in b._covering_fired   # fault: latch NOT set
     _edit(2)
     assert calls == ["unavail", "unavail"]           # bounded retry happened
-    # Now an EXECUTED (pass) run: the latch sets and holds.
+    # An executed pass is cached for submit but cannot mute a later edit.
     b._run_covering = (  # type: ignore[method-assign]
         lambda changed: (calls.append("pass"),
                          ({"verdict": "pass", "ran": ["test_alpha.py"]},
                           ["test_alpha.py"]))[1])
     _edit(3)
     assert calls == ["unavail", "unavail", "pass"]
-    assert "pkg/alpha.py" in b._covering_fired       # executed: latched
+    assert "pkg/alpha.py" in b._covering_fired
     _edit(4)
-    assert calls == ["unavail", "unavail", "pass"]   # latch holds: no re-run
+    assert calls == ["unavail", "unavail", "pass", "pass"]
 
 
 @requires_gt
@@ -863,6 +911,21 @@ def test_submit_cert_allow_never_blocks(indexed_repo, monkeypatch):
     b.edited_files.append("pkg/alpha.py")           # syntactically fine
     assert b.submit_probe() is None
     assert b.deliveries == []
+
+
+@requires_gt
+def test_observed_red_does_not_attribute_dependency_basename(indexed_repo):
+    """A dependency frame sharing a basename with an edit is not edit proof."""
+    b = indexed_repo
+    b.edited_files.append("src/utils.py")
+
+    b._track_observed_red(
+        "pytest -q",
+        "FAILED vendor/utils.py::test_other - AssertionError\n1 failed in 0.10s\n",
+        1,
+    )
+
+    assert b._observed_red is None
 
 
 @requires_gt

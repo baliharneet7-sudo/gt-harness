@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 import queue
 import re
-import stat
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -154,7 +154,7 @@ class BashTool:
                 line = self._lines.get(timeout=min(remaining, 0.5))
             except queue.Empty:
                 if self._proc.poll() is not None:
-                    raise ToolError("Shell process exited unexpectedly.")
+                    raise ToolError("Shell process exited unexpectedly.") from None
                 continue
             m = sentinel_re.match(line)
             if m:
@@ -171,6 +171,14 @@ class BashTool:
             # verification evidence. The output rides along for diagnosis.
             raise ToolError(_truncate(joined) + f"[exit code {exit_code}]")
         return _truncate(joined)
+
+    def cwd(self) -> str:
+        """Return the persistent shell's current directory in host form."""
+        if self._is_cmd:
+            return self.run("cd").strip()
+        if sys.platform == "win32":
+            return self.run("pwd -W").strip()
+        return self.run("pwd").strip()
 
     def _kill(self) -> None:
         proc = self._proc
@@ -220,7 +228,7 @@ def read_file(path: str, line_start: int | None = None,
     try:
         text = p.read_text(encoding="utf-8")
     except UnicodeDecodeError as e:
-        raise ToolError(f"Cannot decode {path} as UTF-8 (binary file?): {e}")
+        raise ToolError(f"Cannot decode {path} as UTF-8 (binary file?): {e}") from e
 
     lines = text.splitlines()
     start = (line_start or 1) - 1
@@ -406,7 +414,7 @@ def _int_arg(arguments: dict[str, Any], key: str, default: int | None = None) ->
         raise ToolError(
             f"Argument {key!r} must be an integer, got {value!r}. "
             f"Re-issue the call with an integer value."
-        )
+        ) from None
 
 
 def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
@@ -415,10 +423,16 @@ def dispatch(name: str, arguments: dict[str, Any], *, bash: BashTool) -> str:
         return bash.run(arguments["command"], timeout=_int_arg(arguments, "timeout", 60))
     if name == "read_file":
         _require(arguments, name, "path")
-        return read_file(arguments["path"],
+        path = Path(arguments["path"])
+        if not path.is_absolute():
+            path = Path(bash.cwd()) / path
+        return read_file(str(path),
                          _int_arg(arguments, "line_start"),
                          _int_arg(arguments, "line_end"))
     if name == "edit_file":
         _require(arguments, name, "path", "old", "new")
-        return edit_file(arguments["path"], arguments["old"], arguments["new"])
+        path = Path(arguments["path"])
+        if not path.is_absolute():
+            path = Path(bash.cwd()) / path
+        return edit_file(str(path), arguments["old"], arguments["new"])
     raise ToolError(f"Unknown tool: {name}")

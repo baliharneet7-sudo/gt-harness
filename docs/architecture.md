@@ -101,10 +101,9 @@ Key property: `cd` and `export` survive between calls — the model works in a
 real session, not one-shot commands. On timeout the whole shell dies and the
 model is told its state is gone.
 
-**Known limitation:** `read_file`/`edit_file` resolve relative paths against
-the *process* cwd, not the shell's live cwd. A model that `cd`s in bash then
-edits a relative path hits the wrong file. Documented, deferred (fix needs
-MSYS path translation on Windows).
+`read_file` and `edit_file` resolve relative paths against the persistent
+shell's live cwd, including Git Bash's Windows path form. A preceding `cd`
+therefore applies consistently to all three tools.
 
 ## Where the efficiency lives (and leaks)
 

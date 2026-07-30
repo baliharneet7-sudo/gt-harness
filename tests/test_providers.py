@@ -22,9 +22,9 @@ def test_step_result_text_only():
     assert sr.stop_reason == "end_turn"
 
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock  # noqa: E402
 
-from nano.providers import AnthropicProvider
+from nano.providers import AnthropicProvider  # noqa: E402
 
 
 class _AnthroMsg:
@@ -140,9 +140,9 @@ def test_anthropic_provider_caches_last_user_not_last_message():
     assert "cache_control" not in sent[1]["content"][-1]
 
 
-import json as _json
+import json as _json  # noqa: E402
 
-from nano.providers import OpenAIProvider
+from nano.providers import OpenAIProvider  # noqa: E402
 
 
 def _fake_openai_response_with_tool():
@@ -277,7 +277,7 @@ def test_normalize_for_openai_passes_plain_user_through():
 
 # --- retry behavior ---
 
-from nano.providers import _call_with_retry
+from nano.providers import _call_with_retry  # noqa: E402
 
 
 class _FlakyError(Exception):

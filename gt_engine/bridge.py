@@ -373,11 +373,10 @@ class GTBridge:
         # {rel: before_content_or_None}; None = the target did not exist (a
         # creation); an ABSENT key = unreadable/huge -> downstream stays quiet.
         self._bash_preimages: dict[str, str | None] = {}
-        # Covering lane state (WIRE 2): per-file once-per-episode fire latch
-        # (production's per-symbol `_covering_exec_fired_syms` cost bound) and
-        # the cached last executed covering result the submit gate's covering
-        # head reuses (G-2: a cached non-fail can never false-block; a cached
-        # FAIL is stale at submit and re-run fresh).
+        # Covering lane state (WIRE 2): files with an executed covering result
+        # plus the latest result reused by the submit head. The set is
+        # telemetry, not a suppression latch: every later edit changes the
+        # revision and creates a new correct-time verification opportunity.
         self._covering_fired: set[str] = set()
         self._last_covering: dict[str, Any] | None = None
         # Recovery lane (FIX B): once-per-signature-per-episode fire latch,
@@ -629,8 +628,8 @@ class GTBridge:
         if not self.graph_db:
             return None
         src = [c for c in changed if c and _has_source_ext(c)]
-        if not src or all(c in self._covering_fired for c in src):
-            return None  # cost bound: fire at most once per file per episode
+        if not src:
+            return None
         from groundtruth.runtime.covering_runner import is_red_attributable
         from groundtruth.runtime.native_render import (
             render_covering_failure_native,
@@ -876,9 +875,6 @@ class GTBridge:
         for rel in rels:
             r = self._fwd(rel)
             if r and r in hay:
-                return True
-            b = os.path.basename(r) if r else ""
-            if b and len(b) >= 4 and b in hay:
                 return True
         return False
 
