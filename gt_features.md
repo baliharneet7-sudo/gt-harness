@@ -493,10 +493,10 @@ Hold constant:
 
 - identical task IDs;
 - identical Mini-SWE code and tool interface;
-- `deepseek/deepseek-v4-flash`;
-- temperature 1 if that is the provider configuration;
+- bare provider-native `deepseek-v4-flash`;
+- explicit temperature 1;
 - identical timeout and step cap;
-- `max_parallel=20`;
+- Terminal-Bench/Harbor concurrency 4;
 - identical substrate and GT commit within an arm;
 - identical prompt and provider settings; and
 - repeated trials or an explicit statement that stochastic single runs are not
@@ -505,9 +505,85 @@ Hold constant:
 The current trigger-oriented smoke configuration already identifies five tasks
 from structured GT-off tool-call/tool-result pairs. It targets indexed success,
 change-surface, unresolved-RED submit, and search-partition opportunities. Its
-acceptance target is at least 9 witnessed identities, a target of 12, zero
-triggered-dark identities, zero telemetry faults, and a provider-final receipt
-for every delivery.
+acceptance target is at least 7 provider-witnessed identities and at least 12
+specifically exercised identities, zero triggered-dark identities, zero
+telemetry faults, and a provider-final receipt for every delivery. “Exercised”
+means that the identity has a specific evaluation or terminal outcome; merely
+appearing in the 17-row census as `no_trigger_observed` does not count.
+
+### 2026-07-30 live audit and corrective finding
+
+Run `30571573718` executed the five-task trigger-oriented smoke on commit
+`3e30b62`, bare `deepseek-v4-flash`, explicit temperature 1, Profile 2,
+concurrency 4, and timeout multiplier 1.0. The run was diagnostically useful
+but did not pass the acceptance gate:
+
+- all 5 task executions were healthy and 3/5 received reward 1;
+- 18 sealed deliveries were byte-bound to their immediate provider requests
+  and linked responses;
+- all seven SDLC checkpoints were observed;
+- all 17 identities received a named terminal state;
+- there were zero triggered-dark identities, telemetry faults, unexposed
+  deliveries, dose violations, or hash-chain failures;
+- 7 identities were witnessed and 6 were action-consistent; and
+- the gate correctly failed because 7 witnessed identities were below the
+  required 9.
+
+The opportunity census then exposed a real wiring defect. `headless-terminal`
+created a new file, but `newfile_precedent` and `GT_CHANGE_SURFACE` did not
+trigger. The workflow explicitly set `GT_RL_PROFILE=2`; the bridge resolved
+explicit profiles with the inventory-only resolver, which omitted all seven
+Profile-2 behavior switches. The local tests had removed GT environment
+variables and therefore exercised the unset-profile path, masking the defect.
+
+Commit `5e37407` corrects the fan-out and adds a names-only activation receipt.
+The live gate now requires every expected Profile-2 control and these seven
+behavior switches on every task:
+
+- `GT_CS_EDIT_TRIGGER`;
+- `GT_SS_EDIT_PREVENTIVE`;
+- `GT_INFRA_NOISE_GUARD`;
+- `GT_HYP_CONTRA_GUARD`;
+- `GT_RECOVERY_ESCALATE`;
+- `GT_OBLIG_STEER_GUARD`; and
+- `GT_ROLE_DRIVEN_COALITION`.
+
+The deterministic verification after the fix is 14/14 canonical trigger tests
+and 266 passed repository tests (two Windows-only capability skips). An actual
+indexed new-file edit under explicit Profile 2 now produces both
+`newfile_precedent` and `GT_CHANGE_SURFACE`. This proves the trigger path and
+prevents the earlier configuration from passing silently; the confirmation
+live run remains the required proof of provider-bound execution.
+
+Run `30573558407` then confirmed the Profile-2 activation fix on commit
+`5e37407`. Every task recorded all 53 expected controls active, no missing
+controls, and all seven behavior flags. It also recorded 20 sealed deliveries,
+7 witnessed identities, 13 specifically exercised identities, 6
+action-consistent identities, all seven lifecycle stages, a complete 17-state
+census, temperature 1, and zero dark, faulted, unexposed, dose-invalid, or
+hash-invalid deliveries. Three of five tasks received reward 1.
+
+That run still failed acceptance for one independent reason:
+`crack-7z-hash` reached Harbor’s 900-second agent timeout. The run also showed
+why the former “9 witnessed” target was unsound. `headless-terminal` created a
+new file, but the change-surface producer found no nonredundant registration,
+companion, or destination advice after creation and correctly stayed quiet.
+Forcing two positive deliveries from that event would reward false or redundant
+advice.
+
+The corrected proof contract therefore separates:
+
+- positive evidence that was provider-witnessed (`min_witnessed=7`);
+- identities that were actually evaluated or reached a specific terminal
+  outcome (`min_exercised=12`); and
+- identities whose trigger never occurred, which remain honestly ineligible.
+
+The bridge now emits an explicit correct-quiet receipt when the new-file edit
+trigger executes but yields no useful repository precedent. The default smoke
+replaces the timeout-prone `crack-7z-hash` trajectory with
+`reshard-c4-data`; it does not weaken the timeout multiplier or hide unhealthy
+tasks. Post-change deterministic verification is 15/15 canonical trigger tests
+and 268 passed repository tests (the same two Windows-only capability skips).
 
 ### Required engine metrics
 

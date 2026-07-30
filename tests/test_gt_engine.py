@@ -775,6 +775,54 @@ def test_explicit_profile_two_new_file_fires_change_surface(
     assert summary["GT_CHANGE_SURFACE"]["status"] == "DELIVERED_UNEXPOSED"
 
 
+@requires_gt
+@pytest.mark.gt_all17
+def test_new_file_change_surface_records_correct_quiet_execution(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("GT_RL_PROFILE", "2")
+    apply_profile_env()
+    monkeypatch.setenv("GT_LOC_RESLOT", "0")
+    (tmp_path / "base_terminal.py").write_text(
+        "class BaseTerminal:\n    pass\n", encoding="utf-8"
+    )
+    db = ensure_index(str(tmp_path))
+    if db is None:
+        pytest.skip("gt-index binary unavailable")
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=db,
+        issue_text="Create headless_terminal.py with HeadlessTerminal.",
+    )
+    created = tmp_path / "headless_terminal.py"
+    after = (
+        "from base_terminal import BaseTerminal\n\n"
+        "class HeadlessTerminal(BaseTerminal):\n    pass\n"
+    )
+    created.write_text(after, encoding="utf-8")
+
+    output = bridge.enrich(
+        "edit_file",
+        {"path": str(created)},
+        "created",
+        False,
+        edit_before=None,
+        edit_after=after,
+    )
+
+    assert output == "created"
+    from gt_engine.attribution import summarize_features
+
+    summary = summarize_features(bridge._attribution.rows)
+    for feature_id in ("newfile_precedent", "GT_CHANGE_SURFACE"):
+        assert summary[feature_id]["status"] == "INELIGIBLE"
+        assert summary[feature_id]["reasons"] == [
+            "producer_abstained_correct_quiet"
+        ]
+
+
 # --------------------------------------------------------------------------- #
 # FIX 3: bash-mediated edit bridges (production _gateway_edit_bridges port)
 # --------------------------------------------------------------------------- #

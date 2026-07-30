@@ -2717,6 +2717,49 @@ class GTBridge:
             })
         # 3. THE ONE CALL.
         envelopes = augment(ev, st)
+        # The pinned runtime's edit-path change-surface producer is
+        # correct-or-quiet, but unlike the patch/caller producers it does not
+        # emit a producer.invocation receipt when it finds no useful
+        # registration, companion, or destination evidence. That made an
+        # observed file creation look like ``no_trigger_observed`` even though
+        # Profile 2 executed the producer. Record the names-only terminal
+        # outcome at this adapter seam; delivery/suppression remains owned by
+        # the normal envelope path below.
+        creates_file = any(
+            not str(pair[0] or "").strip()
+            and bool(str(pair[1] or "").strip())
+            for pair in (edit_before_after or {}).values()
+            if isinstance(pair, (tuple, list)) and len(pair) == 2
+        )
+        change_surface_on = all(
+            os.environ.get(name, "").strip().lower()
+            not in ("", "0", "false", "no", "off")
+            for name in ("GT_CHANGE_SURFACE", "GT_CS_EDIT_TRIGGER")
+        )
+        if creates_file and change_surface_on:
+            from gt_engine.attribution import feature_for_evidence
+
+            candidate_returned = any(
+                feature_for_evidence(
+                    str(getattr(envelope, "evidence_type", "") or "")
+                ) == "newfile_precedent"
+                for envelope in envelopes
+            )
+            outcome = (
+                "candidate_returned"
+                if candidate_returned
+                else "producer_abstained_correct_quiet"
+            )
+            for feature_id in ("newfile_precedent", "GT_CHANGE_SURFACE"):
+                self._trace_record(
+                    "feature.evaluated",
+                    "post_edit",
+                    {
+                        "feature_id": feature_id,
+                        "eligible": candidate_returned,
+                        "outcome": outcome,
+                    },
+                )
         # 4. dose law: <=1 envelope per observation.
         winners = select(envelopes, max_doses=1, multidose=False)
         if not winners:

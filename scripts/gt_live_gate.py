@@ -13,7 +13,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from gt_engine.attribution import DIRECT_FEATURES
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from gt_engine.attribution import DIRECT_FEATURES  # noqa: E402
 
 
 def _model_values(value: Any) -> set[str]:
@@ -33,6 +37,7 @@ def evaluate_live_gate(
     audit: dict[str, Any],
     *,
     min_witnessed: int,
+    min_exercised: int = 0,
     min_action_consistent: int = 0,
     expected_tasks: int,
     expected_model: str,
@@ -50,6 +55,7 @@ def evaluate_live_gate(
     faults: list[str] = []
     unexposed: list[str] = []
     actions_consistent: set[str] = set()
+    exercised: set[str] = set()
     lifecycle_observed: set[str] = set()
     provider_temperatures: set[float] = set()
     complete_census = True
@@ -138,6 +144,14 @@ def evaluate_live_gate(
                 )
         for feature_id, item in task_features.items():
             status = str(item.get("status") or "")
+            reasons = {
+                str(reason) for reason in item.get("reasons") or ()
+            }
+            if (
+                status != "INELIGIBLE"
+                or (reasons and reasons != {"no_trigger_observed"})
+            ):
+                exercised.add(feature_id)
             if status == "WITNESSED":
                 witnessed.add(feature_id)
             elif status == "TRIGGERED_DARK":
@@ -164,6 +178,11 @@ def evaluate_live_gate(
         issues.append(
             f"action-consistent identities {len(actions_consistent)} < required "
             f"{min_action_consistent}"
+        )
+    if len(exercised) < min_exercised:
+        issues.append(
+            f"exercised identities {len(exercised)} < required "
+            f"{min_exercised}"
         )
     if expected_temperature is not None and provider_temperatures != {
         float(expected_temperature)
@@ -200,9 +219,12 @@ def evaluate_live_gate(
         "task_count": len(tasks),
         "expected_tasks": expected_tasks,
         "min_witnessed": min_witnessed,
+        "min_exercised": min_exercised,
         "min_action_consistent": min_action_consistent,
         "witnessed_count": len(witnessed),
         "witnessed_features": sorted(witnessed),
+        "exercised_count": len(exercised),
+        "exercised_features": sorted(exercised),
         "action_consistent_features": sorted(actions_consistent),
         "required_lifecycle": sorted(set(required_lifecycle)),
         "lifecycle_observed": sorted(lifecycle_observed),
@@ -225,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("audit_json")
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--min-witnessed", type=int, default=9)
+    parser.add_argument("--min-witnessed", type=int, default=7)
+    parser.add_argument("--min-exercised", type=int, default=12)
     parser.add_argument("--min-action-consistent", type=int, default=0)
     parser.add_argument("--expected-tasks", type=int, default=5)
     parser.add_argument("--expected-model", default="deepseek-v4-flash")
@@ -250,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     report = evaluate_live_gate(
         audit,
         min_witnessed=args.min_witnessed,
+        min_exercised=args.min_exercised,
         min_action_consistent=args.min_action_consistent,
         expected_tasks=args.expected_tasks,
         expected_model=args.expected_model,

@@ -284,3 +284,47 @@ def test_live_gate_accepts_complete_profile_and_required_behavior(tmp_path):
     assert report["passed"] is True
     assert report["complete_profile"] is True
     assert report["observed_behavior_flags"] == ["GT_CS_EDIT_TRIGGER"]
+
+
+def test_live_gate_requires_exercised_not_merely_censused_features(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    audit = {
+        "tasks": [
+            _task(
+                "task",
+                {
+                    "obligations": _feature(),
+                    "recovery": {
+                        **_feature(
+                            "INELIGIBLE", delivered=False, exposed=False
+                        ),
+                        "reasons": ["trigger_not_satisfied"],
+                    },
+                    "def_partition": {
+                        **_feature(
+                            "INELIGIBLE", delivered=False, exposed=False
+                        ),
+                        "reasons": ["no_trigger_observed"],
+                    },
+                },
+            ),
+        ],
+    }
+
+    report = evaluate_live_gate(
+        audit,
+        min_witnessed=1,
+        min_exercised=3,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        run_dir=tmp_path,
+    )
+
+    assert report["passed"] is False
+    assert report["exercised_features"] == ["obligations", "recovery"]
+    assert any("exercised identities 2 < required 3" in issue
+               for issue in report["issues"])

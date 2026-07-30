@@ -52,7 +52,7 @@ on:
       task_ids:
         description: "Comma-separated trigger-opportunity smoke slice; overrides n_tasks"
         type: string
-        default: "build-cython-ext,crack-7z-hash,headless-terminal,llm-inference-batching-scheduler,sanitize-git-repo"
+        default: "build-cython-ext,headless-terminal,llm-inference-batching-scheduler,reshard-c4-data,sanitize-git-repo"
       timeout_multiplier:
         description: "harbor --agent-timeout-multiplier. MUST match the baseline arm being paired against (frozen full-89 baseline = 1.0; early smokes = 2.0)"
         type: string
@@ -62,9 +62,13 @@ on:
         type: string
         default: "2"
       min_witnessed:
-        description: "Minimum distinct GT identities required by the live attribution gate"
+        description: "Minimum provider-witnessed identities with positive evidence"
         type: string
-        default: "9"
+        default: "7"
+      min_exercised:
+        description: "Minimum identities with a specific live evaluation or terminal outcome"
+        type: string
+        default: "12"
       min_action_consistent:
         description: "Minimum distinct identities whose immediate next action matches the GT delivery"
         type: string
@@ -329,6 +333,7 @@ jobs:
         env:
           JOB_NAME: ${{ steps.harbor.outputs.job_name }}
           MIN_WITNESSED: ${{ inputs.min_witnessed }}
+          MIN_EXERCISED: ${{ inputs.min_exercised }}
           MIN_ACTION_CONSISTENT: ${{ inputs.min_action_consistent }}
           EXPECTED_TASKS: ${{ inputs.expected_tasks }}
           EXPECTED_TEMPERATURE: ${{ inputs.temperature }}
@@ -345,6 +350,7 @@ jobs:
             python scripts/gt_live_gate.py "$audit_json" \
               --run-dir "$run_dir" \
               --min-witnessed "$MIN_WITNESSED" \
+              --min-exercised "$MIN_EXERCISED" \
               --min-action-consistent "$MIN_ACTION_CONSISTENT" \
               --expected-tasks "$EXPECTED_TASKS" \
               --expected-model "deepseek-v4-flash" \
