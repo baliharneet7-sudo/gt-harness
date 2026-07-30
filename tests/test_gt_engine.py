@@ -1127,11 +1127,89 @@ def test_task_start_capsule_fires_and_seals(indexed_repo):
 
 
 @requires_gt
+def test_graph_projection_uses_task_symbols_and_relationship_surfaces(indexed_repo):
+    from gt_engine.graph_context import (
+        build_graph_projection,
+        graph_surface_receipt,
+    )
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(
+        "Implement helper so caller_a remains compatible with the result."
+    )
+    projection = build_graph_projection(indexed_repo.graph_db, contract)
+    receipt = graph_surface_receipt(indexed_repo.graph_db)
+
+    assert receipt["available"] is True
+    assert receipt["surfaces"]["nodes"] > 0
+    assert projection.node_ids
+    assert "pkg/alpha.py" in projection.files
+    assert "helper" in projection.symbols
+
+
+@requires_gt
 def test_task_start_abstains_without_issue_text(indexed_repo):
     b = indexed_repo
     b.issue_text = ""
     assert b.task_start() is None
     assert b.deliveries == []
+
+
+@requires_gt
+def test_submit_certificate_receives_obligation_coverage(
+        indexed_repo, monkeypatch):
+    import groundtruth.runtime.submit_gate as submit_gate
+
+    captured: dict[str, object] = {}
+    real = submit_gate.safe_build_certificate
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    monkeypatch.setattr(submit_gate, "safe_build_certificate", capture)
+    b = indexed_repo
+    b.issue_text = "Implement helper. The result must remain compatible."
+    assert b.task_start() is not None
+    b.edited_files.append("pkg/alpha.py")
+
+    b.submit_probe()
+
+    obligations = captured.get("obligations")
+    assert isinstance(obligations, dict)
+    assert obligations["total"] >= 1
+    assert obligations["unmet"]
+
+
+@requires_gt
+def test_submit_uses_graph_verification_plan(indexed_repo, monkeypatch):
+    import groundtruth.runtime.verification_plan as verification_plan
+
+    calls: list[tuple[str, ...]] = []
+    real = verification_plan.build_verification_plan
+
+    def capture(graph_db, repo_root, changed_entities, obligations=(), **kwargs):
+        calls.append(tuple(obligations))
+        return real(
+            graph_db,
+            repo_root,
+            changed_entities,
+            obligations,
+            **kwargs,
+        )
+
+    monkeypatch.setenv("GT_VERIFICATION_PLAN", "1")
+    monkeypatch.setattr(verification_plan, "build_verification_plan", capture)
+    b = indexed_repo
+    b.issue_text = "Implement helper. The result must remain compatible."
+    assert b.task_start() is not None
+    b.edited_files.append("pkg/alpha.py")
+
+    b.submit_probe()
+
+    assert calls
+    assert calls[-1]
 
 
 @requires_gt

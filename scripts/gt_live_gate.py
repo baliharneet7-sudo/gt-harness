@@ -44,6 +44,9 @@ def evaluate_live_gate(
     expected_temperature: float | None = None,
     require_complete_census: bool = False,
     require_complete_profile: bool = False,
+    require_task_contract: bool = False,
+    require_graph_surface_receipt: bool = False,
+    require_verification_plan_on_graph_edit: bool = False,
     required_behavior_flags: tuple[str, ...] = (),
     required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
@@ -90,6 +93,51 @@ def evaluate_live_gate(
             str(phase)
             for phase in (task.get("lifecycle_checkpoints") or {})
         )
+        if require_task_contract:
+            obligation_count = int(task.get("obligation_count") or 0)
+            shipped_count = int(task.get("shipped_obligation_count") or 0)
+            verify_total = int(task.get("verify_obligation_total") or 0)
+            if (
+                not task.get("task_role")
+                or obligation_count <= 0
+                or shipped_count != obligation_count
+            ):
+                issues.append(
+                    f"{task_name}: incomplete task contract "
+                    f"(role={task.get('task_role') or 'missing'}, "
+                    f"shipped={shipped_count}/{obligation_count})"
+                )
+            if "verify" in (task.get("lifecycle_checkpoints") or {}) and (
+                verify_total != obligation_count
+            ):
+                issues.append(
+                    f"{task_name}: verification contract mismatch "
+                    f"(verify_total={verify_total}, "
+                    f"task_total={obligation_count})"
+                )
+        if (
+            require_graph_surface_receipt
+            and (
+                not task.get("graph_surface_receipt_present")
+                or not task.get("graph_projection_present")
+            )
+        ):
+            issues.append(
+                f"{task_name}: missing graph surface/projection receipt"
+            )
+        graph_edit = bool(
+            task.get("graph_available")
+            and "post_edit" in (task.get("lifecycle_checkpoints") or {})
+        )
+        if (
+            require_verification_plan_on_graph_edit
+            and graph_edit
+            and not task.get("verification_plan_evaluated")
+        ):
+            issues.append(
+                f"{task_name}: graph-backed edit did not evaluate "
+                "GT_VERIFICATION_PLAN"
+            )
         task_features = task.get("feature_attribution") or {}
         if require_complete_census:
             actual_ids = set(task_features)
@@ -237,6 +285,11 @@ def evaluate_live_gate(
         "provider_temperatures": sorted(provider_temperatures),
         "complete_census": complete_census,
         "complete_profile": complete_profile,
+        "require_task_contract": require_task_contract,
+        "require_graph_surface_receipt": require_graph_surface_receipt,
+        "require_verification_plan_on_graph_edit": (
+            require_verification_plan_on_graph_edit
+        ),
         "required_behavior_flags": sorted(set(required_behavior_flags)),
         "observed_behavior_flags": sorted(observed_behavior_flags),
         "issues": issues,
@@ -255,6 +308,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-temperature", type=float)
     parser.add_argument("--require-complete-census", action="store_true")
     parser.add_argument("--require-complete-profile", action="store_true")
+    parser.add_argument("--require-task-contract", action="store_true")
+    parser.add_argument(
+        "--require-graph-surface-receipt", action="store_true"
+    )
+    parser.add_argument(
+        "--require-verification-plan-on-graph-edit", action="store_true"
+    )
     parser.add_argument(
         "--require-behavior-flags",
         default="",
@@ -280,6 +340,11 @@ def main(argv: list[str] | None = None) -> int:
         expected_temperature=args.expected_temperature,
         require_complete_census=args.require_complete_census,
         require_complete_profile=args.require_complete_profile,
+        require_task_contract=args.require_task_contract,
+        require_graph_surface_receipt=args.require_graph_surface_receipt,
+        require_verification_plan_on_graph_edit=(
+            args.require_verification_plan_on_graph_edit
+        ),
         required_behavior_flags=tuple(
             flag.strip()
             for flag in args.require_behavior_flags.split(",")

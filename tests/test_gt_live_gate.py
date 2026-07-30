@@ -16,6 +16,14 @@ def _task(
     missing_profile_controls=None,
     profile_behavior_flags=None,
     profile_receipt_fault="",
+    task_role="",
+    obligation_count=0,
+    shipped_obligation_count=0,
+    verify_obligation_total=0,
+    graph_surface_receipt_present=False,
+    graph_projection_present=False,
+    graph_available=False,
+    verification_plan_evaluated=False,
 ):
     return {
         "task_name": name,
@@ -32,6 +40,14 @@ def _task(
         "missing_profile_controls": missing_profile_controls or [],
         "profile_behavior_flags": profile_behavior_flags or [],
         "profile_receipt_fault": profile_receipt_fault,
+        "task_role": task_role,
+        "obligation_count": obligation_count,
+        "shipped_obligation_count": shipped_obligation_count,
+        "verify_obligation_total": verify_obligation_total,
+        "graph_surface_receipt_present": graph_surface_receipt_present,
+        "graph_projection_present": graph_projection_present,
+        "graph_available": graph_available,
+        "verification_plan_evaluated": verification_plan_evaluated,
     }
 
 
@@ -141,6 +157,59 @@ def test_live_gate_requires_sdlc_checkpoint_union(tmp_path):
     assert report["passed"] is False
     assert report["missing_lifecycle"] == ["test"]
     assert any("missing SDLC" in issue for issue in report["issues"])
+
+
+def test_live_gate_requires_contract_graph_and_graph_edit_plan(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    healthy = _task(
+        "healthy",
+        {"obligations": _feature()},
+        lifecycle={"post_edit": {"count": 1}, "verify": {"count": 1}},
+        task_role="code_behavior",
+        obligation_count=3,
+        shipped_obligation_count=3,
+        verify_obligation_total=3,
+        graph_surface_receipt_present=True,
+        graph_projection_present=True,
+        graph_available=True,
+        verification_plan_evaluated=True,
+    )
+    report = evaluate_live_gate(
+        {"tasks": [healthy]},
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        require_task_contract=True,
+        require_graph_surface_receipt=True,
+        require_verification_plan_on_graph_edit=True,
+        run_dir=tmp_path,
+    )
+    assert report["passed"] is True
+
+    broken = dict(healthy)
+    broken.update({
+        "shipped_obligation_count": 2,
+        "graph_projection_present": False,
+        "verification_plan_evaluated": False,
+    })
+    report = evaluate_live_gate(
+        {"tasks": [broken]},
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        require_task_contract=True,
+        require_graph_surface_receipt=True,
+        require_verification_plan_on_graph_edit=True,
+        run_dir=tmp_path,
+    )
+    assert report["passed"] is False
+    assert any("incomplete task contract" in item for item in report["issues"])
+    assert any("missing graph surface" in item for item in report["issues"])
+    assert any("did not evaluate" in item for item in report["issues"])
 
 
 def test_live_gate_requires_complete_census_temperature_and_actions(tmp_path):

@@ -189,6 +189,92 @@ def test_audit_reports_provider_and_profile_activation_receipts(tmp_path):
     assert audit.profile_receipt_fault == ""
 
 
+def test_audit_projects_contract_graph_router_and_verification_receipts(
+    tmp_path,
+):
+    from gt_engine.attribution import AttributionTrace
+
+    task = make_task_dir(
+        tmp_path,
+        "code-task__graph-receipts",
+        "code-task",
+        "\n".join([stop_line(iters=1, in_t=10, out_t=2), ""]),
+    )
+    trace = AttributionTrace(
+        lambda: task / "agent" / "gt_attribution.jsonl",
+        trace_id="b" * 32,
+    )
+    trace.record(
+        "graph.surface_receipt",
+        action_index=0,
+        boundary="task_start",
+        payload={
+            "available": True,
+            "task_role": "code_behavior",
+            "obligation_count": 4,
+            "shipped_obligation_count": 4,
+            "surface_counts": {"nodes": 9, "edges": 7},
+        },
+    )
+    trace.record(
+        "graph.task_projection",
+        action_index=0,
+        boundary="task_start",
+        payload={
+            "file_count": 2,
+            "symbol_count": 3,
+            "node_count": 4,
+            "surface_hits": {"nodes_fts": 2, "closure": 1},
+        },
+    )
+    trace.record(
+        "control.decision",
+        action_index=1,
+        boundary="gateway",
+        payload={
+            "feature_id": "GT_ROLE_DRIVEN_COALITION",
+            "decision": "SUPPRESSED",
+            "reason": "role_irrelevant",
+        },
+    )
+    trace.record(
+        "control.decision",
+        action_index=2,
+        boundary="gateway",
+        payload={
+            "feature_id": "GT_VERIFICATION_PLAN",
+            "decision": "APPLIED",
+        },
+    )
+    trace.record(
+        "lifecycle.checkpoint",
+        action_index=3,
+        boundary="verify",
+        payload={
+            "phase": "verify",
+            "outcome": "requirements_verified",
+            "obligation_total": 4,
+            "obligation_met": 4,
+        },
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.task_role == "code_behavior"
+    assert audit.obligation_count == 4
+    assert audit.shipped_obligation_count == 4
+    assert audit.graph_surface_counts == {"edges": 7, "nodes": 9}
+    assert audit.graph_projection_file_count == 2
+    assert audit.graph_projection_surface_hits == {
+        "closure": 1, "nodes_fts": 2,
+    }
+    assert audit.evidence_router_suppressed == 1
+    assert audit.evidence_router_reasons == {"role_irrelevant": 1}
+    assert audit.verification_plan_applied is True
+    assert audit.verify_obligation_total == 4
+    assert audit.verify_obligation_met == 4
+
+
 def test_attribution_integrity_failure_is_red(tmp_path):
     from gt_engine.attribution import AttributionTrace
 

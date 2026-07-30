@@ -495,9 +495,18 @@ class GTBridge:
         # these counters prove that the deterministic checkpoint itself ran
         # even when the correct result is quiet (for example, syntax OK).
         self._lifecycle_phases: set[str] = set()
+        self._last_task_edit_action = 0
         self._last_source_edit_action = 0
         self._last_green_verification_action = 0
         self._last_test_outcome = ""
+        # Complete, graph-independent SDLC contract.  The task text is assigned
+        # by nano immediately before task_start(), so extraction happens there.
+        self._task_contract: Any | None = None
+        self._shipped_obligation_ids: set[str] = set()
+        self._verified_obligation_ids: set[str] = set()
+        self._evidence_router: Any | None = None
+        self._graph_projection: Any | None = None
+        self._last_verification_plan: Any | None = None
         from groundtruth.runtime.episode_state import EpisodeState
 
         self.episode = EpisodeState()
@@ -587,6 +596,74 @@ class GTBridge:
                 **details,
             },
         )
+
+    def _obligation_coverage(self) -> dict[str, Any]:
+        obligations = tuple(
+            getattr(self._task_contract, "obligations", ()) or ()
+        )
+        all_ids = {str(item.obligation_id) for item in obligations}
+        met_ids = all_ids & self._verified_obligation_ids
+        unmet = [
+            str(item.text)
+            for item in obligations
+            if str(item.obligation_id) not in met_ids
+        ]
+        return {
+            "total": len(all_ids),
+            "met": len(met_ids),
+            "covered": len(met_ids),
+            "unmet": unmet,
+            "shipped": len(all_ids & self._shipped_obligation_ids),
+        }
+
+    def _build_verification_plan(self) -> Any | None:
+        if (
+            os.environ.get("GT_VERIFICATION_PLAN", "").strip() != "1"
+            or not self.graph_db
+        ):
+            return None
+        try:
+            from groundtruth.runtime.verification_plan import build_verification_plan
+
+            entities = self._edited_symbol_identities(tuple(self.edited_files))
+            obligations = tuple(
+                item.obligation_id
+                for item in (
+                    getattr(self._task_contract, "obligations", ()) or ()
+                )
+            )
+            plan = build_verification_plan(
+                self.graph_db,
+                self.repo_root,
+                sorted(entities),
+                obligations,
+            )
+            self._last_verification_plan = plan
+            checks = tuple(getattr(plan, "checks", ()) or ())
+            self._control_record(
+                "GT_VERIFICATION_PLAN",
+                "mini_seam.verification.plan_selection",
+                "APPLIED",
+                changed_entity_count=len(entities),
+                obligation_count=len(obligations),
+                check_count=len(checks),
+                selection_bases=sorted(
+                    {
+                        str(getattr(check, "selection_basis", "") or "")
+                        for check in checks
+                    }
+                ),
+            )
+            return plan
+        except Exception as exc:  # noqa: BLE001 - planner is correct-or-quiet
+            self._control_record(
+                "GT_VERIFICATION_PLAN",
+                "mini_seam.verification.plan_selection",
+                "NO_EFFECT",
+                reason="planner_fault",
+                fault_type=type(exc).__name__,
+            )
+            return None
 
     def pre_edit_checkpoint(
         self,
@@ -1324,10 +1401,12 @@ class GTBridge:
                 pass
 
     def _run_covering(self, changed: tuple[str, ...]) -> tuple[dict | None, list[str]]:
-        """Select + EXECUTE the repo's own covering tests for the symbols the
-        changed files define. Returns ``(result, files)``; caches the result
-        for the submit gate's covering head. ``(None, [])`` when nothing is
-        selectable (correct-or-quiet)."""
+        """Plan, select, and execute graph-related tests for changed symbols.
+
+        Profile 2's VerificationPlan expands direct covering edges with
+        verified closure and test-directory convention.  If the planner is
+        unavailable, retain the former direct selector as a quiet fallback.
+        """
         from groundtruth.runtime.covering_runner import (
             run_covering_tests,
             select_covering_tests,
@@ -1336,9 +1415,35 @@ class GTBridge:
         syms = self._edited_symbol_identities(changed)
         if not syms:
             return None, []
-        sel = select_covering_tests(
-            self.graph_db, syms, limit=2, repo_root=self.repo_root)
-        files = [c["file"] for c in (sel or []) if c.get("file")]
+        files: list[str] = []
+        plan = self._build_verification_plan()
+        if plan is not None:
+            confidence_order = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
+            checks = sorted(
+                (
+                    check
+                    for check in (getattr(plan, "checks", ()) or ())
+                    if getattr(check, "kind", "") == "unit"
+                ),
+                key=lambda check: (
+                    confidence_order.get(
+                        str(getattr(check, "confidence", "unknown")), 3
+                    ),
+                    str(getattr(check, "selection_basis", "")),
+                ),
+            )
+            for check in checks:
+                for target in tuple(getattr(check, "targets", ()) or ()):
+                    if target and target not in files:
+                        files.append(str(target))
+                    if len(files) >= 4:
+                        break
+                if len(files) >= 4:
+                    break
+        if not files:
+            sel = select_covering_tests(
+                self.graph_db, syms, limit=2, repo_root=self.repo_root)
+            files = [c["file"] for c in (sel or []) if c.get("file")]
         if not files:
             return None, []
         cres = run_covering_tests(
@@ -1725,8 +1830,8 @@ class GTBridge:
                 f"behavioral_check_{outcome}",
                 command_present=bool((cmd or "").strip()),
                 after_latest_edit=bool(
-                    self._last_source_edit_action
-                    and self.action_index > self._last_source_edit_action
+                    self._last_task_edit_action
+                    and self.action_index > self._last_task_edit_action
                 ),
             )
             # Passing runners normally print only aggregate success, not the
@@ -1734,10 +1839,34 @@ class GTBridge:
             # therefore valid SDLC verification even without a path echo.
             if (
                 outcome == "pass"
-                and self._last_source_edit_action
-                and self.action_index > self._last_source_edit_action
+                and self._last_task_edit_action
+                and self.action_index > self._last_task_edit_action
             ):
                 self._last_green_verification_action = self.action_index
+                if self._task_contract is not None:
+                    from gt_engine.task_contract import matching_obligation_ids
+
+                    mapped = matching_obligation_ids(
+                        self._task_contract, cmd or "", output or ""
+                    )
+                    # A repository-wide formal runner is the only observed
+                    # model action allowed to claim the whole task contract.
+                    # Targeted checks keep only their lexical obligation map.
+                    full_suite = bool(
+                        re.search(
+                            r"(?i)(?:^|[;&|]\s*)(?:"
+                            r"python\s+-m\s+pytest|pytest|npm\s+test|"
+                            r"cargo\s+test|go\s+test\s+\./\.\.\.)\s*"
+                            r"(?:-[a-zA-Zqvxrs]+\s*)*$",
+                            (cmd or "").strip(),
+                        )
+                    )
+                    if full_suite:
+                        mapped = {
+                            item.obligation_id
+                            for item in self._task_contract.obligations
+                        }
+                    self._verified_obligation_ids.update(mapped)
             if not self._test_touches_edit(cmd, output):
                 return outcome  # checkpoint is valid; RED attribution is not
             self._observed_red = (
@@ -1969,6 +2098,7 @@ class GTBridge:
                 if rel and rel not in self.edited_files:
                     self.edited_files.append(rel)  # submit-gate syntax domain
             if changed:
+                self._last_task_edit_action = self.action_index
                 source_edit = any(_has_source_ext(rel) for rel in changed)
                 if source_edit:
                     self._last_source_edit_action = self.action_index
@@ -2102,11 +2232,10 @@ class GTBridge:
         producer (verified: producers dispatch on view/edit/test/search
         semantics only), so the probe consumes GT's pure submit decision head
         directly - ``submit_gate.safe_gate_verdict`` - fed with the nearest
-        honest evidence nano possesses: an EXECUTED syntax check
-        (``edit_check.check_edit_syntax``, correct-or-quiet by construction)
-        over the files this episode actually edited. No covering-test result
-        and no hygiene predicate exist in nano, so those heads are None
-        (pass-with-record - never a false block). A BLOCK renders as the
+        honest evidence nano possesses: executed syntax and graph-selected
+        verification checks, unresolved observed RED state, the complete task
+        contract, and fresh diff hygiene. Unavailable heads remain
+        pass-with-record and never fabricate a block. A BLOCK renders as the
         native pre-commit refusal (``render_submit_rejection``), leak-guarded,
         budget-checked, and SEALED as a delivery. Never raises; never blocks
         completion (the agent spends one EXISTING pushback on it, advisory)."""
@@ -2305,6 +2434,7 @@ class GTBridge:
         )
         # WIRE 2 (submit head): the executed covering verdict — fresh by the
         # G-2 staleness law, attribution-gated. None never blocks.
+        plan = self._build_verification_plan()
         covering = self._submit_covering()
         self._trace_record(
             "feature.evaluated",
@@ -2322,6 +2452,16 @@ class GTBridge:
         )
         if covering and covering.get("verdict") == "pass":
             self._last_green_verification_action = self.action_index
+            if plan is not None and any(
+                getattr(check, "kind", "") == "unit"
+                and getattr(check, "selection_basis", "") == "fact_covering"
+                and tuple(getattr(check, "targets", ()) or ())
+                for check in (getattr(plan, "checks", ()) or ())
+            ):
+                self._verified_obligation_ids.update(
+                    str(item)
+                    for item in (getattr(plan, "obligations", ()) or ())
+                )
 
         # SDLC penultimate gate: syntax success proves parseability, not
         # behavior. When enabled, a source edit must be followed by a passing
@@ -2331,28 +2471,48 @@ class GTBridge:
         sdlc_verify_on = os.environ.get(
             "GT_SDLC_VERIFY", ""
         ).strip().lower() not in ("", "0", "false", "no", "off")
+        obligation_coverage = self._obligation_coverage()
+        obligations_current = not obligation_coverage["unmet"]
         verification_current = bool(
-            self._last_source_edit_action
+            self._last_task_edit_action
             and self._last_green_verification_action
-            > self._last_source_edit_action
+            > self._last_task_edit_action
+            and obligations_current
         )
         if (
             sdlc_verify_on
             and submit_block is None
-            and self._last_source_edit_action
+            and self._last_task_edit_action
             and not verification_current
         ):
             submit_block = {
                 "blocking": True,
                 "reason": "verification_missing",
                 "detail": (
-                    "no passing post-edit behavioral check was observed; run "
-                    "the relevant tests or an explicit executable self-check"
+                    "no passing post-edit behavioral check mapped to the complete "
+                    "task contract was observed; "
+                )
+                + (
+                    (
+                        f"{len(obligation_coverage['unmet'])} task requirement(s) "
+                        "remain unverified: "
+                        + "; ".join(
+                            str(item)[:120]
+                            for item in obligation_coverage["unmet"][:3]
+                        )
+                        + ". "
+                    )
+                    if obligation_coverage["unmet"]
+                    else ""
+                )
+                + (
+                    "run the relevant tests or an explicit executable "
+                    "self-check mapped to the changed behavior"
                 ),
             }
         verify_outcome = (
             "not_applicable_no_source_edit"
-            if not self._last_source_edit_action
+            if not self._last_task_edit_action
             else (
                 "post_edit_verification_green"
                 if verification_current
@@ -2367,22 +2527,31 @@ class GTBridge:
             "verify",
             verify_outcome,
             latest_source_edit_action=self._last_source_edit_action,
+            latest_task_edit_action=self._last_task_edit_action,
             latest_green_action=self._last_green_verification_action,
             syntax_outcome=syntax_outcome,
             covering_outcome=(
                 str(covering.get("verdict"))
                 if isinstance(covering, dict) else "unavailable"
             ),
+            obligation_total=obligation_coverage["total"],
+            obligation_met=obligation_coverage["met"],
         )
+        try:
+            from groundtruth.runtime.patch_auditor import git_diff_hygiene
+
+            hygiene = git_diff_hygiene(self.repo_root)
+        except Exception:  # noqa: BLE001 - unavailable hygiene never blocks
+            hygiene = None
         verdict = safe_gate_verdict(
-            covering=covering, hygiene=None, submit_block=submit_block,
+            covering=covering, hygiene=hygiene, submit_block=submit_block,
             bounce_count=self.submit_bounces, max_bounces=1)
         # WIRE 3: the CompletionCertificate (GT_CERT_DELIVERY, production's own
         # flag read — gt_mini_patch.py:22329). Built from what nano HONESTLY
-        # has: the frozen head itself, the executed syntax + covering results.
-        # Heads nano cannot compute stay absent -> UNKNOWN/NOT_APPLICABLE
-        # (visible, fail-open). obligations=None exactly as production passes
-        # it: ADVISORY-only, never a block input (T2 law). ``cert.decision`` is
+        # has: the frozen head, syntax/covering/hygiene results, and explicit
+        # obligation coverage. Heads nano cannot compute stay absent ->
+        # UNKNOWN/NOT_APPLICABLE (visible, fail-open). Obligation coverage is
+        # advisory-only in the certificate; ``cert.decision`` is
         # a pure function of the head, so the cert can NEVER turn an allow into
         # a block (allow-never-block) — we return None on allow regardless.
         cert = None
@@ -2391,10 +2560,10 @@ class GTBridge:
                 from groundtruth.runtime.submit_gate import safe_build_certificate
 
                 cert = safe_build_certificate(
-                    head=verdict, covering=covering, hygiene=None,
+                    head=verdict, covering=covering, hygiene=hygiene,
                     submit_block=submit_block,
                     bounce_count=self.submit_bounces, max_bounces=1,
-                    syntax=syntax_res, obligations=None)
+                    syntax=syntax_res, obligations=obligation_coverage)
             except Exception:  # noqa: BLE001 - a cert fault degrades to the head
                 cert = None
         self._trace_record(
@@ -2532,14 +2701,10 @@ class GTBridge:
 
     def task_start(self) -> str | None:
         """Task-start capsule: production's step-0 surface is the v1r brief
-        (``pretask.v1r_brief.generate_v1r_brief`` - ranked files + obligations;
-        deterministic given the graph: without an installed embedder the dense
-        leg degrades to the zero-embedding model and lexical/graph signals
-        lead). ``gateway.augment`` has NO task_start producer (its producers
-        dispatch on view/edit/test/search semantics), so the brief is the one
-        correct option. Returns the rendered, leak-guarded, budget-checked,
-        SEALED capsule string, or None (no issue text, empty brief, guard
-        drop, or ANY fault - correct-or-quiet). Never raises."""
+        The complete task contract is extracted from the issue independently of
+        graph availability. graph.db enriches routing and verification but can
+        never erase a user requirement. Returns a rendered, leak-guarded,
+        budget-checked, SEALED capsule string, or None."""
         try:
             profile_receipt = self._profile_activation_receipt()
             self._trace_record(
@@ -2568,7 +2733,7 @@ class GTBridge:
                         "decision": "no_delivery",
                         "reason": (
                             "required_input_absent"
-                            if not self.graph_db or not (self.issue_text or "").strip()
+                            if not (self.issue_text or "").strip()
                             else "producer_abstained_or_guarded"
                         ),
                         "feature_id": "obligations",
@@ -2595,12 +2760,6 @@ class GTBridge:
                 {"feature_id": "obligations", "eligible": False,
                  "outcome": "issue_text_absent"})
             return None
-        if not self.graph_db:
-            self._trace_record(
-                "feature.evaluated", "task_start",
-                {"feature_id": "obligations", "eligible": False,
-                 "outcome": "graph_unavailable"})
-            return None  # DORMANT bridge: no graph substrate, no honest brief
         if os.environ.get("GT_GATEWAY", "").strip().lower() in (
                 "", "0", "false", "no", "off"):
             self._trace_record(
@@ -2608,10 +2767,6 @@ class GTBridge:
                 {"feature_id": "obligations", "eligible": False,
                  "outcome": "feature_disabled"})
             return None
-        import contextlib
-        import io
-
-        from groundtruth.pretask.v1r_brief import generate_v1r_brief
         from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
         from groundtruth.runtime.evidence_envelope import INFO, EvidenceEnvelope
         from groundtruth.runtime.native_render import (
@@ -2619,17 +2774,68 @@ class GTBridge:
             contains_test_identity,
         )
 
-        # The brief generator prints host-side diagnostics ([GT L1]/[GT_META])
-        # to stdout; swallow them - they are telemetry, never model bytes.
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            res = generate_v1r_brief(self.issue_text, self.repo_root, self.graph_db)
-        text = (getattr(res, "brief_text", "") or "").strip()
-        # Unwrap the <gt-task-brief> FRAME (production's step-0 container tag;
-        # a pure form unwrap of GT's own wrapper, content untouched). Any
-        # OTHER <gt-*> tag surviving inside still fails the leak guard below.
-        text = re.sub(r"^\s*<gt-task-brief>\s*", "", text)
-        text = re.sub(r"\s*</gt-task-brief>\s*$", "", text).strip()
+        from gt_engine.evidence_router import EvidenceRouter
+        from gt_engine.graph_context import (
+            build_graph_projection,
+            graph_surface_receipt,
+        )
+        from gt_engine.task_contract import (
+            extract_task_contract,
+            render_task_contract,
+        )
+
+        self._task_contract = extract_task_contract(self.issue_text)
+        text, shipped_ids = render_task_contract(
+            self._task_contract, max_chars=MAX_DELTA_CHARS
+        )
+        if not text and self.graph_db:
+            # Compatibility fallback for defect reports phrased as observed
+            # behavior rather than imperatives. The complete contract remains
+            # primary; the graph brief may still supply grounded orientation.
+            import contextlib
+            import io
+
+            from groundtruth.pretask.v1r_brief import generate_v1r_brief
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                result = generate_v1r_brief(
+                    self.issue_text, self.repo_root, self.graph_db
+                )
+            text = (getattr(result, "brief_text", "") or "").strip()
+            text = re.sub(r"^\s*<gt-task-brief>\s*", "", text)
+            text = re.sub(r"\s*</gt-task-brief>\s*$", "", text).strip()
+        self._shipped_obligation_ids = set(shipped_ids)
+        receipt = graph_surface_receipt(self.graph_db or "")
+        self._trace_record(
+            "graph.surface_receipt",
+            "task_start",
+            {
+                "available": bool(receipt.get("available")),
+                "surface_counts": receipt.get("surfaces", {}),
+                "task_role": self._task_contract.role,
+                "obligation_count": len(self._task_contract.obligations),
+                "shipped_obligation_count": len(shipped_ids),
+            },
+        )
+        self._graph_projection = build_graph_projection(
+            self.graph_db or "", self._task_contract
+        )
+        self._evidence_router = EvidenceRouter(
+            self._task_contract,
+            graph_files=self._graph_projection.files,
+            graph_symbols=self._graph_projection.symbols,
+        )
+        self._trace_record(
+            "graph.task_projection",
+            "task_start",
+            {
+                "file_count": len(self._graph_projection.files),
+                "symbol_count": len(self._graph_projection.symbols),
+                "node_count": len(self._graph_projection.node_ids),
+                "surface_hits": dict(self._graph_projection.surface_hits),
+            },
+        )
         if not text:
             self._trace_record(
                 "feature.evaluated", "task_start",
@@ -2655,7 +2861,7 @@ class GTBridge:
                  "rendered_chars": len(text)})
             return None  # law 8: over-budget dropped WHOLE, never clipped
         env = EvidenceEnvelope.build(
-            producer="v1r_brief", fact_id="task_start", target="task_start",
+            producer="task_contract", fact_id="task_start", target="task_start",
             evidence_type="obligations", payload=tuple(text.splitlines()),
             confidence=0.5, tier=INFO, preferred_event="step0")
         sealed, self.chain_head = seal_delivery(
@@ -2717,6 +2923,30 @@ class GTBridge:
             })
         # 3. THE ONE CALL.
         envelopes = augment(ev, st)
+        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
+        if self._evidence_router is not None and envelopes:
+            admitted: list[Any] = []
+            for envelope in envelopes:
+                candidate_text = render_envelope(envelope, native=native)
+                keep, reason = self._evidence_router.admit(
+                    str(getattr(envelope, "evidence_type", "") or ""),
+                    candidate_text,
+                    command=command,
+                    output=output,
+                    commit=False,
+                )
+                self._control_record(
+                    "GT_ROLE_DRIVEN_COALITION",
+                    "mini_seam.evidence_router",
+                    "APPLIED" if keep else "SUPPRESSED",
+                    reason=reason,
+                    evidence_type=str(
+                        getattr(envelope, "evidence_type", "") or ""
+                    ),
+                )
+                if keep:
+                    admitted.append(envelope)
+            envelopes = admitted
         # The pinned runtime's edit-path change-surface producer is
         # correct-or-quiet, but unlike the patch/caller producers it does not
         # emit a producer.invocation receipt when it finds no useful
@@ -2775,7 +3005,6 @@ class GTBridge:
             return output
         winner = winners[0]
         # 5. render in the seam's channel (GT_GATEWAY_NATIVE keys the form).
-        native = os.environ.get("GT_GATEWAY_NATIVE") == "1"
         delta = render_envelope(winner, native=native)
         # 6. seam-owned leak guard on the RENDERED bytes: drop WHOLE.
         if not delta:
@@ -2835,6 +3064,11 @@ class GTBridge:
             text=shipped, tier=winner.tier or "",
             evidence_type=winner.evidence_type or "",
             dedup_key=winner.dedup_key or ""))
+        if self._evidence_router is not None:
+            self._evidence_router.commit(
+                str(winner.evidence_type or ""),
+                delta,
+            )
         producer_capability = {
             "change_surface": "GT_CHANGE_SURFACE",
             "patch_delta": "GT_PATCH_DELTA",

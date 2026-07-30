@@ -660,6 +660,26 @@ class TaskAudit:
     missing_profile_controls: list[str] = field(default_factory=list)
     profile_behavior_flags: list[str] = field(default_factory=list)
     profile_receipt_fault: str = ""
+    # task-contract / graph / verification receipts
+    task_role: str = ""
+    obligation_count: int = 0
+    shipped_obligation_count: int = 0
+    graph_surface_receipt_present: bool = False
+    graph_available: bool = False
+    graph_surface_counts: dict[str, int] = field(default_factory=dict)
+    graph_projection_present: bool = False
+    graph_projection_file_count: int = 0
+    graph_projection_symbol_count: int = 0
+    graph_projection_node_count: int = 0
+    graph_projection_surface_hits: dict[str, int] = field(default_factory=dict)
+    evidence_router_admitted: int = 0
+    evidence_router_suppressed: int = 0
+    evidence_router_reasons: dict[str, int] = field(default_factory=dict)
+    verification_plan_evaluated: bool = False
+    verification_plan_applied: bool = False
+    verification_plan_decisions: list[str] = field(default_factory=list)
+    verify_obligation_total: int = 0
+    verify_obligation_met: int = 0
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -818,6 +838,98 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.lifecycle_checkpoints = {
             phase: lifecycle[phase] for phase in sorted(lifecycle)
         }
+        surface_receipt = next(
+            (
+                row.get("payload", {})
+                for row in reversed(attribution_rows)
+                if row.get("event_type") == "graph.surface_receipt"
+            ),
+            None,
+        )
+        if surface_receipt is not None:
+            a.graph_surface_receipt_present = True
+            a.graph_available = bool(surface_receipt.get("available"))
+            a.task_role = str(surface_receipt.get("task_role") or "")
+            a.obligation_count = int(
+                surface_receipt.get("obligation_count") or 0
+            )
+            a.shipped_obligation_count = int(
+                surface_receipt.get("shipped_obligation_count") or 0
+            )
+            a.graph_surface_counts = {
+                str(key): int(value)
+                for key, value in (
+                    surface_receipt.get("surface_counts") or {}
+                ).items()
+                if isinstance(value, int | float)
+            }
+        projection_receipt = next(
+            (
+                row.get("payload", {})
+                for row in reversed(attribution_rows)
+                if row.get("event_type") == "graph.task_projection"
+            ),
+            None,
+        )
+        if projection_receipt is not None:
+            a.graph_projection_present = True
+            a.graph_projection_file_count = int(
+                projection_receipt.get("file_count") or 0
+            )
+            a.graph_projection_symbol_count = int(
+                projection_receipt.get("symbol_count") or 0
+            )
+            a.graph_projection_node_count = int(
+                projection_receipt.get("node_count") or 0
+            )
+            a.graph_projection_surface_hits = {
+                str(key): int(value)
+                for key, value in (
+                    projection_receipt.get("surface_hits") or {}
+                ).items()
+                if isinstance(value, int | float)
+            }
+        for row in attribution_rows:
+            if row.get("event_type") != "control.decision":
+                continue
+            payload = row.get("payload", {})
+            feature_id = str(payload.get("feature_id") or "")
+            decision = str(payload.get("decision") or "")
+            if feature_id == "GT_ROLE_DRIVEN_COALITION":
+                if decision == "SUPPRESSED":
+                    a.evidence_router_suppressed += 1
+                elif decision == "APPLIED":
+                    a.evidence_router_admitted += 1
+                reason = str(payload.get("reason") or "unspecified")
+                a.evidence_router_reasons[reason] = (
+                    a.evidence_router_reasons.get(reason, 0) + 1
+                )
+            elif feature_id == "GT_VERIFICATION_PLAN":
+                a.verification_plan_evaluated = True
+                a.verification_plan_applied |= decision == "APPLIED"
+                if decision not in a.verification_plan_decisions:
+                    a.verification_plan_decisions.append(decision)
+        a.evidence_router_reasons = dict(
+            sorted(a.evidence_router_reasons.items())
+        )
+        verify_rows = [
+            row.get("payload", {})
+            for row in attribution_rows
+            if row.get("event_type") == "lifecycle.checkpoint"
+            and str(
+                row.get("payload", {}).get("phase")
+                or row.get("boundary")
+                or ""
+            ) == "verify"
+        ]
+        if verify_rows:
+            latest_verify = verify_rows[-1]
+            a.verify_obligation_total = int(
+                latest_verify.get("obligation_total") or 0
+            )
+            a.verify_obligation_met = int(
+                latest_verify.get("obligation_met") or 0
+            )
         for row in attribution_rows:
             if row.get("event_type") != "provider.request":
                 continue
@@ -1172,6 +1284,38 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                 for phase, item in a.lifecycle_checkpoints.items()
             )
             out.append(f"  - SDLC checkpoints: {rendered_phases}")
+        if a.graph_surface_receipt_present:
+            out.append(
+                "  - Task contract: "
+                f"role={a.task_role or '-'}, "
+                f"obligations={a.shipped_obligation_count}/"
+                f"{a.obligation_count} shipped, "
+                f"verified={a.verify_obligation_met}/"
+                f"{a.verify_obligation_total}"
+            )
+            out.append(
+                "  - Graph receipt: "
+                f"available={a.graph_available}, "
+                f"surfaces={a.graph_surface_counts}, "
+                "projection="
+                f"{a.graph_projection_file_count} files/"
+                f"{a.graph_projection_symbol_count} symbols/"
+                f"{a.graph_projection_node_count} nodes, "
+                f"hits={a.graph_projection_surface_hits}"
+            )
+        if a.evidence_router_admitted or a.evidence_router_suppressed:
+            out.append(
+                "  - Evidence router: "
+                f"admitted={a.evidence_router_admitted}, "
+                f"suppressed={a.evidence_router_suppressed}, "
+                f"reasons={a.evidence_router_reasons}"
+            )
+        if a.verification_plan_evaluated:
+            out.append(
+                "  - Verification plan: "
+                f"applied={a.verification_plan_applied}, "
+                f"decisions={a.verification_plan_decisions}"
+            )
         for n in a.notes:
             out.append(f"  - note: {n}")
         for s in a.unparsed_samples:
