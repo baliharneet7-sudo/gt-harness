@@ -372,6 +372,14 @@ class Agent:
             gt_edit_before: str | None = None
             if self._gt is not None and call.name == "edit_file":
                 gt_edit_before = self._read_for_gt(call.arguments.get("path"))
+                try:
+                    self._gt.pre_edit_checkpoint(
+                        call.name,
+                        call.arguments,
+                        edit_before=gt_edit_before,
+                    )
+                except Exception:  # noqa: BLE001 - GT must never block dispatch
+                    pass
             elif self._gt is not None and call.name == "bash":
                 # Bash-mediated edit bridges: a redirect/sed edit cannot be
                 # reverse-applied post-hoc, so the bridge snapshots the target

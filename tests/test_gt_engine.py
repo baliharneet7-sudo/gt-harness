@@ -1446,6 +1446,352 @@ def test_submit_cert_allow_never_blocks(indexed_repo, monkeypatch):
 
 
 @requires_gt
+def test_sdlc_submit_refuses_edit_without_post_edit_verification(
+        indexed_repo, tmp_path, monkeypatch):
+    """Profile-enabled SDLC verification spends one advisory bounce when
+    source was edited but no later behavioral check passed."""
+    monkeypatch.setenv("GT_SDLC_VERIFY", "1")
+    monkeypatch.setenv("GT_CERT_DELIVERY", "1")
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before + "\n# changed without a test\n"
+    alpha.write_text(after, encoding="utf-8")
+    b.enrich(
+        "edit_file",
+        {"path": str(alpha)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+
+    nudge = b.submit_probe()
+
+    assert nudge is not None
+    assert "passing post-edit" in nudge
+    assert b.deliveries[-1].evidence_type == "submit_refusal"
+    rows = b._attribution.rows
+    assert any(
+        row["event_type"] == "lifecycle.checkpoint"
+        and row["payload"].get("phase") == "verify"
+        and row["payload"].get("outcome") == "missing_post_edit_verification"
+        for row in rows
+    )
+
+
+@requires_gt
+@pytest.mark.gt_all17
+def test_post_edit_syntax_failure_delivers_immediately(
+        indexed_repo, tmp_path):
+    """A positive parser failure is delivered on the edit result itself; the
+    model need not wait until its attempted final submission."""
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = "def broken(:\n"
+    alpha.write_text(after, encoding="utf-8")
+
+    out = b.enrich(
+        "edit_file",
+        {"path": str(alpha)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+
+    assert out.startswith("edited")
+    assert "SyntaxError" in out
+    assert b.deliveries[-1].evidence_type == "syntax_result"
+    exposure = b.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": out}],
+        },
+    )
+    b.trace_model_response(
+        1,
+        StepResult(
+            text="repairing syntax",
+            tool_calls=[ToolCall(
+                id="repair-1",
+                name="edit_file",
+                arguments={"path": str(alpha)},
+            )],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        exposure,
+    )
+    from gt_engine.attribution import summarize_features
+
+    summary = summarize_features(b._attribution.rows)
+    assert summary["syntax_result"]["status"] == "WITNESSED"
+    assert summary["GT_EDIT_CHECK"]["status"] == "WITNESSED"
+
+
+@requires_gt
+def test_post_edit_syntax_suppression_does_not_mute_remaining_lanes(
+        indexed_repo, tmp_path, monkeypatch):
+    """A guarded syntax candidate spends no dose and must fall through."""
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before + "\n# changed\n"
+    alpha.write_text(after, encoding="utf-8")
+    monkeypatch.setattr(
+        b,
+        "_post_edit_syntax",
+        lambda _changed: (
+            "pkg/alpha.py",
+            {"verdict": "syntax_error", "rendered": "candidate"},
+        ),
+    )
+    monkeypatch.setattr(
+        b, "_deliver_post_edit_syntax", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(b, "_covering_lane", lambda _changed: None)
+    monkeypatch.setattr(
+        b,
+        "_deliver",
+        lambda _cmd, output, _rc, **_kwargs: output + "\nFALLTHROUGH",
+    )
+
+    enriched = b.enrich(
+        "edit_file",
+        {"path": str(alpha)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+
+    assert enriched.endswith("FALLTHROUGH")
+
+
+@requires_gt
+def test_sdlc_submit_allows_after_green_post_edit_test(
+        indexed_repo, tmp_path, monkeypatch):
+    """A formal green test after the latest edit satisfies the behavioral
+    verification checkpoint; syntax still runs independently at submit."""
+    monkeypatch.setenv("GT_SDLC_VERIFY", "1")
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before + "\n# changed then tested\n"
+    alpha.write_text(after, encoding="utf-8")
+    b.enrich(
+        "edit_file",
+        {"path": str(alpha)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+    b.enrich(
+        "bash",
+        {"command": "python -m pytest -q"},
+        "3 passed in 0.08s\n",
+        False,
+    )
+
+    assert b.submit_probe() is None
+    assert any(
+        row["event_type"] == "lifecycle.checkpoint"
+        and row["payload"].get("phase") == "verify"
+        and row["payload"].get("outcome") == "post_edit_verification_green"
+        for row in b._attribution.rows
+    )
+
+
+@requires_gt
+def test_sdlc_lifecycle_records_research_pre_edit_post_edit_and_test(
+        indexed_repo, tmp_path):
+    """The lifecycle trace proves checkpoint execution even when canonical
+    evidence producers correctly remain quiet."""
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    b.pre_edit_checkpoint(
+        "edit_file",
+        {"path": str(alpha)},
+        edit_before=before,
+    )
+    after = before + "\n# lifecycle edit\n"
+    alpha.write_text(after, encoding="utf-8")
+    b.enrich(
+        "edit_file",
+        {"path": str(alpha)},
+        "edited",
+        False,
+        edit_before=before,
+        edit_after=after,
+    )
+    b.enrich(
+        "bash",
+        {"command": "python -m pytest -q"},
+        "3 passed in 0.08s\n",
+        False,
+    )
+
+    checkpoints = {
+        row["payload"].get("phase")
+        for row in b._attribution.rows
+        if row["event_type"] == "lifecycle.checkpoint"
+    }
+    assert {"pre_edit", "post_edit", "test"} <= checkpoints
+
+
+@requires_gt
+def test_lifecycle_research_only_records_repository_observation(indexed_repo):
+    """A generic or test bash command must not counterfeit research."""
+    b = indexed_repo
+
+    b.enrich(
+        "bash",
+        {"command": "python -c \"print('hello')\""},
+        "hello\n",
+        False,
+    )
+
+    assert not any(
+        row["event_type"] == "lifecycle.checkpoint"
+        and row["payload"].get("phase") == "research"
+        for row in b._attribution.rows
+    )
+
+    b.enrich(
+        "bash",
+        {"command": "rg -n \"helper\" pkg"},
+        "pkg/alpha.py:1:def helper():\n",
+        False,
+    )
+
+    assert any(
+        row["event_type"] == "lifecycle.checkpoint"
+        and row["payload"].get("phase") == "research"
+        for row in b._attribution.rows
+    )
+
+
+@requires_gt
+def test_bash_edit_records_pre_edit_checkpoint_before_dispatch(
+        indexed_repo, tmp_path, monkeypatch):
+    """The bash preimage seam is also the real pre-dispatch SDLC boundary."""
+    monkeypatch.setenv("GT_GATEWAY_EDIT_BRIDGES", "1")
+    b = indexed_repo
+    alpha = tmp_path / "pkg" / "alpha.py"
+    command = "sed -i 's/return x + y/return x-y/' pkg/alpha.py"
+
+    b.capture_bash_preimage({"command": command})
+
+    checkpoints = [
+        row for row in b._attribution.rows
+        if row["event_type"] == "lifecycle.checkpoint"
+        and row["payload"].get("phase") == "pre_edit"
+    ]
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["action_index"] == 0
+    assert checkpoints[0]["payload"]["tool_name"] == "bash"
+    assert checkpoints[0]["payload"]["target_count"] == 1
+    assert checkpoints[0]["payload"]["before_available"] is True
+    assert alpha.read_text(encoding="utf-8") != "changed"
+
+
+@requires_gt
+def test_real_agent_sdlc_gate_requires_and_accepts_green_verification(
+        indexed_repo, tmp_path, monkeypatch):
+    """Actual Agent/provider/tool loop: read -> edit -> premature submit is
+    refused once -> real pytest passes -> final submit is accepted."""
+    monkeypatch.setenv("GT_SDLC_VERIFY", "1")
+    alpha = tmp_path / "pkg" / "alpha.py"
+    before = alpha.read_text(encoding="utf-8")
+    after = before + "\n# verified lifecycle\n"
+    steps = [
+        StepResult(
+            text="inspect",
+            tool_calls=[ToolCall(
+                id="read-1",
+                name="read_file",
+                arguments={"path": str(alpha)},
+            )],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        StepResult(
+            text="edit",
+            tool_calls=[ToolCall(
+                id="edit-1",
+                name="edit_file",
+                arguments={
+                    "path": str(alpha),
+                    "old": before,
+                    "new": after,
+                },
+            )],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        StepResult(
+            text="done too early",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=_usage(),
+        ),
+        StepResult(
+            text="verify",
+            tool_calls=[ToolCall(
+                id="test-1",
+                name="bash",
+                arguments={
+                    "command": (
+                        "python -c \"print('OVERALL PASS: True')\""
+                    )
+                },
+            )],
+            stop_reason="tool_use",
+            usage=_usage(),
+        ),
+        StepResult(
+            text="verified",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=_usage(),
+        ),
+    ]
+    agent = Agent(
+        provider=_ReceiptScriptedProvider(steps),
+        system="s",
+        gt_root=indexed_repo.repo_root,
+    )
+
+    result = agent.run("change helper without breaking its callers")
+
+    assert result.stop_reason == "end_turn"
+    assert any(
+        item.get("type") == "user"
+        and item.get("gt") == "submit_evidence"
+        and "passing post-edit" in str(item.get("content"))
+        for item in result.transcript
+    )
+    checkpoints = {
+        row["payload"].get("phase")
+        for row in agent._gt._attribution.rows
+        if row["event_type"] == "lifecycle.checkpoint"
+    }
+    assert {
+        "task_start", "research", "pre_edit", "post_edit",
+        "test", "verify", "submit",
+    } <= checkpoints
+    from gt_engine.attribution import verify_lifecycle_rows
+
+    assert verify_lifecycle_rows(agent._gt._attribution.rows) == []
+
+
+@requires_gt
 def test_observed_red_does_not_attribute_dependency_basename(indexed_repo):
     """A dependency frame sharing a basename with an edit is not edit proof."""
     b = indexed_repo

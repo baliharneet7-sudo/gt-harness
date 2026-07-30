@@ -652,6 +652,7 @@ class TaskAudit:
     attribution_rows: int = 0
     attribution_issues: list[str] = field(default_factory=list)
     feature_attribution: dict[str, dict] = field(default_factory=dict)
+    lifecycle_checkpoints: dict[str, dict] = field(default_factory=dict)
     provider_receipts_required: bool = False
     # laws
     leak_tag_count: int = 0
@@ -788,6 +789,29 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.attribution_rows = len(attribution_rows)
         a.attribution_issues.extend(attr_issues)
         a.feature_attribution = summarize_features(attribution_rows)
+        lifecycle: dict[str, dict] = {}
+        for row in attribution_rows:
+            if row.get("event_type") != "lifecycle.checkpoint":
+                continue
+            payload = row.get("payload", {})
+            phase = str(payload.get("phase") or row.get("boundary") or "")
+            if not phase:
+                continue
+            item = lifecycle.setdefault(
+                phase,
+                {"count": 0, "outcomes": [], "last_action_index": 0},
+            )
+            item["count"] += 1
+            outcome = str(payload.get("outcome") or "observed")
+            if outcome not in item["outcomes"]:
+                item["outcomes"].append(outcome)
+            item["last_action_index"] = max(
+                int(item["last_action_index"]),
+                int(row.get("action_index") or 0),
+            )
+        a.lifecycle_checkpoints = {
+            phase: lifecycle[phase] for phase in sorted(lifecycle)
+        }
         a.provider_receipts_required = any(
             row.get("event_type") == "provider.request"
             or (
@@ -1100,6 +1124,12 @@ def render_report(audits: list[TaskAudit], run_dir: Path) -> str:
                 f"  - ATTRIBUTION: {a.attribution_rows} hash-chained event(s), "
                 f"{len(a.attribution_issues)} integrity issue(s)"
             )
+        if a.lifecycle_checkpoints:
+            rendered_phases = ", ".join(
+                f"{phase}={item['count']}"
+                for phase, item in a.lifecycle_checkpoints.items()
+            )
+            out.append(f"  - SDLC checkpoints: {rendered_phases}")
         for n in a.notes:
             out.append(f"  - note: {n}")
         for s in a.unparsed_samples:

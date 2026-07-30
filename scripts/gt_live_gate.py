@@ -33,6 +33,7 @@ def evaluate_live_gate(
     min_witnessed: int,
     expected_tasks: int,
     expected_model: str,
+    required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
 ) -> dict[str, Any]:
     tasks = list(audit.get("tasks") or ())
@@ -42,6 +43,7 @@ def evaluate_live_gate(
     faults: list[str] = []
     unexposed: list[str] = []
     actions_consistent: set[str] = set()
+    lifecycle_observed: set[str] = set()
 
     if len(tasks) != expected_tasks:
         issues.append(
@@ -57,6 +59,10 @@ def evaluate_live_gate(
             issues.append(f"{task_name}: ledger: {issue}")
         for issue in task.get("dose_violations") or ():
             issues.append(f"{task_name}: dose: {issue}")
+        lifecycle_observed.update(
+            str(phase)
+            for phase in (task.get("lifecycle_checkpoints") or {})
+        )
         for feature_id, item in (task.get("feature_attribution") or {}).items():
             status = str(item.get("status") or "")
             if status == "WITNESSED":
@@ -80,6 +86,12 @@ def evaluate_live_gate(
         issues.append(
             f"witnessed identities {len(witnessed)} < required "
             f"{min_witnessed}"
+        )
+    missing_lifecycle = sorted(set(required_lifecycle) - lifecycle_observed)
+    if missing_lifecycle:
+        issues.append(
+            "missing SDLC lifecycle checkpoint(s): "
+            + ", ".join(missing_lifecycle)
         )
 
     observed_models: set[str] = set()
@@ -106,6 +118,9 @@ def evaluate_live_gate(
         "witnessed_count": len(witnessed),
         "witnessed_features": sorted(witnessed),
         "action_consistent_features": sorted(actions_consistent),
+        "required_lifecycle": sorted(set(required_lifecycle)),
+        "lifecycle_observed": sorted(lifecycle_observed),
+        "missing_lifecycle": missing_lifecycle,
         "dark": dark,
         "faults": faults,
         "unexposed": unexposed,
@@ -121,6 +136,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-witnessed", type=int, default=9)
     parser.add_argument("--expected-tasks", type=int, default=5)
     parser.add_argument("--expected-model", default="deepseek-v4-flash")
+    parser.add_argument(
+        "--require-lifecycle",
+        default="",
+        help="comma-separated SDLC checkpoint phases required across the run",
+    )
     parser.add_argument("--json", dest="output_json")
     args = parser.parse_args(argv)
 
@@ -131,6 +151,11 @@ def main(argv: list[str] | None = None) -> int:
         min_witnessed=args.min_witnessed,
         expected_tasks=args.expected_tasks,
         expected_model=args.expected_model,
+        required_lifecycle=tuple(
+            phase.strip()
+            for phase in args.require_lifecycle.split(",")
+            if phase.strip()
+        ),
         run_dir=Path(args.run_dir),
     )
     rendered = json.dumps(report, indent=2, sort_keys=True)

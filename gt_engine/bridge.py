@@ -490,6 +490,13 @@ class GTBridge:
         # gone green. Host-side only; consumed at the submit boundary under
         # GT_SS_SUBMIT_RED.
         self._observed_red: dict[str, Any] | None = None
+        # SDLC lifecycle state. Canonical facts remain exception-triggered;
+        # these counters prove that the deterministic checkpoint itself ran
+        # even when the correct result is quiet (for example, syntax OK).
+        self._lifecycle_phases: set[str] = set()
+        self._last_source_edit_action = 0
+        self._last_green_verification_action = 0
+        self._last_test_outcome = ""
         from groundtruth.runtime.episode_state import EpisodeState
 
         self.episode = EpisodeState()
@@ -552,6 +559,60 @@ class GTBridge:
                 payload=payload,
             )
         except Exception:  # noqa: BLE001 - observability is always fail-open
+            pass
+
+    def _lifecycle_checkpoint(
+        self,
+        phase: str,
+        outcome: str,
+        **details: Any,
+    ) -> None:
+        """Record a content-safe SDLC checkpoint.
+
+        This does not manufacture a canonical feature delivery. It answers
+        the orthogonal operational question: did GT execute at the lifecycle
+        boundary, and what deterministic result did that checkpoint reach?
+        """
+        phase = str(phase or "").strip()
+        if not phase:
+            return
+        self._lifecycle_phases.add(phase)
+        self._trace_record(
+            "lifecycle.checkpoint",
+            phase,
+            {
+                "phase": phase,
+                "outcome": str(outcome or "observed"),
+                **details,
+            },
+        )
+
+    def pre_edit_checkpoint(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        *,
+        edit_before: str | None = None,
+    ) -> None:
+        """Observe the real pre-dispatch edit boundary without changing it.
+
+        The checkpoint is deliberately behavior-neutral until GT has positive
+        evidence worth interrupting an edit for. It still proves that every
+        ``edit_file`` proposal was seen before execution, rather than inferred
+        later from a post-edit trajectory.
+        """
+        try:
+            rel = self._repo_rel(str(tool_args.get("path") or ""))
+            self._lifecycle_checkpoint(
+                "pre_edit",
+                "new_file_proposed" if edit_before is None
+                else "existing_file_proposed",
+                tool_name=str(tool_name),
+                target=rel,
+                before_available=edit_before is not None,
+                proposed_action_index=self.action_index + 1,
+            )
+        except Exception:  # noqa: BLE001 - checkpoint telemetry is fail-open
             pass
 
     def _record_feature_census(self) -> None:
@@ -1021,6 +1082,160 @@ class GTBridge:
     _COV_PER_FILE_TIMEOUT = 20
     _COV_TOTAL_BUDGET = 35
 
+    def _post_edit_syntax(
+        self, changed: tuple[str, ...],
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Execute the deterministic edit checker at the post-edit boundary.
+
+        A clean result is capability proof and stays model-quiet. The first
+        positive syntax/name failure is returned for one-dose delivery before
+        slower covering tests or advisory Gateway facts.
+        """
+        from groundtruth.runtime.edit_check import check_edit_syntax
+        from groundtruth.runtime.native_render import render_syntax_error_native
+
+        checked = False
+        for rel in changed[: self._MAX_SUBMIT_SYNTAX_FILES]:
+            if not rel or not _has_source_ext(rel):
+                continue
+            res = check_edit_syntax(rel, self.repo_root)
+            verdict = str(res.get("verdict") or "")
+            if verdict not in ("ok", "syntax_error", "name_error"):
+                continue
+            checked = True
+            self._trace_record(
+                "feature.evaluated",
+                "post_edit",
+                {
+                    "feature_id": "GT_EDIT_CHECK",
+                    "eligible": True,
+                    "outcome": verdict,
+                },
+            )
+            self._trace_record(
+                "feature.evaluated",
+                "post_edit",
+                {
+                    "feature_id": "syntax_result",
+                    "eligible": verdict in ("syntax_error", "name_error"),
+                    "outcome": (
+                        "candidate_returned"
+                        if verdict in ("syntax_error", "name_error")
+                        else "ok"
+                    ),
+                },
+            )
+            if verdict == "ok":
+                self._record_capability_applied(
+                    "GT_EDIT_CHECK",
+                    fact_id="syntax_result",
+                    boundary="post_edit",
+                    reason="executed_ok",
+                )
+                continue
+            text = render_syntax_error_native(res)
+            if text:
+                return rel, {**res, "rendered": text}
+        if not checked:
+            self._trace_record(
+                "feature.evaluated",
+                "post_edit",
+                {
+                    "feature_id": "GT_EDIT_CHECK",
+                    "eligible": False,
+                    "outcome": "no_supported_source_target",
+                },
+            )
+        return None
+
+    def _deliver_post_edit_syntax(
+        self,
+        output: str,
+        rel: str,
+        result: dict[str, Any],
+    ) -> str | None:
+        """Seal one executed post-edit syntax diagnostic as a pure suffix.
+
+        ``None`` means no dose shipped, so the caller must continue through
+        the remaining post-edit lanes instead of muting them.
+        """
+        from groundtruth.runtime.adapters.miniswe import fits_budget, seal_delivery
+        from groundtruth.runtime.evidence_envelope import (
+            VERIFIED,
+            EvidenceEnvelope,
+        )
+        from groundtruth.runtime.native_render import (
+            contains_gt_tag,
+            contains_test_identity,
+        )
+
+        text = str(result.get("rendered") or "")
+        if (
+            not text
+            or contains_gt_tag(text)
+            or contains_test_identity(text)
+            or not fits_budget(text, max_delta_chars=MAX_DELTA_CHARS)
+        ):
+            self._trace_record(
+                "decision.committed",
+                "post_edit",
+                {
+                    "decision": "suppressed",
+                    "reason": (
+                        "render_empty" if not text
+                        else (
+                            "over_budget"
+                            if text and not fits_budget(
+                                text, max_delta_chars=MAX_DELTA_CHARS
+                            )
+                            else "leak_guard"
+                        )
+                    ),
+                    "evidence_type": "syntax_result",
+                    "feature_id": "syntax_result",
+                },
+            )
+            return None
+        env = EvidenceEnvelope.build(
+            producer="edit_check",
+            fact_id=rel,
+            target=rel,
+            evidence_type="syntax_result",
+            payload=tuple(text.splitlines()),
+            provenance=((rel, 0),),
+            confidence=1.0,
+            tier=VERIFIED,
+            preferred_event="edit",
+            measured=True,
+        )
+        shipped = self._join(output, text)[len(output):]
+        tob = output.encode("utf-8", "surrogatepass")
+        sealed, self.chain_head = seal_delivery(
+            env,
+            episode_id=getattr(self.episode, "episode_id", ""),
+            event_id=str(self.action_index),
+            parent_hash=self.chain_head,
+            rendered_bytes=shipped.encode("utf-8", "surrogatepass"),
+            renderer_id="native",
+            tool_output_bytes=tob,
+            boundary=(str(len(tob)) + ":syntax_result").encode("utf-8"),
+            dedup_chain=self.episode.delivered_dedup,
+        )
+        self.deliveries.append(sealed)
+        self.delivered_spans.append(DeliveredSpan(
+            text=shipped,
+            tier="VERIFIED",
+            evidence_type="syntax_result",
+            dedup_key=env.dedup_key or "",
+        ))
+        self._ledger_record(
+            sealed,
+            shipped,
+            "post_edit",
+            capability_ids=("GT_EDIT_CHECK",),
+        )
+        return output + shipped
+
     def _edited_symbol_identities(self, changed: tuple[str, ...]) -> set[str]:
         """Qualified ``path::name`` identities of the NON-test symbols defined
         in the changed files (graph read-only, bounded, deterministic order).
@@ -1125,6 +1340,15 @@ class GTBridge:
         # per edit turn — bounded, and strictly cheaper than a muted lane.
         if cres and cres.get("verdict") in ("pass", "fail"):
             self._covering_fired.update(src)
+            covering_outcome = str(cres.get("verdict"))
+            self._lifecycle_checkpoint(
+                "test",
+                f"covering_check_{covering_outcome}",
+                after_latest_edit=True,
+                selected_files=len(files),
+            )
+            if covering_outcome == "pass":
+                self._last_green_verification_action = self.action_index
         if not cres or cres.get("verdict") != "fail":
             self._trace_record(
                 "feature.evaluated", "covering",
@@ -1409,11 +1633,14 @@ class GTBridge:
                 return True
         return False
 
-    def _track_observed_red(self, cmd: str, output: str, rc: int | None) -> None:
+    def _track_observed_red(
+        self, cmd: str, output: str, rc: int | None,
+    ) -> str | None:
         """Set/clear the observed-RED latch from THIS observation. Uses the
         same formal-runner classifier normalize_event derives test_outcome
         from (patterns.classify_test_observation — never a home-grown test
-        detector). Never raises."""
+        detector). Returns pass/fail for a recognized executed behavioral
+        check and records the test-stage checkpoint; otherwise None."""
         try:
             from groundtruth.runtime.patterns import classify_test_observation
 
@@ -1442,14 +1669,34 @@ class GTBridge:
             ):
                 outcome = _explicit_check_outcome(output or "") or outcome
             if outcome not in ("fail", "pass"):
-                return  # env_fail / no-tests / non-test: latch unchanged
+                return None  # env_fail / no-tests / non-test: latch unchanged
+            self._last_test_outcome = outcome
+            self._lifecycle_checkpoint(
+                "test",
+                f"behavioral_check_{outcome}",
+                command_present=bool((cmd or "").strip()),
+                after_latest_edit=bool(
+                    self._last_source_edit_action
+                    and self.action_index > self._last_source_edit_action
+                ),
+            )
+            # Passing runners normally print only aggregate success, not the
+            # edited source path. A formal green after the latest edit is
+            # therefore valid SDLC verification even without a path echo.
+            if (
+                outcome == "pass"
+                and self._last_source_edit_action
+                and self.action_index > self._last_source_edit_action
+            ):
+                self._last_green_verification_action = self.action_index
             if not self._test_touches_edit(cmd, output):
-                return  # a test touching no edited surface never decides
+                return outcome  # checkpoint is valid; RED attribution is not
             self._observed_red = (
                 {"cmd": (cmd or "").strip(), "step": self.action_index}
                 if outcome == "fail" else None)
+            return outcome
         except Exception:  # noqa: BLE001 - host-side latch must never break the turn
-            pass
+            return None
 
     # ------------------------------------------------------------------ #
     # bash-mediated edit bridges (pre-dispatch snapshot + post-dispatch derive)
@@ -1473,15 +1720,33 @@ class GTBridge:
         read HERE. Never raises; clears prior state either way."""
         self._bash_preimages.clear()
         try:
-            if not _edit_bridges_on():
-                return
             cmd = str(tool_args.get("command") or "")
             from groundtruth.runtime.gateway import KIND_EDIT, classify_command
 
             if classify_command(cmd) != KIND_EDIT:
                 return
             targets = bash_edit_targets(cmd)
+            if not _edit_bridges_on():
+                self._lifecycle_checkpoint(
+                    "pre_edit",
+                    "bash_edit_proposed",
+                    tool_name="bash",
+                    targets=list(targets),
+                    target_count=len(targets),
+                    before_available=False,
+                    proposed_action_index=self.action_index + 1,
+                )
+                return
             if not targets:
+                self._lifecycle_checkpoint(
+                    "pre_edit",
+                    "bash_edit_proposed_targets_unknown",
+                    tool_name="bash",
+                    targets=[],
+                    target_count=0,
+                    before_available=False,
+                    proposed_action_index=self.action_index + 1,
+                )
                 return
             for target in targets:
                 rel = self._repo_rel(target)
@@ -1500,6 +1765,17 @@ class GTBridge:
                     continue  # no entry: downstream stays quiet
                 with open(fp, encoding="utf-8", errors="replace") as fh:
                     self._bash_preimages[rel] = fh.read()
+            self._lifecycle_checkpoint(
+                "pre_edit",
+                "bash_edit_proposed",
+                tool_name="bash",
+                targets=sorted(self._bash_preimages),
+                target_count=len(targets),
+                before_available=any(
+                    before is not None for before in self._bash_preimages.values()
+                ),
+                proposed_action_index=self.action_index + 1,
+            )
         except Exception:  # noqa: BLE001 - pre-image capture must never break dispatch
             self._bash_preimages.clear()
 
@@ -1618,9 +1894,42 @@ class GTBridge:
                     ).hexdigest(),
                 },
             )
+            repository_observation = tool_name == "read_file"
+            if tool_name == "bash" and not changed and (cmd or "").strip():
+                try:
+                    from groundtruth.runtime.gateway import (
+                        KIND_SEARCH,
+                        KIND_VIEW,
+                        classify_command,
+                    )
+
+                    repository_observation = classify_command(cmd) in {
+                        KIND_SEARCH,
+                        KIND_VIEW,
+                    }
+                except Exception:  # noqa: BLE001 - telemetry stays conservative
+                    repository_observation = False
+            if repository_observation:
+                self._lifecycle_checkpoint(
+                    "research",
+                    "repository_observation",
+                    tool_name=str(tool_name),
+                    viewed_count=len(viewed),
+                )
             for rel in changed:
                 if rel and rel not in self.edited_files:
                     self.edited_files.append(rel)  # submit-gate syntax domain
+            if changed:
+                source_edit = any(_has_source_ext(rel) for rel in changed)
+                if source_edit:
+                    self._last_source_edit_action = self.action_index
+                self._lifecycle_checkpoint(
+                    "post_edit",
+                    "edit_observed",
+                    changed_count=len(changed),
+                    before_after_available=bool(eba),
+                    source_edit=source_edit,
+                )
             # FIX B (recovery lane state): the ledger's edit-ordering predicate
             # reads EpisodeState.edited_files (path -> last action_index) +
             # edit_events. augment appends edit_events only when the gateway
@@ -1692,6 +2001,20 @@ class GTBridge:
                 # WIRE 1: refresh/wake the graph BEFORE the producers read it,
                 # so this observation's evidence reflects the post-edit code.
                 self._refresh_graph(changed)
+                try:
+                    syntax_failure = self._post_edit_syntax(changed)
+                except Exception:  # noqa: BLE001 - new lane cannot mute old lanes
+                    syntax_failure = None
+                if syntax_failure is not None:
+                    rel, syntax_result = syntax_failure
+                    try:
+                        syntax_delivery = self._deliver_post_edit_syntax(
+                            output, rel, syntax_result
+                        )
+                    except Exception:  # noqa: BLE001 - sealing fault stays quiet
+                        syntax_delivery = None
+                    if syntax_delivery is not None:
+                        return syntax_delivery
                 # WIRE 2: the executed covering-RED lane. When it delivers, it
                 # IS this observation's one dose — the gateway is skipped
                 # (dose law; covering_verdict out-ranks every gateway class at
@@ -1744,6 +2067,11 @@ class GTBridge:
                 "observation.received",
                 "submit",
                 {"edited_files": list(self.edited_files)},
+            )
+            self._lifecycle_checkpoint(
+                "submit",
+                "submission_attempted",
+                edited_count=len(self.edited_files),
             )
             result = self._submit_gate()
             if result is None:
@@ -1943,6 +2271,60 @@ class GTBridge:
                 ),
             },
         )
+        if covering and covering.get("verdict") == "pass":
+            self._last_green_verification_action = self.action_index
+
+        # SDLC penultimate gate: syntax success proves parseability, not
+        # behavior. When enabled, a source edit must be followed by a passing
+        # formal test, explicit self-check, or selected covering run. This is
+        # one advisory refusal using the existing bounce economy; the second
+        # submit still fails open, so GT cannot deadlock completion.
+        sdlc_verify_on = os.environ.get(
+            "GT_SDLC_VERIFY", ""
+        ).strip().lower() not in ("", "0", "false", "no", "off")
+        verification_current = bool(
+            self._last_source_edit_action
+            and self._last_green_verification_action
+            > self._last_source_edit_action
+        )
+        if (
+            sdlc_verify_on
+            and submit_block is None
+            and self._last_source_edit_action
+            and not verification_current
+        ):
+            submit_block = {
+                "blocking": True,
+                "reason": "verification_missing",
+                "detail": (
+                    "no passing post-edit behavioral check was observed; run "
+                    "the relevant tests or an explicit executable self-check"
+                ),
+            }
+        verify_outcome = (
+            "not_applicable_no_source_edit"
+            if not self._last_source_edit_action
+            else (
+                "post_edit_verification_green"
+                if verification_current
+                else (
+                    "missing_post_edit_verification"
+                    if sdlc_verify_on
+                    else "checkpoint_disabled"
+                )
+            )
+        )
+        self._lifecycle_checkpoint(
+            "verify",
+            verify_outcome,
+            latest_source_edit_action=self._last_source_edit_action,
+            latest_green_action=self._last_green_verification_action,
+            syntax_outcome=syntax_outcome,
+            covering_outcome=(
+                str(covering.get("verdict"))
+                if isinstance(covering, dict) else "unavailable"
+            ),
+        )
         verdict = safe_gate_verdict(
             covering=covering, hygiene=None, submit_block=submit_block,
             bounce_count=self.submit_bounces, max_bounces=1)
@@ -2018,7 +2400,8 @@ class GTBridge:
         ev_type = ("submit_refusal"
                    if cert_rendered
                    or verdict.reason in ("covering_test_failed",
-                                         "observed_red_unresolved")
+                                         "observed_red_unresolved",
+                                         "verification_missing")
                    else "syntax_result")
         # Seam-owned leak guard + law 8 on the rendered bytes, same as a delta.
         if not text:
@@ -2118,6 +2501,12 @@ class GTBridge:
                     "feature_count": 17,
                     "provider_final_receipts_required": True,
                 },
+            )
+            self._lifecycle_checkpoint(
+                "task_start",
+                "issue_and_graph_received",
+                issue_present=bool((self.issue_text or "").strip()),
+                graph_available=bool(self.graph_db),
             )
             result = self._task_start()
             if result is None:

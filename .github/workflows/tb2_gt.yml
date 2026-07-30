@@ -82,6 +82,11 @@ jobs:
       # GTNanoAgent resolves GT_RL_PROFILE as kwarg > host env > default "2"
       # and forwards every GT_* host var into the task container.
       GT_RL_PROFILE: ${{ inputs.gt_profile }}
+      # Harness-local SDLC gate: after a source edit, the penultimate submit
+      # checkpoint requires a passing behavioral test/self-check. It spends
+      # one existing advisory bounce and then fails open, so it cannot deadlock
+      # completion. Kept outside Groundtruth's canonical Profile-2 inventory.
+      GT_SDLC_VERIFY: "1"
       PYTHONUTF8: "1"
     steps:
       - name: Checkout
@@ -322,6 +327,7 @@ jobs:
               --min-witnessed "$MIN_WITNESSED" \
               --expected-tasks "$EXPECTED_TASKS" \
               --expected-model "deepseek-v4-flash" \
+              --require-lifecycle "task_start,research,pre_edit,post_edit,test,verify,submit" \
               --json "$gate_json" || gate_rc=$?
           else
             echo "::error::GT audit did not produce $audit_json"

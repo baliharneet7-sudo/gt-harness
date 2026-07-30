@@ -90,6 +90,18 @@ def test_newfile_missing_role_evidence_maps_to_canonical_feature():
     )
 
 
+def test_groundtruth_registry_aliases_map_to_the_same_17_identities():
+    assert feature_for_evidence("name_fold") == "def_partition"
+    assert feature_for_evidence("wrong_surface") == "def_partition"
+    assert feature_for_evidence("body_concept") == "def_partition"
+    assert feature_for_evidence("trace_frame") == "localization"
+    assert feature_for_evidence("brief_localization") == "localization"
+    assert feature_for_evidence("companion_surface") == "signature_delta"
+    assert feature_for_evidence("caller_contract_search") == "caller_contract"
+    assert feature_for_evidence("coherence_collapse") == "recovery"
+    assert feature_for_evidence("obligation_unexercised") == "obligations"
+
+
 def test_trace_integrity_rejects_mutated_payload(tmp_path):
     path = tmp_path / "gt_attribution.jsonl"
     trace = AttributionTrace(lambda: path, trace_id="b" * 32)
