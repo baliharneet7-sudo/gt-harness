@@ -50,6 +50,10 @@ on:
         description: "Optional comma-separated task names (harbor -i, glob ok). Overrides n_tasks — use to shard a full run manually"
         type: string
         default: ""
+      timeout_multiplier:
+        description: "harbor --agent-timeout-multiplier. MUST match the baseline arm being paired against (frozen full-89 baseline = 1.0; early smokes = 2.0)"
+        type: string
+        default: "1.0"
       gt_profile:
         description: "GT_RL_PROFILE for the agent (GT capability profile; '2' = production law)"
         type: string
@@ -255,18 +259,22 @@ jobs:
           CONCURRENCY: ${{ inputs.concurrency }}
           JOB_NAME_INPUT: ${{ inputs.job_name }}
           TASK_IDS: ${{ inputs.task_ids }}
+          TIMEOUT_MULT: ${{ inputs.timeout_multiplier }}
         run: |
           set -uo pipefail
           JOB_NAME="${JOB_NAME_INPUT:-tb2-gt-${GITHUB_RUN_ID}}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
+          # Pairing law: the GT arm must run the SAME timeout budget as the
+          # baseline arm it is compared against (the frozen full-89 baseline
+          # used harbor's default 1.0; the early 5-task smokes used 2.0).
           args=( run
             -d terminal-bench@2.0
             -a eval.tb_agent:GTNanoAgent
             -m "$MODEL"
             -o results/terminal-bench
             --job-name "$JOB_NAME"
-            --agent-timeout-multiplier 2.0
+            --agent-timeout-multiplier "${TIMEOUT_MULT:-1.0}"
             -n "$CONCURRENCY"
             -y
           )
