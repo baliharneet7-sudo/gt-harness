@@ -1584,6 +1584,61 @@ The follow-up therefore:
 The next live run must use `concurrency=5` exactly. It remains a GT-on run only;
 the comparison continues to use the frozen GT-off baseline.
 
+### Corrected five-way live result: run 30603315821
+
+Run `30603315821` used commit `d9ab376`, `deepseek-v4-flash`,
+temperature 1, Profile 2, timeout multiplier 1.0, and
+`n_concurrent_trials=5` exactly. Harbor launched and completed all five trials
+in one invocation. Four repositories earned reward 1; `build-cython-ext`
+earned 0. The batching repository passed all six verifier tests, but Harbor
+correctly recorded the trial as errored because the agent exceeded the
+1800-second outer timeout before producing a clean terminal result. Therefore
+the live gate failed and this run is not clean acceptance evidence.
+
+Per-task results:
+
+| task | reward | terminal state | iterations | input | output | deliveries | witnessed |
+|---|---:|---|---:|---:|---:|---:|---:|
+| build-cython-ext | 0 | max iterations | 100 | 905,998 | 28,558 | 3 | 4 |
+| headless-terminal | 1 | clean end turn | 49 | 682,926 | 38,665 | 6 | 8 |
+| llm-inference-batching-scheduler | 1 | outer agent timeout | 54 | 1,112,185 | 98,392 | 4 | 7 |
+| reshard-c4-data | 1 | clean end turn | 48 | 1,226,805 | 62,416 | 4 | 6 |
+| sanitize-git-repo | 1 | clean end turn | 28 | 367,140 | 14,301 | 4 | 6 |
+
+The follow-up fixes were directly witnessed:
+
+- exact iteration replay reported zero issues for every task;
+- all 21 sealed capsules were observed in provider requests and expired after
+  exposure; no delivery was left unexposed;
+- progress interventions were bounded to 2, 1, 1, 0, and 2 respectively;
+- the isolation audit reported zero forbidden path attempts on every task;
+- all seven lifecycle boundaries were observed across the run; and
+- the run witnessed nine canonical identities and exercised fifteen, with no
+  dark or faulted feature.
+
+The frozen GT-off comparison is mixed and does not establish superiority. On
+the four tasks with frozen rows, GT-on reduced input tokens by 66.2% for build,
+9.2% for reshard, and 71.7% for sanitizer, but increased batching input by
+99.5%. Output tokens increased by 35.4%, 194.6%, and 197.5% on build, batching,
+and reshard respectively; sanitizer decreased 4.0%. The frozen baseline passed
+all four, while this run produced three reward passes and only two clean
+non-timeout passes among those four.
+
+The traces now isolate the remaining control defects:
+
+1. batching started a model-authored command with `timeout=2500` near the end
+   of an outer 1800-second agent budget; the repository output happened to
+   pass, but the trial could not terminate or emit verification-plan receipts;
+2. build spent 100 iterations rebuilding/installing the package while leaving
+   NumPy-2 removed aliases in the installed Python sources; and
+3. compact input context is no longer the dominant cost on those tasks, but
+   verbose model output and insufficient wall-clock-aware stopping remain
+   severe.
+
+The next change should be researched and tested as wall-clock-aware bounded
+tool execution plus a deterministic verify-and-finish boundary. Increasing the
+Harbor timeout would hide the defect and would violate frozen-baseline parity.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal
