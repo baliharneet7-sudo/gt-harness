@@ -411,6 +411,63 @@ def test_unexposed_capsule_survives_parallel_sibling_action_indices(tmp_path):
     assert capsule not in bridge._message_text(expired)
 
 
+def test_expired_capsule_cannot_corrupt_overlapping_unexposed_capsule(
+    tmp_path,
+):
+    """An old localization may be a strict substring of a fresher result."""
+    from gt_engine.bridge import GTBridge
+
+    bridge = GTBridge(repo_root=str(tmp_path), graph_db=None)
+    old = "\nbase_terminal.py:4:BaseTerminal\n"
+    fresh = (
+        "\nheadless_terminal.py:13:HeadlessTerminal"
+        "\nbase_terminal.py:4:BaseTerminal\n"
+    )
+    bridge._delivery_texts.update({"1": old, "34": fresh})
+    bridge._delivery_metadata.update({
+        "1": {
+            "evidence_type": "localization",
+            "producer": "ranked_localization",
+            "target": "base_terminal.py",
+            "issued_action": "1",
+        },
+        "34": {
+            "evidence_type": "localization",
+            "producer": "ranked_localization",
+            "target": "headless_terminal.py",
+            "issued_action": "34",
+        },
+    })
+    bridge._delivery_exposures["1"] = 1
+    messages = [
+        {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": "first search" + old,
+            }],
+        },
+        {
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": "fresh search" + fresh,
+            }],
+        },
+    ]
+
+    request = bridge.provider_message_view(messages)
+
+    assert old not in bridge._message_text(request[0])
+    assert fresh in bridge._message_text(request[1])
+    assert bridge.trace_model_request(2, request) == ("34",)
+    assert bridge.trace_provider_request(
+        2,
+        "openai.chat.completions",
+        {"model": "deepseek-v4-flash", "messages": request},
+    ) == ("34",)
+
+
 # --------------------------------------------------------------------------- #
 # indexer: code-repo detection (GT dormant on non-code roots)
 # --------------------------------------------------------------------------- #

@@ -1009,6 +1009,62 @@ All 17 identities must retain complete per-task terminal-state accounting,
 every delivery must remain provider-final attributable and action-linked, and
 the final proof must be a real nano + GT run with a per-task result report.
 
+### Efficiency result after the decision-specific implementation
+
+Run
+[`30594350673`](https://github.com/harneet2512/gt-harness/actions/runs/30594350673)
+at `20e4925` completed all five trials and scored 3/5. It fixed the earlier
+batching failure (74 to 40 iterations; 4.74M to 1.33M input tokens) but
+regressed build and reshard. The immutable artifacts exposed three concrete
+problems: repeated generic verification refusals, no bounded NumPy-2 removed
+alias check, and shell-death accounting that confused a recovered command with
+terminal tool failure. Commit `48f2015` fixed those defects and passed 325
+tests plus Ruff.
+
+The identical live configuration at `48f2015`, run
+[`30595670669`](https://github.com/harneet2512/gt-harness/actions/runs/30595670669),
+scored 4/5:
+
+| Task | Reward | Iterations | Input tokens | Output tokens | GT shipped chars | Deliveries |
+|---|---:|---:|---:|---:|---:|---:|
+| `build-cython-ext` | 1 | 100 | 3,084,870 | 25,853 | 8,003 | 12 |
+| `headless-terminal` | 1 | 37 | 626,979 | 21,160 | 1,812 | 5 |
+| `llm-inference-batching-scheduler` | 0 | 49 | 1,846,312 | 60,003 | 2,896 | 4 |
+| `reshard-c4-data` | 1 | 49 | 1,121,296 | 27,406 | 1,915 | 5 |
+| `sanitize-git-repo` | 1 | 25 | 898,498 | 10,532 | 1,539 | 3 |
+
+This is not an efficiency win against the frozen compatible GT-off rows. On
+the four comparable tasks, GT-on scored 3/4 versus 4/4, used 223 versus 195
+iterations (+14.4%), 6,950,976 versus 5,884,607 input tokens (+18.1%), and
+123,794 versus 90,374 output tokens (+37.0%). GT's own 14,353 shipped
+characters are small; the excess comes from model search and verification
+work that GT failed to prevent. Therefore deterministic evidence is only a
+mechanism, not an efficiency result. The acceptance metric is:
+
+`saved model search + avoided failed work > GT payload + GT-induced work`
+
+The run also found two exact semantic defects:
+
+1. Expiring a previously exposed capsule used global substring replacement.
+   An old `base_terminal.py` localization was a strict substring of a fresh
+   two-file localization, so expiry deleted bytes from delivery 34 before the
+   provider request. The ledger claimed 73 sealed characters while the request
+   received only a fragment. Pending capsules must be protected before old
+   capsule removal, and receipts must exclude already-expired substring
+   matches.
+2. The batching threshold-table rows compiled as generic behavior predicates
+   instead of numeric predicates. The model printed
+   `2.723253e+08 >= 2.700000e+08`, then incorrectly declared success. GT kept
+   the run RED and refused submission, but the threshold contract was too
+   coarse and the intervention arrived too late. Multi-bound data-transform
+   rows must compile numerically so a passing command cannot certify a
+   wrong-side measured value.
+
+No superiority claim is permitted until a subsequent identical live run has a
+clean provider attribution gate and reaches non-worse reward with materially
+lower cost. A reroll that merely changes which temperature-1 task fails is not
+evidence of stable improvement.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal

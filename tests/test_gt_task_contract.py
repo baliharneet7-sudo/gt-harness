@@ -714,6 +714,46 @@ def test_numeric_predicate_credits_explicit_satisfied_scientific_bound():
     assert receipts[0].outcome == "pass"
 
 
+def test_threshold_table_row_compiles_as_numeric_not_generic_behavior():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    threshold_intro = Obligation(
+        "obl-intro",
+        "The output files must satisfy the performance thresholds below",
+        "directive",
+    )
+    bucket = Obligation(
+        "obl-bucket-1",
+        (
+            "requests_bucket_1.jsonl | 3.0e11 | 0.055 | "
+            "2.1e6 | 2.7e8"
+        ),
+        "table",
+    )
+    contract = TaskContract("data_transform", (threshold_intro, bucket))
+    predicates = compile_obligation_predicates(contract)
+
+    assert predicates[bucket.obligation_id].kind == "numeric_threshold"
+    receipts = evaluate_passing_observation(
+        contract,
+        predicates,
+        "python validate_metrics.py",
+        (
+            "bucket1 cost 2.9e11 <= threshold 3.0e11 PASS\n"
+            "bucket1 pad_ratio 0.050 <= threshold 0.055 PASS\n"
+            "bucket1 p95 2.0e6 <= threshold 2.1e6 PASS\n"
+            "bucket1 sequential_timecost 2.723e8 >= threshold 2.7e8 FAIL"
+        ),
+        action_index=10,
+    )
+
+    assert receipts == ()
+
+
 def test_numeric_predicate_rejects_observation_without_required_unit():
     from gt_engine.task_contract import Obligation, TaskContract
     from gt_engine.verification_contract import (

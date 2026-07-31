@@ -264,7 +264,13 @@ def compile_obligation_predicates(
         paths = tuple(sorted(set(_PATH_RE.findall(text))))
         if contract.role == "content_scan" or _CONTENT_RE.search(text):
             kind = "content_scope"
-        elif _NUMERIC_RE.search(text):
+        elif (
+            _NUMERIC_RE.search(text)
+            or (
+                contract.role == "data_transform"
+                and len(_required_numeric_bounds(contract, text)) >= 2
+            )
+        ):
             kind = "numeric_threshold"
         elif paths and _ARTIFACT_RE.search(text):
             kind = "artifact"

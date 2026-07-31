@@ -1022,11 +1022,46 @@ class GTBridge:
     ) -> list[dict[str, Any]]:
         """Build a request-only view without capsules from past decisions."""
         view = copy.deepcopy(messages)
+        pending = {
+            delivery_id: self._delivery_texts.get(delivery_id, "")
+            for delivery_id in self._delivery_metadata
+            if self._delivery_exposures.get(delivery_id, 0) < 1
+            and delivery_id not in self._expired_delivery_ids
+        }
         expired = {
             delivery_id: self._delivery_texts.get(delivery_id, "")
             for delivery_id in self._delivery_metadata
             if self._delivery_exposures.get(delivery_id, 0) >= 1
         }
+
+        # Expiry is content-based because provider messages deliberately carry
+        # no GT-only metadata.  Protect complete, not-yet-exposed capsules
+        # before removing old ones: localization and contract evidence often
+        # overlap, and a global old-text replacement must not cut bytes out of
+        # a newer sealed delivery.
+        placeholders: dict[str, str] = {}
+        for delivery_id, text in sorted(
+            pending.items(), key=lambda item: len(item[1]), reverse=True
+        ):
+            if not text:
+                continue
+            marker = (
+                f"\x00GT_PENDING_{delivery_id}_"
+                f"{hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest()}"
+                "\x00"
+            )
+            placeholders[marker] = text
+
+        def protect(value: Any) -> Any:
+            if isinstance(value, str):
+                for marker, text in placeholders.items():
+                    value = value.replace(text, marker)
+                return value
+            if isinstance(value, list):
+                return [protect(item) for item in value]
+            if isinstance(value, dict):
+                return {key: protect(item) for key, item in value.items()}
+            return value
 
         def scrub(value: Any) -> Any:
             if isinstance(value, str):
@@ -1040,7 +1075,36 @@ class GTBridge:
                 return {key: scrub(item) for key, item in value.items()}
             return value
 
-        view = scrub(view)
+        def restore(value: Any) -> Any:
+            if isinstance(value, str):
+                for marker, text in placeholders.items():
+                    value = value.replace(marker, text)
+                return value
+            if isinstance(value, list):
+                return [restore(item) for item in value]
+            if isinstance(value, dict):
+                return {key: restore(item) for key, item in value.items()}
+            return value
+
+        view = restore(scrub(protect(view)))
+        visible = self._message_text(view)
+        for delivery_id, text in pending.items():
+            if not text or text in visible:
+                continue
+            # Defensive seal=>expose fallback. Evidence-aware truncation should
+            # preserve the original tool-result block, but a provider must
+            # never receive a request that silently omits a committed capsule.
+            view.append({"role": "user", "content": text})
+            visible += "\n" + text
+            self._trace_record(
+                "capsule.reinjected",
+                "provider",
+                {
+                    "delivery_id": delivery_id,
+                    "reason": "sealed_capsule_absent_from_request_view",
+                    "rendered_chars": len(text),
+                },
+            )
         for delivery_id, text in expired.items():
             if not text or delivery_id in self._expired_delivery_ids:
                 continue
@@ -1067,7 +1131,11 @@ class GTBridge:
         delivery_ids = tuple(
             delivery_id
             for delivery_id, text in self._delivery_texts.items()
-            if text and text in visible
+            if (
+                text
+                and delivery_id not in self._expired_delivery_ids
+                and text in visible
+            )
         )
         self._trace_record(
             "model.request",
@@ -1110,6 +1178,8 @@ class GTBridge:
         matches: list[dict[str, Any]] = []
         delivery_ids: list[str] = []
         for delivery_id, shipped in self._delivery_texts.items():
+            if delivery_id in self._expired_delivery_ids:
+                continue
             locations = [
                 ".".join(path)
                 for path, text in leaves
