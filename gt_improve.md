@@ -1639,6 +1639,54 @@ The next change should be researched and tested as wall-clock-aware bounded
 tool execution plus a deterministic verify-and-finish boundary. Increasing the
 Harbor timeout would hide the defect and would violate frozen-baseline parity.
 
+### Implemented candidate after run 30603315821
+
+The earlier “retain up to eight turns when budget permits” policy is now
+superseded. It reduced iteration count but raised average input per iteration
+by 88.9% in the corrected five-way run. Spare context-window capacity is not
+an instruction to refill the request with old observations.
+
+The candidate implementation follows the full contract in
+`gt_delivery_timing.md`:
+
+1. **Step-0 graph orientation.** Task start now renders three to five bounded,
+   obligation-linked file/symbol targets into the same sealed block as the
+   complete task contract. The block remains one dose, but independent
+   `obligations`, `localization`, and `GT_LOC_RESLOT` receipts all join to
+   delivery `0`. The provider and immediate response must both report
+   iteration 1.
+2. **Semantic active context.** Durable history remains complete for audit,
+   while the provider view defaults to the task, typed GT state, and two
+   complete recent tool groups. It may retain one older group only when the
+   group contains an active changed path or current RED identifier and still
+   fits the smaller target budget. Omitted groups are receipted by content
+   hash, not raw text.
+3. **Typed verify-and-finish state.** The deterministic checkpoint now carries
+   unresolved/verified obligations, changed paths, latest edit, latest fresh
+   GREEN, predicate-receipt count, current RED, progress state, wall-clock
+   budget, and a bounded next action. A fresh post-edit GREEN with no current
+   RED recommends `summarize_and_submit`; stale verification recommends the
+   smallest unresolved check.
+4. **Wall-clock affordability.** The GT Harbor arm passes its effective agent
+   budget to nano. `Agent.run` starts a monotonic deadline, reserves 180 seconds
+   for termination, clamps every valid bash timeout to the remaining
+   affordable window, and refuses to start a command when only the finish
+   reserve remains. GT-off is unchanged unless the explicit time-budget option
+   is supplied.
+5. **Timing and budget proof.** Attribution now reports exact provider
+   iterations per canonical fact and capability. The auditor proves pre-edit
+   occurs before a changed tool dispatch, post-edit follows it, task-start
+   localization is compound with obligations, and requested/allowed tool
+   timeouts do not exceed remaining time minus the reserve. The live gate
+   treats localization at iteration 2 or later as a failure even if it was
+   eventually exposed.
+
+The paid live run remains gated on local integration, all-17, full-suite,
+Ruff, diff, and workflow validation. The next run is GT-on only:
+`deepseek-v4-flash`, temperature 1, Profile 2, timeout multiplier 1.0, and
+concurrency exactly 5. Comparison remains against the frozen GT-off rows; no
+new GT-off run is authorized.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal

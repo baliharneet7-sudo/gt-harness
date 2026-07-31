@@ -1052,6 +1052,36 @@ class GTBridge:
             },
         )
 
+    def trace_tool_budget(
+        self,
+        *,
+        requested_seconds: int,
+        allowed_seconds: int | None,
+        remaining_seconds: float | None,
+        reserve_seconds: float,
+        decision: str,
+    ) -> None:
+        """Receipt the wall-clock decision without recording command text."""
+        self._trace_record(
+            "tool.budget_decision",
+            "tool_dispatch",
+            {
+                "requested_seconds": int(requested_seconds),
+                "allowed_seconds": (
+                    int(allowed_seconds)
+                    if allowed_seconds is not None
+                    else None
+                ),
+                "remaining_seconds": (
+                    round(float(remaining_seconds), 3)
+                    if remaining_seconds is not None
+                    else None
+                ),
+                "reserve_seconds": round(float(reserve_seconds), 3),
+                "decision": str(decision),
+            },
+        )
+
     @staticmethod
     def _message_text(value: Any) -> str:
         """Flatten only model-visible text fields for exact exposure checks."""
@@ -1147,7 +1177,19 @@ class GTBridge:
             view,
             checkpoint=checkpoint,
             char_budget=max(8_000, int(char_budget)),
+            target_char_budget=min(24_000, max(8_000, int(char_budget))),
             tail_turns=2,
+            semantic_needles=tuple(dict.fromkeys([
+                *(
+                    self._fwd(path)
+                    for path in self.edited_files[-12:]
+                    if path
+                ),
+                str(self._observed_red.get("signature") or "")
+                if self._observed_red else "",
+                str(self._observed_red.get("cmd") or "")[:240]
+                if self._observed_red else "",
+            ])),
             tool_output_chars=4000,
         )
         checkpoint_hash = hashlib.sha256(
@@ -1228,17 +1270,56 @@ class GTBridge:
             "version": "gt.context.v1",
             "boundary": self._active_boundary,
             "action_index": self.action_index,
+            "budget": {
+                "wall_seconds_remaining": (
+                    round(float(self.wall_seconds_remaining), 1)
+                    if getattr(self, "wall_seconds_remaining", None) is not None
+                    else None
+                ),
+                "finish_reserve_seconds": round(float(
+                    getattr(self, "finalization_reserve_seconds", 0.0) or 0.0
+                ), 1),
+            },
             "obligations": {
                 "verified": verified,
                 "unresolved": unresolved,
                 "stale_predicates": stale,
             },
             "changed_paths": list(self.edited_files[-12:]),
+            "verification": {
+                "latest_edit_action": self._last_task_edit_action,
+                "latest_green_action": (
+                    self._last_green_verification_action
+                ),
+                "fresh_green": bool(
+                    self._last_green_verification_action
+                    and self._last_green_verification_action
+                    > self._last_task_edit_action
+                ),
+                "receipt_count": len(self._predicate_receipts),
+                "next_action": (
+                    "summarize_and_submit"
+                    if (
+                        self._last_green_verification_action
+                        and self._last_green_verification_action
+                        > self._last_task_edit_action
+                        and self._observed_red is None
+                    )
+                    else "continue_smallest_unresolved_check"
+                ),
+            },
             "graph_revision": str(
                 getattr(self._graph_projection, "revision", "") or ""
             ),
             "recent_red": (
-                str(self._observed_red.get("signature") or "")
+                {
+                    "signature": str(
+                        self._observed_red.get("signature") or ""
+                    ),
+                    "command": str(
+                        self._observed_red.get("cmd") or ""
+                    ).splitlines()[0][:200],
+                }
                 if self._observed_red else ""
             ),
             "progress": self._progress.state,
@@ -1747,6 +1828,34 @@ class GTBridge:
                 boundary,
                 {"fault_type": type(exc).__name__},
             )
+
+    def _render_task_start_orientation(self, *, max_chars: int = 1100) -> str:
+        """Render a bounded, ranked graph slice for the model's first choice."""
+        lines = [
+            "Ranked work surface (inspect before broad search):",
+        ]
+        seen: set[tuple[str, str]] = set()
+        for item in self._graph_evidence:
+            if not item.file_path:
+                continue
+            key = (item.file_path, item.symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            links = ",".join(item.obligation_ids) or "active-target"
+            claim = " ".join(str(item.claim or "").split())
+            line = (
+                f"{item.rank}. {item.file_path}:{item.symbol or '-'}"
+                f" | {claim[:220]} | for={links}"
+                f" | action={item.intended_action}"
+            )
+            candidate = "\n".join([*lines, line])
+            if len(candidate) > max_chars:
+                break
+            lines.append(line)
+            if len(lines) >= 6:
+                break
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     # ------------------------------------------------------------------ #
     # WIRE 2: executed covering-RED at post-edit (GT_VERIFY_EXECUTE).
@@ -2514,7 +2623,11 @@ class GTBridge:
             if not self._test_touches_edit(cmd, output):
                 return outcome  # checkpoint is valid; RED attribution is not
             self._observed_red = (
-                {"cmd": (cmd or "").strip(), "step": self.action_index}
+                {
+                    "cmd": (cmd or "").strip(),
+                    "step": self.action_index,
+                    "signature": failure_fingerprint(output or ""),
+                }
                 if outcome == "fail" else None)
             return outcome
         except Exception:  # noqa: BLE001 - host-side latch must never break the turn
@@ -3634,7 +3747,7 @@ class GTBridge:
                 },
             )
         text, shipped_ids = render_task_contract(
-            self._task_contract, max_chars=MAX_DELTA_CHARS
+            self._task_contract, max_chars=MAX_DELTA_CHARS - 1200
         )
         if not text and self.graph_db:
             # Compatibility fallback for defect reports phrased as observed
@@ -3677,6 +3790,23 @@ class GTBridge:
             graph_revision=self._graph_projection.revision,
         )
         self._rerank_graph_evidence("task_start")
+        orientation = self._render_task_start_orientation()
+        if orientation:
+            text = f"{text.rstrip()}\n\n{orientation}".strip()
+        else:
+            self._trace_record(
+                "feature.evaluated",
+                "task_start",
+                {
+                    "feature_id": "localization",
+                    "eligible": False,
+                    "outcome": (
+                        "no_ranked_target"
+                        if self.graph_db
+                        else "graph_not_ready"
+                    ),
+                },
+            )
         self._trace_record(
             "graph.task_projection",
             "task_start",
@@ -3733,6 +3863,25 @@ class GTBridge:
         )
         self.deliveries.append(sealed)
         self._ledger_record(sealed, text, "task_start")
+        if orientation:
+            self._trace_record(
+                "feature.applied",
+                "task_start",
+                {
+                    "feature_id": "localization",
+                    "delivery_id": "0",
+                    "decision": "APPLIED",
+                    "reason": "compound_task_start_orientation",
+                    "ranked_count": min(5, len(self._graph_evidence)),
+                },
+            )
+            self._record_capability_applied(
+                "GT_LOC_RESLOT",
+                fact_id="localization",
+                boundary="task_start",
+                delivery_id="0",
+                reason="task_start_orientation",
+            )
         return text
 
     def _deliver(

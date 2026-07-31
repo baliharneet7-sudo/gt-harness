@@ -420,6 +420,149 @@ def test_delivered_fact_does_not_automatically_credit_capability_owner():
     assert summary["GT_LOC_RESLOT"]["status"] == "INELIGIBLE"
 
 
+def test_compound_feature_receipt_credits_a_fact_without_second_delivery():
+    rows = [
+        {
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "0",
+                "feature_id": "obligations",
+                "evidence_type": "obligations",
+            },
+        },
+        {
+            "event_type": "feature.applied",
+            "payload": {
+                "feature_id": "localization",
+                "delivery_id": "0",
+                "decision": "APPLIED",
+                "reason": "compound_task_start_orientation",
+            },
+        },
+        {
+            "event_type": "capability.applied",
+            "payload": {
+                "feature_id": "GT_LOC_RESLOT",
+                "fact_id": "localization",
+                "delivery_id": "0",
+                "decision": "APPLIED",
+            },
+        },
+        {
+            "event_type": "provider.request",
+            "payload": {"iteration": 1, "delivery_ids": ["0"]},
+        },
+        {
+            "event_type": "model.response",
+            "payload": {"iteration": 1, "delivery_ids": ["0"]},
+        },
+    ]
+
+    summary = summarize_features(rows)
+
+    assert summary["obligations"]["status"] == "WITNESSED"
+    assert summary["localization"]["status"] == "WITNESSED"
+    assert summary["GT_LOC_RESLOT"]["status"] == "WITNESSED"
+    assert summary["localization"]["deliveries"] == ["0"]
+
+
+def test_feature_provider_iterations_report_exact_delivery_timing():
+    from gt_engine.attribution import feature_provider_iterations
+
+    rows = [
+        {
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "0",
+                "feature_id": "obligations",
+            },
+        },
+        {
+            "event_type": "feature.applied",
+            "payload": {
+                "decision": "APPLIED",
+                "delivery_id": "0",
+                "feature_id": "localization",
+            },
+        },
+        {
+            "event_type": "capability.applied",
+            "payload": {
+                "decision": "APPLIED",
+                "delivery_id": "0",
+                "feature_id": "GT_LOC_RESLOT",
+                "fact_id": "localization",
+            },
+        },
+        {
+            "event_type": "provider.request",
+            "payload": {"iteration": 1, "delivery_ids": ["0"]},
+        },
+        {
+            "event_type": "decision.committed",
+            "payload": {
+                "decision": "delivered",
+                "delivery_id": "7",
+                "feature_id": "localization",
+            },
+        },
+        {
+            "event_type": "provider.request",
+            "payload": {"iteration": 4, "delivery_ids": ["7"]},
+        },
+    ]
+
+    timing = feature_provider_iterations(rows)
+
+    assert timing["obligations"] == [1]
+    assert timing["localization"] == [1, 4]
+    assert timing["GT_LOC_RESLOT"] == [1]
+
+
+def test_sdlc_timing_requires_pre_edit_before_dispatch_and_post_edit_after():
+    from gt_engine.attribution import verify_sdlc_timing_rows
+
+    valid = [
+        {
+            "sequence": 1,
+            "action_index": 0,
+            "event_type": "lifecycle.checkpoint",
+            "boundary": "pre_edit",
+            "payload": {
+                "phase": "pre_edit",
+                "proposed_action_index": 1,
+            },
+        },
+        {
+            "sequence": 2,
+            "action_index": 1,
+            "event_type": "observation.received",
+            "payload": {
+                "tool_name": "edit_file",
+                "changed_files": ["pkg/a.py"],
+            },
+        },
+        {
+            "sequence": 3,
+            "action_index": 1,
+            "event_type": "lifecycle.checkpoint",
+            "boundary": "post_edit",
+            "payload": {"phase": "post_edit"},
+        },
+    ]
+    invalid = [
+        {**valid[1], "sequence": 1},
+        {**valid[0], "sequence": 2},
+    ]
+
+    assert verify_sdlc_timing_rows(valid) == []
+    issues = verify_sdlc_timing_rows(invalid)
+    assert any("pre_edit occurs after dispatch" in issue for issue in issues)
+    assert any("missing post_edit" in issue for issue in issues)
+
+
 def test_unterminated_producer_invocation_is_telemetry_fault():
     rows = [{
         "event_type": "producer.invocation",

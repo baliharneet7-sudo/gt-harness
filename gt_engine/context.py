@@ -22,6 +22,8 @@ original oldest-first pass (GT-off byte identity).
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from typing import Any
 
 _VERIFIED = "VERIFIED"
@@ -81,8 +83,10 @@ def compact_provider_view(
     *,
     checkpoint: str,
     char_budget: int,
+    target_char_budget: int | None = None,
     tail_turns: int = 2,
-    max_tail_turns: int = 8,
+    max_tail_turns: int = 2,
+    semantic_needles: tuple[str, ...] = (),
     tool_output_chars: int = 4000,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Construct a bounded provider view without mutating durable history."""
@@ -112,9 +116,28 @@ def compact_provider_view(
     if current:
         groups.append(current)
 
+    def group_hash(group: list[dict[str, Any]]) -> str:
+        encoded = json.dumps(
+            group,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8", "surrogatepass")
+        return hashlib.sha256(encoded).hexdigest()
+
+    target_budget = min(
+        int(char_budget),
+        int(target_char_budget)
+        if target_char_budget is not None
+        else int(char_budget),
+    )
     full_view = [anchor] + [item for group in groups for item in group]
     _bound_kept_blocks(full_view, tool_output_chars=tool_output_chars)
-    if message_chars(full_view) <= char_budget:
+    if (
+        message_chars(full_view) <= target_budget
+        and len(groups) <= max(1, int(max_tail_turns))
+    ):
         active_chars = message_chars(full_view)
         return full_view, {
             "raw_message_chars": raw_chars,
@@ -122,25 +145,77 @@ def compact_provider_view(
             "compacted": active_chars < raw_chars,
             "omitted_message_count": 0,
             "tail_turns": len(groups),
+            "semantic_tail_turns": 0,
+            "omitted_group_hashes": [],
         }
 
     keep_count = min(max(1, int(tail_turns)), len(groups))
-    selected = groups[-keep_count:] if groups else []
-    earliest = len(groups) - keep_count - 1
-    while earliest >= 0 and len(selected) < max(keep_count, max_tail_turns):
-        candidate = [groups[earliest], *selected]
+    selected_indices = set(range(len(groups) - keep_count, len(groups)))
+    normalized_needles = tuple(
+        needle.lower() for needle in semantic_needles if str(needle).strip()
+    )
+    semantic_count = 0
+    for index in range(len(groups) - keep_count - 1, -1, -1):
+        if not normalized_needles:
+            break
+        rendered_group = json.dumps(
+            groups[index],
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        ).lower()
+        if not any(needle in rendered_group for needle in normalized_needles):
+            continue
+        candidate_indices = sorted({*selected_indices, index})
         candidate_view = [
             anchor,
-            *(item for group in candidate for item in group),
+            *(
+                item
+                for selected_index in candidate_indices
+                for item in groups[selected_index]
+            ),
         ]
-        if message_chars(candidate_view) > char_budget:
+        _bound_kept_blocks(
+            candidate_view,
+            tool_output_chars=tool_output_chars,
+        )
+        if message_chars(candidate_view) <= target_budget:
+            selected_indices.add(index)
+            semantic_count = 1
+        break
+
+    earliest = min(selected_indices, default=len(groups)) - 1
+    while (
+        earliest >= 0
+        and len(selected_indices) < max(keep_count, max_tail_turns)
+    ):
+        candidate_indices = sorted({*selected_indices, earliest})
+        candidate_view = [
+            anchor,
+            *(
+                item
+                for selected_index in candidate_indices
+                for item in groups[selected_index]
+            ),
+        ]
+        _bound_kept_blocks(
+            candidate_view,
+            tool_output_chars=tool_output_chars,
+        )
+        if message_chars(candidate_view) > target_budget:
             break
-        selected = candidate
+        selected_indices.add(earliest)
         earliest -= 1
+    selected = [groups[index] for index in sorted(selected_indices)]
     keep_count = len(selected)
     view = [anchor] + [item for group in selected for item in group]
     _bound_kept_blocks(view, tool_output_chars=tool_output_chars)
     omitted = len(durable) - len(view)
+    omitted_group_hashes = [
+        group_hash(group)
+        for index, group in enumerate(groups)
+        if index not in selected_indices
+    ]
 
     # If the structural tail still exceeds the budget, retain its pairing but
     # reduce inline output/arguments further. Exact bytes remain durable.
@@ -155,6 +230,8 @@ def compact_provider_view(
         "compacted": True,
         "omitted_message_count": max(0, omitted),
         "tail_turns": keep_count,
+        "semantic_tail_turns": semantic_count,
+        "omitted_group_hashes": omitted_group_hashes,
     }
 
 

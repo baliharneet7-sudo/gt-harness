@@ -199,7 +199,7 @@ The source of truth for this projection is `gt_engine/attribution.py`.
 | `covering_red` | FACT | A covering test fails because of an edited source file | Post-edit or submit | Repair the attributable regression |
 | `recovery` | FACT | The same formal failure recurs after an intervening edit | Test/tool result | Abandon the falsified hypothesis |
 | `submit_refusal` | FACT | Submission has unresolved positive failing evidence | Submit | Resolve the evidence before resubmitting |
-| `GT_LOC_RESLOT` | Byte owner | Ranked localization is placed in the next request | Research/search | Make localization model-visible |
+| `GT_LOC_RESLOT` | Byte owner | Ranked localization is placed in the task-start or next search-result request | Orient/research | Make localization model-visible at the decision boundary |
 | `GT_EDIT_CHECK` | Capability owner | Deterministic edit checker executes; it delivers only on a positive failure | Post-edit or submit | Validate the edited code |
 | `GT_CERT_DELIVERY` | Byte owner | Completion certificate owns a submit-refusal delivery | Submit | Name completion evidence state |
 | `GT_CHANGE_SURFACE` | Byte owner | Change-surface producer yields a new-file precedent | Research/edit | Deliver proven change-surface evidence |

@@ -291,6 +291,12 @@ class GTNanoAgent(NanoAgent):
         # image WORKDIR = the TB task's working directory). Double quotes keep
         # paths with spaces intact while still allowing the expansion.
         command = self._run_command(
-            instruction, model, extra_args='--gt-root "$PWD" '
+            instruction,
+            model,
+            extra_args=(
+                '--gt-root "$PWD" '
+                f"--time-budget-seconds "
+                f"{shlex.quote(os.environ.get('GT_AGENT_TIMEOUT_SECONDS', '1800'))} "
+            ),
         )
         await self.exec_as_agent(environment, command, env=env)

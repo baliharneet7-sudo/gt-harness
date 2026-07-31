@@ -94,8 +94,10 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from gt_engine.attribution import (  # noqa: E402
+    feature_provider_iterations,
     summarize_features,
     verify_lifecycle_rows,
+    verify_sdlc_timing_rows,
     verify_trace_rows,
 )
 from gt_engine.replay import build_iteration_replay  # noqa: E402
@@ -675,6 +677,14 @@ class TaskAudit:
     attribution_rows: int = 0
     attribution_issues: list[str] = field(default_factory=list)
     feature_attribution: dict[str, dict] = field(default_factory=dict)
+    feature_provider_iterations: dict[str, list[int]] = field(
+        default_factory=dict
+    )
+    task_start_localization_delivery_id: str = ""
+    task_start_localization_provider_iteration: int = 0
+    task_start_localization_response_iteration: int = 0
+    task_start_localization_compound: bool = False
+    task_start_localization_eligible: bool = False
     lifecycle_checkpoints: dict[str, dict] = field(default_factory=dict)
     provider_temperatures: list[float] = field(default_factory=list)
     provider_receipts_required: bool = False
@@ -747,6 +757,11 @@ class TaskAudit:
     context_active_message_chars: int = 0
     graph_evidence_rendered_count: int = 0
     progress_intervention_count: int = 0
+    bash_observation_count: int = 0
+    tool_budget_receipt_count: int = 0
+    tool_budget_clamped_count: int = 0
+    tool_budget_rejected_count: int = 0
+    tool_budget_violation_count: int = 0
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -810,6 +825,7 @@ def load_attribution(path: Path) -> tuple[list[dict], list[str]]:
         )
         if provider_receipts_required:
             issues.extend(verify_lifecycle_rows(rows))
+        issues.extend(verify_sdlc_timing_rows(rows))
     return rows, issues
 
 
@@ -890,6 +906,83 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.attribution_rows = len(attribution_rows)
         a.attribution_issues.extend(attr_issues)
         a.feature_attribution = summarize_features(attribution_rows)
+        a.feature_provider_iterations = feature_provider_iterations(
+            attribution_rows
+        )
+        task_start_localization = next(
+            (
+                row
+                for row in attribution_rows
+                if row.get("event_type") == "feature.applied"
+                and row.get("boundary") == "task_start"
+                and row.get("payload", {}).get("feature_id")
+                == "localization"
+                and row.get("payload", {}).get("decision") == "APPLIED"
+            ),
+            None,
+        )
+        if task_start_localization is not None:
+            delivery_id = str(
+                task_start_localization.get("payload", {}).get(
+                    "delivery_id"
+                ) or ""
+            )
+            a.task_start_localization_delivery_id = delivery_id
+            a.task_start_localization_compound = any(
+                row.get("event_type") == "decision.committed"
+                and row.get("boundary") == "task_start"
+                and row.get("payload", {}).get("decision") == "delivered"
+                and str(
+                    row.get("payload", {}).get("delivery_id") or ""
+                ) == delivery_id
+                and row.get("payload", {}).get("feature_id")
+                == "obligations"
+                for row in attribution_rows
+            )
+            provider = next(
+                (
+                    row
+                    for row in attribution_rows
+                    if row.get("event_type") == "provider.request"
+                    and delivery_id in {
+                        str(value)
+                        for value in row.get("payload", {}).get(
+                            "delivery_ids", ()
+                        )
+                    }
+                ),
+                None,
+            )
+            if provider is not None:
+                a.task_start_localization_provider_iteration = int(
+                    provider.get("payload", {}).get("iteration") or 0
+                )
+                response = next(
+                    (
+                        row
+                        for row in attribution_rows
+                        if row.get("event_type") == "model.response"
+                        and int(row.get("sequence") or 0)
+                        > int(provider.get("sequence") or 0)
+                        and delivery_id in {
+                            str(value)
+                            for value in row.get("payload", {}).get(
+                                "delivery_ids", ()
+                            )
+                        }
+                    ),
+                    None,
+                )
+                if response is not None:
+                    a.task_start_localization_response_iteration = int(
+                        response.get("payload", {}).get("iteration") or 0
+                    )
+        a.task_start_localization_eligible = any(
+            row.get("event_type") == "graph.evidence_need"
+            and row.get("boundary") == "task_start"
+            and int(row.get("payload", {}).get("ranked_count") or 0) > 0
+            for row in attribution_rows
+        )
         replay = build_iteration_replay(attribution_rows)
         a.replay_iteration_count = int(replay["iteration_count"])
         a.replay_accounted_input_tokens = int(
@@ -1095,6 +1188,27 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 )
             elif event_type == "progress.intervention":
                 a.progress_intervention_count += 1
+            elif event_type == "tool.budget_decision":
+                a.tool_budget_receipt_count += 1
+                decision = str(payload.get("decision") or "")
+                a.tool_budget_clamped_count += int(decision == "CLAMPED")
+                a.tool_budget_rejected_count += int(decision == "REJECTED")
+                allowed = payload.get("allowed_seconds")
+                remaining = payload.get("remaining_seconds")
+                reserve = float(payload.get("reserve_seconds") or 0.0)
+                if (
+                    allowed is not None
+                    and remaining is not None
+                    and float(allowed) > max(
+                        0.0, float(remaining) - reserve
+                    )
+                ):
+                    a.tool_budget_violation_count += 1
+            elif (
+                event_type == "observation.received"
+                and payload.get("tool_name") == "bash"
+            ):
+                a.bash_observation_count += 1
             elif event_type == "tool.outcome_classified":
                 a.tool_outcome_classified_count += 1
                 classification = str(

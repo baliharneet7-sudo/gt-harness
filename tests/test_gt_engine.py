@@ -267,6 +267,54 @@ def test_compact_provider_view_uses_budget_for_more_than_minimum_tail():
     assert receipt["active_message_chars"] <= 5_000
 
 
+def test_compact_provider_view_default_never_rehydrates_irrelevant_old_turns():
+    """Typed state, not spare budget, owns durable context by default."""
+    from gt_engine.context import compact_provider_view
+
+    messages = _make_messages(n_results=6, result_len=1_500)
+
+    view, receipt = compact_provider_view(
+        messages,
+        checkpoint='{"unresolved":["obl-1"],"changed_paths":["pkg/a.py"]}',
+        char_budget=20_000,
+        tail_turns=2,
+        tool_output_chars=1_000,
+    )
+
+    rendered = str(view)
+    assert "'id': 't5'" in rendered
+    assert "'id': 't4'" in rendered
+    assert "'id': 't3'" not in rendered
+    assert receipt["tail_turns"] == 2
+
+
+def test_compact_provider_view_retains_one_older_semantically_active_group():
+    from gt_engine.context import compact_provider_view
+
+    messages = _make_messages(n_results=6, result_len=1_500)
+    messages[3]["content"][0]["input"]["command"] = "sed -n 1,80p pkg/active.py"
+    messages[4]["content"][0]["content"] = "pkg/active.py exact source"
+
+    view, receipt = compact_provider_view(
+        messages,
+        checkpoint='{"changed_paths":["pkg/active.py"]}',
+        char_budget=10_000,
+        target_char_budget=6_000,
+        tail_turns=2,
+        semantic_needles=("pkg/active.py",),
+        tool_output_chars=1_000,
+    )
+
+    rendered = str(view)
+    assert "'id': 't1'" in rendered
+    assert "'id': 't4'" in rendered
+    assert "'id': 't5'" in rendered
+    assert "'id': 't2'" not in rendered
+    assert receipt["semantic_tail_turns"] == 1
+    assert receipt["tail_turns"] == 3
+    assert receipt["omitted_group_hashes"]
+
+
 def test_bridge_records_gateway_no_candidate_reason(tmp_path):
     """A quiet gateway observation must be explainable, not absent from telemetry."""
     from gt_engine.bridge import GTBridge
@@ -1381,6 +1429,60 @@ def test_task_start_capsule_fires_and_seals(indexed_repo):
     assert sealed.evidence_type == "obligations"
     assert sealed.receipt_state == "delivered"
     assert b.chain_head
+
+
+@requires_gt
+def test_task_start_delivers_one_compound_orientation_with_localization_receipts(
+        indexed_repo):
+    """Step 0 must expose obligations and ranked graph locations as one block."""
+    from types import SimpleNamespace
+
+    from gt_engine.attribution import summarize_features
+
+    apply_profile_env()
+    bridge = indexed_repo
+    bridge.issue_text = (
+        "Fix helper in pkg/alpha.py while keeping caller_a compatible."
+    )
+
+    capsule = bridge.task_start()
+
+    assert capsule is not None
+    assert "Ranked work surface" in capsule
+    assert "pkg/alpha.py" in capsule
+    assert "helper" in capsule
+    assert len(bridge.deliveries) == 1
+    assert bridge.deliveries[0].evidence_type == "obligations"
+
+    messages = [{"role": "user", "content": "task\n\n" + capsule}]
+    view = bridge.provider_message_view(messages, char_budget=8_000)
+    delivery_ids = bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {"model": "deepseek-v4-flash", "messages": view},
+    )
+    bridge.trace_model_response(
+        1,
+        SimpleNamespace(
+            text="I will inspect the ranked helper first.",
+            tool_calls=(),
+            stop_reason="tool_use",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_read_tokens=0,
+            ),
+        ),
+        delivery_ids,
+    )
+
+    summary = summarize_features(bridge._attribution.rows)
+    assert summary["obligations"]["status"] == "WITNESSED"
+    assert summary["localization"]["status"] == "WITNESSED"
+    assert summary["GT_LOC_RESLOT"]["status"] == "WITNESSED"
+    assert summary["obligations"]["deliveries"] == ["0"]
+    assert summary["localization"]["deliveries"] == ["0"]
+    assert summary["GT_LOC_RESLOT"]["deliveries"] == ["0"]
 
 
 @requires_gt

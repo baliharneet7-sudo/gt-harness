@@ -41,6 +41,10 @@ def _task(
     graph_evidence_unlinked_count=0,
     graph_evidence_revision_mismatch_count=0,
     shell_lifecycle_unrecovered_count=0,
+    task_start_localization_provider_iteration=0,
+    task_start_localization_response_iteration=0,
+    task_start_localization_compound=False,
+    task_start_localization_eligible=False,
 ):
     return {
         "task_name": name,
@@ -90,6 +94,18 @@ def _task(
         "shell_lifecycle_unrecovered_count": (
             shell_lifecycle_unrecovered_count
         ),
+        "task_start_localization_provider_iteration": (
+            task_start_localization_provider_iteration
+        ),
+        "task_start_localization_response_iteration": (
+            task_start_localization_response_iteration
+        ),
+        "task_start_localization_compound": (
+            task_start_localization_compound
+        ),
+        "task_start_localization_eligible": (
+            task_start_localization_eligible
+        ),
     }
 
 
@@ -128,6 +144,50 @@ def test_live_gate_accepts_healthy_provider_bound_feature_union(tmp_path):
 
     assert report["passed"] is True
     assert report["witnessed_count"] == 3
+
+
+def test_live_gate_requires_compound_localization_on_first_provider_request(
+        tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    audit = {
+        "tasks": [
+            _task(
+                "on-time",
+                {"localization": _feature()},
+                task_start_localization_provider_iteration=1,
+                task_start_localization_response_iteration=1,
+                task_start_localization_compound=True,
+                task_start_localization_eligible=True,
+            ),
+            _task(
+                "late",
+                {"localization": _feature()},
+                task_start_localization_provider_iteration=3,
+                task_start_localization_response_iteration=3,
+                task_start_localization_compound=True,
+                task_start_localization_eligible=True,
+            ),
+        ],
+    }
+
+    report = evaluate_live_gate(
+        audit,
+        min_witnessed=1,
+        expected_tasks=2,
+        expected_model="deepseek-v4-flash",
+        require_step0_localization=True,
+        run_dir=tmp_path,
+    )
+
+    assert report["passed"] is False
+    assert any(
+        "late: task-start localization reached provider iteration 3" in issue
+        for issue in report["issues"]
+    )
 
 
 def test_live_gate_rejects_dark_unexposed_and_wrong_model(tmp_path):

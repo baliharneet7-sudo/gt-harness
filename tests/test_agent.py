@@ -23,6 +23,157 @@ def _u(i, o):
     return Usage(input_tokens=i, output_tokens=o)
 
 
+def test_bash_timeout_is_clamped_to_wall_clock_finalization_reserve():
+    from nano.agent import affordable_bash_timeout
+
+    assert affordable_bash_timeout(
+        requested_seconds=2_500,
+        remaining_seconds=240,
+        reserve_seconds=180,
+    ) == 60
+    assert affordable_bash_timeout(
+        requested_seconds=60,
+        remaining_seconds=180,
+        reserve_seconds=180,
+    ) is None
+    assert affordable_bash_timeout(
+        requested_seconds=30,
+        remaining_seconds=None,
+        reserve_seconds=180,
+    ) == 30
+
+
+def test_agent_clamps_model_bash_timeout_before_dispatch():
+    fp = FakeProvider([
+        StepResult(
+            text="verify",
+            tool_calls=[ToolCall(
+                id="t1",
+                name="bash",
+                arguments={"command": "run tests", "timeout": 2_500},
+            )],
+            stop_reason="tool_use",
+            usage=_u(10, 5),
+        ),
+        StepResult(
+            text="done",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=_u(10, 5),
+        ),
+    ])
+
+    class _RecordingBash:
+        def __init__(self):
+            self.timeouts = []
+
+        def run(self, command, timeout=30):
+            self.timeouts.append(timeout)
+            return "ok\n"
+
+    bash = _RecordingBash()
+    class _BudgetGT:
+        issue_text = ""
+        delivered_spans = []
+
+        def __init__(self):
+            self.budgets = []
+
+        def task_start(self):
+            return None
+
+        def provider_message_view(self, messages, **_kwargs):
+            return messages
+
+        def trace_model_request(self, *_args):
+            return ()
+
+        def trace_model_response(self, *_args):
+            return None
+
+        def trace_run_completed(self, *_args):
+            return None
+
+        def capture_bash_preimage(self, *_args):
+            return None
+
+        def enrich(self, _name, _args, output, _is_error, **_kwargs):
+            return output
+
+        def trace_tool_budget(self, **receipt):
+            self.budgets.append(receipt)
+
+    agent = Agent(
+        provider=fp,
+        system="sys",
+        max_iterations=2,
+        verify=False,
+        bash=bash,
+        time_budget_seconds=600,
+        finalization_reserve_seconds=180,
+        clock=lambda: 0.0,
+    )
+    gt = _BudgetGT()
+    agent._gt = gt
+
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    assert bash.timeouts == [420]
+    assert gt.budgets == [{
+        "requested_seconds": 2_500,
+        "allowed_seconds": 420,
+        "remaining_seconds": 600.0,
+        "reserve_seconds": 180,
+        "decision": "CLAMPED",
+    }]
+
+
+def test_agent_rejects_tool_when_only_finish_reserve_remains():
+    fp = FakeProvider([
+        StepResult(
+            text="long verification",
+            tool_calls=[ToolCall(
+                id="t1",
+                name="bash",
+                arguments={"command": "run tests", "timeout": 2_500},
+            )],
+            stop_reason="tool_use",
+            usage=_u(10, 5),
+        ),
+        StepResult(
+            text="summarizing",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=_u(10, 5),
+        ),
+    ])
+
+    class _NeverBash:
+        def run(self, command, timeout=30):
+            raise AssertionError("unaffordable command must not execute")
+
+    agent = Agent(
+        provider=fp,
+        system="sys",
+        max_iterations=2,
+        verify=False,
+        bash=_NeverBash(),
+        time_budget_seconds=180,
+        finalization_reserve_seconds=180,
+        clock=lambda: 0.0,
+    )
+
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    tool_rows = [
+        row for row in result.transcript if row.get("type") == "tool_result"
+    ]
+    assert tool_rows[0]["is_error"] is True
+    assert "wall-clock finish reserve" in tool_rows[0]["output"]
+
+
 def test_agent_one_shot_end_turn():
     fp = FakeProvider([
         StepResult(text="task done", tool_calls=[], stop_reason="end_turn",

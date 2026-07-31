@@ -48,6 +48,7 @@ def evaluate_live_gate(
     require_graph_surface_receipt: bool = False,
     require_verification_plan_on_graph_edit: bool = False,
     require_improvement_receipts: bool = False,
+    require_step0_localization: bool = False,
     required_behavior_flags: tuple[str, ...] = (),
     required_lifecycle: tuple[str, ...] = (),
     run_dir: Path | None = None,
@@ -76,6 +77,8 @@ def evaluate_live_gate(
         "harmful_tool_outcomes": 0,
         "new_capsule_tool_outcomes": 0,
     }
+    step0_localization_eligible = 0
+    step0_localization_on_time = 0
     expected_feature_ids = set(DIRECT_FEATURES)
     valid_statuses = {
         "INELIGIBLE",
@@ -137,6 +140,42 @@ def evaluate_live_gate(
             issues.append(
                 f"{task_name}: missing graph surface/projection receipt"
             )
+        localization_eligible = bool(
+            task.get("task_start_localization_eligible")
+        )
+        step0_localization_eligible += int(localization_eligible)
+        if require_step0_localization and localization_eligible:
+            provider_iteration = int(
+                task.get(
+                    "task_start_localization_provider_iteration"
+                ) or 0
+            )
+            response_iteration = int(
+                task.get(
+                    "task_start_localization_response_iteration"
+                ) or 0
+            )
+            if not task.get("task_start_localization_compound"):
+                issues.append(
+                    f"{task_name}: task-start localization is not joined "
+                    "to the obligations delivery"
+                )
+            if provider_iteration != 1:
+                issues.append(
+                    f"{task_name}: task-start localization reached provider "
+                    f"iteration {provider_iteration}, expected 1"
+                )
+            if response_iteration != 1:
+                issues.append(
+                    f"{task_name}: task-start localization response iteration "
+                    f"{response_iteration}, expected 1"
+                )
+            if (
+                task.get("task_start_localization_compound")
+                and provider_iteration == 1
+                and response_iteration == 1
+            ):
+                step0_localization_on_time += 1
         graph_edit = bool(
             task.get("graph_available")
             and "post_edit" in (task.get("lifecycle_checkpoints") or {})
@@ -218,6 +257,19 @@ def evaluate_live_gate(
             if int(task.get("shell_lifecycle_unrecovered_count") or 0):
                 issues.append(
                     f"{task_name}: unrecovered persistent shell failure"
+                )
+            if int(task.get("tool_budget_violation_count") or 0):
+                issues.append(
+                    f"{task_name}: bash timeout exceeded affordable "
+                    "wall-clock budget"
+                )
+            if int(task.get("bash_observation_count") or 0) != int(
+                task.get("tool_budget_receipt_count") or 0
+            ):
+                issues.append(
+                    f"{task_name}: bash wall-clock receipt census mismatch "
+                    f"({task.get('tool_budget_receipt_count') or 0}/"
+                    f"{task.get('bash_observation_count') or 0})"
                 )
             if int(task.get("forbidden_harness_path_attempt_count") or 0):
                 issues.append(
@@ -428,6 +480,9 @@ def evaluate_live_gate(
             require_verification_plan_on_graph_edit
         ),
         "require_improvement_receipts": require_improvement_receipts,
+        "require_step0_localization": require_step0_localization,
+        "step0_localization_eligible": step0_localization_eligible,
+        "step0_localization_on_time": step0_localization_on_time,
         "improvement_totals": improvement_totals,
         "required_behavior_flags": sorted(set(required_behavior_flags)),
         "observed_behavior_flags": sorted(observed_behavior_flags),
@@ -456,6 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--require-improvement-receipts", action="store_true"
+    )
+    parser.add_argument(
+        "--require-step0-localization", action="store_true"
     )
     parser.add_argument(
         "--require-behavior-flags",
@@ -488,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
             args.require_verification_plan_on_graph_edit
         ),
         require_improvement_receipts=args.require_improvement_receipts,
+        require_step0_localization=args.require_step0_localization,
         required_behavior_flags=tuple(
             flag.strip()
             for flag in args.require_behavior_flags.split(",")

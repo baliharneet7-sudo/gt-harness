@@ -82,6 +82,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--gt-root", default=None,
                      help="Codebase root for GroundTruth evidence enrichment. "
                           "Omit to run stock nano (GT off).")
+    run.add_argument(
+        "--time-budget-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Outer agent wall-clock budget. Bash timeouts are clamped to "
+            "preserve time for the final verified response."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Construction failures (missing SDK/key, no usable shell) happen before
@@ -97,7 +106,8 @@ def main(argv: list[str] | None = None) -> int:
         system = SYSTEM_PROMPT + (GT_PROMPT_SUFFIX if args.gt_root else "")
         agent = Agent(provider=provider, system=system,
                       max_iterations=args.max_iterations, on_event=_print_event,
-                      gt_root=args.gt_root)
+                      gt_root=args.gt_root,
+                      time_budget_seconds=args.time_budget_seconds)
     except Exception as e:
         _console.print(f"[bold red]setup error:[/] {type(e).__name__}: {e}")
         return 1

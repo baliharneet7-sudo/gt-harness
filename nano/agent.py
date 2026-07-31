@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .providers import Provider, StepResult, ToolCall
 from .tools import TOOLS, BashTool, ToolError, dispatch
+
+
+def affordable_bash_timeout(
+    *,
+    requested_seconds: int,
+    remaining_seconds: float | None,
+    reserve_seconds: float,
+) -> int | None:
+    """Return a timeout that cannot consume the agent's finish reserve."""
+    requested = max(1, int(requested_seconds))
+    if remaining_seconds is None:
+        return requested
+    affordable = int(max(0.0, remaining_seconds - reserve_seconds))
+    if affordable < 1:
+        return None
+    return min(requested, affordable)
 
 
 @dataclass
@@ -32,6 +49,13 @@ class Agent:
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
     gt_root: str | None = None  # codebase root for GroundTruth; None = GT off
+    time_budget_seconds: float | None = None
+    finalization_reserve_seconds: float = 180.0
+    clock: Callable[[], float] = field(
+        default=time.monotonic,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.bash is None:
@@ -51,11 +75,34 @@ class Agent:
         if self.on_event:
             self.on_event(event)
 
+    def _remaining_seconds(self) -> float | None:
+        deadline = getattr(self, "_deadline", None)
+        if deadline is None:
+            return None
+        return max(0.0, float(deadline) - float(self.clock()))
+
+    def _sync_gt_budget(self) -> None:
+        if self._gt is None:
+            return
+        try:
+            self._gt.wall_seconds_remaining = self._remaining_seconds()
+            self._gt.finalization_reserve_seconds = (
+                self.finalization_reserve_seconds
+            )
+        except Exception:  # noqa: BLE001 - budget telemetry is advisory
+            pass
+
     def run(self, task: str) -> AgentResult:
+        self._deadline = (
+            float(self.clock()) + float(self.time_budget_seconds)
+            if self.time_budget_seconds is not None
+            else None
+        )
         task_content = task
         if self._gt is not None:
             self._gt.issue_text = task  # B-4: thread the real task text into GT
             self._gt.iteration_budget = self.max_iterations
+            self._sync_gt_budget()
             # GT integration point 4: task-start delivery. Production's step-0
             # surface (the v1r brief: obligations + ranked localization) rides
             # the INITIAL user message, before the first provider call, so the
@@ -92,6 +139,7 @@ class Agent:
                     total_cache_read_tokens=total_cache, transcript=transcript,
                 ))
 
+            self._sync_gt_budget()
             # GT integration point 3: evidence-aware truncation. Stock path
             # (and stock bytes) whenever the GT bridge is absent; the GT path
             # itself falls back to stock truncation on any fault.
@@ -378,16 +426,66 @@ class Agent:
                             ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for call in calls:
+            effective_arguments = dict(call.arguments)
+            budget_error = ""
+            if call.name == "bash":
+                raw_timeout = effective_arguments.get("timeout", 60)
+                try:
+                    requested_timeout = int(
+                        60 if raw_timeout is None else raw_timeout
+                    )
+                except (TypeError, ValueError):
+                    requested_timeout = None
+                if requested_timeout is not None:
+                    remaining_seconds = self._remaining_seconds()
+                    allowed_timeout = affordable_bash_timeout(
+                        requested_seconds=requested_timeout,
+                        remaining_seconds=remaining_seconds,
+                        reserve_seconds=self.finalization_reserve_seconds,
+                    )
+                    if allowed_timeout is None:
+                        budget_error = (
+                            "Command was not started because only the "
+                            "wall-clock finish reserve remains. Summarize the "
+                            "current verified state now; do not launch another "
+                            "long-running command."
+                        )
+                    else:
+                        effective_arguments["timeout"] = allowed_timeout
+                    if self._gt is not None:
+                        try:
+                            self._gt.trace_tool_budget(
+                                requested_seconds=requested_timeout,
+                                allowed_seconds=allowed_timeout,
+                                remaining_seconds=remaining_seconds,
+                                reserve_seconds=(
+                                    self.finalization_reserve_seconds
+                                ),
+                                decision=(
+                                    "REJECTED"
+                                    if allowed_timeout is None
+                                    else (
+                                        "CLAMPED"
+                                        if allowed_timeout
+                                        < requested_timeout
+                                        else "ALLOWED"
+                                    )
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001 - telemetry only
+                            pass
             # GT edit bridges (B-3): edit-turn producers need the target file's
             # before/after content. Captured HERE (tools.py stays unchanged);
             # before-content read pre-dispatch, after-content post-dispatch.
             gt_edit_before: str | None = None
             if self._gt is not None and call.name == "edit_file":
-                gt_edit_before = self._read_for_gt(call.arguments.get("path"))
+                gt_edit_before = self._read_for_gt(
+                    effective_arguments.get("path")
+                )
                 try:
                     self._gt.pre_edit_checkpoint(
                         call.name,
-                        call.arguments,
+                        effective_arguments,
                         edit_before=gt_edit_before,
                     )
                 except Exception:  # noqa: BLE001 - GT must never block dispatch
@@ -397,11 +495,21 @@ class Agent:
                 # reverse-applied post-hoc, so the bridge snapshots the target
                 # file at the PRE-dispatch boundary (never raises internally).
                 try:
-                    self._gt.capture_bash_preimage(call.arguments)
+                    self._gt.capture_bash_preimage(effective_arguments)
                 except Exception:  # noqa: BLE001 - GT must never break dispatch
                     pass
             try:
-                output = dispatch(call.name, call.arguments, bash=self.bash)
+                if budget_error:
+                    raise ToolError(
+                        budget_error,
+                        kind="wall_clock_budget",
+                        recovery="finish_from_current_verified_state",
+                    )
+                output = dispatch(
+                    call.name,
+                    effective_arguments,
+                    bash=self.bash,
+                )
                 is_error = False
             except ToolError as e:
                 output = f"ERROR: {e}"
@@ -417,10 +525,12 @@ class Agent:
             if self._gt is not None:
                 gt_edit_after: str | None = None
                 if call.name == "edit_file" and not is_error:
-                    gt_edit_after = self._read_for_gt(call.arguments.get("path"))
+                    gt_edit_after = self._read_for_gt(
+                        effective_arguments.get("path")
+                    )
                 try:
                     output = self._gt.enrich(
-                        call.name, call.arguments, output, is_error,
+                        call.name, effective_arguments, output, is_error,
                         edit_before=gt_edit_before, edit_after=gt_edit_after,
                         tool_call_id=call.id,
                         can_request_follow=can_request_follow)

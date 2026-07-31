@@ -112,8 +112,11 @@ DIRECT_FEATURES: dict[str, dict[str, Any]] = {
         "intended_action": "track repeated failures across edits",
     },
     "GT_LOC_RESLOT": {
-        "kind": "CAP", "boundaries": ("search_result",),
-        "trigger": "ranked localization is reslotted into the next model request",
+        "kind": "CAP", "boundaries": ("task_start", "search_result"),
+        "trigger": (
+            "ranked localization is placed into the task-start or next "
+            "search-result model request"
+        ),
         "intended_action": "reslot a ranked localization result into the request",
     },
     "GT_PATCH_DELTA": {
@@ -404,6 +407,103 @@ def verify_lifecycle_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
     return issues
 
 
+def feature_provider_iterations(
+    rows: Iterable[dict[str, Any]],
+) -> dict[str, list[int]]:
+    """Join independently attributed features to exact provider iterations."""
+    materialized = [dict(row) for row in rows]
+    delivery_features: dict[str, set[str]] = {}
+    for row in materialized:
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        event_type = str(row.get("event_type") or "")
+        decision = str(payload.get("decision") or "")
+        delivery_id = str(payload.get("delivery_id") or "")
+        feature_id = str(payload.get("feature_id") or "")
+        if not delivery_id or not feature_id:
+            continue
+        if event_type == "decision.committed" and decision == "delivered":
+            delivery_features.setdefault(delivery_id, set()).add(feature_id)
+        elif event_type in {"feature.applied", "capability.applied"} and (
+            decision == "APPLIED"
+        ):
+            delivery_features.setdefault(delivery_id, set()).add(feature_id)
+
+    timings: dict[str, set[int]] = {}
+    for row in materialized:
+        if row.get("event_type") != "provider.request":
+            continue
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        iteration = int(payload.get("iteration") or 0)
+        if iteration <= 0:
+            continue
+        for delivery_id in payload.get("delivery_ids", ()):
+            for feature_id in delivery_features.get(str(delivery_id), ()):
+                timings.setdefault(feature_id, set()).add(iteration)
+    return {
+        feature_id: sorted(iterations)
+        for feature_id, iterations in sorted(timings.items())
+    }
+
+
+def verify_sdlc_timing_rows(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """Verify edit lifecycle checkpoints bracket the actual tool dispatch."""
+    materialized = [dict(row) for row in rows]
+    for position, row in enumerate(materialized, 1):
+        row.setdefault("sequence", position)
+    checkpoints = [
+        row
+        for row in materialized
+        if row.get("event_type") == "lifecycle.checkpoint"
+        and isinstance(row.get("payload"), dict)
+    ]
+    issues: list[str] = []
+    for observation in materialized:
+        if observation.get("event_type") != "observation.received":
+            continue
+        payload = observation.get("payload")
+        if (
+            not isinstance(payload, dict)
+            or not payload.get("changed_files")
+        ):
+            continue
+        action_index = int(observation.get("action_index") or 0)
+        sequence = int(observation.get("sequence") or 0)
+        pre = [
+            row
+            for row in checkpoints
+            if row.get("boundary") == "pre_edit"
+            and int(
+                row.get("payload", {}).get(
+                    "proposed_action_index"
+                ) or 0
+            ) == action_index
+        ]
+        if not pre:
+            issues.append(
+                f"edit action {action_index}: missing pre_edit checkpoint"
+            )
+        elif not any(int(row.get("sequence") or 0) < sequence for row in pre):
+            issues.append(
+                f"edit action {action_index}: pre_edit occurs after dispatch"
+            )
+        post = [
+            row
+            for row in checkpoints
+            if row.get("boundary") == "post_edit"
+            and int(row.get("action_index") or 0) == action_index
+            and int(row.get("sequence") or 0) > sequence
+        ]
+        if not post:
+            issues.append(
+                f"edit action {action_index}: missing post_edit checkpoint"
+            )
+    return issues
+
+
 def summarize_features(
     rows: Iterable[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -529,6 +629,38 @@ def summarize_features(
                     feature_id,
                     "TELEMETRY_FAULT",
                     str(payload.get("reason") or "capability_fault"),
+                )
+            continue
+        if event_type == "feature.applied":
+            feature_id = str(payload.get("feature_id") or "")
+            decision = str(payload.get("decision") or "")
+            delivery_id = str(payload.get("delivery_id") or "")
+            if feature_id not in DIRECT_FEATURES:
+                continue
+            if decision == "APPLIED":
+                if delivery_id:
+                    update(
+                        feature_id,
+                        "DELIVERED_UNEXPOSED",
+                        str(payload.get("reason") or "feature_applied"),
+                    )
+                    delivery_to_features.setdefault(delivery_id, []).append(
+                        feature_id
+                    )
+                    summary[feature_id]["deliveries"].append(delivery_id)
+                else:
+                    update(feature_id, "WITNESSED", "feature_applied")
+            elif decision in {"SUPPRESSED", "DROPPED"}:
+                update(
+                    feature_id,
+                    "SUPPRESSED_WITH_REASON",
+                    str(payload.get("reason") or "feature_suppressed"),
+                )
+            elif decision == "FAULT":
+                update(
+                    feature_id,
+                    "TELEMETRY_FAULT",
+                    str(payload.get("reason") or "feature_fault"),
                 )
             continue
         if event_type == "decision.committed":
