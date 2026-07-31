@@ -462,6 +462,10 @@ def test_artifact_only_edit_requires_contract_mapped_verification(
     assert "verification_missing" in refusal
     assert bridge._last_task_edit_action > 0
 
+    # The unchanged generic unknown-state message has no new information.
+    assert bridge.submit_probe() is None
+    assert bridge.submit_bounces == 1
+
 
 @requires_gt
 def test_unmapped_exit_zero_does_not_verify_contract(tmp_path, monkeypatch):
@@ -656,6 +660,32 @@ def test_numeric_predicate_rejects_measured_value_above_scientific_bound():
     assert receipts == ()
 
 
+@requires_gt
+def test_unmet_contract_prioritizes_numeric_risk_in_submit_detail(
+    tmp_path, monkeypatch,
+):
+    from gt_engine.bridge import GTBridge
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text=(
+            "Create compress.py.\n"
+            "- It must reconstruct all input files\n"
+            "- Maximum 30 files or folders in each directory\n"
+            "- Maximum 15MB filesize per file"
+        ),
+    )
+    assert bridge.task_start()
+
+    unmet = bridge._obligation_coverage()["unmet"]
+
+    assert any("Maximum 30" in item for item in unmet[:2])
+    assert any("Maximum 15MB" in item for item in unmet[:2])
+
+
 def test_numeric_predicate_credits_explicit_satisfied_scientific_bound():
     from gt_engine.task_contract import Obligation, TaskContract
     from gt_engine.verification_contract import (
@@ -729,6 +759,35 @@ def test_content_scope_requires_complete_unexcluded_negative_search():
         "",
         1,
     )
+
+
+def test_content_scope_accepts_explicit_passing_repository_absence_suite():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    obligation = Obligation(
+        "obl-hf",
+        "Ensure no hardcoded Huggingface token remains anywhere.",
+        "test",
+    )
+    contract = TaskContract("content_scan", (obligation,))
+    receipts = evaluate_passing_observation(
+        contract,
+        compile_obligation_predicates(contract),
+        "python -m unittest discover -v",
+        (
+            "test_no_hardcoded_huggingface_token ... "
+            "No hardcoded Huggingface token anywhere. ... ok\n"
+            "Ran 1 test\nOK"
+        ),
+        action_index=12,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].kind == "content_scope"
 
 
 @requires_gt

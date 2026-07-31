@@ -42,7 +42,8 @@ _CONTENT_RE = re.compile(
 )
 _NUMERIC_RE = re.compile(
     r"(?i)(?:<=|>=|<|>|below|above|threshold|at most|at least|less than|"
-    r"more than|\d+(?:\.\d+)?\s*(?:ms|s|m|mb|gb|%))"
+    r"more than|maximum|minimum|\bmax\b|\bmin\b|"
+    r"\d+(?:\.\d+)?\s*(?:ms|s|m|mb|gb|%))"
 )
 _ARTIFACT_RE = re.compile(
     r"(?i)\b(?:create|generate|produce|write|put it in|artifact|file)\b"
@@ -66,6 +67,14 @@ _CONTENT_ABSENCE_RE = re.compile(
     r"(?i)(?:\b0\s+(?:matches|findings|secrets|tokens)\b|"
     r"\bno\s+(?:matches|findings|secrets|sensitive values|tokens)\b|"
     r"\b(?:secrets|sensitive values|tokens)\s+(?:are\s+)?not present\b)"
+)
+_CONTENT_SUITE_ASSERTION_RE = re.compile(
+    r"(?i)(?:no\s+hardcoded\s+(?:github|huggingface|aws|secret|token)|"
+    r"no\s+(?:secret|sensitive|token).{0,40}\banywhere\b|"
+    r"\b(?:secret|token)\s+absence\b)"
+)
+_FORMAL_CONTENT_SUITE_RE = re.compile(
+    r"(?i)(?:^|[;&|]\s*)(?:python\d*\s+-m\s+)?(?:pytest|unittest)\b"
 )
 _EXIT_CODE_MARKER_RE = re.compile(r"(?im)^\s*\[exit code \d+\]\s*$")
 
@@ -299,6 +308,15 @@ def is_complete_content_absence_observation(
     return empty_negative or bool(_CONTENT_ABSENCE_RE.search(output))
 
 
+def is_content_scope_test_observation(command: str, output: str) -> bool:
+    """Recognize a passing suite that explicitly asserts repository absence."""
+    return bool(
+        _FORMAL_CONTENT_SUITE_RE.search(command or "")
+        and _CONTENT_SUITE_ASSERTION_RE.search(output or "")
+        and not re.search(r"(?im)^\s*(?:FAIL|FAILED|ERROR)\b", output or "")
+    )
+
+
 def evaluate_passing_observation(
     contract: TaskContract,
     predicates: dict[str, ObligationPredicate],
@@ -353,8 +371,11 @@ def evaluate_passing_observation(
             )
         elif predicate.kind == "content_scope":
             verified = bool(
-                is_complete_content_absence_observation(
-                    command, output, returncode
+                (
+                    is_complete_content_absence_observation(
+                        command, output, returncode
+                    )
+                    or is_content_scope_test_observation(command, output)
                 )
                 and item.obligation_id in lexical
             )

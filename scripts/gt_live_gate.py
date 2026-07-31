@@ -215,9 +215,9 @@ def evaluate_live_gate(
                 issues.append(
                     f"{task_name}: unknown tool outcome(s) remain"
                 )
-            if int(outcome_counts.get("shell_lifecycle") or 0):
+            if int(task.get("shell_lifecycle_unrecovered_count") or 0):
                 issues.append(
-                    f"{task_name}: persistent shell lifecycle failure"
+                    f"{task_name}: unrecovered persistent shell failure"
                 )
             if int(task.get("graph_refresh_failure_count") or 0):
                 issues.append(

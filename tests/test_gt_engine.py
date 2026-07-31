@@ -1201,6 +1201,25 @@ def test_submit_probe_remains_authoritative_for_nano_pushback_budget(
     assert b.submit_probe() is None  # bounded by nano's three-pushback policy
 
 
+@requires_gt
+def test_submit_blocks_positive_numpy2_removed_alias(indexed_repo, tmp_path):
+    source = tmp_path / "pkg" / "compat.py"
+    source.write_text(
+        "import numpy as np\nDTYPE = np.int\n",
+        encoding="utf-8",
+    )
+    b = indexed_repo
+    b.issue_text = "Make this package compatible with NumPy >=2.0."
+    b.edited_files.append("pkg/compat.py")
+
+    refusal = b.submit_probe()
+
+    assert refusal is not None
+    assert "NumPy >=2 incompatible aliases remain" in refusal
+    assert "pkg/compat.py: np.int" in refusal
+    assert b.deliveries[-1].evidence_type == "submit_refusal"
+
+
 # --------------------------------------------------------------------------- #
 # FIX 4: task-start capsule (v1r brief) against the real fixture graph.db
 # --------------------------------------------------------------------------- #

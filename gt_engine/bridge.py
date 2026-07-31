@@ -84,6 +84,12 @@ _CHECK_EXEC_RE = re.compile(
     r"(?i)(?:^|[;&|]\s*)(?:python\d*|node|pytest|npm\s+test|"
     r"(?:bash|sh)\s+\S*(?:test|check|verify)\S*)\b"
 )
+_NUMPY2_TASK_RE = re.compile(
+    r"(?is)\bnumpy\b.{0,80}(?:>=?\s*2(?:\.0)?|2\.[0-9])"
+)
+_REMOVED_NUMPY_ALIAS_RE = re.compile(
+    r"\b(?:np|numpy)\.(?:bool|int|float|complex|object|str|unicode)\b"
+)
 
 
 def _explicit_check_outcome(output: str) -> str | None:
@@ -481,6 +487,8 @@ class GTBridge:
         self._progress = ProgressLedger()
         self.iteration_budget = 0
         self._last_model_iteration = 0
+        self._last_submit_block_reason = ""
+        self._last_submit_unmet_ids: frozenset[str] = frozenset()
         self._capability_receipts: set[tuple[str, str]] = set()
         # Bash-edit pre-images captured at the pre-dispatch boundary:
         # {rel: before_content_or_None}; None = the target did not exist (a
@@ -618,17 +626,96 @@ class GTBridge:
         )
         all_ids = {str(item.obligation_id) for item in obligations}
         met_ids = all_ids & self._verified_obligation_ids
-        unmet = [
-            str(item.text)
+        unmet_rows = [
+            (
+                str(item.obligation_id),
+                str(item.text),
+                str(
+                    getattr(
+                        self._obligation_predicates.get(
+                            str(item.obligation_id)
+                        ),
+                        "kind",
+                        "behavior",
+                    )
+                ),
+            )
             for item in obligations
             if str(item.obligation_id) not in met_ids
         ]
+        priority = {
+            "numeric_threshold": 0,
+            "content_scope": 1,
+            "artifact": 2,
+            "behavior": 3,
+        }
+        unmet_rows.sort(
+            key=lambda row: priority.get(row[2], 2)
+        )
+        unmet_ids = [row[0] for row in unmet_rows]
+        unmet = [row[1] for row in unmet_rows]
         return {
             "total": len(all_ids),
             "met": len(met_ids),
             "covered": len(met_ids),
             "unmet": unmet,
+            "unmet_ids": unmet_ids,
             "shipped": len(all_ids & self._shipped_obligation_ids),
+        }
+
+    def _numpy_compatibility_block(self) -> dict[str, Any] | None:
+        """Find positive NumPy-2 removed-alias evidence before submission."""
+        if not _NUMPY2_TASK_RE.search(self.issue_text or ""):
+            return None
+        findings: list[tuple[str, str]] = []
+        scanned = 0
+        excluded = {
+            ".git", ".gt", ".venv", "venv", "node_modules", "__pycache__",
+        }
+        try:
+            for root, dirs, files in os.walk(self.repo_root):
+                dirs[:] = [name for name in dirs if name not in excluded]
+                for name in files:
+                    if not name.lower().endswith(
+                        (".py", ".pyx", ".pxd", ".pxi")
+                    ):
+                        continue
+                    scanned += 1
+                    if scanned > 5000:
+                        break
+                    path = os.path.join(root, name)
+                    if os.path.getsize(path) > 2_000_000:
+                        continue
+                    with open(
+                        path, encoding="utf-8", errors="replace"
+                    ) as handle:
+                        aliases = sorted(set(
+                            _REMOVED_NUMPY_ALIAS_RE.findall(handle.read())
+                        ))
+                    if aliases:
+                        findings.append((
+                            self._repo_rel(path),
+                            ", ".join(aliases[:4]),
+                        ))
+                    if len(findings) >= 5:
+                        break
+                if scanned > 5000 or len(findings) >= 5:
+                    break
+        except OSError:
+            return None
+        if not findings:
+            return None
+        detail = "; ".join(
+            f"{path}: {aliases}" for path, aliases in findings
+        )
+        return {
+            "blocking": True,
+            "reason": "numpy_removed_alias",
+            "detail": (
+                "NumPy >=2 incompatible aliases remain in source: "
+                f"{detail}. Replace them with supported builtin or explicit "
+                "NumPy scalar types, then rerun the build/import check"
+            ),
         }
 
     def _build_verification_plan(self) -> Any | None:
@@ -2767,6 +2854,8 @@ class GTBridge:
                 ),
             },
         )
+        if submit_block is None:
+            submit_block = self._numpy_compatibility_block()
         # FIX D (SS-2 broad fallback, GT_SS_SUBMIT_RED): the agent's OWN
         # unresolved observed RED — fires exactly where graph coverage is
         # dark (production's conan-17092 class: the agent watched a test on
@@ -2930,6 +3019,31 @@ class GTBridge:
             obligation_total=obligation_coverage["total"],
             obligation_met=obligation_coverage["met"],
         )
+        current_unmet_ids = frozenset(
+            str(item) for item in obligation_coverage["unmet_ids"]
+        )
+        if (
+            submit_block is not None
+            and submit_block.get("reason") == "verification_missing"
+            and self._last_submit_block_reason == "verification_missing"
+            and current_unmet_ids == self._last_submit_unmet_ids
+        ):
+            # Replaying the same generic unknown-state refusal supplies no new
+            # information and caused large live token regressions. Positive
+            # RED/syntax/covering blockers remain authoritative; a verification
+            # blocker may repeat only after the unmet set materially shrinks.
+            self._trace_record(
+                "decision.committed",
+                "submit",
+                {
+                    "decision": "suppressed",
+                    "reason": "unchanged_verification_blocker",
+                    "evidence_type": "submit_refusal",
+                    "feature_id": "submit_refusal",
+                    "unmet_count": len(current_unmet_ids),
+                },
+            )
+            return None
         try:
             from groundtruth.runtime.patch_auditor import git_diff_hygiene
 
@@ -3029,7 +3143,8 @@ class GTBridge:
                    if cert_rendered
                    or verdict.reason in ("covering_test_failed",
                                          "observed_red_unresolved",
-                                         "verification_missing")
+                                         "verification_missing",
+                                         "numpy_removed_alias")
                    else "syntax_result")
         # Seam-owned leak guard + law 8 on the rendered bytes, same as a delta.
         if not text:
@@ -3060,6 +3175,10 @@ class GTBridge:
         # bounded refusal budget — otherwise a suppressed attempt could consume
         # nano's remaining opportunity to act on real evidence.
         self.submit_bounces += 1
+        self._last_submit_block_reason = str(
+            (submit_block or {}).get("reason") or verdict.reason or ""
+        )
+        self._last_submit_unmet_ids = current_unmet_ids
         # The cert block / a covering block / the SS-2 observed-RED block is
         # the submit_refusal fact class (production's lineage binding,
         # gt_mini_patch.py:22415; gt_gt.md: GT_SS_SUBMIT_RED owns
@@ -3393,6 +3512,31 @@ class GTBridge:
                 )
                 if keep:
                     admitted.append(envelope)
+                else:
+                    from gt_engine.attribution import feature_for_evidence
+
+                    canonical = feature_for_evidence(
+                        str(
+                            getattr(
+                                envelope, "evidence_type", ""
+                            ) or ""
+                        )
+                    )
+                    if canonical:
+                        self._trace_record(
+                            "decision.committed",
+                            "gateway",
+                            {
+                                "decision": "suppressed",
+                                "reason": reason,
+                                "evidence_type": str(
+                                    getattr(
+                                        envelope, "evidence_type", ""
+                                    ) or ""
+                                ),
+                                "feature_id": canonical,
+                            },
+                        )
             envelopes = admitted
         # The pinned runtime's edit-path change-surface producer is
         # correct-or-quiet, but unlike the patch/caller producers it does not

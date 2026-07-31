@@ -711,6 +711,8 @@ class TaskAudit:
     tool_outcome_harmful_count: int = 0
     tool_outcome_information_gain_count: int = 0
     tool_outcome_new_capsule_count: int = 0
+    shell_lifecycle_recovered_count: int = 0
+    shell_lifecycle_unrecovered_count: int = 0
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -957,6 +959,7 @@ def audit_task(task_dir: Path) -> TaskAudit:
             if value
         }
         exposure_counts: dict[str, int] = {}
+        pending_shell_lifecycle = 0
         for row in attribution_rows:
             event_type = str(row.get("event_type") or "")
             payload = row.get("payload", {})
@@ -1045,6 +1048,17 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 a.tool_outcome_new_capsule_count += int(
                     bool(payload.get("new_delivery_ids"))
                 )
+                if classification == "shell_lifecycle":
+                    pending_shell_lifecycle += 1
+                elif (
+                    pending_shell_lifecycle
+                    and payload.get("tool_name") == "bash"
+                    and classification == "success"
+                ):
+                    a.shell_lifecycle_recovered_count += (
+                        pending_shell_lifecycle
+                    )
+                    pending_shell_lifecycle = 0
         a.predicate_observed_kinds = dict(
             sorted(a.predicate_observed_kinds.items())
         )
@@ -1055,6 +1069,7 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.capsule_repeated_exposure_count = sum(
             max(0, count - 1) for count in exposure_counts.values()
         )
+        a.shell_lifecycle_unrecovered_count = pending_shell_lifecycle
         for row in attribution_rows:
             if row.get("event_type") != "control.decision":
                 continue

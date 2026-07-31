@@ -1,9 +1,9 @@
 # GT Improvement Plan: From Attributable Wiring to Measured Advantage
 
-Status: research-backed implementation plan
+Status: implementation in progress; first strict live candidate diagnosed
 Repository: `gt-harness`  
 Runtime: nano-harness with GroundTruth (GT)  
-Last diagnosed live run: `30590129776`, commit `0d3dd88`
+Last diagnosed live run: `30594350673`, commit `20e4925`
 Confidence: high on the diagnosed defects; moderate that the proposed changes
 will improve outcomes until repeated GT-on live runs establish the effect.
 
@@ -79,8 +79,68 @@ Implemented:
 Local proof now covers false numeric credit, unit mismatch, complete versus
 excluded content scope, role-pack enforcement, malformed entity extraction,
 good and bad localization, graph-query priority, decision-linked graph
-evidence, repeated-submit authority, and near-budget recovery. Full repository
-verification and the strict live GT-on smoke remain the next gates.
+evidence, repeated-submit authority, and near-budget recovery.
+
+### First strict live candidate: run `30594350673`
+
+Run `30594350673` executed the real five-task nano + GT workflow at commit
+`20e4925` with `deepseek-v4-flash`, temperature `1`, Profile 2, concurrency 4,
+and timeout multiplier `1.0`. Harbor completed all five live provider trials
+with no trial error. Reward remained 3/5, but the solved-task composition
+changed:
+
+| Task | Reward | Iterations | Input tokens | GT chars | Result versus run `30590129776` |
+|---|---:|---:|---:|---:|---|
+| build | 0 | 75 | 2,290,305 | 6,882 | regressed; hidden verifier found `np.int` |
+| headless | 1 | 37 | 410,075 | 2,329 | still solved, but more expensive |
+| batching | 1 | 40 | 1,329,623 | 4,258 | improved from fail at 74 / 4,739,587 |
+| reshard | 0 | 57 | 810,661 | 3,276 | still failed; root had 331 entries, over 30 |
+| sanitizer | 1 | 45 | 1,797,776 | 2,479 | still solved, but much more expensive |
+
+This is a real positive result for batching, not a general GT advantage.
+Across the four tasks with graded frozen GT-off observations (build, batching,
+reshard, sanitizer), GT-off solved 4/4 while this candidate solved 2/4. The
+same four tasks used:
+
+| Metric | Frozen GT-off | Run `30594350673` | Delta |
+|---|---:|---:|---:|
+| Iterations | 195 | 217 | +11.3% |
+| Input tokens | 5,884,607 | 6,228,365 | +5.8% |
+| Output tokens | 90,374 | 103,098 | +14.1% |
+
+Therefore the candidate is worse than the existing baseline despite the large
+batching improvement. Deterministic evidence is not enough; it must reduce
+decision uncertainty. The main live defects were:
+
+- generic `verification_missing` refusals repeated three times even when the
+  unresolved set was unchanged, adding work without adding information;
+- build had no positive NumPy-2 removed-alias check, so `np.int` survived;
+- reshard's generic refusal hid the high-risk `30 entries` and `15MB`
+  numeric constraints behind earlier prose obligations;
+- sanitizer's explicit passing absence suite did not satisfy content-scope
+  predicates, so the same seven unknowns repeated;
+- all 21 rejected sanitizer localizations were named by the router but the
+  census misclassified the canonical localization feature as dark; and
+- reshard had one shell-process death with no active GT delivery, then a
+  successful bash observation. The event was recovered but the gate treated
+  any historical shell death as terminal.
+
+The post-run correction now:
+
+- suppresses an unchanged generic verification refusal after its first
+  delivery, while positive syntax, covering, observed-RED, and NumPy blockers
+  retain the full bounded authority;
+- recognizes explicit passing repository-absence suites;
+- prioritizes numeric/content/artifact unknowns in the smallest refusal set;
+- executes a bounded positive NumPy-2 removed-alias source scan at submit;
+- attributes router suppression to the canonical evidence feature; and
+- records recovered versus unrecovered shell lifecycle failures, failing the
+  live gate only on an unrecovered shell.
+
+Replaying the immutable run through the corrected measurement code yields a
+clean attribution gate: seven identities witnessed, 15 exercised, zero dark,
+zero unexposed, zero stale/unlinked graph facts, and one recovered shell event.
+That fixes the measurement; it does not retroactively improve the 3/5 reward.
 
 ## Current evidence
 

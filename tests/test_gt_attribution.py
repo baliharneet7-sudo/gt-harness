@@ -588,6 +588,25 @@ def test_registry_abstention_is_named_suppression_not_ineligible():
     assert summary["caller_contract"]["reasons"] == ["producer_disabled"]
 
 
+def test_router_suppression_is_attributed_to_canonical_evidence_feature():
+    rows = [{
+        "event_type": "control.decision",
+        "payload": {
+            "feature_id": "GT_ROLE_DRIVEN_COALITION",
+            "decision": "SUPPRESSED",
+            "reason": "not_grounded_in_content_search",
+            "evidence_type": "localization",
+        },
+    }]
+
+    summary = summarize_features(rows)
+
+    assert summary["localization"]["status"] == "SUPPRESSED_WITH_REASON"
+    assert summary["localization"]["reasons"] == [
+        "not_grounded_in_content_search"
+    ]
+
+
 def test_carried_delivery_does_not_overwrite_immediate_response_action():
     """Old GT bytes remain in later conversation history. The first linked
     response is the causal boundary; later actions must not overwrite it."""

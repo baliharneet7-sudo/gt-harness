@@ -318,6 +318,26 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
         },
     )
     trace.record(
+        "tool.outcome_classified",
+        action_index=3,
+        boundary="tool_result",
+        payload={
+            "tool_name": "bash",
+            "classification": "shell_lifecycle",
+            "harmful": True,
+        },
+    )
+    trace.record(
+        "tool.outcome_classified",
+        action_index=4,
+        boundary="tool_result",
+        payload={
+            "tool_name": "bash",
+            "classification": "success",
+            "harmful": False,
+        },
+    )
+    trace.record(
         "control.decision",
         action_index=1,
         boundary="gateway",
@@ -380,8 +400,14 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
     assert audit.capsule_repeated_exposure_count == 0
     assert audit.utility_selected_count == 1
     assert audit.progress_states == {"STALLED": 1}
-    assert audit.tool_outcome_counts == {"useful_red": 1}
+    assert audit.tool_outcome_counts == {
+        "shell_lifecycle": 1,
+        "success": 1,
+        "useful_red": 1,
+    }
     assert audit.tool_outcome_new_capsule_count == 1
+    assert audit.shell_lifecycle_recovered_count == 1
+    assert audit.shell_lifecycle_unrecovered_count == 0
 
 
 def test_attribution_integrity_failure_is_red(tmp_path):

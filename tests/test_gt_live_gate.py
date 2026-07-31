@@ -40,6 +40,7 @@ def _task(
     predicate_invalid_receipt_count=0,
     graph_evidence_unlinked_count=0,
     graph_evidence_revision_mismatch_count=0,
+    shell_lifecycle_unrecovered_count=0,
 ):
     return {
         "task_name": name,
@@ -85,6 +86,9 @@ def _task(
         "graph_evidence_unlinked_count": graph_evidence_unlinked_count,
         "graph_evidence_revision_mismatch_count": (
             graph_evidence_revision_mismatch_count
+        ),
+        "shell_lifecycle_unrecovered_count": (
+            shell_lifecycle_unrecovered_count
         ),
     }
 
@@ -296,6 +300,7 @@ def test_live_gate_requires_complete_improvement_receipts(tmp_path):
         "predicate_invalid_receipt_count": 1,
         "graph_evidence_unlinked_count": 1,
         "graph_evidence_revision_mismatch_count": 1,
+        "shell_lifecycle_unrecovered_count": 1,
     })
     report = evaluate_live_gate(
         {"tasks": [broken]},
@@ -312,7 +317,7 @@ def test_live_gate_requires_complete_improvement_receipts(tmp_path):
     assert "invalid semantic predicate receipt" in joined
     assert "tool-outcome census mismatch" in joined
     assert "unknown tool outcome" in joined
-    assert "shell lifecycle" in joined
+    assert "unrecovered persistent shell" in joined
     assert "graph context refresh failure" in joined
     assert "capsule repeated" in joined
     assert "invalid utility selection" in joined

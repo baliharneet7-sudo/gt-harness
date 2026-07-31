@@ -630,10 +630,23 @@ def summarize_features(
             feature_id = str(payload.get("feature_id") or "")
             decision = str(payload.get("decision") or "")
             reason = str(payload.get("reason") or decision or "control_evaluated")
+            routed_feature = (
+                feature_for_evidence(
+                    str(payload.get("evidence_type") or "")
+                )
+                if feature_id == "GT_ROLE_DRIVEN_COALITION"
+                else None
+            )
             if decision == "APPLIED":
                 update(feature_id, "WITNESSED", reason)
             elif decision in {"SUPPRESSED", "DROPPED"}:
                 update(feature_id, "SUPPRESSED_WITH_REASON", reason)
+                if routed_feature:
+                    update(
+                        routed_feature,
+                        "SUPPRESSED_WITH_REASON",
+                        reason,
+                    )
             elif decision == "ERROR":
                 update(feature_id, "TELEMETRY_FAULT", reason)
             elif feature_id:
