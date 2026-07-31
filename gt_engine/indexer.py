@@ -14,6 +14,7 @@ tasks (no harm, no noise).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -73,7 +74,9 @@ def _seed_binary_env() -> None:
 def ensure_index(root: str) -> str | None:
     """Ensure a fresh graph.db exists for ``root``; return its path or None.
 
-    The db lives at <root>/.gt/graph.db with a self-ignoring .gitignore.
+    When ``GT_STATE_DIR`` is set, the db lives in a root-identity subdirectory
+    there, completely outside the indexed/graded repository. The local default
+    remains ``<root>/.gt/graph.db`` with a self-ignoring ``.gitignore``.
     Re-indexed on every call (a stale graph would violate correct-or-quiet;
     gt-index is fast). Never raises.
     """
@@ -85,11 +88,19 @@ def ensure_index(root: str) -> str | None:
         _seed_binary_env()
         from groundtruth._binary import run_index
 
-        gt_dir = Path(root) / ".gt"
-        gt_dir.mkdir(exist_ok=True)
-        ignore = gt_dir / ".gitignore"
-        if not ignore.exists():
-            ignore.write_text("*\n", encoding="utf-8")
+        external = str(os.environ.get("GT_STATE_DIR") or "").strip()
+        if external:
+            root_key = hashlib.sha256(
+                os.path.realpath(root).encode("utf-8", "surrogatepass")
+            ).hexdigest()[:16]
+            gt_dir = Path(external) / root_key
+            gt_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            gt_dir = Path(root) / ".gt"
+            gt_dir.mkdir(exist_ok=True)
+            ignore = gt_dir / ".gitignore"
+            if not ignore.exists():
+                ignore.write_text("*\n", encoding="utf-8")
         db = gt_dir / "graph.db"
         if not run_index(str(root), str(db)):
             return None

@@ -1,5 +1,5 @@
 
-from nano.agent import Agent, AgentResult
+from nano.agent import Agent, AgentResult, gt_harness_access_reason
 from nano.providers import StepResult, ToolCall, Usage
 
 
@@ -21,6 +21,34 @@ class FakeProvider:
 
 def _u(i, o):
     return Usage(input_tokens=i, output_tokens=o)
+
+
+def test_gt_harness_access_guard_rejects_access_but_allows_exclusions():
+    assert gt_harness_access_reason(
+        "bash",
+        {"command": "ls -la .gt && find .gt -type f"},
+    )
+    assert gt_harness_access_reason(
+        "read_file",
+        {"path": "/installed-agent/nano-harness/gt_engine/bridge.py"},
+    )
+    assert gt_harness_access_reason(
+        "edit_file",
+        {"path": "/tmp/.nano-gt-state/abc/graph.db"},
+    )
+    assert gt_harness_access_reason(
+        "bash",
+        {"command": "grep -rn token . --exclude-dir=.gt"},
+    ) is None
+    assert gt_harness_access_reason(
+        "bash",
+        {
+            "command": (
+                "find . -path ./.git -prune -o -path ./.gt -prune "
+                "-o -type f -print"
+            )
+        },
+    ) is None
 
 
 def test_bash_timeout_is_clamped_to_wall_clock_finalization_reserve():

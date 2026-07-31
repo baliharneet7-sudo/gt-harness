@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -622,6 +623,31 @@ def test_ensure_index_non_code_root_returns_none(tmp_path):
     assert ensure_index(str(tmp_path)) is None
     assert ensure_index(str(tmp_path / "missing")) is None
     assert ensure_index(None) is None
+
+
+@requires_gt
+def test_ensure_index_can_keep_graph_state_outside_repository(
+        tmp_path, monkeypatch):
+    import groundtruth._binary
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    state = tmp_path / "private-state"
+    monkeypatch.setenv("GT_STATE_DIR", str(state))
+
+    def fake_run_index(_root, output):
+        Path(output).write_bytes(b"sqlite")
+        return True
+
+    monkeypatch.setattr(groundtruth._binary, "run_index", fake_run_index)
+
+    db = ensure_index(str(repo))
+
+    assert db is not None
+    assert Path(db).is_relative_to(state)
+    assert Path(db).name == "graph.db"
+    assert not (repo / ".gt").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -1593,6 +1619,65 @@ def test_progress_control_enters_finalization_once(indexed_repo):
         if row["event_type"] == "progress.control_issued"
     ]
     assert rows[-1]["payload"]["mode"] == "finalization"
+
+
+@requires_gt
+def test_finalization_prioritizes_install_end_state_over_descriptive_clauses(
+        indexed_repo):
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import compile_obligation_predicates
+
+    bridge = indexed_repo
+    obligations = tuple(
+        Obligation(f"obl-{index}", f"Descriptive compatibility clause {index}.", "task")
+        for index in range(6)
+    ) + (
+        Obligation(
+            "obl-install",
+            "Install the package from source to the system global Python environment.",
+            "task",
+        ),
+    )
+    bridge._task_contract = TaskContract("code_behavior", obligations)
+    bridge._obligation_predicates = compile_obligation_predicates(
+        bridge._task_contract
+    )
+    bridge.iteration_budget = 100
+
+    control = bridge.progress_control(80)
+    checkpoint = bridge._render_context_checkpoint()
+
+    assert control is not None
+    assert "Install the package" in control
+    priority = json.loads(
+        checkpoint.split("\n[jit graph evidence]", 1)[0]
+    )["obligations"]["priority_unresolved"]
+    assert priority[0]["id"] == "obl-install"
+
+
+@requires_gt
+def test_finalization_control_rejects_broad_views_but_allows_checks(
+        indexed_repo):
+    bridge = indexed_repo
+    bridge.iteration_budget = 100
+    assert bridge.progress_control(80)
+
+    assert bridge.tool_control_reason(
+        "read_file", {"path": "pkg/alpha.py"}
+    )
+    assert bridge.tool_control_reason(
+        "bash", {"command": "grep -rn helper ."}
+    )
+    assert bridge.tool_control_reason(
+        "bash", {"command": "python -m pytest -q"}
+    ) is None
+    assert bridge.tool_control_reason(
+        "edit_file", {"path": "pkg/alpha.py", "old": "x", "new": "y"}
+    ) is None
+    bridge._recent_failure_paths = ("/repo/pkg/failing.py",)
+    assert bridge.tool_control_reason(
+        "read_file", {"path": "/repo/pkg/failing.py"}
+    ) is None
 
 
 @requires_gt

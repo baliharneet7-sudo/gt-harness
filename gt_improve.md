@@ -1775,6 +1775,75 @@ and immutable-artifact replay. Only then may another paid five-task GT-on smoke
 run. The live acceptance condition remains reward non-worse than the frozen
 baseline plus per-task reductions that do not hide a correctness regression.
 
+### Lifecycle-control live result: run 30608738489
+
+Run `30608738489` tested commit `15deec1` with the same required five-way
+DeepSeek V4 Flash configuration. Harbor completed in 18 minutes 43 seconds and
+the artifact uploaded. The attribution gate failed, and unlike the preceding
+parser defect, this failure is real: the sanitizer agent executed `ls .gt` and
+`find .gt`, directly inspecting GT state inside the graded repository.
+
+| task | reward | stop | iterations | input | output | controls |
+|---|---:|---|---:|---:|---:|---|
+| build-cython-ext | 0 | max iterations | 100 | 487,883 | 40,738 | finalization@80 |
+| headless-terminal | 1 | end turn | 53 | 275,778 | 40,060 | verified_completion@41 |
+| llm-inference-batching-scheduler | 0 | max iterations | 100 | 620,725 | 16,866 | artifact_completion@50; finalization@80 |
+| reshard-c4-data | 1 | max iterations | 100 | 669,939 | 85,211 | verified_completion@43; finalization@80 |
+| sanitize-git-repo | 1 | end turn | 76 | 508,896 | 63,464 | none |
+
+The controls were wired at their declared times. Headless improved from 100 to
+53 iterations after its fresh-GREEN control. The batching control named the
+missing output paths at iteration 50, but the immediate response only listed
+the output/input directories and then resumed reading `cost_model.py`; neither
+required plan file was ever created. A model-visible directive without a
+pre-dispatch policy is therefore not deterministic loop control.
+
+The result again fails the benefit gate. On the four frozen-comparable tasks,
+reward is 2/4 versus 4/4, iterations are 376 versus 195 (+92.8%), input tokens
+are 2,287,443 versus 5,884,607 (-61.1%), and output tokens are 206,279 versus
+90,374 (+128.2%). All eligible step-0 localization remained on time (3/3);
+10 identities were witnessed and 15 exercised; six lifecycle controls were
+receipted. Those wiring facts do not offset the outcome and isolation failures.
+
+The verifier failures remain exact:
+
+- build never installed `pyknotid` globally, so 9 of 11 verifier tests failed
+  with `ModuleNotFoundError`;
+- batching never created `plan_b1.jsonl` or `plan_b2.jsonl`, so 5 of 6 verifier
+  tests failed; and
+- reshard and sanitizer passed, but consumed more iterations/output than their
+  deterministic state justified.
+
+### Isolation and enforceable-control correction
+
+The trace requires a real boundary, not another prompt sentence:
+
+1. Terminal-Bench now sets `GT_STATE_DIR=/tmp/.nano-gt-state`. `ensure_index`
+   stores `graph.db` under a hash of the repository identity there and never
+   creates `<repo>/.gt`.
+2. With GT active, nano rejects direct tool access to `.gt`,
+   `/installed-agent`, `/logs/agent`, and `/tmp/.nano-gt-state` before
+   dispatch. Explicit prune/exclusion expressions remain legal.
+3. Rejections are hash-safe `tool.control_decision` receipts. The audit reports
+   rejected harness access separately from an executed forbidden-path
+   violation; a blocked command is not mislabeled as filesystem access.
+4. After `artifact_completion`, unrelated read/search calls are rejected while
+   required outputs remain absent. Reads of the named input/output surfaces
+   remain allowed; edits, generation commands, and executable checks remain
+   allowed.
+5. After `finalization`, broad read/search calls are rejected. A target named
+   by the latest concrete failure traceback is still readable, and edits/tests
+   remain allowed, so the boundary does not suppress a proven repair.
+6. Unresolved end-state obligations are semantically ordered before rendering:
+   install/deploy requirements first, required artifacts next, then explicit
+   must/should conditions. Build's global-install requirement can no longer be
+   hidden as item seven behind the three-item finalization limit.
+
+No further paid smoke is justified until these rules pass focused isolation,
+agent, engine, audit, all-17, and full-suite verification. The next artifact
+must show either zero harness attempts or explicit pre-dispatch rejections and
+zero executed violations.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal

@@ -15,3 +15,26 @@ def test_gt_staged_source_cleanup_is_exact_and_guarded():
         "\"/installed-agent/nano-harness\" && "
         "rm -rf -- /installed-agent/nano-harness"
     )
+
+
+def test_gt_run_uses_external_private_state_directory(monkeypatch, tmp_path):
+    class _Environment:
+        pass
+
+    captured = {}
+
+    async def fake_exec(_self, _environment, command, env):
+        captured["command"] = command
+        captured["env"] = env
+
+    monkeypatch.setattr(GTNanoAgent, "exec_as_agent", fake_exec)
+    agent = GTNanoAgent(logs_dir=tmp_path)
+    agent.model_name = "deepseek-v4-flash"
+    agent.gt_profile = "2"
+
+    import asyncio
+
+    asyncio.run(agent.run("task", _Environment(), object()))
+
+    assert captured["env"]["GT_STATE_DIR"] == "/tmp/.nano-gt-state"
+    assert '--gt-root "$PWD"' in captured["command"]

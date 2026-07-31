@@ -878,6 +878,20 @@ the last concrete action. Graph ranking now weights distinctive anchors and
 down-ranks words repeated across many obligations, preventing generic overlap
 from masquerading as task localization.
 
+Run `30608738489` proved that those lifecycle controls were live but not yet
+enforceable. Six controls fired at their specified iterations; headless stopped
+at iteration 53, but batching ignored the artifact directive and still ended
+without either required plan. The sanitizer agent also directly inspected
+`.gt`, making the run an isolation failure even though its task verifier
+passed.
+
+The corrected lifecycle implementation therefore moves `graph.db` outside the
+repository and adds a GT-only pre-dispatch tool policy. Harness-path access is
+rejected and receipted; artifact-completion and finalization states reject
+unrelated repository observation while preserving output/input access,
+edits, tests, and targeted reads named by a fresh failure. These are lifecycle
+controls, not additional canonical features and not semantic-delivery claims.
+
 ### Required engine metrics
 
 | Metric | Required interpretation |

@@ -543,3 +543,31 @@ Each mode is issued at most once and receipted as
 paths, prioritized unresolved obligation text and predicate types, remaining
 iterations, and the last concrete action. Artifact existence is never promoted
 to semantic verification without an executable check.
+
+## Enforceability addendum: run 30608738489
+
+Run `30608738489` showed that correct-time delivery is necessary but not
+sufficient. `artifact_completion` reached batching at iteration 50 and
+`finalization` at 80, yet the model returned to unrelated source reads and
+finished without the required artifacts. Six controls fired across the run,
+but three tasks still reached iteration 100.
+
+The same run exposed a separate hard failure: sanitizer executed real `.gt`
+inspection commands. The graph database had been stored under the graded
+repository, so prompt-only isolation was structurally false.
+
+The revised timing contract now includes pre-dispatch enforceability:
+
+- graph state lives under the external `GT_STATE_DIR`, not the task root;
+- explicit harness-path access is rejected before execution;
+- artifact-completion rejects unrelated repository observation until the
+  required output paths exist;
+- finalization rejects broad observation but permits edits, executable checks,
+  and a targeted read named by the latest failure; and
+- finalization prioritizes install/deploy and required-artifact end states
+  before descriptive compatibility clauses; and
+- the audit distinguishes rejected access from executed access using
+  `tool.control_decision` receipts.
+
+The next live gate must show zero executed harness accesses. A blocked attempt
+is reported separately and does not count as an isolation violation.

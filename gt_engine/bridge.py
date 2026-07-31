@@ -490,6 +490,7 @@ class GTBridge:
         self._progress_intervention_count = 0
         self._progress_control_modes: set[str] = set()
         self._last_action_summary = ""
+        self._recent_failure_paths: tuple[str, ...] = ()
         self.iteration_budget = 0
         self._last_model_iteration = 0
         self._last_submit_block_reason = ""
@@ -651,14 +652,41 @@ class GTBridge:
             for item in obligations
             if str(item.obligation_id) not in met_ids
         ]
-        priority = {
-            "numeric_threshold": 0,
+        kind_priority = {
+            "artifact": 0,
+            "numeric_threshold": 1,
             "content_scope": 1,
-            "artifact": 2,
-            "behavior": 3,
+            "behavior": 2,
         }
+
+        def priority(row: tuple[str, str, str]) -> tuple[int, int]:
+            text = row[1].lower()
+            # Delivery/install/deploy requirements are end-state conditions,
+            # not implementation detail. They must not disappear behind the
+            # first three descriptive clauses at finalization.
+            if re.search(
+                r"\b(?:install|installed|deploy|deployed|publish|published)\b",
+                text,
+            ):
+                semantic = 0
+            elif row[2] in {"numeric_threshold", "content_scope"}:
+                semantic = 1
+            elif row[2] == "artifact" or re.search(
+                r"\b(?:create|generate|produce|output artifact)\b",
+                text,
+            ):
+                semantic = 2
+            elif re.search(
+                r"\b(?:must|should|required|at the very least)\b",
+                text,
+            ):
+                semantic = 3
+            else:
+                semantic = 4
+            return semantic, kind_priority.get(row[2], 2)
+
         unmet_rows.sort(
-            key=lambda row: priority.get(row[2], 2)
+            key=priority
         )
         unmet_ids = [row[0] for row in unmet_rows]
         unmet = [row[1] for row in unmet_rows]
@@ -1258,8 +1286,10 @@ class GTBridge:
         ]
         verified = sorted(self._verified_obligation_ids)
         unresolved = [item for item in all_ids if item not in self._verified_obligation_ids]
+        coverage = self._obligation_coverage()
+        priority_ids = list(coverage["unmet_ids"])
         unresolved_details = []
-        for obligation_id in unresolved[:5]:
+        for obligation_id in priority_ids[:5]:
             item = obligation_by_id.get(obligation_id)
             predicate = self._obligation_predicates.get(obligation_id)
             unresolved_details.append({
@@ -1478,6 +1508,94 @@ class GTBridge:
             },
         )
         return directive
+
+    def tool_control_reason(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> str | None:
+        """Reject broad observation after a deterministic control boundary."""
+        if not self._progress_control_modes:
+            return None
+        name = str(tool_name or "")
+        command = str(tool_args.get("command") or "")
+        path = self._fwd(str(tool_args.get("path") or ""))
+        observation = name == "read_file"
+        if name == "bash" and command.strip():
+            try:
+                from groundtruth.runtime.gateway import (
+                    KIND_SEARCH,
+                    KIND_VIEW,
+                    classify_command,
+                )
+
+                observation = classify_command(command) in {
+                    KIND_SEARCH,
+                    KIND_VIEW,
+                }
+            except Exception:  # noqa: BLE001 - unknown command stays allowed
+                observation = False
+        if not observation:
+            return None
+        if "finalization" in self._progress_control_modes:
+            hay = (command + "\n" + path).lower()
+            if any(
+                needle and needle in hay
+                for failure_path in self._recent_failure_paths
+                for needle in {
+                    self._fwd(failure_path).lower(),
+                    os.path.basename(self._fwd(failure_path)).lower(),
+                }
+            ):
+                return None
+            return (
+                "Finalization mode forbids further repository search/view. "
+                "Execute the smallest remaining edit or verification, then "
+                "finish."
+            )
+        if "artifact_completion" in self._progress_control_modes:
+            missing = self._artifact_readiness()[
+                "missing_required_artifacts"
+            ]
+            allowed_needles = {
+                self._fwd(item).lower()
+                for item in missing
+            } | {
+                os.path.basename(self._fwd(item)).lower()
+                for item in missing
+            }
+            hay = (command + "\n" + path).lower()
+            if (
+                "output_data" not in hay
+                and "input_data" not in hay
+                and not any(needle and needle in hay for needle in allowed_needles)
+            ):
+                return (
+                    "Artifact-completion mode forbids unrelated repository "
+                    "research while required outputs are absent. Create or "
+                    "check the named output artifacts now."
+                )
+        return None
+
+    def trace_tool_control(
+        self,
+        *,
+        decision: str,
+        reason: str,
+        reason_code: str,
+        tool_name: str,
+    ) -> None:
+        self._trace_record(
+            "tool.control_decision",
+            "pre_dispatch",
+            {
+                "decision": str(decision),
+                "reason": str(reason),
+                "reason_code": str(reason_code),
+                "tool_name": str(tool_name),
+                "model_iteration": int(self._last_model_iteration + 1),
+            },
+        )
 
     def trace_model_request(
         self, iteration: int, messages: list[dict[str, Any]]
@@ -2955,6 +3073,17 @@ class GTBridge:
             import hashlib
             summary = " ".join((cmd or str(tool_name or "")).split())
             self._last_action_summary = summary[:240]
+            if is_error:
+                candidates = re.findall(
+                    r"(?:/[A-Za-z0-9_.-]+)+\."
+                    r"(?:py|pyi|go|rs|js|jsx|ts|tsx|c|h|cc|cpp|sh)",
+                    output or "",
+                )
+                self._recent_failure_paths = tuple(
+                    dict.fromkeys(self._fwd(item) for item in candidates)
+                )[:8]
+            elif changed:
+                self._recent_failure_paths = ()
 
             self._trace_record(
                 "observation.received",

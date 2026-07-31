@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -7,6 +8,46 @@ from typing import Any
 
 from .providers import Provider, StepResult, ToolCall
 from .tools import TOOLS, BashTool, ToolError, dispatch
+
+_GT_SAFE_EXCLUSION_RE = re.compile(
+    r"(?ix)"
+    r"(?:"
+    r"--exclude-dir(?:=|\s+)['\"]?\.gt['\"]?"
+    r"|--glob(?:=|\s+)['\"]?!\.gt(?:/\*)?['\"]?"
+    r"|-not\s+-path\s+['\"]?(?:\./)?\.gt(?:/\*)?['\"]?"
+    r"|-path\s+['\"]?(?:\./)?\.gt(?:/\*)?['\"]?\s+-prune"
+    r")"
+)
+_GT_HARNESS_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s'\"=:(])(?:"
+    r"(?:\./)?\.gt(?:/|[\s'\";|&)]|$)"
+    r"|/installed-agent(?:/|[\s'\";|&)]|$)"
+    r"|/logs/agent(?:/|[\s'\";|&)]|$)"
+    r"|/tmp/\.nano-gt-state(?:/|[\s'\";|&)]|$)"
+    r")"
+)
+
+
+def gt_harness_access_reason(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str | None:
+    """Name an explicit GT/harness path access, excluding prune expressions."""
+    name = str(tool_name or "")
+    if name == "bash":
+        candidate = _GT_SAFE_EXCLUSION_RE.sub(
+            "", str(arguments.get("command") or "")
+        )
+    elif name in {"read_file", "edit_file"}:
+        candidate = str(arguments.get("path") or "")
+    else:
+        return None
+    if _GT_HARNESS_PATH_RE.search(candidate):
+        return (
+            "GroundTruth and harness state is outside the task filesystem "
+            "contract; this access was not executed."
+        )
+    return None
 
 
 def affordable_bash_timeout(
@@ -440,6 +481,41 @@ class Agent:
         for call in calls:
             effective_arguments = dict(call.arguments)
             budget_error = ""
+            isolation_error = ""
+            tool_control_code = ""
+            if self._gt is not None:
+                isolation_error = (
+                    gt_harness_access_reason(
+                        call.name, effective_arguments
+                    ) or ""
+                )
+                if isolation_error:
+                    tool_control_code = "harness_isolation"
+                if not isolation_error and hasattr(
+                    self._gt, "tool_control_reason"
+                ):
+                    try:
+                        isolation_error = (
+                            self._gt.tool_control_reason(
+                                call.name, effective_arguments
+                            ) or ""
+                        )
+                    except Exception:  # noqa: BLE001 - policy is fail-open
+                        isolation_error = ""
+                    if isolation_error:
+                        tool_control_code = "lifecycle_control"
+                if isolation_error and hasattr(
+                    self._gt, "trace_tool_control"
+                ):
+                    try:
+                        self._gt.trace_tool_control(
+                            decision="REJECTED",
+                            reason=isolation_error,
+                            reason_code=tool_control_code,
+                            tool_name=call.name,
+                        )
+                    except Exception:  # noqa: BLE001 - telemetry only
+                        pass
             if call.name == "bash":
                 raw_timeout = effective_arguments.get("timeout", 60)
                 try:
@@ -511,6 +587,12 @@ class Agent:
                 except Exception:  # noqa: BLE001 - GT must never break dispatch
                     pass
             try:
+                if isolation_error:
+                    raise ToolError(
+                        isolation_error,
+                        kind="gt_tool_control",
+                        recovery="return_to_task_or_finish",
+                    )
                 if budget_error:
                     raise ToolError(
                         budget_error,

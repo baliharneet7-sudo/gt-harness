@@ -284,6 +284,10 @@ class GTNanoAgent(NanoAgent):
         env.update({k: v for k, v in os.environ.items() if k.startswith("GT_")})
         env.update(self.resolve_env_vars())
         env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
+        # Keep mutable GT state completely outside the graded repository. The
+        # task container is isolated per trial, so this private tmp location
+        # cannot collide across the five concurrent tasks.
+        env["GT_STATE_DIR"] = "/tmp/.nano-gt-state"
         # --gt-root "$PWD": single point of GT activation. Deliberately NOT
         # shlex-quoted — the $PWD must survive into the container's shell and
         # expand THERE (harbor prefixes `set -o pipefail; ` and execs the

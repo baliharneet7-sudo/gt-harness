@@ -746,6 +746,9 @@ class TaskAudit:
     progress_control_iterations: dict[str, list[int]] = field(
         default_factory=dict
     )
+    tool_control_rejected_count: int = 0
+    harness_access_rejected_count: int = 0
+    lifecycle_tool_rejected_count: int = 0
     tool_outcome_classified_count: int = 0
     tool_outcome_counts: dict[str, int] = field(default_factory=dict)
     tool_outcome_harmful_count: int = 0
@@ -1205,6 +1208,18 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 a.progress_control_iterations.setdefault(mode, []).append(
                     iteration
                 )
+            elif (
+                event_type == "tool.control_decision"
+                and payload.get("decision") == "REJECTED"
+            ):
+                a.tool_control_rejected_count += 1
+                reason_code = str(payload.get("reason_code") or "")
+                a.harness_access_rejected_count += int(
+                    reason_code == "harness_isolation"
+                )
+                a.lifecycle_tool_rejected_count += int(
+                    reason_code == "lifecycle_control"
+                )
             elif event_type == "tool.budget_decision":
                 a.tool_budget_receipt_count += 1
                 decision = str(payload.get("decision") or "")
@@ -1274,6 +1289,15 @@ def audit_task(task_dir: Path) -> TaskAudit:
             max(0, count - 1) for count in exposure_counts.values()
         )
         a.shell_lifecycle_unrecovered_count = pending_shell_lifecycle
+        if a.harness_access_rejected_count:
+            blocked = min(
+                a.forbidden_harness_path_attempt_count,
+                a.harness_access_rejected_count,
+            )
+            a.forbidden_harness_path_attempt_count -= blocked
+            a.forbidden_harness_path_samples = (
+                a.forbidden_harness_path_samples[blocked:]
+            )
         for row in attribution_rows:
             if row.get("event_type") != "control.decision":
                 continue
