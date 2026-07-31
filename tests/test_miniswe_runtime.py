@@ -48,3 +48,19 @@ def test_runtime_hooks_are_idempotent(tmp_path):
     first = install_runtime_hooks(agent, adapter)
     second = install_runtime_hooks(agent, adapter)
     assert first is second
+
+
+def test_real_miniswe_entrypoint_builds_pinned_adapter(tmp_path):
+    from scripts.miniswe_gt_run import build_agent
+
+    agent, adapter = build_agent(
+        task="Create output.py and run pytest.",
+        model="deepseek-v4-flash",
+        cwd=str(tmp_path),
+        state_dir=str(tmp_path / "state"),
+        output=None,
+        temperature=1.0,
+    )
+    assert agent._gt_runtime_hook_handle.installed is True
+    assert adapter.contract is not None
+    assert adapter.task_id
