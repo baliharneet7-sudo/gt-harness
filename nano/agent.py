@@ -140,6 +140,18 @@ class Agent:
                 ))
 
             self._sync_gt_budget()
+            if self._gt is not None and hasattr(self._gt, "progress_control"):
+                try:
+                    gt_control = self._gt.progress_control(iteration)
+                except Exception:  # noqa: BLE001 - control is fail-open
+                    gt_control = None
+                if gt_control:
+                    messages.append({"role": "user", "content": gt_control})
+                    transcript.append({
+                        "type": "user",
+                        "content": gt_control,
+                        "gt": "progress_control",
+                    })
             # GT integration point 3: evidence-aware truncation. Stock path
             # (and stock bytes) whenever the GT bridge is absent; the GT path
             # itself falls back to stock truncation on any fault.

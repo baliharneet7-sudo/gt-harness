@@ -511,3 +511,35 @@ The next live candidate is accepted only when:
 - token reduction does not hide a correctness regression; and
 - stable superiority is claimed only after repeated GT-on trials because
   temperature 1 is stochastic.
+
+## Candidate-result addendum: run 30606642296
+
+The first implementation of this plan was tested live in run `30606642296`.
+It proved the timing contract but failed the outcome contract:
+
+- all eligible step-0 localization was provider-exposed and response-linked at
+  iteration 1;
+- all delivery, lifecycle, replay, budget, and isolation checks pass after
+  correcting a parser false positive for explicit `.gt` exclusions;
+- input tokens fell 67.7% on the four frozen-comparable tasks;
+- reward fell from the frozen 4/4 to 2/4, iterations rose 77.9%, and output
+  tokens rose 63.9%.
+
+The trace shows that request compaction succeeded while deterministic control
+was incomplete. Required output paths remained only in the durable task
+contract, fresh GREEN did not produce a salient completion boundary, and the
+ranker could favor generic cross-obligation overlap.
+
+The follow-up therefore adds three just-in-time states:
+
+1. `artifact_completion` at 50% when a contract-scoped required artifact is
+   absent;
+2. `verified_completion` after a fresh post-edit GREEN; and
+3. `finalization` at 80% with remaining requests and the smallest unresolved
+   requirement.
+
+Each mode is issued at most once and receipted as
+`progress.control_issued`. The checkpoint now carries exact missing artifact
+paths, prioritized unresolved obligation text and predicate types, remaining
+iterations, and the last concrete action. Artifact existence is never promoted
+to semantic verification without an executable check.

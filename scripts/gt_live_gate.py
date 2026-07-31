@@ -74,6 +74,7 @@ def evaluate_live_gate(
         "utility_scored": 0,
         "utility_abstained": 0,
         "progress_transitions": 0,
+        "progress_controls": 0,
         "harmful_tool_outcomes": 0,
         "new_capsule_tool_outcomes": 0,
     }
@@ -213,6 +214,9 @@ def evaluate_live_gate(
         )
         improvement_totals["progress_transitions"] += int(
             task.get("progress_transition_count") or 0
+        )
+        improvement_totals["progress_controls"] += int(
+            task.get("progress_control_count") or 0
         )
         improvement_totals["harmful_tool_outcomes"] += int(
             task.get("tool_outcome_harmful_count") or 0

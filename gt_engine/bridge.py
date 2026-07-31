@@ -488,6 +488,8 @@ class GTBridge:
 
         self._progress = ProgressLedger(stall_threshold=2)
         self._progress_intervention_count = 0
+        self._progress_control_modes: set[str] = set()
+        self._last_action_summary = ""
         self.iteration_budget = 0
         self._last_model_iteration = 0
         self._last_submit_block_reason = ""
@@ -1247,11 +1249,32 @@ class GTBridge:
         obligations = tuple(
             getattr(self._task_contract, "obligations", ()) or ()
         )
+        obligation_by_id = {
+            str(getattr(item, "obligation_id", "") or ""): item
+            for item in obligations
+        }
         all_ids = [
             str(getattr(item, "obligation_id", "") or "") for item in obligations
         ]
         verified = sorted(self._verified_obligation_ids)
         unresolved = [item for item in all_ids if item not in self._verified_obligation_ids]
+        unresolved_details = []
+        for obligation_id in unresolved[:5]:
+            item = obligation_by_id.get(obligation_id)
+            predicate = self._obligation_predicates.get(obligation_id)
+            unresolved_details.append({
+                "id": obligation_id,
+                "text": " ".join(
+                    str(getattr(item, "text", "") or "").split()
+                )[:280],
+                "predicate": str(getattr(predicate, "kind", "") or "unknown"),
+                "scope": list(getattr(predicate, "scope", ()) or ())[:4],
+            })
+        readiness = self._artifact_readiness()
+        remaining_iterations = (
+            max(0, int(self.iteration_budget) - int(self._last_model_iteration))
+            if self.iteration_budget > 0 else None
+        )
         stale = sorted(
             predicate_id
             for predicate_id, receipt in self._predicate_receipts.items()
@@ -1271,6 +1294,8 @@ class GTBridge:
             "boundary": self._active_boundary,
             "action_index": self.action_index,
             "budget": {
+                "iteration_limit": int(self.iteration_budget or 0),
+                "iterations_remaining": remaining_iterations,
                 "wall_seconds_remaining": (
                     round(float(self.wall_seconds_remaining), 1)
                     if getattr(self, "wall_seconds_remaining", None) is not None
@@ -1283,8 +1308,10 @@ class GTBridge:
             "obligations": {
                 "verified": verified,
                 "unresolved": unresolved,
+                "priority_unresolved": unresolved_details,
                 "stale_predicates": stale,
             },
+            "readiness": readiness,
             "changed_paths": list(self.edited_files[-12:]),
             "verification": {
                 "latest_edit_action": self._last_task_edit_action,
@@ -1323,6 +1350,7 @@ class GTBridge:
                 if self._observed_red else ""
             ),
             "progress": self._progress.state,
+            "last_action": self._last_action_summary,
             "exposed_delivery_ids": sorted(
                 delivery_id
                 for delivery_id, count in self._delivery_exposures.items()
@@ -1335,6 +1363,121 @@ class GTBridge:
         if graph_lines:
             rendered += "\n[jit graph evidence]\n" + "\n".join(graph_lines)
         return rendered
+
+    def _artifact_readiness(self) -> dict[str, Any]:
+        """Return exact missing required artifact paths without claiming success.
+
+        This reads only paths already present in the task-derived contract. It
+        is deliberately a state renderer, not a verification receipt: absence
+        can guide the next action, while presence still requires an executable
+        check before the obligation becomes verified.
+        """
+        missing: list[str] = []
+        present: list[str] = []
+        for obligation_id, predicate in self._obligation_predicates.items():
+            if (
+                obligation_id in self._verified_obligation_ids
+                or str(getattr(predicate, "kind", "") or "") != "artifact"
+            ):
+                continue
+            for raw_path in tuple(getattr(predicate, "scope", ()) or ()):
+                path = str(raw_path or "")
+                if not path:
+                    continue
+                candidate = (
+                    path if os.path.isabs(path)
+                    else os.path.join(self.repo_root, path)
+                )
+                target = present if os.path.exists(candidate) else missing
+                if path not in target:
+                    target.append(path)
+        return {
+            "missing_required_artifacts": missing[:8],
+            "present_unverified_artifacts": present[:8],
+        }
+
+    def progress_control(self, iteration: int) -> str | None:
+        """Issue one bounded, deterministic lifecycle directive when needed."""
+        limit = int(self.iteration_budget or 0)
+        current = max(1, int(iteration))
+        readiness = self._artifact_readiness()
+        missing = list(readiness["missing_required_artifacts"])
+        fresh_green = bool(
+            self._last_green_verification_action
+            and self._last_green_verification_action
+            > self._last_task_edit_action
+            and self._observed_red is None
+        )
+        mode = ""
+        if limit > 0 and current >= max(1, int(limit * 0.8)):
+            mode = "finalization"
+        elif (
+            missing
+            and limit > 0
+            and current >= max(1, int(limit * 0.5))
+        ):
+            mode = "artifact_completion"
+        elif fresh_green and self._last_task_edit_action:
+            mode = "verified_completion"
+        if not mode or mode in self._progress_control_modes:
+            return None
+        self._progress_control_modes.add(mode)
+        remaining = max(0, limit - current + 1) if limit else 0
+        unmet = self._obligation_coverage()["unmet"]
+        if mode == "artifact_completion":
+            directive = (
+                "[deterministic GT lifecycle control]\n"
+                "Required output artifacts are still absent: "
+                + ", ".join(missing[:6])
+                + ". Stop broad research; create these outputs now, then run "
+                "an executable existence/content check."
+            )
+        elif mode == "verified_completion":
+            directive = (
+                "[deterministic GT lifecycle control]\n"
+                "A fresh post-edit GREEN check exists. Do not reopen broad "
+                "research. Check only the remaining explicit requirements"
+                + (
+                    ": " + "; ".join(str(item)[:160] for item in unmet[:3])
+                    if unmet else ""
+                )
+                + ", then finish with the verified result."
+            )
+        else:
+            directive = (
+                "[deterministic GT lifecycle control]\n"
+                f"Finalization mode: {remaining} model request(s) remain. "
+                "Do not repeat searches or refactor unrelated code. "
+            )
+            if missing:
+                directive += (
+                    "Create the missing required artifacts now: "
+                    + ", ".join(missing[:6])
+                    + ". "
+                )
+            elif fresh_green and not unmet:
+                directive += "The edited state is GREEN; finish now. "
+            elif unmet:
+                directive += (
+                    "Execute the smallest check for these unresolved requirements: "
+                    + "; ".join(str(item)[:160] for item in unmet[:3])
+                    + ". "
+                )
+            directive += "After that bounded action, submit the result."
+        self._trace_record(
+            "progress.control_issued",
+            "provider",
+            {
+                "mode": mode,
+                "iteration": current,
+                "iteration_limit": limit,
+                "remaining": remaining,
+                "missing_artifact_count": len(missing),
+                "unmet_obligation_count": len(unmet),
+                "fresh_green": fresh_green,
+            },
+        )
+        return directive
 
     def trace_model_request(
         self, iteration: int, messages: list[dict[str, Any]]
@@ -2810,6 +2953,8 @@ class GTBridge:
             cmd, rc, changed, viewed, eba = self._event_parts(
                 tool_name, tool_args, output, is_error, edit_before, edit_after)
             import hashlib
+            summary = " ".join((cmd or str(tool_name or "")).split())
+            self._last_action_summary = summary[:240]
 
             self._trace_record(
                 "observation.received",

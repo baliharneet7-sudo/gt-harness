@@ -129,6 +129,55 @@ def test_agent_clamps_model_bash_timeout_before_dispatch():
     }]
 
 
+def test_agent_injects_ephemeral_gt_progress_control_before_provider_call():
+    fp = FakeProvider([
+        StepResult(
+            text="done",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=_u(10, 5),
+        ),
+    ])
+
+    class _ControlGT:
+        issue_text = ""
+        iteration_budget = 0
+
+        def task_start(self):
+            return None
+
+        def progress_control(self, iteration):
+            assert iteration == 1
+            return "[deterministic GT lifecycle control]\nfinish now"
+
+        def provider_message_view(self, messages, **_kwargs):
+            return messages
+
+        def trace_model_request(self, *_args):
+            return None
+
+        def trace_model_response(self, *_args):
+            return None
+
+        def trace_run_completed(self, *_args):
+            return None
+
+    agent = Agent(
+        provider=fp,
+        system="sys",
+        max_iterations=1,
+        verify=False,
+    )
+    agent._gt = _ControlGT()
+
+    result = agent.run("task")
+
+    assert result.stop_reason == "end_turn"
+    request = fp.calls[0]["messages"]
+    assert request[-1]["content"].endswith("finish now")
+    assert result.transcript[-2]["gt"] == "progress_control"
+
+
 def test_agent_rejects_tool_when_only_finish_reserve_remains():
     fp = FakeProvider([
         StepResult(

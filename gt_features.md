@@ -845,6 +845,39 @@ projection when a graph wakes, admit graph-grounded content-scan evidence, and
 make repository-wide scope exclusions a deterministic pre-submit concern
 before spending another five-task smoke.
 
+### Timely-context live result and lifecycle-control follow-up
+
+Run `30606642296` is the current timing proof for commit `58655d4`. All three
+tasks eligible for task-start localization received the compound
+obligations/localization block in provider iteration 1 and response iteration
+1. Across five tasks, 10 canonical identities were witnessed, 15 were
+exercised, and no identity was dark, faulted, or unexposed. The immutable
+artifact passes the corrected audit and live gate; its original audit failure
+was a parser false positive for commands that explicitly excluded `.gt`.
+
+That run is not outcome proof. On the four frozen-comparable tasks, reward fell
+from 4/4 to 2/4 and iterations rose from 195 to 347. Input tokens fell 67.7%,
+but output tokens rose 63.9%. The batching task never created its required
+`plan_b1.jsonl` and `plan_b2.jsonl` outputs, while two passing tasks continued
+to iteration 100. Deterministic context was cheaper but insufficiently
+controlling.
+
+The follow-up adds lifecycle controls around—not new members of—the canonical
+17:
+
+| control state | exact trigger | model-visible action | proof |
+|---|---|---|---|
+| `artifact_completion` | at least 50% of the iteration budget and a contract-scoped required artifact is absent | names exact missing paths; directs creation plus executable check | `progress.control_issued` with mode and iteration |
+| `verified_completion` | a post-edit behavioral check is GREEN and no later edit/current RED exists | stops broad research; names only unmet requirements; directs finish | same |
+| `finalization` | at least 80% of the iteration budget | names requests remaining and the smallest unresolved check/artifact; forbids repeated search | same |
+
+Each mode fires at most once. Missing or present artifact state is advisory and
+cannot mint a verification receipt. The checkpoint also retains bounded
+unresolved obligation text, predicate kind/scope, remaining iterations, and
+the last concrete action. Graph ranking now weights distinctive anchors and
+down-ranks words repeated across many obligations, preventing generic overlap
+from masquerading as task localization.
+
 ### Required engine metrics
 
 | Metric | Required interpretation |

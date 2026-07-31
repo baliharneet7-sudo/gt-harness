@@ -426,6 +426,52 @@ def test_graph_evidence_is_linked_to_unresolved_need_and_revision():
     assert ranked[0].revision == "rev-a"
 
 
+def test_graph_evidence_does_not_rank_generic_many_obligation_overlap():
+    from gt_engine.graph_context import GraphProjection, GraphSemanticFact
+    from gt_engine.graph_evidence import build_evidence_need, rank_graph_evidence
+    from gt_engine.task_contract import Obligation, TaskContract
+
+    contract = TaskContract(
+        "content_scan",
+        tuple(
+            Obligation(
+                f"obl-{index}",
+                f"Replace sensitive value in unique_target_{index}.py.",
+                "task",
+            )
+            for index in range(4)
+        ),
+    )
+    projection = GraphProjection(
+        files=frozenset({"metadata_filters.py", "unique_target_2.py"}),
+        symbols=frozenset({"sensitive_filter", "unique_target_2"}),
+        node_ids=frozenset({1, 2}),
+        surface_hits=(("symbol_content_fts", 2),),
+        semantic_facts=(
+            GraphSemanticFact(
+                "symbol_content_fts", 1, "metadata_filters.py",
+                "sensitive_filter", "ranked_body", "sensitive replacement",
+                confidence=1.0, revision="rev-a",
+            ),
+            GraphSemanticFact(
+                "symbol_content_fts", 2, "unique_target_2.py",
+                "unique_target_2", "ranked_body", "sanitize unique_target_2",
+                confidence=0.8, revision="rev-a",
+            ),
+        ),
+        revision="rev-a",
+    )
+
+    ranked = rank_graph_evidence(
+        contract,
+        projection,
+        build_evidence_need(contract, projection, boundary="task_start"),
+    )
+
+    assert [item.file_path for item in ranked] == ["unique_target_2.py"]
+    assert ranked[0].obligation_ids == ("obl-2",)
+
+
 @requires_gt
 def test_artifact_only_edit_requires_contract_mapped_verification(
     tmp_path, monkeypatch

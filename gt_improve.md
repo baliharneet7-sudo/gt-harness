@@ -1687,6 +1687,94 @@ Ruff, diff, and workflow validation. The next run is GT-on only:
 concurrency exactly 5. Comparison remains against the frozen GT-off rows; no
 new GT-off run is authorized.
 
+### Live result for the timely-context candidate: run 30606642296
+
+Run `30606642296` tested commit `58655d4` with the required live configuration:
+`deepseek-v4-flash`, temperature 1, Profile 2, timeout multiplier 1.0, and
+concurrency exactly 5. Harbor completed in 15 minutes 33 seconds without an
+outer timeout. The initial workflow audit failed only because its isolation
+parser treated commands that explicitly pruned or excluded `.gt` as forbidden
+access. Recomputing the immutable artifact after correcting that parser yields
+`passed=true` with zero issues and all five task verdicts
+`GREEN-delivered`. This correction changes audit classification only; it does
+not change rewards, tokens, trajectories, or feature witnesses.
+
+| task | reward | stop | iterations | input | output | deliveries | witnessed identities |
+|---|---:|---|---:|---:|---:|---:|---:|
+| build-cython-ext | 0 | max iterations | 100 | 445,991 | 32,306 | 3 | 3 |
+| headless-terminal | 1 | max iterations | 100 | 529,229 | 78,148 | 9 | 9 |
+| llm-inference-batching-scheduler | 0 | max iterations | 100 | 579,011 | 17,335 | 5 | 6 |
+| reshard-c4-data | 1 | max iterations | 100 | 622,620 | 67,830 | 5 | 8 |
+| sanitize-git-repo | 1 | end turn | 47 | 255,209 | 30,652 | 4 | 8 |
+
+The delivery-timing and safety assertions succeeded:
+
+- all three eligible task-start localization capsules were in provider
+  iteration 1 and linked to response iteration 1;
+- the run witnessed 10 canonical identities and exercised 15, with no dark,
+  faulted, or unexposed feature;
+- every bash call had exactly one budget receipt, with zero timeout violations,
+  clamps, or rejections;
+- all lifecycle ordering checks passed; and
+- all five isolation censuses are clean after the exclusion-parser correction.
+
+The efficiency result is not superiority. Against the four frozen GT-off rows,
+this candidate earned 2/4 rather than 4/4 and used 347 rather than 195
+iterations. It reduced input tokens from 5,884,607 to 1,902,831 (-67.7%), but
+increased output tokens from 90,374 to 148,123 (+63.9%). The deterministic
+context compactor therefore worked, but correctness and termination control
+regressed. Lower input cost cannot compensate for two failed tasks.
+
+Exact verifier diagnosis:
+
+1. `build-cython-ext` built local extension objects but never completed the
+   task's required global installation. The final trajectory was still
+   inspecting build surfaces at iteration 100.
+2. `llm-inference-batching-scheduler` never created the required
+   `/app/task_file/output_data/plan_b1.jsonl` and `plan_b2.jsonl` artifacts.
+   It repeatedly edited model and packer code despite those output paths being
+   present in the task-start contract.
+3. `headless-terminal` and `reshard-c4-data` had already reached passing end
+   states but continued to iteration 100. A typed checkpoint recommendation
+   was insufficiently salient to terminate the live model loop.
+4. The graph ranker overvalued a fact matching one generic word across many
+   obligations. On the sanitizer task this put an unrelated metadata-filter
+   surface ahead of the actual target.
+
+### Deterministic control follow-up after run 30606642296
+
+The next candidate addresses those trace-proven defects without adding model
+reasoning:
+
+- the request checkpoint includes remaining iterations, bounded text and
+  predicate type for the five highest-priority unresolved obligations, the
+  last concrete action, exact missing required artifact paths, and
+  present-but-unverified artifact paths;
+- at 50% of the iteration budget, missing required artifacts cause one
+  explicit lifecycle control message that orders artifact creation and an
+  executable existence/content check;
+- a fresh post-edit GREEN causes one completion control message; at 80%, one
+  finalization message forbids repeated search and names the smallest remaining
+  requirement or missing artifact;
+- these controls are one-shot typed state transitions recorded as
+  `progress.control_issued`, not repeatedly retained evidence blocks;
+- artifact presence remains advisory state and never becomes a verification
+  receipt without an executable check;
+- absolute Linux task paths are preserved by predicate compilation; and
+- graph facts now require a distinctive weighted match. A generic anchor that
+  occurs across many obligations cannot win by accumulating link count.
+
+The sanitizer isolation parser regression is also pinned: `.gt` prune
+expressions and prose stating that `.gt` is excluded are removed before the
+forbidden-path census, while actual reads remain reportable.
+
+Local acceptance for this follow-up requires the new progress-control,
+artifact-readiness, graph-specificity, and audit regression tests; the complete
+engine and all-17 suites; full pytest; Ruff; diff validation; workflow parsing;
+and immutable-artifact replay. Only then may another paid five-task GT-on smoke
+run. The live acceptance condition remains reward non-worse than the frozen
+baseline plus per-task reductions that do not hide a correctness regression.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal

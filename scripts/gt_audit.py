@@ -128,6 +128,8 @@ _GT_EXCLUSION_RE = re.compile(
     r"--exclude-dir(?:=|\s+)['\"]?\.gt['\"]?"
     r"|--glob(?:=|\s+)['\"]?!\.gt(?:/\*)?['\"]?"
     r"|-not\s+-path\s+['\"]?(?:\./)?\.gt(?:/\*)?['\"]?"
+    r"|-path\s+['\"]?(?:\./)?\.gt(?:/\*)?['\"]?\s+-prune"
+    r"|\bexcluding\b[^;&|]{0,48}\.gt\b"
     r")"
 )
 _GT_ACCESS_RE = re.compile(
@@ -739,6 +741,11 @@ class TaskAudit:
     utility_abstained_count: int = 0
     progress_transition_count: int = 0
     progress_states: dict[str, int] = field(default_factory=dict)
+    progress_control_count: int = 0
+    progress_control_modes: dict[str, int] = field(default_factory=dict)
+    progress_control_iterations: dict[str, list[int]] = field(
+        default_factory=dict
+    )
     tool_outcome_classified_count: int = 0
     tool_outcome_counts: dict[str, int] = field(default_factory=dict)
     tool_outcome_harmful_count: int = 0
@@ -1188,6 +1195,16 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 )
             elif event_type == "progress.intervention":
                 a.progress_intervention_count += 1
+            elif event_type == "progress.control_issued":
+                a.progress_control_count += 1
+                mode = str(payload.get("mode") or "UNKNOWN")
+                iteration = int(payload.get("iteration") or 0)
+                a.progress_control_modes[mode] = (
+                    a.progress_control_modes.get(mode, 0) + 1
+                )
+                a.progress_control_iterations.setdefault(mode, []).append(
+                    iteration
+                )
             elif event_type == "tool.budget_decision":
                 a.tool_budget_receipt_count += 1
                 decision = str(payload.get("decision") or "")
@@ -1241,6 +1258,15 @@ def audit_task(task_dir: Path) -> TaskAudit:
             sorted(a.predicate_observed_kinds.items())
         )
         a.progress_states = dict(sorted(a.progress_states.items()))
+        a.progress_control_modes = dict(
+            sorted(a.progress_control_modes.items())
+        )
+        a.progress_control_iterations = {
+            mode: sorted(iterations)
+            for mode, iterations in sorted(
+                a.progress_control_iterations.items()
+            )
+        }
         a.tool_outcome_counts = dict(sorted(a.tool_outcome_counts.items()))
         a.capsule_unique_exposed_count = len(exposure_counts)
         a.capsule_exposure_count = sum(exposure_counts.values())

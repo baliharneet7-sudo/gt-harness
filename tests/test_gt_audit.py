@@ -135,6 +135,16 @@ def test_audit_does_not_count_explicit_gt_exclusions_as_access(tmp_path):
                 "bash(command=\"find . -not -path './.gt/*' "
                 "--exclude-dir='.gt'\")",
             ),
+            panel(
+                "tool_call",
+                "bash(command='find . -path ./.git -prune -o "
+                "-path ./.gt -prune -o -type f -print')",
+            ),
+            panel(
+                "tool_call",
+                "bash(command=\"echo 'scan excluding .git and .gt' && "
+                "grep -r token --exclude-dir=.git --exclude-dir=.gt .\")",
+            ),
             stop_line(iters=1, in_t=10, out_t=2),
             "",
         ]),
@@ -454,6 +464,46 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
     assert audit.tool_outcome_new_capsule_count == 1
     assert audit.shell_lifecycle_recovered_count == 1
     assert audit.shell_lifecycle_unrecovered_count == 0
+
+
+def test_audit_censuses_typed_progress_controls(tmp_path):
+    from gt_engine.attribution import AttributionTrace
+
+    task_dir = make_task_dir(
+        tmp_path,
+        "code-task__progress-controls",
+        "code-task",
+        "\n".join([stop_line(iters=80, in_t=10, out_t=2), ""]),
+    )
+    trace = AttributionTrace(
+        lambda: task_dir / "agent" / "gt_attribution.jsonl",
+        trace_id="e" * 32,
+    )
+    for action_index, (mode, iteration) in enumerate((
+        ("artifact_completion", 50),
+        ("verified_completion", 62),
+        ("finalization", 80),
+    ), 1):
+        trace.record(
+            "progress.control_issued",
+            action_index=action_index,
+            boundary="provider",
+            payload={
+                "mode": mode,
+                "iteration": iteration,
+                "iteration_limit": 100,
+            },
+        )
+
+    audit = gt_audit.audit_task(task_dir)
+
+    assert audit.progress_control_count == 3
+    assert audit.progress_control_modes == {
+        "artifact_completion": 1,
+        "finalization": 1,
+        "verified_completion": 1,
+    }
+    assert audit.progress_control_iterations["finalization"] == [80]
 
 
 def test_attribution_integrity_failure_is_red(tmp_path):

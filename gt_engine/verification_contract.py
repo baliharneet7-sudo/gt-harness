@@ -34,7 +34,7 @@ _NUMERIC_FAILURE_RE = re.compile(
     r"all\s+checks\s+passed\s*:\s*false)"
 )
 _PATH_RE = re.compile(
-    r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_]+"
+    r"(?<![\w.-])/?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_]+"
 )
 _CONTENT_RE = re.compile(
     r"(?i)\b(?:secret|sensitive|token|credential|api key|not present|"

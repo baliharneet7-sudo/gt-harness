@@ -1544,6 +1544,58 @@ def test_provider_view_renders_jit_graph_evidence_and_receipts_checkpoint(
 
 
 @requires_gt
+def test_checkpoint_names_unresolved_requirements_and_missing_artifacts(
+        indexed_repo):
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import compile_obligation_predicates
+
+    bridge = indexed_repo
+    missing_scope = "/app/task_file/output_data/gt_test_missing_plan_b1.jsonl"
+    obligation = Obligation(
+        "obl-artifact",
+        f"Generate the required file {missing_scope}.",
+        "task",
+        ("plan_b1.jsonl",),
+    )
+    bridge._task_contract = TaskContract("data_transform", (obligation,))
+    bridge._obligation_predicates = compile_obligation_predicates(
+        bridge._task_contract
+    )
+    bridge.iteration_budget = 100
+    bridge._last_model_iteration = 49
+
+    checkpoint = bridge._render_context_checkpoint()
+    control = bridge.progress_control(50)
+
+    assert missing_scope in checkpoint
+    assert '"iterations_remaining":51' in checkpoint
+    assert '"priority_unresolved"' in checkpoint
+    assert control is not None
+    assert "Required output artifacts are still absent" in control
+    assert missing_scope in control
+    assert bridge.progress_control(51) is None
+
+
+@requires_gt
+def test_progress_control_enters_finalization_once(indexed_repo):
+    bridge = indexed_repo
+    bridge.iteration_budget = 100
+
+    first = bridge.progress_control(80)
+    second = bridge.progress_control(81)
+
+    assert first is not None
+    assert "Finalization mode: 21 model request(s) remain" in first
+    assert "Do not repeat searches" in first
+    assert second is None
+    rows = [
+        row for row in bridge._attribution.rows
+        if row["event_type"] == "progress.control_issued"
+    ]
+    assert rows[-1]["payload"]["mode"] == "finalization"
+
+
+@requires_gt
 def test_task_start_abstains_without_issue_text(indexed_repo):
     b = indexed_repo
     b.issue_text = ""

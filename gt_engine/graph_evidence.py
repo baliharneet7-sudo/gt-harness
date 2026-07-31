@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 
 from gt_engine.graph_context import GraphProjection, GraphSemanticFact
@@ -101,29 +102,49 @@ def rank_graph_evidence(
 ) -> tuple[GraphEvidence, ...]:
     """Link graph facts to unresolved obligations or an active changed path."""
     obligations = {
-        item.obligation_id: set(significant_tokens(item.text))
-        | {_key(subject) for subject in item.subjects}
+        item.obligation_id: (
+            set(significant_tokens(item.text)),
+            {_key(subject) for subject in item.subjects if _key(subject)},
+        )
         for item in contract.obligations
         if item.obligation_id in need.unresolved_obligation_ids
     }
+    anchor_frequency = Counter(
+        anchor
+        for lexical, subjects in obligations.values()
+        for anchor in lexical | subjects
+    )
     active = {
         str(path).replace("\\", "/").lower() for path in need.active_paths
     }
     scored: list[tuple[tuple[float, ...], GraphSemanticFact, tuple[str, ...]]] = []
     for position, fact in enumerate(projection.semantic_facts):
         keys = _fact_keys(fact)
-        links = tuple(
-            obligation_id
-            for obligation_id, anchors in obligations.items()
-            if anchors & keys
-        )
+        linked: list[tuple[str, float]] = []
+        for obligation_id, (lexical, subjects) in obligations.items():
+            overlap = lexical & keys
+            exact_subject = subjects & keys
+            # Repeated generic words such as "sensitive", "replace", or
+            # "output" must not beat a distinctive path/symbol match merely
+            # because they occur in many obligations.
+            weighted_overlap = sum(
+                (1.0 / float(anchor_frequency[anchor]))
+                + (0.75 if anchor_frequency[anchor] == 1 else 0.0)
+                for anchor in overlap
+            )
+            strength = weighted_overlap + (3.0 * len(exact_subject))
+            if exact_subject or strength >= 1.5:
+                linked.append((obligation_id, strength))
+        links = tuple(item[0] for item in linked)
+        strongest_link = max((item[1] for item in linked), default=0.0)
         path_active = fact.file_path.lower() in active
         if not links and not path_active:
             continue
         score = (
             float(bool(path_active)),
-            float(len(links)),
+            strongest_link,
             float(fact.confidence),
+            float(-len(links)),
             float(-position),
         )
         scored.append((score, fact, links))
