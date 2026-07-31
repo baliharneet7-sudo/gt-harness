@@ -1065,6 +1065,40 @@ clean provider attribution gate and reaches non-worse reward with materially
 lower cost. A reroll that merely changes which temperature-1 task fails is not
 evidence of stable improvement.
 
+Run
+[`30597263179`](https://github.com/harneet2512/gt-harness/actions/runs/30597263179)
+at `530668f` proved the capsule-overlap correction: Harbor completed all five
+trials, the audit reported zero unexposed deliveries, zero dark identities,
+zero attribution faults, 11 witnessed identities, 15 exercised identities,
+and all seven lifecycle boundaries. It nevertheless scored only 3/5 and is
+therefore further negative outcome evidence:
+
+| Task | Reward | Iterations | Input tokens | Output tokens | GT chars | Terminal state |
+|---|---:|---:|---:|---:|---:|---|
+| `build-cython-ext` | 0 | 100 | 3,612,915 | 40,749 | 2,768 | max iterations |
+| `headless-terminal` | 0 | 86 | 3,685,480 | 72,172 | 1,302 | 900-second agent timeout |
+| `llm-inference-batching-scheduler` | 1 | 65 | 4,147,849 | 125,048 | 4,267 | end turn |
+| `reshard-c4-data` | 1 | 100 | 4,453,930 | 85,521 | 2,469 | max iterations |
+| `sanitize-git-repo` | 1 | 40 | 1,660,690 | 47,300 | 1,798 | end turn |
+
+On the four frozen-baseline-compatible tasks, this run used 305 versus 195
+iterations (+56.4%), 13,875,384 versus 5,884,607 input tokens (+135.8%), and
+298,618 versus 90,374 output tokens (+230.4%), while scoring 3/4 versus 4/4.
+The batching numeric-table fix compiled seven numeric predicates and the task
+passed, but this did not offset the other trajectories.
+
+The dominant newly observed waste was harness self-interference. On headless,
+the model discovered `/installed-agent/nano-harness` with `find /` at
+iteration 3, began reading `gt_engine/task_contract.py` and
+`verification_contract.py` at iteration 4, and later spent many decisions
+reverse-engineering submit-refusal internals. It timed out and the hidden
+verifier found a real `pyte` API mismatch. This is not useful GT reasoning; it
+is implementation leakage caused by staging the agent source in a root-readable
+container. The adapter must remove the exact staged checkout after its
+non-editable uv install and smoke check, and the GT-only prompt must explicitly
+classify `.gt`, `/installed-agent`, the agent environment, and GroundTruth
+implementation as out-of-scope harness internals.
+
 ## Research basis
 
 - [Terminal-Bench](https://arxiv.org/abs/2601.11868): hard multi-step terminal

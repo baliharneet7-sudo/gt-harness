@@ -51,7 +51,10 @@ GT_PROMPT_SUFFIX = """\
 
 Structural evidence from static analysis of the repository (definitions, \
 callers, signatures, test results) may appear appended to tool outputs; it is \
-deterministic and trustworthy - use it.
+deterministic and trustworthy - use it. Treat `.gt`, `/installed-agent`, the \
+agent's Python environment, and GroundTruth's implementation as harness \
+internals, not task code: never inspect, modify, test, or reverse-engineer \
+them. Work only on the user's task and its repository.
 """
 
 

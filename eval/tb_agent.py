@@ -45,6 +45,11 @@ _REMOTE_DIR = "/installed-agent/nano-harness"
 # BaseInstalledAgent.setup()). find_binary() honors $GT_INDEX_BINARY first.
 _REMOTE_GT_BINARY = "/installed-agent/gt-index"
 _VENDOR_DIR = _REPO_ROOT / "vendor"
+_GT_STAGED_SOURCE_CLEANUP = (
+    "test \"$(readlink -f /installed-agent/nano-harness)\" = "
+    "\"/installed-agent/nano-harness\" && "
+    "rm -rf -- /installed-agent/nano-harness"
+)
 
 # Task images vary (debian, alpine, ...); make sure curl exists, then let uv
 # bring its own Python so we never depend on the image's python3.
@@ -186,6 +191,14 @@ class GTNanoAgent(NanoAgent):
     def name() -> str:
         return "nano-gt"
 
+    def get_version_command(self) -> str | None:
+        # The staged checkout is intentionally removed after the non-editable
+        # uv installation, so version discovery uses the installed venv.
+        return (
+            '"$HOME/.local/share/uv/tools/nano-harness/bin/python" '
+            "-c \"import nano; print(nano.__version__)\""
+        )
+
     @staticmethod
     def _gt_wheel() -> Path:
         wheels = sorted(_VENDOR_DIR.glob("groundtruth_mcp-*.whl"))
@@ -253,6 +266,12 @@ class GTNanoAgent(NanoAgent):
             "test -s /tmp/gt-install-smoke.db && rm -f /tmp/gt-install-smoke.db",
             env=dict(UTF8_ENV),
         )
+        # The task model runs as root and can otherwise discover this checkout
+        # with a broad `find /`, then waste its trajectory reverse-engineering
+        # GT's refusal logic instead of solving /app. uv installed a regular
+        # wheel copy (not editable), and the smoke above proved that copy plus
+        # the indexer before this exact, guarded removal.
+        await self.exec_as_root(environment, _GT_STAGED_SOURCE_CLEANUP)
 
     @with_prompt_template
     async def run(
