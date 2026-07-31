@@ -247,7 +247,31 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
         "contract.predicate_observed",
         action_index=3,
         boundary="test",
-        payload={"predicate_id": "pred-1", "kind": "behavior"},
+        payload={
+            "predicate_id": "pred-1",
+            "kind": "behavior",
+            "outcome": "pass",
+            "action_index": 3,
+            "latest_edit_action": 2,
+            "command_sha256": "c" * 64,
+            "output_sha256": "d" * 64,
+        },
+    )
+    trace.record(
+        "graph.evidence_need",
+        action_index=0,
+        boundary="task_start",
+        payload={"revision": "graph-r1", "ranked_count": 1},
+    )
+    trace.record(
+        "graph.evidence_ranked",
+        action_index=0,
+        boundary="task_start",
+        payload={
+            "revision": "graph-r1",
+            "obligation_ids": ["obl-1"],
+            "active_target_linked": False,
+        },
     )
     trace.record(
         "graph.context_refreshed",
@@ -342,6 +366,11 @@ def test_audit_projects_contract_graph_router_and_verification_receipts(
     assert audit.role_pack_id == "code-build"
     assert audit.predicate_compiled_count == 4
     assert audit.predicate_observed_kinds == {"behavior": 1}
+    assert audit.predicate_invalid_receipt_count == 0
+    assert audit.graph_evidence_need_count == 1
+    assert audit.graph_evidence_ranked_count == 1
+    assert audit.graph_evidence_unlinked_count == 0
+    assert audit.graph_evidence_revision_mismatch_count == 0
     assert audit.graph_projection_revision == "graph-r1"
     assert audit.graph_router_revision == "graph-r1"
     assert audit.graph_semantic_fact_count == 8

@@ -1,11 +1,11 @@
 # GT Improvement Plan: From Attributable Wiring to Measured Advantage
 
-Status: implementation plan  
+Status: research-backed implementation plan
 Repository: `gt-harness`  
 Runtime: nano-harness with GroundTruth (GT)  
-Last diagnosed live run: `30582455019`, commit `4694257`  
+Last diagnosed live run: `30590129776`, commit `0d3dd88`
 Confidence: high on the diagnosed defects; moderate that the proposed changes
-will improve outcomes until matched repeated live runs establish the effect.
+will improve outcomes until repeated GT-on live runs establish the effect.
 
 ## Decision
 
@@ -18,8 +18,9 @@ at the decision point where they matter.
 The current engine has crossed the attribution threshold: sealed GT bytes can
 be proved in the provider-final request, linked to the response, and associated
 with the next action. It has not crossed the utility threshold. The latest run
-solved only two of five tasks and greatly increased tokens and iterations
-against the available, imperfect GT-off comparison.
+solved three of five tasks. Its two failures show that correct wiring and valid
+graph provenance do not guarantee useful evidence, semantic verification, or
+effective stopping.
 
 The objective is therefore:
 
@@ -31,81 +32,195 @@ replay, integration, audit, and configuration gates must pass first. The final
 candidate proof must then be a real nano + GT provider run, not an offline or
 pre-modelled simulation.
 
+No new GT-off execution is part of this plan. The existing GT-off artifacts are
+the frozen comparison source. All implementation, replay, and new live
+execution below are GT-on only.
+
+## Implementation status — 2026-07-30
+
+The first implementation slice from this plan is now in the working tree.
+This is not yet a live superiority claim.
+
+Implemented:
+
+- numeric predicates parse scientific notation, preserve the required
+  comparator and unit, and refuse credit when the measured value is on the
+  wrong side of the bound or omits the required unit;
+- repository-wide negative content searches recognize the truthful
+  `rg`/`grep` no-match status, reject excluded or narrow scopes, and can
+  produce a content-scope receipt after the latest edit;
+- predicate receipts carry measured value, operator, required value, unit,
+  observation action, latest-edit action, and command/output hashes;
+- a positive submit blocker remains authoritative for nano's existing three
+  pushbacks, with a unique truthful refusal on each attempt;
+- the selected role pack is enforced by the router; content tasks suppress
+  caller noise, while code and data tasks retain valid definition partition
+  and new-file precedent evidence;
+- malformed new-file entities and task-irrelevant localization are suppressed
+  with named reasons;
+- graph FTS anchors are ordered by explicit subject, obligation coverage, and
+  specificity rather than alphabetical first-24 truncation;
+- ranked FTS rows retain surface, confidence, and graph revision as semantic
+  facts;
+- a shared deterministic `EvidenceNeed`/`GraphEvidence` layer links a bounded
+  graph slice to unresolved obligations or the active edited target;
+- graph evidence ranking runs at task start and atomically after graph
+  refresh, with content-safe provenance and revision receipts, and its ranked
+  file slice constrains subsequent graph-localization admission;
+- a first attributable required RED near 80% of the iteration budget receives
+  one bounded recovery intervention and outranks advisory localization, while
+  the original repeated-failure-after-edit recovery remains; and
+- audit/live-gate schemas reject invalid semantic predicate receipts,
+  unlinked graph evidence, and stale graph-evidence revisions; and
+- utility receipts expose freshness, unresolved relevance, expected
+  information gain, repetition, token/interruption cost, and false-positive
+  risk instead of only a static severity/confidence score.
+
+Local proof now covers false numeric credit, unit mismatch, complete versus
+excluded content scope, role-pack enforcement, malformed entity extraction,
+good and bad localization, graph-query priority, decision-linked graph
+evidence, repeated-submit authority, and near-budget recovery. Full repository
+verification and the strict live GT-on smoke remain the next gates.
+
 ## Current evidence
 
-Run `30582455019` used `deepseek-v4-flash`, temperature `1`, Profile 2,
+Run `30590129776` used `deepseek-v4-flash`, temperature `1`, Profile 2,
 concurrency `4`, timeout multiplier `1.0`, and the exact five-task workflow
-slice. Both the workflow gate and an independent local rerun passed.
+slice. Workflow, Harbor, provider attribution, feature census, lifecycle,
+capsule expiry, graph refresh, and strict live gates passed.
 
 It proved:
 
+- reward was 3/5: build, headless, and sanitizer passed; batching and reshard
+  failed;
 - all five task contracts reached the provider-final request byte-for-byte;
-- all 17 canonical identities were censused on every task;
-- nine identities were live-witnessed across the run;
+- all 22 delivered capsules were unique, exposed once, and expired;
+- 10/17 identities were provider-witnessed and 15/17 were exercised with a
+  named outcome;
 - no eligible identity went dark;
-- observed lifecycle opportunities were recorded at task start, research,
-  pre-edit, post-edit, test, verify, and submit;
-- all 14 trustworthy `graph.db` surfaces were inventoried;
-- graph projection, role routing, and obligation accounting executed; and
-- attribution used structured provider-bound payload blocks, not trajectory
-  substring guesses.
+- every task recorded task-start, research, pre-edit, post-edit, test, verify,
+  and submit boundaries;
+- 44 graph refreshes completed without a refresh fault;
+- the final per-task projections contained 373 semantic-fact records;
+- all 277 tool outcomes were classified: 247 success, 13 useful RED, 8 product
+  failure, 6 dependency/environment, 2 tool-contract, 1 agent-command, and no
+  persistent-shell lifecycle failure.
 
-It also proved that wiring is insufficient:
+The result is a wiring success and an efficacy failure. Batching missed one
+numeric performance bound and reshard timed out only on the independently
+generated hidden workload.
 
-| Task | Reward | Principal miss |
-|---|---:|---|
-| `build-cython-ext` | 0 | Left `np.int` in `ccomplexity.pyx`; exhausted 100 iterations |
-| `headless-terminal` | 1 | Solved |
-| `llm-inference-batching-scheduler` | 0 | Bucket 2 was 36.66m against a 32m threshold; exhausted 100 iterations |
-| `reshard-c4-data` | 1 | Solved |
-| `sanitize-git-repo` | 0 | Excluded `exp_data/`, missed a second HF token, and had 13 localization candidates over-suppressed |
+## Deep delivery audit: what GT actually sent
 
-Across the four tasks with a graded historical GT-off observation, GT-off was
-4/4 and the latest GT-on was 1/4. GT-on used 55.4% more iterations, 114.0% more
-input tokens, 78.3% more output tokens, 23.1% more tool results, and 23.5% more
-tool errors. Those arms differed in timeout and temperature configuration, so
-these are descriptive observations, not causal estimates.
+### Evidence channels
 
-The run sealed 13,810 GT characters but repeatedly exposed them for roughly
-821,971 characters across provider requests: about 59.5x amplification.
+GT does not currently produce one unified deterministic research result. The
+22 deliveries came from four disconnected channels:
+
+| Channel | Deliveries | Characters | How it is produced |
+|---|---:|---:|---|
+| Issue/task contract | 5 | 5,581 | Normative issue extraction; no graph required |
+| Direct graph producers | 10 | 5,155 | Ranked localization, caller queries, and new-file precedent |
+| Tool observation | 2 | 132 | Deepest repository stack frame from the immediate failure |
+| Verification/control state | 5 | 2,473 | Unresolved RED or missing predicate state at submit |
+| **Total** | **22** | **13,341** | Exact sealed provider-delivered bytes |
+
+“Research” in lifecycle telemetry means that nano searched or viewed something.
+It does not mean GT synthesized the graph, task requirements, current patch,
+recent failures, and verification state into a research conclusion.
+
+### Every live delivery
+
+Quality below measures whether the bytes were timely, discriminative, and
+actionable. The linked response is association, not proof of causality.
+
+| Task/action | Delivery | Basis | Quality | Delivery-byte diagnosis and linked response |
+|---|---|---|---|---|
+| build/0 | `obligations` | issue | Medium | Correct checklist, but fenced README code is excluded, so the required executable example is named but not preserved; nano began inspection |
+| build/35 | `localization` | graph | Low | Ranked catalogue/setup/general Python symbols instead of Cython/NumPy compatibility surfaces; nano read other files |
+| build/36 | `caller_contract_view` | graph | Medium | Valid caller facts for `invariants.py`, but 1,685 characters covered a broad API surface without tying it to the active NumPy failure; nano edited two files |
+| build/46 | `caller_contract_view` | graph | Medium-high | Exact callers and unpacking behavior for `openknot.py`; nano immediately edited the target |
+| build/54 | `caller_contract_view` | graph | Medium-high | Bounded caller constraints for `representation.py`; nano immediately edited the target |
+| build/88 | `submit_refusal` | verification | High | Correctly named an unresolved observed RED; nano ran another verification command and the task passed |
+| headless/0 | `obligations` | issue | High | Compact, task-specific interface and behavior checklist; nano began repository inspection |
+| headless/1 | `localization` | graph | High | Correctly identified `BaseTerminal` at the first research boundary; the next response continued shell inspection |
+| headless/7 | `trace_frame` | observation | Medium | Correct failing file and line, but only the frame was sent—not exception meaning, relevant values, or graph neighborhood |
+| headless/20 | `submit_refusal` | verification | Medium | Correctly identified incomplete behavioral evidence, but the next action read files rather than executing the missing checks; the task later passed |
+| batching/0 | `obligations` | issue | Medium | Complete-looking but flat checklist; thresholds are prose/table fragments rather than typed inequalities and mojibake is present |
+| batching/1 | `caller_contract_view` | graph | Low-medium | Correct `align()` caller, but mostly redundant with the just-viewed files and not connected to the active optimization decision |
+| batching/20 | `missing_role_postcreate:implementation` | graph + issue | Low | Sibling files were useful, but entity extraction produced malformed text beginning `2.jsonl...`; this should have abstained |
+| batching/31 | `trace_frame` | observation | Medium-high | Exact failing `_plan_for_requests` frame; nano immediately edited that target, but the exception semantics were absent |
+| batching/72 | `submit_refusal` | verification | High | Correctly named six unresolved requirements and triggered three checks |
+| batching/73 | `localization` | graph | Medium content, low timing | Correctly named optimized/baseline/cost-model files, but only after the first submit at action 73; two later checks were RED and the second submit still passed |
+| reshard/0 | `obligations` | issue | Medium | Good functional contract, but “similarly sized and distributed” remained prose rather than a scaling/data-distribution predicate |
+| reshard/37 | `localization` | graph | Medium | Correct scripts, but delivered after both scripts existed and after substantial implementation; nano ran a target-related command |
+| reshard/58 | `submit_refusal` | verification | Medium-high | Correctly demanded executable verification and triggered a full local round trip; GT could not judge whether the sample represented the hidden distribution |
+| sanitize/0 | `obligations` | issue | High | Clear repository-wide replacement, preservation, and non-contamination invariants |
+| sanitize/1 | `localization` | graph | Low | Returned unrelated symbols/files rather than contaminated locations or repository scope; nano continued a broad shell search |
+| sanitize/29 | `submit_refusal` | verification | Medium | Correctly requested repository-wide proof, but reported all seven requirements generically even though the eventual patch passed |
+
+Of the ten graph-derived deliveries, only three linked next responses explicitly
+referenced the delivered target. That classifier is intentionally conservative,
+but the payload audit confirms the larger defect: graph provenance is often
+valid while task utility is weak.
+
+### Why “373 graph facts” did not become 373 useful facts
+
+`gt_engine.graph_context.build_graph_projection` now reads all 14 trusted
+surfaces and creates semantic facts for properties, assertions, edge metadata,
+file hashes, and project metadata. The bridge atomically rebuilds the projection
+and evidence router after graph wake/refresh. The earlier claim that wake keeps
+an old projection/router is no longer true.
+
+However:
+
+1. `GraphProjection.semantic_facts` is counted in telemetry but is not supplied
+   to GroundTruth Gateway producers or rendered into model-facing evidence.
+2. Gateway producers independently query `graph.db`; the router receives only
+   flattened file and symbol sets plus a revision.
+3. The projection query alphabetically sorts lexical tokens and takes the first
+   24, rather than ranking anchors by obligation importance, current target, or
+   failure relevance.
+4. Test nodes are excluded from primary FTS seeds, weakening pre-submit test
+   discovery.
+5. Passage retrieval contributes a node identity but discards the bounded code
+   excerpt that explains why it matched.
+6. Edge expansion flattens relation direction/type into sets; closure paths are
+   not preserved.
+7. Co-change adds filenames but drops count, recency, and concrete precedent
+   commits from semantic delivery.
+8. Properties/assertions are collected only for the original seed IDs, not for
+   the most relevant expanded impact or test nodes.
+9. File-hash and project-metadata records inflate the semantic-fact count even
+   though they are freshness/control facts, not model-facing task evidence.
+10. Ranked localization is issue-fixed and offered at the first qualifying
+    search. It is not conditioned on the current hypothesis, patch, unresolved
+    predicate, or recent RED, so it can be irrelevant early or useful too late.
+11. Caller-contract delivery is conditioned on the viewed file, not the exact
+    symbol being changed or the unresolved obligation. Valid broad caller lists
+    can therefore interrupt without adding decision value.
+12. Selected role packs are telemetry, not router authority. The
+    `data_transform` pack does not list caller-contract evidence, yet batching
+    received `caller_contract_view`; `EvidenceRouter` is constructed from the
+    task contract and never receives the selected pack.
+13. Static utility scoring ranks available candidates by feature class,
+    confidence, actionability, and byte length. It does not score novelty,
+    unresolved-predicate coverage, current patch relevance, expected
+    information gain, or whether nano is already taking the suggested action.
+
+The conclusion is precise:
+
+> GT sends some correct graph-derived facts, but it does not yet compile the
+> best available graph evidence for the decision nano is making now.
 
 ### Tool-error diagnosis
 
-Raw tool-error count is not a valid quality metric. Across the four graded
-historical pairs, GT-on produced 42 errors versus 34 GT-off, an increase of 8.
-Across all five GT-on tasks there were 51:
-
-| Task | GT-off | GT-on | Difference |
-|---|---:|---:|---:|
-| `build-cython-ext` | 15 | 19 | +4 |
-| `headless-terminal` | 0 partial | 9 | not comparable: GT-off was OOM-killed after 7 iterations |
-| `llm-inference-batching-scheduler` | 1 | 17 | +16 |
-| `reshard-c4-data` | 0 | 5 | +5 |
-| `sanitize-git-repo` | 18 | 1 | -17 |
-
-The counts mix genuine failing builds, useful RED self-checks, intended
-no-match searches, missing dependencies, malformed one-off commands,
-unavailable binaries, timeouts, edit-precondition misses, and shell crashes.
-The GT-off sanitizer passed despite 18 errors, many from negative searches and
-bad-path probes. Error count alone therefore measures neither GT health nor
-agent competence.
-
-Response-to-observation linkage narrows, but does not settle, causality:
-
-- 48/51 GT-on errors followed requests containing only previously issued,
-  persistent GT capsules;
-- a newly issued build localization capsule was followed by a useful failing
-  probe that exposed `np.float`;
-- a newly issued reshard localization capsule was followed by a useful failing
-  decompression probe that exposed a missing `argparse` import; and
-- the sanitizer submit refusal was followed by a validation script containing
-  `exit`, which killed nano's persistent shell and produced
-  `Shell process exited unexpectedly`.
-
-This does not exonerate GT. The task-start contract persisted in every later
-request, so its longer-term effect is confounded. It does prove that future
-analysis must separate new from persistent capsules and useful RED from harmful
-tool misuse.
+Tool failures are not the common root cause. Only nine of 277 observations were
+harmful, and no persistent-shell lifecycle failure occurred. The batching task
+did exhibit trajectory/tool expansion, but GT delivered only six capsules
+during that trajectory. The engine failed by supplying weak/late evidence,
+over-crediting lexical verification, and allowing submission after one refusal;
+it did not directly emit the long sequence of nano commands.
 
 ## Non-goals
 
@@ -163,14 +278,16 @@ the current decision belongs in the provider request.
 
 ### Defect
 
-`gt_engine/task_contract.py::matching_obligation_ids` maps passing commands to
-requirements using shared tokens. `gt_engine/bridge.py` can credit the whole
-contract after a generic full-suite command. Neither proves that every
-requirement was exercised.
+The first implementation now compiles `behavior`, `artifact`,
+`numeric_threshold`, and `content_scope` predicates, but observation remains
+lexical. Numeric verification checks that obligation numbers occur in passing
+command/output text; it does not parse and evaluate the measured inequality.
+Artifact and content checks likewise prove command shape more often than the
+required postcondition.
 
 ### Change
 
-Compile obligations into typed predicates such as:
+Replace lexical receipts with typed assertion receipts such as:
 
 - test selector;
 - content presence or absence over an explicit scope;
@@ -179,106 +296,139 @@ Compile obligations into typed predicates such as:
 - build/import success; and
 - command/output contract.
 
-Each predicate receipt records obligation, scope, command and output hashes,
-workspace revision, action, and `pass`, `fail`, `unknown`, or `stale`.
+Each predicate receipt records obligation, scope, extracted observed value,
+operator, required value, units, command and output hashes, workspace revision,
+action, and `pass`, `fail`, `unknown`, or `stale`.
 An obligation becomes verified only when its required fresh predicates pass.
 Uncompilable requirements remain unknown. A generic test pass cannot certify
 unrelated content, artifact, or numeric obligations.
 
 ### Code and tests
 
-- Add `gt_engine/verification_contract.py`.
-- Replace or demote lexical matching in `gt_engine/task_contract.py`.
+- Replace the lexical evaluators in `gt_engine/verification_contract.py`.
+- Keep `matching_obligation_ids` only as candidate routing, never proof.
 - Update verification and submit certification in `gt_engine/bridge.py`.
 - Add predicate state to `scripts/gt_audit.py` and `scripts/gt_live_gate.py`.
-- Test unrelated full-suite passes, scoped scans, exact numeric values,
-  post-edit staleness, and multi-obligation selectors.
+- Add role adapters for numeric inequalities, input immutability, artifact
+  schema, repository-wide absence, round-trip conservation, and scale/runtime.
+- Test unrelated full-suite passes, wrong-side numeric values, unit mismatch,
+  scoped scans, exact artifacts, post-edit staleness, and multi-obligation
+  selectors.
 
 ### Acceptance
 
 - No lexical-only verified transition.
 - Every verified obligation has a fresh executable receipt.
-- Replay keeps `np.int`, the 32m threshold, and repository-wide token absence
-  unresolved.
+- Replay keeps removed NumPy aliases, every batching inequality (including
+  bucket 1 cost `<= 3.0e11` and bucket 2 latency `<= 3.2e7`), and
+  repository-wide token absence unresolved until semantically proven.
 - Refusal delivers the smallest unresolved predicate set.
 
 ## Workstream 2: Semantic use of `graph.db`
 
 ### Defect
 
-`GraphProjection` currently returns files, symbols, node IDs, and hit counts.
-`properties` and `assertions` are counted but discarded.
-`edge_metadata`, `file_hashes`, and `project_meta` are inventory-only.
+`GraphProjection` now reads every trusted surface and retains bounded semantic
+facts. The bridge and router use only flattened file/symbol sets, while Gateway
+producers query the database through separate logic. Rank, path, relation,
+excerpt, assertion, co-change, and lifecycle need are not unified. The 373
+final projected facts therefore measure availability, not delivered utility.
 
 ### Change
 
-Project typed, ranked evidence with source surface, provenance, confidence,
-revision, and intended lifecycle use:
+Introduce one shared graph evidence IR with source surface, provenance,
+confidence, revision, rank, lifecycle need, obligation link, and intended
+action:
+
+```text
+EvidenceNeed
+  = task role
+  + unresolved predicates
+  + current viewed/edited symbol
+  + patch delta
+  + latest RED
+  + lifecycle boundary
+  + remaining budget
+
+GraphEvidence
+  = claim
+  + minimal proof rows
+  + relation/path
+  + freshness
+  + consequence
+  + deterministic next check
+```
 
 | Surface | Required semantic use |
 |---|---|
 | `nodes` | Canonical identity, symbol kind, source/test role |
 | `nodes_fts` | Ranked name/path localization |
 | `symbol_content_fts` | Implementation-body matches and spans |
-| `content_passages` | Bounded source excerpt and line provenance |
+| `content_passages` | Bounded source excerpt and line provenance, not only its node |
 | `content_passages_fts` | Requirement-specific passage retrieval |
-| `edges` | Typed caller, callee, import, inheritance, and test relations |
+| `edges` | Directional typed caller, callee, import, inheritance, and test relations |
 | `edge_metadata` | Relation provenance, confidence, and stale filtering |
-| `closure` | Bounded transitive impact surface |
+| `closure` | Bounded transitive path with intermediate nodes |
 | `properties` | Signature, decorator, schema, constant, and stored properties |
 | `assertions` | Existing invariants and verification predicate candidates |
-| `cochanges` | Ranked companion surface with count/recency |
-| `cochange_sets` | Concrete precedent/change sets |
+| `cochanges` | Ranked companion surface with count and recency |
+| `cochange_sets` | Concrete precedent commits and complete relevant sets |
 | `file_hashes` | Freshness and receipt invalidation |
 | `project_meta` | Index schema, revision, and compatibility |
 
-Preserve rank and provenance instead of flattening results into sets. Query
-only role-relevant surfaces; never dump the database.
+Preserve rank and provenance instead of flattening results into sets. Rank
+anchors by obligation specificity and current decision state; never use
+alphabetical first-24 truncation as relevance. Retrieve production and test
+nodes in separate lanes. Query only role-relevant surfaces; never dump the
+database.
 
 ### Acceptance
 
 - Every trustworthy surface changes a typed projection or has an explicit
   `inventory_only_by_design` outcome.
 - Every graph fact has surface and revision provenance.
-- Replay localizes `ccomplexity.pyx` and the complete sanitizer scope.
+- Every model-facing graph fact links to an unresolved obligation, active
+  target/patch, or recent failure.
+- Replay localizes Cython/NumPy compatibility surfaces, the exact batching
+  cost path, representative reshard verification, and complete sanitizer scope.
+- Malformed entity extraction abstains instead of delivering.
 - Prompt bytes stay inside the dose budget.
 
 ## Workstream 3: Atomic graph wake and refresh
 
-### Defect
+### Implemented foundation
 
-`gt_engine/bridge.py::_refresh_graph` updates `self.graph_db` but does not
-rebuild `self._graph_projection` or `self._evidence_router`. Clone-late and
-create-late tasks use a new database pointer with dormant task context.
+Run `30590129776` proves that `_refresh_graph` rebuilds the task projection and
+router atomically. Build and reshard wake from an initially unavailable graph,
+and all 44 refreshes completed without a fault.
 
-### Change
+### Remaining change
 
-Make refresh an atomic transaction:
-
-1. update the index;
-2. validate the revision;
-3. rebuild the task projection;
-4. rebuild/version the router;
-5. invalidate graph-dependent receipts;
-6. record old/new revisions and outcome.
-
-On failure, retain the last internally consistent snapshot.
+Preserve the existing atomic transaction, then invalidate graph-dependent
+verification and delivery candidates by revision. Recompute `EvidenceNeed`,
+rerank the changed graph slice, and supersede stale graph capsules. Audit must
+distinguish graph refresh from semantic reranking.
 
 ### Acceptance
 
-- `build-cython-ext` and `reshard-c4-data` gain populated post-wake
+- `build-cython-ext` and `reshard-c4-data` retain populated post-wake
   projections.
 - Router paths and evidence revisions change with refresh.
 - Audit rejects database/projection/router revision mismatch.
+- A changed graph causes a new decision-specific ranking rather than replaying
+  an issue-fixed answer.
 
 ## Workstream 4: Challenge incomplete content-search scope
 
 ### Defect
 
 For `content_scan`, `gt_engine/evidence_router.py` suppresses candidates outside
-the model's observed search paths. In the sanitizer failure, an explicit
-`exp_data/` exclusion became the boundary of truth and suppressed 13 graph
-candidates.
+the model's observed search paths. In the earlier sanitizer failure, an
+explicit `exp_data/` exclusion became the boundary of truth and suppressed 13
+graph candidates. In run `30590129776`, sanitizer passed, but the one delivered
+graph localization still named unrelated symbols rather than contaminated
+scope. Both outcomes show that observed search scope and generic graph ranking
+are poor substitutes for a repository-wide content invariant.
 
 ### Change
 
@@ -308,8 +458,9 @@ block submit.
 ### Defect
 
 Recovery requires the same formal failure across an intervening source edit.
-The bridge explicitly omits degenerate-loop detection and escalation. Two
-tasks exhausted 100 iterations without recovery.
+The new progress ledger records `STALLED`, `CONTRADICTED`, and `BUDGET_RISK`,
+but these are shadow observations. A fresh useful RED after batching's first
+submit produced neither a second refusal nor a bounded recovery action.
 
 ### Change
 
@@ -326,52 +477,58 @@ PROGRESS
   -> RECOVERED
 ```
 
-Calibrate thresholds in shadow mode from stored trajectories. Deliver a bounded
-steer only after acceptable shadow precision. Allow one escalation after a
-delivered recovery produces no material transition.
+Calibrate thresholds from stored trajectories. Deliver one bounded steer when
+there is positive evidence of one of these states:
+
+- fresh required RED near submit;
+- unresolved predicate set unchanged across repeated probes;
+- patch fingerprint changes without changing the failure;
+- exploration expands while the localization frontier and verified set do not;
+- remaining iteration budget crosses a threshold with positive unresolved
+  evidence.
+
+The steer must contain current blocker, last meaningful evidence, and one
+deterministic next action. Allow one escalation only when the first recovery
+produces no material transition.
 
 ### Acceptance
 
-- Replay detects both 100-iteration stalls before exhaustion.
+- Replay detects batching's live expansion before action 72.
 - Improving state never triggers a stall.
 - Environment errors do not masquerade as source contradictions.
 - Recovery and escalation are provider-bound and action-linked.
+- A fresh required RED invalidates readiness immediately.
 
 ## Workstream 6: Ephemeral GT context
 
-### Defect
+### Implemented foundation
 
-GT text remains in conversation history and is resent repeatedly, causing about
-59.5x exposure amplification and stale competition.
+Run `30590129776` proves that every one of 22 capsules is exposed once and then
+expired. The parallel-batch expiry defect found in run `30589336562` is fixed.
 
-### Change
+### Remaining change
 
-Give each capsule:
-
-- issue action and decision stage;
-- graph/workspace revisions;
-- expiry condition;
-- supersession key;
-- maximum exposure count; and
-- resolution state.
-
-Build a separate provider-bound request view containing only active capsules.
-Do not mutate the forensic trajectory. Expired bytes disappear from later
-requests while hashes and attribution receipts remain durable.
+Keep one-exposure delivery. Replace the large task-start checklist after its
+first use with a durable host-side contract and compact unresolved deltas at
+verification/submit. Measure total provider history growth separately from GT
+capsule bytes: batching's 4.7M input tokens came from a long nano trajectory,
+not repeated active GT capsules.
 
 ### Acceptance
 
-- Task-start contracts can be superseded by compact unresolved deltas.
+- Task-start contracts are superseded by compact unresolved deltas.
 - Post-edit capsules expire after the decision they govern.
 - Provider block-list tests prove expired text is absent.
-- Repeated GT input bytes fall at least 50% in five-trajectory replay.
+- Audit reports active GT bytes separately from ordinary conversation history.
 
 ## Workstream 7: Deterministic utility arbitration
 
 ### Defect
 
-The one-dose arbiter limits volume but does not explicitly decide whether a
-candidate is worth its context and interruption cost.
+The implemented one-dose arbiter uses static feature severity, envelope
+confidence, presence of target/provenance, and byte length. It does not know
+whether evidence resolves an outstanding decision, is redundant with nano's
+current action, or is likely to reduce uncertainty.
 
 ### Change
 
@@ -401,14 +558,21 @@ taking.
 - Every delivery has an inspectable score decomposition.
 - Fresh failing predicates outrank repeated localization.
 - All-low candidates produce `utility_abstain`.
-- Replay materially reduces equivalent repeated deliveries.
+- Malformed, redundant, already-acted, and decision-irrelevant candidates
+  abstain.
+- Replay reduces low-value delivery without suppressing the build caller facts
+  that preceded target edits.
 
 ## Workstream 8: Task-role capability packs
 
 ### Defect
 
-The current roles affect routing but do not define a complete
-lifecycle-specific evidence and verification policy.
+Role packs now declare allowed evidence and predicate kinds, but the selected
+pack is not passed into `EvidenceRouter`. The declarations are therefore
+mostly receipts: batching received caller-contract evidence even though the
+`data_transform` pack does not allow that class. Packs also do not yet define
+complete lifecycle-specific graph queries, verification adapters, recovery
+policy, or submit authority.
 
 ### Change
 
@@ -423,7 +587,11 @@ Configure stable canonical features through declarative packs:
 | Service/system | Config, process, port, dependency topology | Health, protocol, persistence |
 
 Allow deterministic multi-label selection when necessary. Record pack version
-on every routing and verification decision.
+
+Make the selected pack an explicit input to the router, graph query planner,
+predicate compiler, progress governor, and submit policy. Any cross-pack
+exception must be declared and receipted rather than emerging from hard-coded
+router special cases.
 
 ### Acceptance
 
@@ -432,12 +600,14 @@ on every routing and verification decision.
 - Build tasks receive compile/import and impact predicates.
 - Data tasks preserve exact numeric thresholds.
 
-## Workstream 9: Matched repeated experiments
+## Workstream 9: GT-on validation against the frozen existing baseline
 
 ### Defect
 
-The current GT-off comparison differs in timeout and temperature, includes an
-ungraded task, and has no repetitions.
+The existing baseline already exists. Re-running GT-off would spend time and
+money without improving the engine. What is missing is a stable GT-on
+candidate, repeated GT-on evidence, and a comparison reader that consumes the
+frozen baseline without mutating or replacing it.
 
 ### Change
 
@@ -448,22 +618,22 @@ Separate these claims:
 | Wiring | Complete census and terminal outcomes at correct lifecycle stages |
 | Attribution | Exact provider-final bytes, linked response, linked action |
 | Behavior | Fresh actionable evidence, action consistency, low false intervention |
-| Efficiency | Matched repetitions with lower cost at non-worse reward |
-| Outcome | Matched repetitions with higher reward and acceptable cost |
+| Efficiency | Repeated GT-on runs with lower cost at non-worse reward, compared with the frozen baseline where controls are compatible |
+| Outcome | Repeated GT-on runs with higher reward and acceptable cost, with incompatibilities named |
 
-Freeze exact tasks/order, substrate, nano version, commit except intended GT
-change, model, explicit temperature, timeout, iteration limit, concurrency,
-prompt/tools, adapter, and grader. Run at least three paired repetitions; five
-are preferred.
+Freeze exact tasks/order, substrate, nano version, model, explicit temperature,
+timeout, iteration limit, concurrency, prompt/tools, adapter, and grader. Run
+at least three GT-on repetitions; five are preferred. Use deterministic replay
+and local feature ablations before the live candidate, not new paid GT-off
+runs.
 
-Candidate arms:
+Candidate stages:
 
-1. GT-off;
-2. attribution-only, with no model-facing GT bytes;
-3. contract/verification only;
-4. semantic graph;
-5. progress governor;
-6. full GT.
+1. offline attribution/quality replay;
+2. contract and semantic-verification integration;
+3. graph evidence compiler integration;
+4. progress/submit governor integration;
+5. full GT-on live candidate.
 
 Use replay to eliminate broken arms before paid execution. Report every task
 before aggregates. Primary metrics are reward, input tokens per reward,
@@ -475,6 +645,7 @@ iterations per reward, and wall time per reward.
 - Every artifact carries the full configuration receipt.
 - Provider block lists are inspected structurally.
 - Reports distinguish observation, causal estimate, and hypothesis.
+- No workflow dispatches a new GT-off run.
 
 ## Workstream 10: Tool outcomes and GT-induced misuse
 
@@ -483,14 +654,14 @@ canonical feature.
 
 ### Defect
 
-All nonzero tool results currently feed one aggregate. Attribution links GT to
-a response and tool name but does not classify the observation, its information
-gain, or whether the capsule was new or merely persistent. Nano's persistent
-bash process can also be killed by top-level `exit` in model-generated checks.
+Tool outcomes are now classified and capsule exposures are unique. The
+remaining defect is behavioral coupling: useful RED, harmful misuse, progress,
+verification invalidation, utility, and submit readiness are still separate
+state machines.
 
 ### Change
 
-Classify every error:
+Retain the implemented classes:
 
 - `useful_red`;
 - `expected_negative_probe`;
@@ -502,9 +673,9 @@ Classify every error:
 - `product_failure`; or
 - `unknown`.
 
-Link request, response, active delivery IDs, new/persistent exposure position,
-capsule age, tool call, observation, information gain, next recovery action,
-and comparable off event.
+Link request, response, delivery ID, tool call, observation, information gain,
+predicate invalidation, progress transition, next recovery action, and submit
+state.
 
 Detect top-level `exit`/`logout` in persistent-shell commands and run that
 command in an isolated child shell or reject it precisely. Do not silently
@@ -513,11 +684,10 @@ RED—into progress and utility penalties.
 
 ### Acceptance
 
-- All 51 stored GT-on errors receive a class and reason.
+- All 277 live observations retain a class and reason.
 - `unknown` is below a predeclared limit.
-- The sanitizer counterfactual cannot kill the persistent shell.
 - Useful RED and harmful errors are reported separately per task.
-- New-capsule attribution is separated from persistent context.
+- Useful RED deterministically invalidates readiness and can trigger recovery.
 
 ## Dependency-ordered execution
 
@@ -525,37 +695,53 @@ RED—into progress and utility penalties.
 
 Deliver:
 
-- preserve run `30582455019` as failure fixtures;
+- preserve runs `30582455019`, `30589336562`, and `30590129776` as immutable
+  replay fixtures;
+- add a 22-delivery quality manifest recording basis, timing, target,
+  obligation/recent-RED link, novelty, next response, and observed outcome;
 - exact capsule exposure/expiry metrics;
 - tool-outcome taxonomy and response-to-observation linkage;
-- persistent-shell lifecycle protection;
-- matched workflow receipts;
+- existing baseline import/validation with no new GT-off execution;
 - deterministic replay for predicates, routing, progress, and utility; and
-- goldens for the three failed tasks.
+- goldens for malformed new-file evidence, poor localization, late
+  localization, false numeric credit, representative-scale verification, and
+  second-submit fail-open.
 
 Exit:
 
-- reproduce graph wake, sanitizer suppression, absent recovery, lexical
-  verification, capsule amplification, and all 51 tool outcomes;
+- reproduce graph wake, poor sanitizer/build localization, malformed batching
+  entity extraction, absent recovery, lexical numeric verification, and the
+  second-submit fail-open;
 - prove provider block-list handling is structural; and
 - keep the complete suite green.
 
 ### Phase 1: Truthful completion
 
-Implement workstreams 1 and 8. Exit when every smoke task has role-appropriate
-predicates and all three known incomplete patches remain correctly unverified.
+Implement workstream 1 and the verification half of workstream 8. Exit when
+every smoke task has role-appropriate semantic predicates, batching's measured
+miss remains RED, reshard's non-representative pass remains insufficient, and
+fresh RED cannot be hidden by a later submit.
 
-### Phase 2: Complete and fresh repository evidence
+### Phase 2: Decision-specific graph research
 
-Implement workstreams 2, 3, and 4. Exit when clone-late tasks have post-wake
-projections, sanitizer scope is complete, revision mismatch fails audit, and
-graph bytes remain bounded.
+Implement the shared `EvidenceNeed`/`GraphEvidence` IR and workstreams 2, 3,
+and 4. Exit when:
+
+- every graph delivery is tied to an unresolved obligation, active target,
+  patch impact, or recent RED;
+- build localization names Cython/NumPy compatibility surfaces;
+- batching evidence names the exact cost path before broad optimization;
+- reshard evidence proposes a representative distribution/runtime check;
+- sanitizer evidence names contaminated scope rather than unrelated symbols;
+- malformed entity extraction abstains;
+- rank/relation/excerpt provenance survives rendering; and
+- graph bytes remain bounded.
 
 ### Phase 3: Reduce waste and prevent exhaustion
 
 Implement workstreams 5, 6, and 7. Exit when both historical stalls are found
-early, repeated GT exposure falls at least 50%, every capsule expires, and
-every intervention has a utility decision.
+early, every capsule expires after one exposure, total-history cost is reported
+separately, and every intervention has a decision-specific utility score.
 
 ### Phase 4: Pre-live audit
 
@@ -572,7 +758,7 @@ Run:
 - context expiry/exposure tests;
 - tool-outcome and shell-lifecycle tests;
 - progress shadow precision review; and
-- workflow/substrate parity audit.
+- workflow/substrate parity audit against the frozen receipts.
 
 The audit emits exactly:
 
@@ -580,7 +766,7 @@ The audit emits exactly:
 - `NO_GO_CODE`; or
 - `NO_GO_EXPERIMENT`.
 
-### Phase 5: Real nano + GT live run
+### Phase 5: Real nano + GT live runs
 
 Dispatch `.github/workflows/tb2_gt.yml` only after `GO_LIVE`:
 
@@ -590,7 +776,7 @@ Dispatch `.github/workflows/tb2_gt.yml` only after `GO_LIVE`:
 - Profile 2;
 - exact task slice:
   `build-cython-ext,headless-terminal,llm-inference-batching-scheduler,reshard-c4-data,sanitize-git-repo`;
-- concurrency `4`, unless the paired arm freezes another value;
+- concurrency `4`;
 - timeout multiplier `1.0`;
 - exact expected count `5`; and
 - strict contract, profile, lifecycle, provider attribution, feature census,
@@ -601,8 +787,20 @@ deliveries, provider receipts, response/action/observation linkage, roles and
 predicates, graph revisions, capsule lifecycle, progress, utility, and
 classified tool outcomes.
 
-One run is a candidate observation. Improvement requires the matched repeated
-protocol.
+First run one strict five-task GT-on smoke. If it passes artifact and behavior
+gates, repeat the identical GT-on configuration. Compare with the existing
+frozen baseline artifact; do not dispatch GT-off.
+
+### Live outcome targets
+
+- batching and reshard pass the checks that failed in run `30590129776`;
+- no previously passing task regresses;
+- no malformed or decision-irrelevant graph capsule is delivered;
+- every submit refusal remains authoritative while its blocker remains;
+- graph evidence arrives before the governed edit/verification decision;
+- batching materially reduces its 74-iteration, 4.74M-input-token trajectory;
+- aggregate reward improves before an efficiency superiority claim; and
+- repeated GT-on observations agree before the result is called stable.
 
 ## Five-task acceptance matrix
 
@@ -610,8 +808,8 @@ protocol.
 |---|---|---|
 | `build-cython-ext` | Graph wake, build pack, compiled-source impact | All affected Cython sources checked for removed aliases; build/import pass |
 | `headless-terminal` | Code/CLI pack | Required terminal behavior and repository checks pass |
-| `llm-inference-batching-scheduler` | Data pack, exact numeric obligations | Structured per-bucket thresholds, including bucket 2 ≤ 32m |
-| `reshard-c4-data` | Graph wake, data/artifact pack | Schema, shards, order/conservation, and CLI checks |
+| `llm-inference-batching-scheduler` | Data pack, exact numeric obligations, cost-path graph slice | Parsed per-bucket inequalities, including bucket 1 cost `<= 3.0e11`, with measured values |
+| `reshard-c4-data` | Graph wake, data/artifact pack, scale/distribution need | Schema, shards, order/conservation, CLI, representative distribution, and runtime checks |
 | `sanitize-git-repo` | Content pack, repository scope challenge | Complete-scope sensitive-content absence and placeholders |
 
 ## Telemetry and gate additions
@@ -634,13 +832,14 @@ request/response/action linkage when model-facing.
 `scripts/gt_audit.py` must report per task:
 
 - predicate state by obligation;
-- graph revisions, surface semantics, and refresh consistency;
+- graph revisions, ranked surface semantics, evidence-need links, and refresh
+  consistency;
 - search inclusions/exclusions and scope gaps;
 - progress/recovery transitions;
 - unique, repeated, and expired capsule bytes;
 - utility winners and suppressions;
 - tool-outcome class, information gain, exposure position, and recovery; and
-- configuration parity.
+- configuration receipt and frozen-baseline compatibility.
 
 `scripts/gt_live_gate.py` must fail on:
 
@@ -653,7 +852,7 @@ request/response/action linkage when model-facing.
 - top-level `exit` still killing the persistent shell;
 - eligible-dark identities;
 - missing provider attribution/response linkage; or
-- comparison mismatch.
+- a new GT-off dispatch request.
 
 It must not fail because an ineligible feature stayed quiet.
 
@@ -663,13 +862,13 @@ It must not fail because an ineligible feature stayed quiet.
 2. Predicate compiler/evaluator and audit schema.
 3. Role packs and five-task predicate adapters.
 4. Semantic graph projection and freshness.
-5. Atomic graph wake and router revisioning.
+5. Graph revision invalidation and decision reranking.
 6. Content-scope challenge.
 7. Progress ledger and recovery shadow mode.
 8. Ephemeral provider request view.
 9. Utility arbiter.
 10. Recovery delivery after shadow review.
-11. Workflow parity, live dispatch, and result report.
+11. GT-on workflow parity, repeated live dispatch, and result report.
 
 Every slice needs unit tests, replay, audit compatibility, and a rollback flag
 when it changes model-facing behavior.
@@ -679,20 +878,21 @@ when it changes model-facing behavior.
 Do not dispatch if:
 
 - a known incomplete patch can be certified;
-- graph wake retains an old projection/router;
+- graph wake leaves stale evidence or predicate receipts;
 - sanitizer exclusions remain invisible;
 - historical stalls have no shadow transition;
-- repeated GT exposure is unbounded;
+- a capsule is exposed more than once;
 - utility/expiry is unauditable;
 - tool outcomes are unclassified or checks can kill the shell;
 - attribution relies on trajectory text;
-- experiment parity is ambiguous; or
+- frozen configuration receipts are missing; or
 - the local suite is red.
 
-Claim improvement only after matched repetitions show higher reward, or
-non-worse reward with materially lower cost, without hiding a catastrophic
-task-level regression. Flat reward with higher cost means GT is worse. A
-single positive temperature-1 run is promising but inconclusive.
+Claim improvement only after repeated GT-on runs show higher reward, or
+non-worse reward with materially lower cost against the compatible portion of
+the frozen existing baseline, without hiding a task-level regression. Flat
+reward with higher cost means GT is worse. A single positive temperature-1 run
+is promising but inconclusive.
 
 ## Definition of done
 
@@ -705,7 +905,8 @@ single positive temperature-1 run is promising but inconclusive.
 6. GT context expires and repeated exposure is bounded.
 7. Every intervention passes deterministic utility admission.
 8. Role packs provide task-appropriate SDLC support.
-9. Experiments are matched and repeated.
+9. GT-on live configuration is frozen and repeated; the existing baseline is
+   consumed without a new GT-off run.
 10. Tool outcomes are classified and harmful GT-linked misuse is prevented or
     surfaced.
 
@@ -726,23 +927,27 @@ outcome classification, atomic graph refresh, one-exposure capsule expiry,
 role selection, predicate execution, and SDLC boundary coverage.
 
 It does **not** satisfy this plan's outcome definition. Reward was 3/5 overall
-and 2/4 on the valid GT-off pairs, versus 4/4 for GT-off. The next
-dependency-ordered work is:
+and the graph-derived delivery audit found valid but weak, malformed, and late
+evidence. The next dependency-ordered work is:
 
 1. make numeric/content/artifact predicates validate observed semantics rather
    than command vocabulary;
-2. treat timed-out or incomplete required probes as unresolved positive
-   evidence;
-3. replace the single submit bounce with a bounded unresolved-predicate policy
+2. compile decision-specific graph evidence from unresolved requirements,
+   active patch/target, recent RED, and role;
+3. treat non-representative, timed-out, or incomplete required probes as
+   unresolved positive evidence;
+4. replace the single submit bounce with a bounded unresolved-predicate policy
    coordinated with nano's remaining pushback budget;
-4. render bounded role-relevant graph facts into applicable feature evidence,
+5. render bounded role-relevant graph facts into applicable feature evidence,
    not only projection telemetry;
-5. turn calibrated `STALLED`/`BUDGET_RISK` shadow states into one bounded
+6. turn calibrated `STALLED`/`BUDGET_RISK` shadow states into one bounded
    recovery action; and
-6. run the frozen matched repeated protocol before claiming improvement.
-11. All 17 identities retain complete per-task terminal-state accounting.
-12. Every delivery is provider-final attributable and action-linked.
-13. A real nano + GT run passes strict audit with a per-task result report.
+7. run the frozen repeated GT-on protocol before claiming improvement, using
+   the existing baseline without dispatching a new GT-off run.
+
+All 17 identities must retain complete per-task terminal-state accounting,
+every delivery must remain provider-final attributable and action-linked, and
+the final proof must be a real nano + GT run with a per-task result report.
 
 ## Research basis
 
@@ -753,6 +958,18 @@ dependency-ordered work is:
   design and concise purpose-built interaction surfaces affect performance.
 - [Agentless](https://arxiv.org/abs/2407.01489): bounded localization, repair,
   and validation can outperform more complex agent loops at lower cost.
+- [RepoGraph](https://arxiv.org/abs/2410.14684): graph retrieval can improve
+  repository agents, but indiscriminately flattening a larger two-hop graph was
+  the worst tested variant; targeted subgraphs and early use matter.
+- [LocAgent](https://arxiv.org/abs/2503.09089): hierarchical entity search,
+  relation-aware traversal, and graph formatting improve fine-grained
+  localization; whole-query retrieval is too coarse for difficult tasks.
+- [ARISE](https://arxiv.org/abs/2605.03117): structural graphs alone miss
+  statement-level value flow; definition-use slices improve function/line
+  localization and downstream repair.
+- [VRpilot](https://arxiv.org/abs/2405.15690): compiler/test/sanitizer feedback
+  is useful when it is iteratively incorporated into the next repair decision,
+  matching GT's need to connect RED to recovery and readiness invalidation.
 - [SWT-Bench](https://arxiv.org/abs/2406.12952): executable fail-to-pass tests
   support more precise completion decisions.
 - [Failure as Process](https://arxiv.org/abs/2607.09510): many failures begin
@@ -762,8 +979,8 @@ dependency-ordered work is:
 
 ## Repository evidence
 
-- `gt_features.md`: historical/current feature map and run `30582455019`
-  diagnosis.
+- `gt_features.md`: historical/current feature map and live-run diagnoses
+  through `30590129776`.
 - `gt_engine/task_contract.py`: contract extraction and lexical matching.
 - `gt_engine/graph_context.py`: 14-surface inventory and task projection.
 - `gt_engine/evidence_router.py`: role/relevance suppression.

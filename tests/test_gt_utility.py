@@ -34,9 +34,14 @@ def test_utility_can_abstain():
 
 def test_score_is_deterministic():
     candidate = _candidate("localization", 0.7)
-    assert score_candidate(candidate, "x.py") == score_candidate(
+    score = score_candidate(candidate, "x.py")
+    assert score == score_candidate(
         candidate, "x.py"
     )
+    assert score.freshness == 1.0
+    assert score.unresolved_relevance > 0
+    assert score.expected_information_gain == 0.7
+    assert score.false_positive_risk > 0
 
 
 def test_sdlc_priority_dominates_confidence_and_registration_wins():

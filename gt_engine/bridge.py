@@ -480,6 +480,7 @@ class GTBridge:
 
         self._progress = ProgressLedger()
         self.iteration_budget = 0
+        self._last_model_iteration = 0
         self._capability_receipts: set[tuple[str, str]] = set()
         # Bash-edit pre-images captured at the pre-dispatch boundary:
         # {rel: before_content_or_None}; None = the target did not exist (a
@@ -519,6 +520,7 @@ class GTBridge:
         self._role_pack: Any | None = None
         self._evidence_router: Any | None = None
         self._graph_projection: Any | None = None
+        self._graph_evidence: tuple[Any, ...] = ()
         self._last_verification_plan: Any | None = None
         from groundtruth.runtime.episode_state import EpisodeState
 
@@ -1084,6 +1086,7 @@ class GTBridge:
         self, iteration: int, result: Any, delivery_ids: tuple[str, ...]
     ) -> None:
         """Link the next response/actions to exposure without claiming causality."""
+        self._last_model_iteration = int(iteration)
         calls = list(getattr(result, "tool_calls", ()) or ())
         self._last_response_delivery_ids = tuple(delivery_ids)
         self._last_response_action_index = self.action_index
@@ -1277,6 +1280,7 @@ class GTBridge:
         prior_db = self.graph_db or ""
         prior_projection = self._graph_projection
         prior_router = self._evidence_router
+        prior_graph_evidence = self._graph_evidence
         try:
             from gt_engine.graph_context import (
                 build_graph_projection,
@@ -1309,6 +1313,7 @@ class GTBridge:
                 projection = build_graph_projection(db, self._task_contract)
                 router = EvidenceRouter(
                     self._task_contract,
+                    role_pack=self._role_pack,
                     graph_files=projection.files,
                     graph_symbols=projection.symbols,
                     graph_revision=projection.revision,
@@ -1318,6 +1323,7 @@ class GTBridge:
             self.graph_db = db
             self._graph_projection = projection
             self._evidence_router = router
+            self._rerank_graph_evidence("post_edit")
             revision = graph_revision(db)
             payload = {
                 "prior_revision": prior_revision,
@@ -1351,6 +1357,7 @@ class GTBridge:
             self.graph_db = prior_db or None
             self._graph_projection = prior_projection
             self._evidence_router = prior_router
+            self._graph_evidence = prior_graph_evidence
             self._trace_record(
                 "graph.context_refresh_failed",
                 "post_edit",
@@ -1359,6 +1366,85 @@ class GTBridge:
                     "fault_type": type(exc).__name__,
                     "changed_file_count": len(changed),
                 },
+            )
+
+    def _rerank_graph_evidence(self, boundary: str) -> None:
+        """Build and receipt the decision-specific graph slice, host-side."""
+        if self._task_contract is None or self._graph_projection is None:
+            self._graph_evidence = ()
+            return
+        try:
+            from gt_engine.graph_evidence import (
+                build_evidence_need,
+                rank_graph_evidence,
+            )
+
+            need = build_evidence_need(
+                self._task_contract,
+                self._graph_projection,
+                boundary=boundary,
+                verified_obligation_ids=self._verified_obligation_ids,
+                active_paths=tuple(self.edited_files),
+                recent_red=self._observed_red is not None,
+            )
+            ranked = rank_graph_evidence(
+                self._task_contract, self._graph_projection, need
+            )
+            self._graph_evidence = ranked
+            if self._evidence_router is not None:
+                self._evidence_router.relevant_graph_files = frozenset(
+                    item.file_path for item in ranked if item.file_path
+                )
+            self._trace_record(
+                "graph.evidence_need",
+                boundary,
+                {
+                    "task_role": need.role,
+                    "boundary": need.boundary,
+                    "unresolved_obligation_ids": list(
+                        need.unresolved_obligation_ids
+                    ),
+                    "anchor_count": len(need.anchors),
+                    "active_path_count": len(need.active_paths),
+                    "recent_red": need.recent_red,
+                    "revision": need.graph_revision,
+                    "ranked_count": len(ranked),
+                    "relevant_file_count": len({
+                        item.file_path for item in ranked if item.file_path
+                    }),
+                },
+            )
+            for item in ranked:
+                self._trace_record(
+                    "graph.evidence_ranked",
+                    boundary,
+                    {
+                        "surface": item.surface,
+                        "file_path_sha256": hashlib.sha256(
+                            item.file_path.encode(
+                                "utf-8", "surrogatepass"
+                            )
+                        ).hexdigest(),
+                        "symbol_sha256": hashlib.sha256(
+                            item.symbol.encode("utf-8", "surrogatepass")
+                        ).hexdigest(),
+                        "claim_sha256": hashlib.sha256(
+                            item.claim.encode("utf-8", "surrogatepass")
+                        ).hexdigest(),
+                        "confidence": item.confidence,
+                        "revision": item.revision,
+                        "obligation_ids": list(item.obligation_ids),
+                        "active_target_linked": item.active_target_linked,
+                        "intended_action": item.intended_action,
+                        "rank": item.rank,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001 - semantic slice is optional
+            self._graph_evidence = ()
+            self._trace_record(
+                "graph.evidence_ranking_failed",
+                boundary,
+                {"fault_type": type(exc).__name__},
             )
 
     # ------------------------------------------------------------------ #
@@ -1838,15 +1924,43 @@ class GTBridge:
                   D_REFRESH_BEFORE_ADVICE)
         selection = next(
             (a.disposition for a in advisories if a.disposition in mapped), None)
-        if selection != D_HYPOTHESIS_FALSIFIED:
-            return None  # honest subset: only the CAP's recurs-across-edits class
-        if fp in self._recovery_fired_sigs:
-            return None  # once per signature per episode
         from groundtruth.runtime.patterns import classify_test_observation
 
         if classify_test_observation(cmd or "", output or "", rc)[0] != "fail":
             return None  # stall gate: a GENUINE failing TEST right now (W6 1b)
         from groundtruth.runtime.native_render import render_recovery_native
+
+        if selection != D_HYPOTHESIS_FALSIFIED:
+            near_budget = bool(
+                self.iteration_budget > 0
+                and self._last_model_iteration
+                >= max(1, int(self.iteration_budget * 0.8))
+            )
+            unresolved = bool(
+                self._task_contract is not None
+                and len(self._verified_obligation_ids)
+                < len(self._task_contract.obligations)
+            )
+            if not (
+                fp
+                and near_budget
+                and unresolved
+                and self._test_touches_edit(cmd, output)
+            ):
+                return None
+            signature = f"budget-{fp}"
+            if signature in self._recovery_fired_sigs:
+                return None
+            imperative = (
+                "A required check is still failing near the iteration limit; "
+                "fix this observed failure before further exploration."
+            )
+            text = render_recovery_native(
+                D_REQUEST_NEW_HYPOTHESIS, imperative
+            )
+            return (text, signature) if text else None
+        if fp in self._recovery_fired_sigs:
+            return None  # once per signature per episode
 
         # Production's D_HYPOTHESIS_FALSIFIED imperative, verbatim (:12639).
         imperative = ("The last edit did not change the failing result — form "
@@ -1983,6 +2097,18 @@ class GTBridge:
                 and _CHECK_EXEC_RE.search(cmd or "")
             ):
                 outcome = _explicit_check_outcome(output or "") or outcome
+            if outcome not in ("fail", "pass") and self._task_contract is not None:
+                from gt_engine.verification_contract import (
+                    is_complete_content_absence_observation,
+                )
+
+                if (
+                    self._task_contract.role == "content_scan"
+                    and is_complete_content_absence_observation(
+                        cmd or "", output or "", rc
+                    )
+                ):
+                    outcome = "pass"
             if outcome not in ("fail", "pass"):
                 return None  # env_fail / no-tests / non-test: latch unchanged
             self._last_test_outcome = outcome
@@ -2015,6 +2141,7 @@ class GTBridge:
                         cmd or "",
                         output or "",
                         action_index=self.action_index,
+                        returncode=rc,
                     )
                     for receipt in receipts:
                         self._verified_obligation_ids.add(
@@ -2031,6 +2158,14 @@ class GTBridge:
                                 "obligation_id": receipt.obligation_id,
                                 "kind": receipt.kind,
                                 "outcome": receipt.outcome,
+                                "observed_value": receipt.observed_value,
+                                "operator": receipt.operator,
+                                "required_value": receipt.required_value,
+                                "unit": receipt.unit,
+                                "action_index": receipt.action_index,
+                                "latest_edit_action": (
+                                    self._last_task_edit_action
+                                ),
                                 "command_sha256": receipt.command_sha256,
                                 "output_sha256": receipt.output_sha256,
                             },
@@ -2447,6 +2582,12 @@ class GTBridge:
                 if cov_text:
                     # Recovery defers (ladder floor); its latch is NOT burned.
                     return self._deliver_covering(output, cov_text, changed[0])
+            if recovery and recovery[1].startswith("budget-"):
+                # A fresh attributable RED near exhaustion is decision-critical
+                # and outranks advisory localization/caller evidence.
+                return self._deliver_recovery(
+                    output, recovery[0], recovery[1]
+                )
             enriched = self._deliver(cmd, output, rc,
                                      changed_files=changed, viewed_files=viewed,
                                      edit_before_after=eba)
@@ -2517,6 +2658,10 @@ class GTBridge:
 
     # Syntax-check at most this many edited files at the submit boundary.
     _MAX_SUBMIT_SYNTAX_FILES = 10
+    # Nano owns the terminal bound with ``max_pushbacks=3``. GT remains
+    # authoritative for positive unresolved evidence throughout that existing
+    # budget instead of failing open after its first refusal.
+    _MAX_SUBMIT_BLOCKS = 3
 
     def _submit_covering(self) -> dict | None:
         """The submit gate's covering HEAD (G-2 staleness law, the mini seam's
@@ -2631,7 +2776,7 @@ class GTBridge:
         # if the agent NEVER observed a failing test (hidden verifier tests
         # are invisible by design), the latch is None and this never fires —
         # GT only knows what the agent observed. Single-dose rides the
-        # existing bounce economy (max_bounces=1: the second submit passes).
+        # existing bounded nano pushback economy.
         # Leak guard on the detail: the echoed command is the agent's OWN
         # (agent-visible by definition), but the seam law still applies —
         # if the quoted line trips contains_test_identity it degrades to the
@@ -2714,8 +2859,8 @@ class GTBridge:
         # SDLC penultimate gate: syntax success proves parseability, not
         # behavior. When enabled, a source edit must be followed by a passing
         # formal test, explicit self-check, or selected covering run. This is
-        # one advisory refusal using the existing bounce economy; the second
-        # submit still fails open, so GT cannot deadlock completion.
+        # bounded advisory refusals using nano's existing pushback economy; GT
+        # does not create an independent unbounded loop.
         sdlc_verify_on = os.environ.get(
             "GT_SDLC_VERIFY", ""
         ).strip().lower() not in ("", "0", "false", "no", "off")
@@ -2793,7 +2938,8 @@ class GTBridge:
             hygiene = None
         verdict = safe_gate_verdict(
             covering=covering, hygiene=hygiene, submit_block=submit_block,
-            bounce_count=self.submit_bounces, max_bounces=1)
+            bounce_count=self.submit_bounces,
+            max_bounces=self._MAX_SUBMIT_BLOCKS)
         # WIRE 3: the CompletionCertificate (GT_CERT_DELIVERY, production's own
         # flag read — gt_mini_patch.py:22329). Built from what nano HONESTLY
         # has: the frozen head, syntax/covering/hygiene results, and explicit
@@ -2810,7 +2956,8 @@ class GTBridge:
                 cert = safe_build_certificate(
                     head=verdict, covering=covering, hygiene=hygiene,
                     submit_block=submit_block,
-                    bounce_count=self.submit_bounces, max_bounces=1,
+                    bounce_count=self.submit_bounces,
+                    max_bounces=self._MAX_SUBMIT_BLOCKS,
                     syntax=syntax_res, obligations=obligation_coverage)
             except Exception:  # noqa: BLE001 - a cert fault degrades to the head
                 cert = None
@@ -2863,6 +3010,21 @@ class GTBridge:
                 text = ""
         if not text:
             text = render_submit_rejection(verdict.reason, verdict.detail)
+        if text and self.submit_bounces:
+            # A repeated positive blocker is new decision evidence only because
+            # nano acted after the prior refusal and still did not clear it.
+            # Name that state so provider bytes and dedup identity remain
+            # honest rather than replaying an indistinguishable capsule.
+            marker = (
+                "still unresolved after "
+                f"{self.submit_bounces} prior refusal"
+                f"{'s' if self.submit_bounces != 1 else ''}"
+            )
+            trailer = "commit aborted (exit 1)"
+            if trailer in text:
+                text = text.replace(trailer, marker + "\n" + trailer, 1)
+            else:
+                text = text.rstrip() + "\n" + marker
         ev_type = ("submit_refusal"
                    if cert_rendered
                    or verdict.reason in ("covering_test_failed",
@@ -2895,10 +3057,8 @@ class GTBridge:
         # W2-R4 fix: the bounce is spent ONLY when refusal text actually
         # ships (all guards above passed). A guard-suppressed refusal (empty
         # render, leak trip, over budget) is a silent allow and must not burn
-        # the single bounce — otherwise the NEXT submit fails open
-        # unconditionally and a real block never ships at all. max_bounces=1
-        # semantics are unchanged for genuinely-shipped refusals: the probe
-        # after a shipped refusal is gate_overridden (fail-open, no deadlock).
+        # bounded refusal budget — otherwise a suppressed attempt could consume
+        # nano's remaining opportunity to act on real evidence.
         self.submit_bounces += 1
         # The cert block / a covering block / the SS-2 observed-RED block is
         # the submit_refusal fact class (production's lineage binding,
@@ -3103,10 +3263,12 @@ class GTBridge:
         )
         self._evidence_router = EvidenceRouter(
             self._task_contract,
+            role_pack=self._role_pack,
             graph_files=self._graph_projection.files,
             graph_symbols=self._graph_projection.symbols,
             graph_revision=self._graph_projection.revision,
         )
+        self._rerank_graph_evidence("task_start")
         self._trace_record(
             "graph.task_projection",
             "task_start",
@@ -3294,7 +3456,17 @@ class GTBridge:
                     "severity": scored.severity,
                     "evidence_strength": scored.evidence_strength,
                     "actionability": scored.actionability,
+                    "freshness": scored.freshness,
+                    "unresolved_relevance": (
+                        scored.unresolved_relevance
+                    ),
+                    "expected_information_gain": (
+                        scored.expected_information_gain
+                    ),
+                    "repetition_cost": scored.repetition_cost,
                     "token_cost": scored.token_cost,
+                    "interruption_cost": scored.interruption_cost,
+                    "false_positive_risk": scored.false_positive_risk,
                     "score": scored.score,
                     "selected": scored.candidate is winner,
                 },

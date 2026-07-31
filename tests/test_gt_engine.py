@@ -1183,12 +1183,22 @@ def test_submit_probe_quiet_on_clean_or_unedited(indexed_repo):
 
 
 @requires_gt
-def test_submit_probe_fails_open_after_max_bounces(indexed_repo, tmp_path):
+def test_submit_probe_remains_authoritative_for_nano_pushback_budget(
+        indexed_repo, tmp_path):
     (tmp_path / "pkg" / "broken.py").write_text("def oops(:\n", encoding="utf-8")
     b = indexed_repo
     b.edited_files.append("pkg/broken.py")
-    assert b.submit_probe() is not None      # first refusal
-    assert b.submit_probe() is None          # gate_overridden: never deadlock
+    assert b.submit_probe() is not None
+    assert b.submit_probe() is not None
+    assert b.submit_probe() is not None
+    refusal_hashes = [
+        item.rendered_bytes_hash
+        for item in b.deliveries
+        if item.evidence_type in {"submit_refusal", "syntax_result"}
+    ]
+    assert len(refusal_hashes) == 3
+    assert len(set(refusal_hashes)) == 3
+    assert b.submit_probe() is None  # bounded by nano's three-pushback policy
 
 
 # --------------------------------------------------------------------------- #
@@ -1232,6 +1242,14 @@ def test_graph_projection_uses_task_symbols_and_relationship_surfaces(indexed_re
     assert projection.node_ids
     assert "pkg/alpha.py" in projection.files
     assert "helper" in projection.symbols
+    assert any(
+        fact.surface in {
+            "nodes_fts", "symbol_content_fts", "content_passages_fts"
+        }
+        and fact.revision == projection.revision
+        and ("helper" in fact.value.lower() or fact.symbol == "helper")
+        for fact in projection.semantic_facts
+    )
 
 
 @requires_gt
@@ -1799,8 +1817,11 @@ def test_submit_cert_block_on_covering_red(covering_repo, tmp_path, monkeypatch)
     assert "<gt-" not in nudge.lower()
     sealed = b.deliveries[-1]
     assert sealed.evidence_type == "submit_refusal"
-    # Fail-open: the second probe never deadlocks the run.
-    assert b.submit_probe() is None
+    # The same positive covering RED remains authoritative within nano's
+    # bounded pushback budget.
+    second = b.submit_probe()
+    assert second is not None
+    assert "still unresolved after 1 prior refusal" in second
 
 
 @requires_gt
@@ -2472,6 +2493,25 @@ def test_recovery_quiet_without_intervening_edit(indexed_repo, monkeypatch):
 
 
 @requires_gt
+def test_recovery_fires_on_fresh_attributable_red_near_budget(
+        indexed_repo, tmp_path, monkeypatch):
+    """A first useful RED may steer near exhaustion without claiming that an
+    intervening edit has already been falsified."""
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    b = indexed_repo
+    b.issue_text = "Implement helper and keep callers compatible."
+    assert b.task_start()
+    b.iteration_budget = 10
+    b._last_model_iteration = 8
+    _edit_alpha(b, tmp_path, "near-budget attempt")
+
+    out = b.enrich("bash", {"command": _PYTEST_CMD}, _RED_TOUCH, True)
+
+    assert "still failing near the iteration limit" in out
+    assert b.deliveries[-1].evidence_type == "recovery"
+
+
+@requires_gt
 def test_recovery_quiet_on_nontest_failure_recurrence(indexed_repo, tmp_path,
                                                       monkeypatch):
     """The stall gate's genuine-test half: a recurring NON-test failure (a
@@ -2550,7 +2590,8 @@ def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
                                                        monkeypatch):
     """LIVE FIRE: edit -> observed test FAIL on the edited surface -> submit
     is refused ONCE (native pre-commit form, agent's own command quoted),
-    sealed as submit_refusal; the second submit passes (single dose)."""
+    sealed as submit_refusal and remains authoritative within nano's bounded
+    pushback budget."""
     monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
     monkeypatch.setenv("GT_CERT_DELIVERY", "1")
     b = indexed_repo
@@ -2570,7 +2611,9 @@ def test_submit_red_blocks_on_unresolved_observed_fail(indexed_repo, tmp_path,
     assert summary["submit_refusal"]["status"] == "DELIVERED_UNEXPOSED"
     assert summary["GT_SS_SUBMIT_RED"]["status"] == "DELIVERED_UNEXPOSED"
     assert summary["GT_CERT_DELIVERY"]["status"] == "DELIVERED_UNEXPOSED"
-    assert b.submit_probe() is None            # single dose: 2nd submit passes
+    second = b.submit_probe()
+    assert second is not None
+    assert "still unresolved after 1 prior refusal" in second
 
 
 @requires_gt
@@ -2630,10 +2673,9 @@ def test_submit_red_ignores_failure_on_unedited_surface(indexed_repo,
 def test_submit_bounce_not_burned_by_suppressed_refusal(indexed_repo, tmp_path,
                                                         monkeypatch):
     """W2-R4 fix: a refusal SUPPRESSED by the seam guards (leak-tripping
-    render here) is a silent allow and must NOT spend the single bounce —
-    the next submit with a real block still refuses. The bounce is counted
-    only when refusal text actually ships (fail-open economics preserved:
-    the probe AFTER a shipped refusal passes)."""
+    render here) is a silent allow and must NOT spend the bounded refusal
+    budget. The next submit with a real block still refuses, and only shipped
+    refusal text consumes that budget."""
     monkeypatch.setenv("GT_SS_SUBMIT_RED", "1")
     b = indexed_repo
     _edit_and_fail(b, tmp_path)
@@ -2652,8 +2694,9 @@ def test_submit_bounce_not_burned_by_suppressed_refusal(indexed_repo, tmp_path,
     assert nudge is not None
     assert "never re-run green" in nudge
     assert b.submit_bounces == 1               # spent exactly at the ship
-    # Probe 3: genuinely-shipped refusal -> max_bounces=1 fail-open holds.
-    assert b.submit_probe() is None
+    # Probe 3: the unresolved blocker remains authoritative while nano still
+    # has pushback budget.
+    assert b.submit_probe() is not None
 
 
 @requires_gt

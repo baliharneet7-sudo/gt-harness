@@ -156,6 +156,10 @@ def evaluate_live_gate(
         improvement_totals["graph_semantic_facts"] += int(
             task.get("graph_semantic_fact_count") or 0
         )
+        improvement_totals.setdefault("graph_evidence_ranked", 0)
+        improvement_totals["graph_evidence_ranked"] += int(
+            task.get("graph_evidence_ranked_count") or 0
+        )
         improvement_totals["graph_refreshes"] += int(
             task.get("graph_refresh_count") or 0
         )
@@ -198,6 +202,10 @@ def evaluate_live_gate(
                     f"{task_name}: predicate compilation mismatch "
                     f"({compiled_count}/{obligation_count})"
                 )
+            if int(task.get("predicate_invalid_receipt_count") or 0):
+                issues.append(
+                    f"{task_name}: invalid semantic predicate receipt"
+                )
             if classified_count != tool_results:
                 issues.append(
                     f"{task_name}: tool-outcome census mismatch "
@@ -214,6 +222,16 @@ def evaluate_live_gate(
             if int(task.get("graph_refresh_failure_count") or 0):
                 issues.append(
                     f"{task_name}: graph context refresh failure"
+                )
+            if int(task.get("graph_evidence_unlinked_count") or 0):
+                issues.append(
+                    f"{task_name}: decision-irrelevant graph evidence ranked"
+                )
+            if int(
+                task.get("graph_evidence_revision_mismatch_count") or 0
+            ):
+                issues.append(
+                    f"{task_name}: stale graph evidence revision"
                 )
             if task.get("graph_available") and (
                 not task.get("graph_projection_revision")

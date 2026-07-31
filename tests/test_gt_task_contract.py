@@ -181,6 +181,146 @@ def test_content_scan_router_allows_one_graph_grounded_scope_challenge():
 
 
 @requires_gt
+def test_router_enforces_selected_role_pack_for_concrete_alias():
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.role_packs import select_role_pack
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(SANITIZE_TASK)
+    pack = select_role_pack(contract)
+    router = EvidenceRouter(contract, role_pack=pack)
+
+    keep, reason = router.admit(
+        "caller_contract_view",
+        "load_ppl_yaml() has 2 production callers",
+        command="cat training/params.py",
+        output="",
+        commit=False,
+    )
+
+    assert (keep, reason) == (False, "role_pack_evidence_mismatch")
+
+
+@requires_gt
+def test_router_rejects_malformed_newfile_entity():
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.role_packs import CapabilityPack
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(
+        "Create optimized_packer.py to produce plan_b2.jsonl."
+    )
+    pack = CapabilityPack(
+        "test",
+        "1",
+        ("post_edit",),
+        ("artifact",),
+        ("newfile_precedent",),
+    )
+    router = EvidenceRouter(contract, role_pack=pack)
+
+    keep, reason = router.admit(
+        "missing_role_postcreate:implementation",
+        (
+            "2 siblings define implementation: baseline_packer.py, "
+            "optimized_packer.py\n"
+            "issue names new entity 'plan' in this family: "
+            "'2.jsonl`` and produce a plan in ``/app/task_file/ou'"
+        ),
+        command="edit optimized_packer.py",
+        output="",
+        commit=False,
+    )
+
+    assert (keep, reason) == (False, "malformed_newfile_entity")
+
+
+@requires_gt
+def test_localization_requires_task_subject_not_only_graph_membership():
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(SANITIZE_TASK)
+    router = EvidenceRouter(
+        contract,
+        graph_files=frozenset({"tools/expdb.py", "ray_processing/process.py"}),
+    )
+
+    assert router.admit(
+        "localization",
+        "tools/expdb.py:75:load_smart_html",
+        command="rg AWS_ACCESS_KEY_ID .",
+        output="",
+        commit=False,
+    ) == (False, "localization_subject_mismatch")
+
+
+@requires_gt
+@pytest.mark.parametrize(
+    ("issue", "rendered"),
+    [
+        (
+            "Implement HeadlessTerminal(BaseTerminal) in headless_terminal.py.",
+            "base_terminal.py:4:BaseTerminal",
+        ),
+        (
+            "Create a batching scheduler whose measured cost stays below the threshold.",
+            "cost_model.py:18:estimate_batch_cost",
+        ),
+        (
+            "Create compress.py and decompress.py to reshard a dataset exactly.",
+            "tools/compress.py:12:compress_shard",
+        ),
+    ],
+)
+def test_localization_accepts_decision_specific_semantic_anchor(issue, rendered):
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(issue)
+    path = rendered.split(":", 1)[0]
+    router = EvidenceRouter(contract, graph_files=frozenset({path}))
+
+    assert router.admit(
+        "localization",
+        rendered,
+        command="rg unrelated .",
+        output="",
+        commit=False,
+    )[0]
+
+
+@requires_gt
+def test_localization_prefers_decision_ranked_graph_slice():
+    from gt_engine.evidence_router import EvidenceRouter
+    from gt_engine.task_contract import extract_task_contract
+
+    contract = extract_task_contract(
+        "Implement helper in relevant.py and keep callers compatible."
+    )
+    router = EvidenceRouter(
+        contract,
+        graph_files=frozenset({"relevant.py", "helper_noise.py"}),
+        relevant_graph_files=frozenset({"relevant.py"}),
+    )
+
+    assert router.admit(
+        "localization",
+        "helper_noise.py:4:helper",
+        command="rg helper .",
+        output="",
+        commit=False,
+    ) == (False, "graph_unrelated")
+    assert router.admit(
+        "localization",
+        "relevant.py:4:helper",
+        command="rg helper .",
+        output="",
+        commit=False,
+    )[0]
+
+
+@requires_gt
 def test_graph_receipt_names_all_trustworthy_surfaces(tmp_path):
     from gt_engine.graph_context import graph_surface_receipt
 
@@ -203,6 +343,87 @@ def test_graph_receipt_names_all_trustworthy_surfaces(tmp_path):
         "project_meta",
     }
     assert receipt["available"] is False
+
+
+def test_graph_query_prioritizes_explicit_subjects_over_alphabetic_noise():
+    from gt_engine.graph_context import graph_query_terms
+    from gt_engine.task_contract import Obligation, TaskContract
+
+    contract = TaskContract(
+        "data_transform",
+        (
+            Obligation(
+                "obl-1",
+                "Create optimized_packer.py and keep measured batching latency "
+                "below its exact threshold.",
+                "test",
+                ("optimized_packer.py",),
+            ),
+            Obligation(
+                "obl-2",
+                "Verify batching latency and batching cost.",
+                "test",
+            ),
+        ),
+    )
+
+    terms = graph_query_terms(contract, limit=4)
+
+    assert terms[0] == "optimized_packer.py"
+    assert "batching" in terms
+
+
+def test_graph_evidence_is_linked_to_unresolved_need_and_revision():
+    from gt_engine.graph_context import (
+        GraphProjection,
+        GraphSemanticFact,
+    )
+    from gt_engine.graph_evidence import (
+        build_evidence_need,
+        rank_graph_evidence,
+    )
+    from gt_engine.task_contract import Obligation, TaskContract
+
+    contract = TaskContract(
+        "data_transform",
+        (
+            Obligation(
+                "obl-cost",
+                "Measured batching cost must stay below 3.0e11.",
+                "test",
+            ),
+        ),
+    )
+    projection = GraphProjection(
+        files=frozenset({"cost_model.py", "unrelated.py"}),
+        symbols=frozenset({"estimate_batching_cost", "noise"}),
+        node_ids=frozenset({1, 2}),
+        surface_hits=(("symbol_content_fts", 2),),
+        semantic_facts=(
+            GraphSemanticFact(
+                "symbol_content_fts", 1, "cost_model.py",
+                "estimate_batching_cost", "ranked_body", "batching cost",
+                confidence=0.9, revision="rev-a",
+            ),
+            GraphSemanticFact(
+                "symbol_content_fts", 2, "unrelated.py",
+                "noise", "ranked_body", "unrelated setup",
+                confidence=1.0, revision="rev-a",
+            ),
+        ),
+        revision="rev-a",
+    )
+    need = build_evidence_need(
+        contract, projection, boundary="research",
+    )
+
+    ranked = rank_graph_evidence(contract, projection, need)
+
+    assert len(ranked) == 1
+    assert ranked[0].file_path == "cost_model.py"
+    assert ranked[0].obligation_ids == ("obl-cost",)
+    assert ranked[0].active_target_linked is False
+    assert ranked[0].revision == "rev-a"
 
 
 @requires_gt
@@ -406,3 +627,143 @@ def test_later_edit_invalidates_prior_predicate_receipts(tmp_path, monkeypatch):
 
     assert bridge._obligation_coverage()["unmet"]
     assert not bridge._predicate_receipts
+
+
+def test_numeric_predicate_rejects_measured_value_above_scientific_bound():
+    """A passing metrics command is not proof when its measured inequality is RED."""
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    obligation = Obligation(
+        "obl-cost",
+        "Bucket 1 measured cost must be below 3.0e11",
+        "test",
+    )
+    contract = TaskContract("data_transform", (obligation,))
+    predicates = compile_obligation_predicates(contract)
+
+    receipts = evaluate_passing_observation(
+        contract,
+        predicates,
+        "python validate_metrics.py --check-cost",
+        "Bucket 1 measured cost 3.066e11 threshold 3.0e11",
+        action_index=7,
+    )
+
+    assert receipts == ()
+
+
+def test_numeric_predicate_credits_explicit_satisfied_scientific_bound():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    obligation = Obligation(
+        "obl-cost",
+        "Bucket 1 measured cost must be below 3.0e11",
+        "test",
+    )
+    contract = TaskContract("data_transform", (obligation,))
+    predicates = compile_obligation_predicates(contract)
+
+    receipts = evaluate_passing_observation(
+        contract,
+        predicates,
+        "python validate_metrics.py --check-cost",
+        "Bucket 1 measured cost 2.95e11 <= threshold 3.0e11 PASS",
+        action_index=8,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].kind == "numeric_threshold"
+    assert receipts[0].outcome == "pass"
+
+
+def test_numeric_predicate_rejects_observation_without_required_unit():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    obligation = Obligation(
+        "obl-latency",
+        "Latency must be below 100 ms",
+        "test",
+    )
+    contract = TaskContract("data_transform", (obligation,))
+
+    receipts = evaluate_passing_observation(
+        contract,
+        compile_obligation_predicates(contract),
+        "python validate_metrics.py --latency",
+        "Latency measured 75 <= threshold 100 ms PASS",
+        action_index=9,
+    )
+
+    assert receipts == ()
+
+
+def test_content_scope_requires_complete_unexcluded_negative_search():
+    from gt_engine.verification_contract import (
+        is_complete_content_absence_observation,
+    )
+
+    assert is_complete_content_absence_observation(
+        'rg "AWS_ACCESS_KEY_ID|hf_" .',
+        "",
+        1,
+    )
+    assert not is_complete_content_absence_observation(
+        'rg "AWS_ACCESS_KEY_ID|hf_" . --glob "!exp_data/**"',
+        "",
+        1,
+    )
+    assert not is_complete_content_absence_observation(
+        'rg "AWS_ACCESS_KEY_ID|hf_" config/',
+        "",
+        1,
+    )
+
+
+@requires_gt
+def test_bridge_credits_repository_wide_negative_content_search(
+    tmp_path, monkeypatch,
+):
+    from gt_engine.bridge import GTBridge
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    target = tmp_path / "config.py"
+    target.write_text('TOKEN = "<placeholder>"\n', encoding="utf-8")
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text=(
+            "Remove all API keys from the entire repository and ensure no "
+            "sensitive values remain."
+        ),
+    )
+    assert bridge.task_start()
+    bridge.enrich(
+        "edit_file",
+        {"path": str(target)},
+        "edited",
+        False,
+        edit_before='TOKEN = "secret"\n',
+        edit_after='TOKEN = "<placeholder>"\n',
+    )
+
+    bridge.enrich(
+        "bash",
+        {"command": 'rg "API keys|sensitive values" .'},
+        "[exit code 1]",
+        True,  # rg status 1 means the negative search found no matches
+    )
+
+    assert bridge._predicate_receipts

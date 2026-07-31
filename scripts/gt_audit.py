@@ -687,9 +687,14 @@ class TaskAudit:
     predicate_compiled_count: int = 0
     predicate_observed_count: int = 0
     predicate_observed_kinds: dict[str, int] = field(default_factory=dict)
+    predicate_invalid_receipt_count: int = 0
     graph_projection_revision: str = ""
     graph_router_revision: str = ""
     graph_semantic_fact_count: int = 0
+    graph_evidence_need_count: int = 0
+    graph_evidence_ranked_count: int = 0
+    graph_evidence_unlinked_count: int = 0
+    graph_evidence_revision_mismatch_count: int = 0
     graph_refresh_count: int = 0
     graph_refresh_failure_count: int = 0
     capsule_expired_count: int = 0
@@ -938,6 +943,19 @@ def audit_task(task_dir: Path) -> TaskAudit:
             a.role_pack_version = str(
                 role_pack_receipt.get("version") or ""
             )
+        valid_graph_revisions = {
+            str(value)
+            for row in attribution_rows
+            if row.get("event_type") in {
+                "graph.task_projection",
+                "graph.context_refreshed",
+            }
+            for value in (
+                row.get("payload", {}).get("revision"),
+                row.get("payload", {}).get("router_revision"),
+            )
+            if value
+        }
         exposure_counts: dict[str, int] = {}
         for row in attribution_rows:
             event_type = str(row.get("event_type") or "")
@@ -950,10 +968,40 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 a.predicate_observed_kinds[kind] = (
                     a.predicate_observed_kinds.get(kind, 0) + 1
                 )
+                invalid = (
+                    payload.get("outcome") != "pass"
+                    or not payload.get("command_sha256")
+                    or not payload.get("output_sha256")
+                    or int(payload.get("action_index") or 0)
+                    < int(payload.get("latest_edit_action") or 0)
+                )
+                if kind == "numeric_threshold":
+                    invalid = invalid or not all(
+                        payload.get(name)
+                        for name in (
+                            "observed_value",
+                            "operator",
+                            "required_value",
+                        )
+                    )
+                if invalid:
+                    a.predicate_invalid_receipt_count += 1
             elif event_type == "graph.context_refreshed":
                 a.graph_refresh_count += 1
             elif event_type == "graph.context_refresh_failed":
                 a.graph_refresh_failure_count += 1
+            elif event_type == "graph.evidence_need":
+                a.graph_evidence_need_count += 1
+            elif event_type == "graph.evidence_ranked":
+                a.graph_evidence_ranked_count += 1
+                if (
+                    not payload.get("obligation_ids")
+                    and not bool(payload.get("active_target_linked"))
+                ):
+                    a.graph_evidence_unlinked_count += 1
+                fact_revision = str(payload.get("revision") or "")
+                if fact_revision and fact_revision not in valid_graph_revisions:
+                    a.graph_evidence_revision_mismatch_count += 1
             elif event_type == "capsule.expired":
                 a.capsule_expired_count += 1
             elif event_type == "provider.request":

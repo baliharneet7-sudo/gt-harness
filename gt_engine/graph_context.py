@@ -107,19 +107,55 @@ def graph_surface_receipt(graph_db: str) -> dict[str, object]:
         con.close()
 
 
-def _fts_query(contract: TaskContract) -> str:
+def graph_query_terms(
+    contract: TaskContract,
+    *,
+    limit: int = 24,
+) -> tuple[str, ...]:
+    """Return decision anchors in specificity order, never alphabetic order."""
+    subjects: list[str] = []
     tokens: list[str] = []
     for item in contract.obligations:
         tokens.extend(significant_tokens(item.text))
-        tokens.extend(s.lower() for s in item.subjects)
-    clean = sorted(
-        {
-            token.replace('"', "")
-            for token in tokens
-            if token.replace("_", "").replace(".", "").isalnum()
-        }
-    )[:24]
-    return " OR ".join(f'"{token}"' for token in clean)
+        subjects.extend(s.lower() for s in item.subjects)
+
+    def clean(value: str) -> str:
+        value = str(value or "").replace('"', "").strip().lower()
+        return value if value.replace("_", "").replace(".", "").isalnum() else ""
+
+    # Explicit paths/symbols are the strongest anchors. Remaining terms prefer
+    # repeated obligation coverage and specificity (longer identifiers) while
+    # retaining first occurrence as a deterministic final tie-break.
+    ordered: list[str] = []
+    for value in subjects:
+        value = clean(value)
+        if value and value not in ordered:
+            ordered.append(value)
+    first_seen: dict[str, int] = {}
+    frequency: dict[str, int] = {}
+    for index, raw in enumerate(tokens):
+        value = clean(raw)
+        if not value:
+            continue
+        first_seen.setdefault(value, index)
+        frequency[value] = frequency.get(value, 0) + 1
+    ranked = sorted(
+        frequency,
+        key=lambda value: (
+            -frequency[value],
+            -int("_" in value or "." in value),
+            -len(value),
+            first_seen[value],
+        ),
+    )
+    for value in ranked:
+        if value not in ordered:
+            ordered.append(value)
+    return tuple(ordered[: max(1, int(limit))])
+
+
+def _fts_query(contract: TaskContract) -> str:
+    return " OR ".join(f'"{token}"' for token in graph_query_terms(contract))
 
 
 def build_graph_projection(
@@ -144,38 +180,66 @@ def build_graph_projection(
         if query and "nodes_fts" in tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name FROM nodes_fts f "
+                    "SELECT n.id,n.file_path,n.name,"
+                    "snippet(nodes_fts,-1,'','',' ',12) FROM nodes_fts f "
                     "JOIN nodes n ON n.id=f.rowid WHERE nodes_fts MATCH ? "
                     "AND COALESCE(n.is_test,0)=0 ORDER BY bm25(nodes_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["nodes_fts"] += len(rows)
-                for node_id, file_path, name in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
+                    semantic_facts.append(GraphSemanticFact(
+                        "nodes_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_symbol",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
         if query and {"symbol_content_fts", "nodes"} <= tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name FROM symbol_content_fts f "
+                    "SELECT n.id,n.file_path,n.name,"
+                    "snippet(symbol_content_fts,0,'','',' ',12) "
+                    "FROM symbol_content_fts f "
                     "JOIN nodes n ON n.id=f.rowid "
                     "WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
                     "ORDER BY bm25(symbol_content_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["symbol_content_fts"] += len(rows)
-                for node_id, file_path, name in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
+                    semantic_facts.append(GraphSemanticFact(
+                        "symbol_content_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_body",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
         if query and {"content_passages_fts", "content_passages", "nodes"} <= tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name FROM content_passages_fts f "
+                    "SELECT n.id,n.file_path,n.name,p.content,p.start_line "
+                    "FROM content_passages_fts f "
                     "JOIN content_passages p ON p.passage_id=f.rowid "
                     "JOIN nodes n ON n.id=p.node_id "
                     "WHERE content_passages_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
@@ -184,10 +248,23 @@ def build_graph_projection(
                 ).fetchall()
                 hits["content_passages_fts"] += len(rows)
                 hits["content_passages"] += len(rows)
-                for node_id, file_path, name in rows:
+                for rank, (
+                    node_id, file_path, name, excerpt, start_line
+                ) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
+                    semantic_facts.append(GraphSemanticFact(
+                        "content_passages_fts",
+                        int(node_id),
+                        str(file_path).replace("\\", "/"),
+                        str(name),
+                        "ranked_passage",
+                        str(excerpt or f"{file_path}:{name}")[:500],
+                        int(start_line or 0),
+                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
+                        revision=revision,
+                    ))
             except sqlite3.Error:
                 pass
 

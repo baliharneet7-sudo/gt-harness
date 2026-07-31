@@ -37,6 +37,9 @@ def _task(
     utility_selected_count=0,
     graph_projection_revision="",
     graph_router_revision="",
+    predicate_invalid_receipt_count=0,
+    graph_evidence_unlinked_count=0,
+    graph_evidence_revision_mismatch_count=0,
 ):
     return {
         "task_name": name,
@@ -76,6 +79,13 @@ def _task(
         "utility_selected_count": utility_selected_count,
         "graph_projection_revision": graph_projection_revision,
         "graph_router_revision": graph_router_revision,
+        "predicate_invalid_receipt_count": (
+            predicate_invalid_receipt_count
+        ),
+        "graph_evidence_unlinked_count": graph_evidence_unlinked_count,
+        "graph_evidence_revision_mismatch_count": (
+            graph_evidence_revision_mismatch_count
+        ),
     }
 
 
@@ -283,6 +293,9 @@ def test_live_gate_requires_complete_improvement_receipts(tmp_path):
         "capsule_repeated_exposure_count": 1,
         "utility_selected_count": 3,
         "graph_router_revision": "graph-r0",
+        "predicate_invalid_receipt_count": 1,
+        "graph_evidence_unlinked_count": 1,
+        "graph_evidence_revision_mismatch_count": 1,
     })
     report = evaluate_live_gate(
         {"tasks": [broken]},
@@ -296,6 +309,7 @@ def test_live_gate_requires_complete_improvement_receipts(tmp_path):
     joined = "\n".join(report["issues"])
     assert "missing role-pack" in joined
     assert "predicate compilation mismatch" in joined
+    assert "invalid semantic predicate receipt" in joined
     assert "tool-outcome census mismatch" in joined
     assert "unknown tool outcome" in joined
     assert "shell lifecycle" in joined
@@ -303,6 +317,8 @@ def test_live_gate_requires_complete_improvement_receipts(tmp_path):
     assert "capsule repeated" in joined
     assert "invalid utility selection" in joined
     assert "projection/router revision mismatch" in joined
+    assert "decision-irrelevant graph evidence" in joined
+    assert "stale graph evidence revision" in joined
 
 
 def test_live_gate_requires_complete_census_temperature_and_actions(tmp_path):

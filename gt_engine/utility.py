@@ -30,7 +30,13 @@ class UtilityScore:
     severity: float
     evidence_strength: float
     actionability: float
+    freshness: float
+    unresolved_relevance: float
+    expected_information_gain: float
+    repetition_cost: float
     token_cost: float
+    interruption_cost: float
+    false_positive_risk: float
     score: float
 
 
@@ -43,7 +49,24 @@ def score_candidate(candidate: Any, rendered: str) -> UtilityScore:
     target = str(getattr(candidate, "target", "") or "")
     provenance = tuple(getattr(candidate, "provenance", ()) or ())
     actionability = 1.0 if target or provenance else 0.7
+    freshness = 1.0  # semantic duplicates are removed by EvidenceRouter first
+    unresolved_relevance = (
+        1.0 if kind in {
+            "covering_verdict", "syntax_result", "submit_refusal", "recovery",
+        }
+        else 0.8 if kind in {
+            "localization", "ranked_localization", "signature_delta",
+            "patch_delta",
+        }
+        else 0.7 if kind != "unknown" else 0.4
+    )
+    expected_information_gain = evidence_strength
+    repetition_cost = 0.0
     token_cost = min(0.4, len(rendered or "") / 10_000)
+    interruption_cost = (
+        0.0 if unresolved_relevance == 1.0 else 0.03
+    )
+    false_positive_risk = (1.0 - evidence_strength) * 0.15
     # Severity expresses the deterministic SDLC priority and must remain the
     # dominant term. Confidence modulates within that priority; it must not
     # let a high-confidence navigation hint displace a more timely contract or
@@ -53,7 +76,13 @@ def score_candidate(candidate: Any, rendered: str) -> UtilityScore:
         severity
         * (0.6 + 0.4 * evidence_strength)
         * actionability
+        * freshness
+        * unresolved_relevance
+        * (0.75 + 0.25 * expected_information_gain)
+        - repetition_cost
         - token_cost
+        - interruption_cost
+        - false_positive_risk
     )
     return UtilityScore(
         candidate,
@@ -61,7 +90,13 @@ def score_candidate(candidate: Any, rendered: str) -> UtilityScore:
         severity,
         evidence_strength,
         actionability,
+        freshness,
+        unresolved_relevance,
+        expected_information_gain,
+        repetition_cost,
         token_cost,
+        interruption_cost,
+        false_positive_risk,
         score,
     )
 

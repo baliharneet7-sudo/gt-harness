@@ -18,3 +18,9 @@ def test_content_pack_excludes_caller_contract_noise():
     pack = select_role_pack(_contract("content_scan"))
     assert "caller_contract" not in pack.allowed_evidence
     assert "content_scope" in pack.predicate_kinds
+
+
+def test_code_and_data_packs_keep_navigation_and_new_file_evidence():
+    for role in ("code_behavior", "data_transform"):
+        allowed = set(select_role_pack(_contract(role)).allowed_evidence)
+        assert {"def_partition", "newfile_precedent"} <= allowed

@@ -60,8 +60,14 @@ DIRECT_FEATURES: dict[str, dict[str, Any]] = {
     "recovery": {
         "kind": "FACT", "boundaries": ("test_result", "tool_result"),
         "producer": "governor",
-        "trigger": "the same test failure recurs after an intervening edit",
-        "intended_action": "form a new hypothesis after a falsified edit",
+        "trigger": (
+            "the same test failure recurs after an intervening edit, or a "
+            "fresh attributable required RED persists near the iteration limit"
+        ),
+        "intended_action": (
+            "change hypothesis after falsification or repair the observed "
+            "required RED before further exploration"
+        ),
     },
     "signature_delta": {
         "kind": "FACT", "boundaries": ("edit_result",),
@@ -98,7 +104,10 @@ DIRECT_FEATURES: dict[str, dict[str, Any]] = {
     },
     "GT_HYPOTHESIS": {
         "kind": "CAP", "boundaries": ("test_result", "tool_result"),
-        "trigger": "the recovery governor yields a repeated-failure recovery fact",
+        "trigger": (
+            "the recovery governor yields a proven falsification or bounded "
+            "near-budget RED intervention"
+        ),
         "intended_action": "track repeated failures across edits",
     },
     "GT_LOC_RESLOT": {
