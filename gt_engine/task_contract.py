@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -369,6 +370,36 @@ def render_task_contract(
         if len("\n".join([*lines, note])) <= max_chars:
             lines.append(note)
     return "\n".join(lines), tuple(shipped)
+
+
+def render_obligation_delta(
+    contract: TaskContract,
+    shipped_ids: Iterable[str],
+    *,
+    max_chars: int,
+) -> tuple[str, tuple[str, ...]]:
+    """Render missing obligations for a bounded corrective delivery.
+
+    The full task contract remains authoritative outside the model-facing
+    capsule. This delta exposes only rows not proven to have been shipped.
+    """
+    shipped = set(shipped_ids)
+    remaining = [item for item in contract.obligations
+                 if item.obligation_id not in shipped]
+    header = "GT remaining contract obligations:"
+    lines = [header]
+    selected: list[str] = []
+    for item in remaining:
+        row = f"- [ ] {item.text}"
+        candidate = "\n".join([*lines, row])
+        if len(candidate) > max_chars:
+            break
+        lines.append(row)
+        selected.append(item.obligation_id)
+    if not selected:
+        return "", ()
+    lines.append("Check these obligations before submit; do not assume omitted rows are satisfied.")
+    return "\n".join(lines)[:max_chars], tuple(selected)
 
 
 def matching_obligation_ids(

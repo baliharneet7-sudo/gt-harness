@@ -951,6 +951,25 @@ def test_content_scope_accepts_explicit_passing_repository_absence_suite():
     assert receipts[0].kind == "content_scope"
 
 
+def test_render_obligation_delta_repairs_unshipped_contract():
+    from gt_engine.task_contract import (
+        extract_task_contract,
+        render_obligation_delta,
+        render_task_contract,
+    )
+
+    contract = extract_task_contract(
+        "Must create output.py. Must run the tests. Must preserve schema."
+    )
+    first, shipped = render_task_contract(contract, max_chars=80)
+    assert first
+    assert len(shipped) < len(contract.obligations)
+    delta, delta_ids = render_obligation_delta(contract, shipped, max_chars=500)
+    assert delta_ids
+    assert set(delta_ids).isdisjoint(shipped)
+    assert "remaining contract" in delta
+
+
 @requires_gt
 def test_bridge_credits_repository_wide_negative_content_search(
     tmp_path, monkeypatch,

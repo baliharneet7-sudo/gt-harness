@@ -137,6 +137,11 @@ _GT_ACCESS_RE = re.compile(
 )
 
 _KNOWN_PANEL_TITLES = {"assistant", "tool_call", "tool_result", "tool_result (error)", "final"}
+_GT_INDEX_DIAGNOSTIC_RE = re.compile(
+    r"(?i)^(?:GroundTruth:\s+gt-index failed:.*|Found \d+ source files,?\s*|"
+    r"Pass [12]:|python:\s+\d+ files,?\s*|Parsed \d+/\d+ files.*|"
+    r".*INDEX FAILED:.*|.*workers\)\.*)$"
+)
 
 
 @dataclass
@@ -214,6 +219,10 @@ def parse_transcript(text: str) -> Transcript:
             continue
         if _GT_L1_RE.match(line):
             t.gt_l1_lines += 1
+            continue
+        if _GT_INDEX_DIAGNOSTIC_RE.match(line.strip()):
+            # These are host-side index diagnostics. The structured graph
+            # failure/recovery events remain the authoritative signal.
             continue
         t.unparsed.append((i, line))
     if cur is not None:
@@ -732,6 +741,7 @@ class TaskAudit:
     graph_evidence_revision_mismatch_count: int = 0
     graph_refresh_count: int = 0
     graph_refresh_failure_count: int = 0
+    graph_refresh_recovered_count: int = 0
     capsule_expired_count: int = 0
     capsule_unique_exposed_count: int = 0
     capsule_exposure_count: int = 0
@@ -1144,6 +1154,8 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 a.graph_refresh_count += 1
             elif event_type == "graph.context_refresh_failed":
                 a.graph_refresh_failure_count += 1
+            elif event_type == "graph.context_refresh_recovered":
+                a.graph_refresh_recovered_count += 1
             elif event_type == "graph.evidence_need":
                 a.graph_evidence_need_count += 1
             elif event_type == "graph.evidence_ranked":

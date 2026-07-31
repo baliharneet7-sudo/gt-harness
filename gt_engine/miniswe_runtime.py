@@ -51,7 +51,7 @@ def install_runtime_hooks(agent: Any, adapter: MiniSweAdapter) -> RuntimeHookHan
 
     def prepare_messages(_model: Any, messages: list[dict]) -> list[dict]:
         prepared = prepare(messages)
-        suffix = adapter.provider_suffix()
+        suffix = adapter.next_provider_suffix()
         if prepared and isinstance(prepared[-1], dict):
             last = dict(prepared[-1])
             content = last.get("content", "")
@@ -64,7 +64,7 @@ def install_runtime_hooks(agent: Any, adapter: MiniSweAdapter) -> RuntimeHookHan
     def execute_actions(_agent: Any, message: dict) -> list[dict]:
         actions = tuple((message.get("extra") or {}).get("actions") or ())
         results: list[dict] = []
-        for action in actions:
+        for action_index, action in enumerate(actions, start=1):
             command = _command(action)
             lower_command = command.lower()
             if "submit" in lower_command and adapter.phase in {"IMPLEMENT", "VERIFY"}:
@@ -78,6 +78,18 @@ def install_runtime_hooks(agent: Any, adapter: MiniSweAdapter) -> RuntimeHookHan
                 if adapter.phase == "IMPLEMENT":
                     adapter.begin_verify()
             adapter.after_observation(_observation_output(result))
+            if adapter.contract is not None:
+                returncode = (
+                    result.get("returncode")
+                    if isinstance(result, dict)
+                    else getattr(result, "returncode", None)
+                )
+                adapter.evaluate_observation(
+                    command,
+                    _observation_output(result),
+                    returncode=returncode,
+                    action_index=action_index,
+                )
         formatter = getattr(model, "format_observation_messages", None)
         if callable(formatter):
             return agent.add_messages(*formatter(message, results, agent.get_template_vars()))

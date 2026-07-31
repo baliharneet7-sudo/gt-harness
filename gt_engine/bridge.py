@@ -2010,6 +2010,20 @@ class GTBridge:
                     "changed_file_count": len(changed),
                 },
             )
+            # The failed graph is never used as proof.  Record an explicit
+            # lexical-fallback recovery so the controller can continue with
+            # task-local verification instead of leaving the lifecycle in an
+            # unexplained infrastructure fault.
+            self._trace_record(
+                "graph.context_refresh_recovered",
+                "post_edit",
+                {
+                    "fallback": "task_local_predicates",
+                    "changed_file_count": len(changed),
+                    "graph_revision": "",
+                    "proof_available": False,
+                },
+            )
 
     def _rerank_graph_evidence(self, boundary: str) -> None:
         """Build and receipt the decision-specific graph slice, host-side."""

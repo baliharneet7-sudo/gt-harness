@@ -32,6 +32,7 @@ def _task(
     tool_outcome_classified_count=0,
     tool_outcome_counts=None,
     graph_refresh_failure_count=0,
+    graph_refresh_recovered_count=0,
     capsule_repeated_exposure_count=0,
     utility_scored_count=0,
     utility_selected_count=0,
@@ -77,6 +78,7 @@ def _task(
         "tool_outcome_classified_count": tool_outcome_classified_count,
         "tool_outcome_counts": tool_outcome_counts or {},
         "graph_refresh_failure_count": graph_refresh_failure_count,
+        "graph_refresh_recovered_count": graph_refresh_recovered_count,
         "capsule_repeated_exposure_count": (
             capsule_repeated_exposure_count
         ),
@@ -571,3 +573,27 @@ def test_live_gate_requires_exercised_not_merely_censused_features(tmp_path):
     assert report["exercised_features"] == ["obligations", "recovery"]
     assert any("exercised identities 2 < required 3" in issue
                for issue in report["issues"])
+
+
+def test_recovered_graph_refresh_is_not_reported_as_unhandled_fault(tmp_path):
+    trial = tmp_path / "task__trial"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({
+        "config": {"agent": {"model_name": "deepseek-v4-flash"}},
+    }), encoding="utf-8")
+    audit = {"tasks": [_task(
+        "task",
+        {"obligations": _feature()},
+        graph_refresh_failure_count=1,
+        graph_refresh_recovered_count=1,
+    )]}
+    report = evaluate_live_gate(
+        audit,
+        min_witnessed=1,
+        expected_tasks=1,
+        expected_model="deepseek-v4-flash",
+        require_improvement_receipts=True,
+        run_dir=tmp_path,
+    )
+    assert not any("graph context refresh failure" in issue
+                   for issue in report["issues"])

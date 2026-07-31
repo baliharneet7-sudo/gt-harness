@@ -9,6 +9,7 @@ from gt_engine.miniswe_audit import (
     BASELINE_RESOLVED_FLOOR,
     FEATURE_IDS,
     audit_attribution,
+    audit_feature_opportunities,
     load_baseline,
     select_tasks,
     validate_tb2_smoke,
@@ -116,3 +117,19 @@ def test_tb2_manifest_validates_ten_tasks_and_ungraded_case(tmp_path: Path):
     result = validate_tb2_smoke(manifest, baseline)
     assert result["task_count"] == 10
     assert result["ungraded"] == ["headless-terminal"]
+
+
+def test_feature_opportunity_audit_is_per_task_and_requires_terminal_state():
+    rows = [
+        {"task_id": "t1", "feature_id": "obligations", "eligible": True,
+         "terminal": "DELIVERED", "trigger_iteration": 1,
+         "delivery_iteration": 1, "action_id": "a1"},
+        {"task_id": "t1", "feature_id": "recovery", "eligible": True,
+         "terminal": "APPLIED_QUIET", "trigger_iteration": 2,
+         "delivery_iteration": None, "action_id": "a2"},
+    ]
+    result = audit_feature_opportunities(rows)
+    assert result["ok"] is True
+    assert result["by_task"]["t1"]["DELIVERED"] == 1
+    rows[1]["terminal"] = ""
+    assert audit_feature_opportunities(rows)["ok"] is False

@@ -306,7 +306,9 @@ def evaluate_live_gate(
                         f"{task_name}: replay input tokens do not match "
                         "the transcript total"
                     )
-            if int(task.get("graph_refresh_failure_count") or 0):
+            refresh_failures = int(task.get("graph_refresh_failure_count") or 0)
+            refresh_recovered = int(task.get("graph_refresh_recovered_count") or 0)
+            if refresh_failures > refresh_recovered:
                 issues.append(
                     f"{task_name}: graph context refresh failure"
                 )

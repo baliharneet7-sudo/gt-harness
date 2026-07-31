@@ -37,6 +37,10 @@ FEATURE_IDS = (
 )
 _DEEPSEEK_RE = re.compile(r"deepseek-v4-flash", re.IGNORECASE)
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_TERMINAL_STATES = frozenset({
+    "DELIVERED", "APPLIED_QUIET", "INELIGIBLE", "SUPPRESSED",
+    "FAULT", "DELIVERY_FAILURE",
+})
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,45 @@ def audit_attribution(rows: Iterable[Mapping[str, Any]]) -> AttributionAudit:
     missing = sorted(set(FEATURE_IDS) - set(by_feature))
     issues.extend(f"missing feature {feature}" for feature in missing)
     return AttributionAudit(not issues, tuple(issues), by_feature)
+
+
+def audit_feature_opportunities(
+    rows: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Validate feature opportunity terminals grouped by task.
+
+    This is intentionally independent of transcript text: an eligible
+    opportunity without a terminal state is an instrumentation fault, while
+    INELIGIBLE/SUPPRESSED/APPLIED_QUIET are truthful outcomes rather than
+    missing feature activity.
+    """
+    issues: list[str] = []
+    by_task: dict[str, dict[str, int]] = {}
+    seen: set[tuple[str, str]] = set()
+    for index, row in enumerate(rows, start=1):
+        task_id = str(row.get("task_id") or "")
+        feature_id = str(row.get("feature_id") or "")
+        if not task_id or feature_id not in FEATURE_IDS:
+            issues.append(f"row {index}: missing/unknown task or feature")
+            continue
+        key = (task_id, feature_id)
+        if key in seen:
+            issues.append(f"row {index}: duplicate opportunity {task_id}/{feature_id}")
+            continue
+        seen.add(key)
+        eligible = bool(row.get("eligible"))
+        terminal = str(row.get("terminal") or "")
+        if eligible and terminal not in _TERMINAL_STATES:
+            issues.append(f"row {index}: eligible opportunity has no terminal state")
+        if terminal == "DELIVERED":
+            trigger = int(row.get("trigger_iteration") or 0)
+            delivery = int(row.get("delivery_iteration") or 0)
+            if delivery < trigger or not row.get("action_id"):
+                issues.append(f"row {index}: delivered opportunity lacks timing/action join")
+        counts = by_task.setdefault(task_id, {})
+        if terminal:
+            counts[terminal] = counts.get(terminal, 0) + 1
+    return {"ok": not issues, "issues": issues, "by_task": by_task}
 
 
 def payload_sha256(payload: bytes | str) -> str:

@@ -793,3 +793,17 @@ def test_carried_delivery_does_not_overwrite_immediate_response_action():
 
     assert summary["localization"]["action_observed"] is True
     assert summary["localization"]["action_consistent"] is True
+
+
+def test_transcript_parser_consumes_gt_index_diagnostics_as_structured_noise():
+    from scripts.gt_audit import parse_transcript
+
+    transcript = (
+        "GroundTruth: gt-index failed: Pass 1: discovering files\n"
+        "Found 1 source files,\n"
+        "Pass 2: parsing 1 files (4 workers)......\n"
+        "stop: max_iterations  iterations=1  in=1 out=1 cache_read=0\n"
+    )
+    parsed = parse_transcript(transcript)
+    assert parsed.unparsed == []
+    assert parsed.stop is not None

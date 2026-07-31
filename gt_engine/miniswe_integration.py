@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .miniswe_controller import GroundtruthController, Predicate
+from .task_contract import TaskContract
+from .verification_contract import compile_obligation_predicates, evaluate_passing_observation
 
 
 @dataclass(frozen=True)
@@ -43,13 +45,19 @@ class MiniSweAdapter(GroundtruthController):
     """
 
     def __init__(self, *, task_id: str, state_dir: str | Path,
-                 predicates: Iterable[Predicate], repeat_budget: int = 2):
+                 predicates: Iterable[Predicate], repeat_budget: int = 2,
+                 contract: TaskContract | None = None):
         super().__init__(predicates, repeat_budget=repeat_budget)
         self.task_id = task_id
+        self.contract = contract
+        self._compiled_predicates = (
+            compile_obligation_predicates(contract) if contract is not None else {}
+        )
         self.store = ExternalStateStore(state_dir, task_id)
         self.iteration = 0
         self.deliveries: list[ProviderDelivery] = []
         self._last_payload_hash = ""
+        self._last_control_state: tuple[str, int, tuple[str, ...]] | None = None
 
     def _record_state(self) -> None:
         self.store.append(
@@ -102,6 +110,56 @@ class MiniSweAdapter(GroundtruthController):
             suffix=suffix,
         )
         return delivery
+
+    def next_provider_suffix(self) -> str:
+        """Return one control delta per state vector, never an unchanged dose."""
+        state = (self.phase, self.workspace_epoch, self.unmet_predicates)
+        if state == self._last_control_state:
+            return ""
+        self._last_control_state = state
+        return self.provider_suffix()
+
+    def evaluate_observation(
+        self,
+        command: str,
+        output: str,
+        *,
+        returncode: int | None,
+        action_index: int,
+    ) -> tuple[str, ...]:
+        """Convert a real command result into semantic predicate receipts."""
+        if self.contract is None:
+            return ()
+        receipts = evaluate_passing_observation(
+            self.contract,
+            self._compiled_predicates,
+            command,
+            output,
+            action_index=action_index,
+            returncode=returncode,
+        )
+        predicate_ids = {item.predicate_id for item in self.predicates.values()}
+        green: list[str] = []
+        for receipt in receipts:
+            if receipt.predicate_id not in predicate_ids:
+                continue
+            self.record_receipt(
+                receipt.predicate_id,
+                command,
+                returncode if returncode is not None else 1,
+                output,
+                epoch=self.workspace_epoch,
+                status="GREEN",
+                semantic=True,
+            )
+            green.append(receipt.predicate_id)
+        self.store.append(
+            "semantic_observation",
+            command_sha256=hashlib.sha256(command.encode("utf-8")).hexdigest(),
+            action_index=action_index,
+            predicate_ids=green,
+        )
+        return tuple(green)
 
     def submit_decision(self) -> bool:
         accepted = super().submit_decision()
