@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<text>.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
@@ -80,10 +81,31 @@ class Obligation:
     subjects: tuple[str, ...] = ()
 
 
+class TaskMode(StrEnum):
+    PATCH = "PATCH"
+    BUILD_INSTALL = "BUILD_INSTALL"
+    ARTIFACT = "ARTIFACT"
+    SERVICE = "SERVICE"
+    DATA_TRANSFORM = "DATA_TRANSFORM"
+    MIXED = "MIXED"
+
+
+@dataclass(frozen=True)
+class TypedPredicate:
+    predicate_id: str
+    mode: TaskMode
+    description: str
+    phase: str
+    dependencies: tuple[str, ...] = ()
+    freshness_epoch: int = 0
+
+
 @dataclass(frozen=True)
 class TaskContract:
     role: str
     obligations: tuple[Obligation, ...]
+    task_mode: TaskMode = TaskMode.PATCH
+    predicates: tuple[TypedPredicate, ...] = ()
 
 
 def _clean(text: str) -> str:
@@ -253,6 +275,33 @@ def _role(issue_text: str) -> str:
     return "code_behavior"
 
 
+def _task_mode(issue_text: str) -> TaskMode:
+    text = (issue_text or "").lower()
+    if re.search(r"\b(server|service|daemon|listen|endpoint|http)\b", text):
+        return TaskMode.SERVICE
+    if re.search(r"\b(install|build|compile|package|extension|import)\b", text):
+        return TaskMode.BUILD_INSTALL
+    if re.search(r"\b(output|artifact|file|schema|manifest|report)\b", text):
+        return TaskMode.ARTIFACT
+    if _DATA_TRANSFORM_RE.search(text):
+        return TaskMode.DATA_TRANSFORM
+    return TaskMode.PATCH
+
+
+def _typed_predicates(
+    obligations: tuple[Obligation, ...], mode: TaskMode
+) -> tuple[TypedPredicate, ...]:
+    return tuple(
+        TypedPredicate(
+            predicate_id=f"pred-{obligation.obligation_id}",
+            mode=mode,
+            description=obligation.text,
+            phase="VERIFY",
+        )
+        for obligation in obligations
+    )
+
+
 def extract_task_contract(issue_text: str) -> TaskContract:
     """Extract the complete bounded task contract without requiring graph.db."""
     combined = _engine_candidates(issue_text) + _markdown_candidates(issue_text)
@@ -286,7 +335,14 @@ def extract_task_contract(issue_text: str) -> TaskContract:
                 subjects=_subjects(text),
             )
         )
-    return TaskContract(role=_role(issue_text), obligations=tuple(obligations))
+    frozen = tuple(obligations)
+    mode = _task_mode(issue_text)
+    return TaskContract(
+        role=_role(issue_text),
+        obligations=frozen,
+        task_mode=mode,
+        predicates=_typed_predicates(frozen, mode),
+    )
 
 
 def render_task_contract(
