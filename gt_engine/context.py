@@ -82,6 +82,7 @@ def compact_provider_view(
     checkpoint: str,
     char_budget: int,
     tail_turns: int = 2,
+    max_tail_turns: int = 8,
     tool_output_chars: int = 4000,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Construct a bounded provider view without mutating durable history."""
@@ -125,6 +126,18 @@ def compact_provider_view(
 
     keep_count = min(max(1, int(tail_turns)), len(groups))
     selected = groups[-keep_count:] if groups else []
+    earliest = len(groups) - keep_count - 1
+    while earliest >= 0 and len(selected) < max(keep_count, max_tail_turns):
+        candidate = [groups[earliest], *selected]
+        candidate_view = [
+            anchor,
+            *(item for group in candidate for item in group),
+        ]
+        if message_chars(candidate_view) > char_budget:
+            break
+        selected = candidate
+        earliest -= 1
+    keep_count = len(selected)
     view = [anchor] + [item for group in selected for item in group]
     _bound_kept_blocks(view, tool_output_chars=tool_output_chars)
     omitted = len(durable) - len(view)

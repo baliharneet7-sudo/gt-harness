@@ -262,7 +262,11 @@ class Agent:
                 ))
 
             used_tools = True
-            tool_results = self._execute_tool_calls(sr.tool_calls, transcript)
+            tool_results = self._execute_tool_calls(
+                sr.tool_calls,
+                transcript,
+                can_request_follow=iteration < self.max_iterations,
+            )
             if self._gt is not None:
                 gt_submit_dirty = True
             # Only a *successful* tool counts as verification evidence - a
@@ -368,7 +372,10 @@ class Agent:
         return {"role": "assistant", "content": content_blocks}
 
     def _execute_tool_calls(self, calls: list[ToolCall],
-                            transcript: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                            transcript: list[dict[str, Any]],
+                            *,
+                            can_request_follow: bool = True,
+                            ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for call in calls:
             # GT edit bridges (B-3): edit-turn producers need the target file's
@@ -415,7 +422,8 @@ class Agent:
                     output = self._gt.enrich(
                         call.name, call.arguments, output, is_error,
                         edit_before=gt_edit_before, edit_after=gt_edit_after,
-                        tool_call_id=call.id)
+                        tool_call_id=call.id,
+                        can_request_follow=can_request_follow)
                 except Exception:  # noqa: BLE001 - GT must never break a tool turn
                     pass
             transcript.append({"type": "tool_result", "id": call.id,

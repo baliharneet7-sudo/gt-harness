@@ -124,6 +124,27 @@ def test_audit_counts_task_agent_harness_path_attempts(tmp_path):
     )
 
 
+def test_audit_does_not_count_explicit_gt_exclusions_as_access(tmp_path):
+    task = make_task_dir(
+        tmp_path,
+        "code-task__isolation-exclusion",
+        "code-task",
+        "\n".join([
+            panel(
+                "tool_call",
+                "bash(command=\"find . -not -path './.gt/*' "
+                "--exclude-dir='.gt'\")",
+            ),
+            stop_line(iters=1, in_t=10, out_t=2),
+            "",
+        ]),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.forbidden_harness_path_attempt_count == 0
+
+
 def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
     from gt_engine.attribution import AttributionTrace
 

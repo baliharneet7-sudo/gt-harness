@@ -116,10 +116,20 @@ _SETUP_ERROR_RE = re.compile(r"^setup error:")
 # verified in-panel count = 0 across the smoke artifact). Known shape, so it
 # is consumed - an occurrence INSIDE a panel is flagged separately.
 _GT_L1_RE = re.compile(r"^\[GT L1\] ")
-_FORBIDDEN_HARNESS_PATH_RE = re.compile(
+_FORBIDDEN_HARNESS_HARD_RE = re.compile(
     r"(?i)(?:^|[\s'\"(])(?:/installed-agent(?:/nano-harness)?|"
-    r"(?:\./)?\.gt(?:/|\b)|/logs/agent|gt_engine(?:/|\.)|"
-    r"groundtruth/runtime|(?:^|/)verifier(?:/|\b))"
+    r"/logs/agent|gt_engine(?:/|\.)|groundtruth/runtime|"
+    r"(?:^|/)verifier(?:/|\b))"
+)
+_GT_EXCLUSION_RE = re.compile(
+    r"(?ix)(?:"
+    r"--exclude-dir(?:=|\s+)['\"]?\.gt['\"]?"
+    r"|--glob(?:=|\s+)['\"]?!\.gt(?:/\*)?['\"]?"
+    r"|-not\s+-path\s+['\"]?(?:\./)?\.gt(?:/\*)?['\"]?"
+    r")"
+)
+_GT_ACCESS_RE = re.compile(
+    r"(?i)(?:^|[\s'\"(])(?:\./)?\.gt(?:/|\b)"
 )
 
 _KNOWN_PANEL_TITLES = {"assistant", "tool_call", "tool_result", "tool_result (error)", "final"}
@@ -207,6 +217,13 @@ def parse_transcript(text: str) -> Transcript:
         t.unparsed_structures.append(
             f"line {cur.start_line}: panel '{cur.title}' not closed (EOF)")
     return t
+
+
+def _forbidden_harness_path_attempt(text: str) -> bool:
+    if _FORBIDDEN_HARNESS_HARD_RE.search(text or ""):
+        return True
+    without_exclusions = _GT_EXCLUSION_RE.sub("", text or "")
+    return bool(_GT_ACCESS_RE.search(without_exclusions))
 
 
 # --------------------------------------------------------------------------- #
@@ -821,7 +838,7 @@ def audit_task(task_dir: Path) -> TaskAudit:
         " ".join(panel.text.split())[:240]
         for panel in t.panels
         if panel.title == "tool_call"
-        and _FORBIDDEN_HARNESS_PATH_RE.search(panel.text)
+        and _forbidden_harness_path_attempt(panel.text)
     ]
     a.forbidden_harness_path_attempt_count = len(forbidden)
     a.forbidden_harness_path_samples = forbidden[:5]

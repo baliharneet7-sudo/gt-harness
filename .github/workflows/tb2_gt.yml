@@ -40,7 +40,7 @@ on:
       concurrency:
         description: "Concurrent trials (harbor -n)"
         type: string
-        default: "4"
+        default: "5"
       temperature:
         description: "Explicit OpenAI-compatible sampling temperature"
         type: string

@@ -487,6 +487,7 @@ class GTBridge:
         from gt_engine.progress import ProgressLedger
 
         self._progress = ProgressLedger(stall_threshold=2)
+        self._progress_intervention_count = 0
         self.iteration_budget = 0
         self._last_model_iteration = 0
         self._last_submit_block_reason = ""
@@ -2332,6 +2333,8 @@ class GTBridge:
             capability_ids=("GT_HYPOTHESIS",),
         )
         self._recovery_fired_sigs.add(signature)  # burned on DELIVERY only
+        if signature.startswith("progress-"):
+            self._progress_intervention_count += 1
         return output + shipped
 
     def _progress_intervention(
@@ -2351,6 +2354,8 @@ class GTBridge:
             return None
         signature = f"progress-{transition.signature}"
         if signature in self._recovery_fired_sigs:
+            return None
+        if self._progress_intervention_count >= 2:
             return None
         text = (
             "This action repeated without new information. Do not repeat it; "
@@ -2681,6 +2686,7 @@ class GTBridge:
         edit_before: str | None = None,
         edit_after: str | None = None,
         tool_call_id: str = "",
+        can_request_follow: bool = True,
     ) -> str:
         """Complete this observation with at most one gateway dose.
 
@@ -2892,6 +2898,31 @@ class GTBridge:
                 # WIRE 1: refresh/wake the graph BEFORE the producers read it,
                 # so this observation's evidence reflects the post-edit code.
                 self._refresh_graph(changed)
+            if not can_request_follow:
+                # Preserve deterministic state and verification receipts even
+                # though no provider request remains to consume model-facing
+                # bytes.  Sealing a capsule here would create a false delivery
+                # witness; skipping the checks would create stale submit/run
+                # telemetry.
+                if changed:
+                    try:
+                        self._post_edit_syntax(changed)
+                    except Exception:  # noqa: BLE001 - telemetry stays quiet
+                        pass
+                    try:
+                        self._covering_lane(changed)
+                    except Exception:  # noqa: BLE001 - telemetry stays quiet
+                        pass
+                self._trace_record(
+                    "decision.committed",
+                    "terminal_tool_result",
+                    {
+                        "decision": "no_delivery",
+                        "reason": "no_following_provider_budget",
+                    },
+                )
+                return output
+            if changed:
                 try:
                     syntax_failure = self._post_edit_syntax(changed)
                 except Exception:  # noqa: BLE001 - new lane cannot mute old lanes

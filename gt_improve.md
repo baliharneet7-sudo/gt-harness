@@ -1543,7 +1543,7 @@ No live run starts until:
   replays.
 
 Then run the real five-task `nano + GT` workflow with
-`deepseek-v4-flash`, temperature `1`, Profile 2, concurrency 4, and timeout
+`deepseek-v4-flash`, temperature `1`, Profile 2, concurrency 5, and timeout
 multiplier 1.0. Compare per task against the frozen GT-off rows. The live report
 must include reward, iterations, input/output/cache tokens, wall time, tool
 outcomes, request-size curve, delivered features and boundary, predicate
@@ -1553,6 +1553,36 @@ delivery.
 One clean run can prove wiring and demonstrate a candidate improvement. A
 stable claim requires repeated GT-on trials because temperature-1 output is
 stochastic; it does not require another GT-off run.
+
+### First live result and measured follow-up
+
+Run `30601595795` exercised the new bounded provider view on all five tasks.
+Harbor completed all five trials and exact replay accounted for every provider
+iteration and input token, but the run is not acceptance evidence: reward was
+2/5 and the audit found two terminal-iteration deliveries with no following
+provider request plus one false-positive filesystem-isolation finding.
+
+The trace isolated three concrete defects:
+
+1. after the context threshold, the provider view retained exactly two complete
+   tool turns even when the remaining character budget could safely retain
+   more, discarding recent semantic work;
+2. progress intervention was bounded per normalized signature rather than per
+   task, producing 7--22 recovery capsules on individual tasks; and
+3. the isolation audit treated explicit `.gt` exclusion expressions as access.
+
+The follow-up therefore:
+
+- greedily retains up to eight complete recent turns while remaining inside the
+  existing character budget;
+- caps progress interventions at two per task;
+- forbids sealing any tool-result delivery when no provider iteration remains;
+- distinguishes explicit `.gt` exclusions from actual `.gt` access; and
+- makes five-way parallelism the workflow default as well as an explicit live
+  dispatch input.
+
+The next live run must use `concurrency=5` exactly. It remains a GT-on run only;
+the comparison continues to use the frozen GT-off baseline.
 
 ## Research basis
 

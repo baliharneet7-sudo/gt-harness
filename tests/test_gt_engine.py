@@ -244,6 +244,29 @@ def test_compact_provider_view_does_not_mutate_durable_messages():
     assert messages == original
 
 
+def test_compact_provider_view_uses_budget_for_more_than_minimum_tail():
+    from gt_engine.context import compact_provider_view
+
+    messages = _make_messages(n_results=6, result_len=1_500)
+    messages[2]["content"][0]["content"] = "old" * 5000
+
+    view, receipt = compact_provider_view(
+        messages,
+        checkpoint="state",
+        char_budget=5_000,
+        tail_turns=2,
+        max_tail_turns=4,
+        tool_output_chars=1_000,
+    )
+
+    rendered = str(view)
+    assert "'id': 't5'" in rendered
+    assert "'id': 't2'" in rendered
+    assert "'id': 't0'" not in rendered
+    assert 2 < receipt["tail_turns"] <= 4
+    assert receipt["active_message_chars"] <= 5_000
+
+
 def test_bridge_records_gateway_no_candidate_reason(tmp_path):
     """A quiet gateway observation must be explainable, not absent from telemetry."""
     from gt_engine.bridge import GTBridge
@@ -2681,6 +2704,62 @@ def test_repeated_no_gain_repository_action_gets_one_bounded_steer(
         if item.evidence_type == "recovery"
     ]
     assert len(controls) == 1
+
+
+@requires_gt
+def test_progress_interventions_are_globally_bounded_per_task(
+        indexed_repo, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    bridge = indexed_repo
+    outputs = []
+    for index in range(4):
+        candidate = bridge._progress_intervention(
+            SimpleNamespace(
+                current="STALLED",
+                streak=2,
+                signature=f"distinct-stall-{index}",
+            ),
+            classification="expected_negative_probe",
+        )
+        if candidate is not None:
+            outputs.append(bridge._deliver_recovery("", *candidate))
+
+    assert len(outputs) == 2
+    assert all("repeated without new information" in item for item in outputs)
+    assert len([
+        item for item in bridge.deliveries
+        if item.evidence_type == "recovery"
+    ]) == 2
+
+
+@requires_gt
+def test_terminal_tool_result_never_seals_unexposable_delivery(
+        indexed_repo, monkeypatch):
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    bridge = indexed_repo
+    command = "grep -rn terminal_missing ."
+    bridge.enrich("bash", {"command": command}, "", False)
+
+    output = bridge.enrich(
+        "bash",
+        {"command": command},
+        "",
+        False,
+        can_request_follow=False,
+    )
+
+    assert output == ""
+    assert not [
+        item for item in bridge.deliveries
+        if item.evidence_type == "recovery"
+    ]
+    assert any(
+        row["event_type"] == "decision.committed"
+        and row["payload"].get("reason") == "no_following_provider_budget"
+        for row in bridge._attribution.rows
+    )
 
 
 @requires_gt
