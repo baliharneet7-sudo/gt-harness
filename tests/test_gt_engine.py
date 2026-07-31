@@ -183,6 +183,67 @@ def test_smart_truncate_keeps_phase_two():
     assert str(msgs[1]["content"][0]["input"]["new"]).startswith("[truncated")
 
 
+def test_compact_provider_view_keeps_task_checkpoint_and_two_recent_turns():
+    from gt_engine.context import compact_provider_view
+
+    messages = [{"role": "user", "content": "ORIGINAL TASK"}]
+    for index in range(5):
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": f"t{index}",
+                    "name": "bash",
+                    "input": {"command": f"echo {index}"},
+                }],
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": f"t{index}",
+                    "content": str(index) * 200,
+                    "is_error": False,
+                }],
+            },
+        ])
+
+    view, receipt = compact_provider_view(
+        messages,
+        checkpoint="state-v1",
+        char_budget=900,
+        tail_turns=2,
+        tool_output_chars=100,
+    )
+
+    assert "ORIGINAL TASK" in str(view[0]["content"])
+    assert "state-v1" in str(view[0]["content"])
+    rendered = str(view)
+    assert "'id': 't0'" not in rendered
+    assert "'id': 't4'" in rendered
+    assert receipt["compacted"] is True
+    assert receipt["omitted_message_count"] >= 2
+    assert receipt["active_message_chars"] < receipt["raw_message_chars"]
+
+
+def test_compact_provider_view_does_not_mutate_durable_messages():
+    from gt_engine.context import compact_provider_view
+
+    messages = _make_messages(n_results=1, result_len=1000, big_input=1000)
+    original = copy.deepcopy(messages)
+
+    compact_provider_view(
+        messages,
+        checkpoint="state",
+        char_budget=200,
+        tail_turns=1,
+        tool_output_chars=50,
+    )
+
+    assert messages == original
+
+
 def test_bridge_records_gateway_no_candidate_reason(tmp_path):
     """A quiet gateway observation must be explainable, not absent from telemetry."""
     from gt_engine.bridge import GTBridge
@@ -1326,6 +1387,35 @@ def test_graph_projection_uses_task_symbols_and_relationship_surfaces(indexed_re
         and ("helper" in fact.value.lower() or fact.symbol == "helper")
         for fact in projection.semantic_facts
     )
+
+
+@requires_gt
+def test_provider_view_renders_jit_graph_evidence_and_receipts_checkpoint(
+        indexed_repo):
+    bridge = indexed_repo
+    bridge.issue_text = "Update helper while keeping caller compatible."
+    task_capsule = bridge.task_start()
+    assert task_capsule
+    messages = [{"role": "user", "content": "task\n\n" + task_capsule}]
+
+    view = bridge.provider_message_view(messages, char_budget=8_000)
+    rendered = bridge._message_text(view)
+
+    assert "[jit graph evidence]" in rendered
+    assert "pkg/alpha.py" in rendered
+    assert "for=obl-" in rendered
+    bridge.trace_provider_request(
+        1,
+        "openai.chat.completions",
+        {"model": "deepseek-v4-flash", "messages": view},
+    )
+    request = [
+        row for row in bridge._attribution.rows
+        if row["event_type"] == "provider.request"
+    ][-1]["payload"]
+    assert request["checkpoint_sha256"]
+    assert request["active_boundary"] == "task_start"
+    assert request["context_policy"] == "gt.compact.v1"
 
 
 @requires_gt
@@ -2566,6 +2656,31 @@ def test_recovery_quiet_without_intervening_edit(indexed_repo, monkeypatch):
     out = b.enrich("bash", {"command": _PYTEST_CMD}, _FAIL_X, True)
     assert out == _FAIL_X
     assert not [d for d in b.deliveries if d.evidence_type == "recovery"]
+
+
+@requires_gt
+def test_repeated_no_gain_repository_action_gets_one_bounded_steer(
+        indexed_repo, monkeypatch):
+    monkeypatch.setenv("GT_HYPOTHESIS", "1")
+    bridge = indexed_repo
+    first = bridge.enrich(
+        "bash", {"command": "grep -rn missing_symbol ."}, "", False
+    )
+    second = bridge.enrich(
+        "bash", {"command": "grep -rn missing_symbol ."}, "", False
+    )
+    third = bridge.enrich(
+        "bash", {"command": "grep -rn missing_symbol ."}, "", False
+    )
+
+    assert "repeated without new information" not in first
+    assert "repeated without new information" in second
+    assert "repeated without new information" not in third
+    controls = [
+        item for item in bridge.deliveries
+        if item.evidence_type == "recovery"
+    ]
+    assert len(controls) == 1
 
 
 @requires_gt

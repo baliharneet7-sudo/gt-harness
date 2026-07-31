@@ -42,6 +42,17 @@ def _resolve_shell() -> tuple[list[str], bool]:
 class ToolError(Exception):
     """Raised when a tool call fails. The message is shown to the model."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "tool_error",
+        recovery: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.recovery = recovery
+
 
 _OUTPUT_LIMIT = 16_000  # chars; spec §3.3 leaves "large output truncation" to impl
 
@@ -169,17 +180,32 @@ class BashTool:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill()
+                self._spawn()
                 raise ToolError(
                     f"Command exceeded timeout of {timeout}s and was killed: "
-                    f"{command!r}. The shell was restarted: cwd, env vars, and "
-                    f"background processes are reset. Re-establish state if "
-                    f"needed; pass a larger timeout for long commands."
+                    f"{command!r}. The shell was restarted; background "
+                    "processes are gone and shell-local cwd/env state was "
+                    "reset. Re-run only the smallest unfinished check, first "
+                    "restoring its cwd/env, and pass a larger timeout if that "
+                    "check legitimately needs it.",
+                    kind="timeout",
+                    recovery="restore_state_then_retry_smallest_check",
                 )
             try:
                 line = self._lines.get(timeout=min(remaining, 0.5))
             except queue.Empty:
                 if self._proc.poll() is not None:
-                    raise ToolError("Shell process exited unexpectedly.") from None
+                    code = self._proc.returncode
+                    self._kill()
+                    self._spawn()
+                    raise ToolError(
+                        "Shell process exited unexpectedly "
+                        f"(exit {code}) before the command receipt completed. "
+                        "The shell was restarted; restore cwd/env and retry "
+                        "only the unfinished command.",
+                        kind="shell_lifecycle",
+                        recovery="restore_state_then_retry_unfinished_command",
+                    ) from None
                 continue
             m = sentinel_re.match(line)
             if m:

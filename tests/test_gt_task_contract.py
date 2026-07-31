@@ -633,6 +633,54 @@ def test_later_edit_invalidates_prior_predicate_receipts(tmp_path, monkeypatch):
     assert not bridge._predicate_receipts
 
 
+@requires_gt
+def test_unrelated_edit_preserves_scoped_artifact_receipt(tmp_path, monkeypatch):
+    from gt_engine.bridge import GTBridge
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    artifact = tmp_path / "report.json"
+    artifact.write_text("{}\n", encoding="utf-8")
+    source = tmp_path / "helper.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    bridge = GTBridge(
+        repo_root=str(tmp_path),
+        graph_db=None,
+        issue_text="Create report.json as the required output artifact.",
+    )
+    assert bridge.task_start()
+    bridge.enrich(
+        "edit_file",
+        {"path": str(artifact)},
+        "edited",
+        False,
+        edit_before=None,
+        edit_after="{}\n",
+    )
+    bridge.enrich(
+        "bash",
+        {"command": (
+            "python -c \"from pathlib import Path; "
+            "assert Path('report.json').is_file(); print('report.json exists')\""
+        )},
+        "report.json exists",
+        False,
+    )
+    assert bridge._predicate_receipts
+
+    bridge.enrich(
+        "edit_file",
+        {"path": str(source)},
+        "edited",
+        False,
+        edit_before="value = 1\n",
+        edit_after="value = 2\n",
+    )
+
+    assert bridge._predicate_receipts
+    assert not bridge._obligation_coverage()["unmet"]
+
+
 def test_numeric_predicate_rejects_measured_value_above_scientific_bound():
     """A passing metrics command is not proof when its measured inequality is RED."""
     from gt_engine.task_contract import Obligation, TaskContract
@@ -712,6 +760,33 @@ def test_numeric_predicate_credits_explicit_satisfied_scientific_bound():
     assert len(receipts) == 1
     assert receipts[0].kind == "numeric_threshold"
     assert receipts[0].outcome == "pass"
+    assert receipts[0].coverage_basis == "measured_numeric_bound"
+
+
+def test_numeric_receipt_uses_measured_bound_without_lexical_task_overlap():
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.verification_contract import (
+        compile_obligation_predicates,
+        evaluate_passing_observation,
+    )
+
+    obligation = Obligation(
+        "obl-cost",
+        "Bucket 1 measured cost must be below 3.0e11",
+        "test",
+    )
+    contract = TaskContract("data_transform", (obligation,))
+
+    receipts = evaluate_passing_observation(
+        contract,
+        compile_obligation_predicates(contract),
+        "python check.py",
+        "value 2.95e11 <= threshold 3.0e11 PASS",
+        action_index=8,
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].coverage_basis == "measured_numeric_bound"
 
 
 def test_threshold_table_row_compiles_as_numeric_not_generic_behavior():

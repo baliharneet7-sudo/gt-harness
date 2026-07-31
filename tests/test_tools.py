@@ -317,6 +317,17 @@ def test_bash_timeout_does_not_contaminate_next_command(bash):
     assert "NANO_DONE" not in out  # no stale sentinel from the killed shell
 
 
+def test_unexpected_shell_death_is_actionable_and_recovers(bash):
+    if bash._is_cmd:
+        pytest.skip("POSIX shell lifecycle")
+    with pytest.raises(ToolError) as exc:
+        bash.run("kill $$", timeout=5)
+    assert exc.value.kind == "shell_lifecycle"
+    assert exc.value.recovery == "restore_state_then_retry_unfinished_command"
+    assert "shell was restarted" in str(exc.value).lower()
+    assert bash.run("echo recovered", timeout=5).strip() == "recovered"
+
+
 def test_edit_file_preserves_lf_newlines(tmp_workdir):
     # A one-char edit in an LF file must NOT rewrite the whole file to CRLF.
     p = tmp_workdir / "lf.py"

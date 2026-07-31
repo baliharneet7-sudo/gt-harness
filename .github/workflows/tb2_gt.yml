@@ -342,8 +342,12 @@ jobs:
           run_dir="results/terminal-bench/${JOB_NAME}"
           audit_json="${run_dir}/gt-audit.json"
           gate_json="${run_dir}/gt-live-gate.json"
+          replay_json="${run_dir}/gt-iteration-replay.json"
           audit_rc=0
           gate_rc=0
+          replay_rc=0
+          python scripts/gt_replay.py "$run_dir" --json "$replay_json" \
+            || replay_rc=$?
           python scripts/gt_audit.py "$run_dir" --json "$audit_json" \
             || audit_rc=$?
           if [ -f "$audit_json" ]; then
@@ -377,7 +381,8 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ "$audit_rc" -ne 0 ] || [ "$gate_rc" -ne 0 ]; then
+          if [ "$audit_rc" -ne 0 ] || [ "$gate_rc" -ne 0 ] \
+              || [ "$replay_rc" -ne 0 ]; then
             exit 1
           fi
 

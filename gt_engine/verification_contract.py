@@ -101,6 +101,7 @@ class PredicateReceipt:
     operator: str = ""
     required_value: str = ""
     unit: str = ""
+    coverage_basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -349,10 +350,16 @@ def evaluate_passing_observation(
         operator = ""
         required_value = ""
         unit = ""
+        coverage_basis = ""
         if predicate.kind == "behavior":
             verified = full_suite or (
                 executable and item.obligation_id in lexical
             )
+            if verified:
+                coverage_basis = (
+                    "full_repository_suite"
+                    if full_suite else "targeted_executable_anchor_match"
+                )
         elif predicate.kind == "artifact":
             verified = bool(
                 executable
@@ -360,6 +367,8 @@ def evaluate_passing_observation(
                 and all(path in observed for path in predicate.scope)
                 and re.search(r"(?i)(?:test\s+-[ef]|exists|stat|ls)", command)
             )
+            if verified:
+                coverage_basis = "scoped_artifact_assertion"
         elif predicate.kind == "numeric_threshold":
             (
                 verified,
@@ -372,19 +381,21 @@ def evaluate_passing_observation(
                 str(item.text or ""),
                 output,
             )
-            verified = bool(
-                executable and item.obligation_id in lexical and verified
-            )
+            verified = bool(executable and verified)
+            if verified:
+                coverage_basis = "measured_numeric_bound"
         elif predicate.kind == "content_scope":
-            verified = bool(
-                (
-                    is_complete_content_absence_observation(
-                        command, output, returncode
-                    )
-                    or is_content_scope_test_observation(command, output)
-                )
-                and item.obligation_id in lexical
+            repository_absence = is_complete_content_absence_observation(
+                command, output, returncode
             )
+            content_suite = is_content_scope_test_observation(command, output)
+            verified = bool(repository_absence or content_suite)
+            if verified:
+                coverage_basis = (
+                    "repository_wide_negative_search"
+                    if repository_absence
+                    else "explicit_content_absence_suite"
+                )
         if not verified:
             continue
         receipts.append(
@@ -404,6 +415,7 @@ def evaluate_passing_observation(
                 operator=operator,
                 required_value=required_value,
                 unit=unit,
+                coverage_basis=coverage_basis,
             )
         )
     return tuple(receipts)

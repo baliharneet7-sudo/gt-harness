@@ -219,6 +219,29 @@ def evaluate_live_gate(
                 issues.append(
                     f"{task_name}: unrecovered persistent shell failure"
                 )
+            if int(task.get("forbidden_harness_path_attempt_count") or 0):
+                issues.append(
+                    f"{task_name}: task agent accessed forbidden harness paths"
+                )
+            if int(task.get("context_policy_request_count") or 0):
+                if int(task.get("replay_issue_count") or 0):
+                    issues.append(
+                        f"{task_name}: per-iteration replay has join issues"
+                    )
+                if int(task.get("replay_iteration_count") or 0) != int(
+                    task.get("iterations") or 0
+                ):
+                    issues.append(
+                        f"{task_name}: replay iteration count does not match "
+                        "the transcript"
+                    )
+                if int(task.get("replay_accounted_input_tokens") or 0) != int(
+                    task.get("in_tokens") or 0
+                ):
+                    issues.append(
+                        f"{task_name}: replay input tokens do not match "
+                        "the transcript total"
+                    )
             if int(task.get("graph_refresh_failure_count") or 0):
                 issues.append(
                     f"{task_name}: graph context refresh failure"

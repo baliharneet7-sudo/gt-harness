@@ -99,6 +99,31 @@ def test_crashed_run_is_red():
     assert not a.unparsed_structures
 
 
+def test_audit_counts_task_agent_harness_path_attempts(tmp_path):
+    task = make_task_dir(
+        tmp_path,
+        "code-task__isolation",
+        "code-task",
+        "\n".join([
+            panel("assistant", "I will inspect the implementation."),
+            panel(
+                "tool_call",
+                "bash(command='find /installed-agent/nano-harness -type f')",
+            ),
+            panel("tool_result", "find: no such file or directory"),
+            stop_line(iters=1, in_t=10, out_t=2),
+            "",
+        ]),
+    )
+
+    audit = gt_audit.audit_task(task)
+
+    assert audit.forbidden_harness_path_attempt_count == 1
+    assert "/installed-agent/nano-harness" in (
+        audit.forbidden_harness_path_samples[0]
+    )
+
+
 def test_attribution_trace_is_loaded_and_projects_all_17_features(tmp_path):
     from gt_engine.attribution import AttributionTrace
 

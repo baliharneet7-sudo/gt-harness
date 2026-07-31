@@ -98,6 +98,7 @@ from gt_engine.attribution import (  # noqa: E402
     verify_lifecycle_rows,
     verify_trace_rows,
 )
+from gt_engine.replay import build_iteration_replay  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # transcript parsing (nano CLI rich-panel format, tee'd without ANSI)
@@ -115,6 +116,11 @@ _SETUP_ERROR_RE = re.compile(r"^setup error:")
 # verified in-panel count = 0 across the smoke artifact). Known shape, so it
 # is consumed - an occurrence INSIDE a panel is flagged separately.
 _GT_L1_RE = re.compile(r"^\[GT L1\] ")
+_FORBIDDEN_HARNESS_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s'\"(])(?:/installed-agent(?:/nano-harness)?|"
+    r"(?:\./)?\.gt(?:/|\b)|/logs/agent|gt_engine(?:/|\.)|"
+    r"groundtruth/runtime|(?:^|/)verifier(?:/|\b))"
+)
 
 _KNOWN_PANEL_TITLES = {"assistant", "tool_call", "tool_result", "tool_result (error)", "final"}
 
@@ -713,6 +719,17 @@ class TaskAudit:
     tool_outcome_new_capsule_count: int = 0
     shell_lifecycle_recovered_count: int = 0
     shell_lifecycle_unrecovered_count: int = 0
+    forbidden_harness_path_attempt_count: int = 0
+    forbidden_harness_path_samples: list[str] = field(default_factory=list)
+    replay_iteration_count: int = 0
+    replay_accounted_input_tokens: int = 0
+    replay_issue_count: int = 0
+    context_policy_request_count: int = 0
+    context_compacted_request_count: int = 0
+    context_raw_message_chars: int = 0
+    context_active_message_chars: int = 0
+    graph_evidence_rendered_count: int = 0
+    progress_intervention_count: int = 0
     # laws
     leak_tag_count: int = 0
     leak_tag_context: list[str] = field(default_factory=list)
@@ -800,6 +817,14 @@ def audit_task(task_dir: Path) -> TaskAudit:
         return a
     text = nano_txt.read_text(encoding="utf-8", errors="replace")
     t = parse_transcript(text)
+    forbidden = [
+        " ".join(panel.text.split())[:240]
+        for panel in t.panels
+        if panel.title == "tool_call"
+        and _FORBIDDEN_HARNESS_PATH_RE.search(panel.text)
+    ]
+    a.forbidden_harness_path_attempt_count = len(forbidden)
+    a.forbidden_harness_path_samples = forbidden[:5]
 
     # 1. RUN HEALTH -------------------------------------------------------- #
     if t.stop:
@@ -848,6 +873,12 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.attribution_rows = len(attribution_rows)
         a.attribution_issues.extend(attr_issues)
         a.feature_attribution = summarize_features(attribution_rows)
+        replay = build_iteration_replay(attribution_rows)
+        a.replay_iteration_count = int(replay["iteration_count"])
+        a.replay_accounted_input_tokens = int(
+            replay["accounted_input_tokens"]
+        )
+        a.replay_issue_count = len(replay["issues"])
         lifecycle: dict[str, dict] = {}
         for row in attribution_rows:
             if row.get("event_type") != "lifecycle.checkpoint":
@@ -1008,6 +1039,20 @@ def audit_task(task_dir: Path) -> TaskAudit:
             elif event_type == "capsule.expired":
                 a.capsule_expired_count += 1
             elif event_type == "provider.request":
+                if payload.get("context_policy"):
+                    a.context_policy_request_count += 1
+                    a.context_compacted_request_count += int(
+                        bool(payload.get("compacted"))
+                    )
+                    a.context_raw_message_chars += int(
+                        payload.get("raw_message_chars") or 0
+                    )
+                    a.context_active_message_chars += int(
+                        payload.get("active_message_chars") or 0
+                    )
+                    a.graph_evidence_rendered_count += int(
+                        payload.get("graph_evidence_count") or 0
+                    )
                 for match in payload.get("matches") or ():
                     if not isinstance(match, dict):
                         continue
@@ -1031,6 +1076,8 @@ def audit_task(task_dir: Path) -> TaskAudit:
                 a.progress_states[state] = (
                     a.progress_states.get(state, 0) + 1
                 )
+            elif event_type == "progress.intervention":
+                a.progress_intervention_count += 1
             elif event_type == "tool.outcome_classified":
                 a.tool_outcome_classified_count += 1
                 classification = str(

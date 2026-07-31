@@ -61,8 +61,9 @@ DIRECT_FEATURES: dict[str, dict[str, Any]] = {
         "kind": "FACT", "boundaries": ("test_result", "tool_result"),
         "producer": "governor",
         "trigger": (
-            "the same test failure recurs after an intervening edit, or a "
-            "fresh attributable required RED persists near the iteration limit"
+            "the same test failure recurs after an intervening edit, a fresh "
+            "attributable required RED persists near the iteration limit, or "
+            "a repository action repeats without information gain"
         ),
         "intended_action": (
             "change hypothesis after falsification or repair the observed "

@@ -1,11 +1,13 @@
 # GT Improvement Plan: From Attributable Wiring to Measured Advantage
 
-Status: implementation in progress; first strict live candidate diagnosed
+Status: research complete; implementation must follow the ranked gates below
 Repository: `gt-harness`  
 Runtime: nano-harness with GroundTruth (GT)  
-Last diagnosed live run: `30594350673`, commit `20e4925`
-Confidence: high on the diagnosed defects; moderate that the proposed changes
-will improve outcomes until repeated GT-on live runs establish the effect.
+Last diagnosed live run: `30597263179`, commit `530668f`
+Latest code under consideration: `6362926` (harness isolation, not live-proven)
+Confidence: high on the dominant causes; moderate on the expected effect of
+each proposed correction until replay ablations and repeated GT-on trials
+establish it.
 
 ## Decision
 
@@ -1098,6 +1100,459 @@ container. The adapter must remove the exact staged checkout after its
 non-editable uv install and smoke check, and the GT-only prompt must explicitly
 classify `.gt`, `/installed-agent`, the agent environment, and GroundTruth
 implementation as out-of-scope harness internals.
+
+## Frontier-lab research and root-cause decision
+
+### Strong conclusion
+
+The next thing to fix is **not another GT feature and not a larger graph
+dump**. It is the harness control plane that turns deterministic state into
+model context and actions.
+
+The current implementation has four compounding defects:
+
+1. useful state is often delivered as prose rather than a minimal
+   decision-specific delta;
+2. successful work is under-credited by coarse verification predicates, so
+   the model keeps testing or receives generic refusals;
+3. progress detection is mainly telemetry and does not reliably redirect or
+   terminate a stalled trajectory; and
+4. each additional iteration resends an already large history, so a small
+   behavioral detour becomes a very large token regression.
+
+`graph.db` is therefore under-used semantically and overvalued conceptually.
+The bridge inventories and queries 14 surfaces, builds a ranked
+`_graph_evidence` tuple, and uses that tuple to constrain router admission.
+But `_graph_evidence` is never directly rendered to the model. Relation,
+closure, co-change, property, and assertion rows are mostly set expansion,
+receipts, or admission support. The model usually receives separate gateway
+producer prose, not the compact decision-linked fact set that was ranked.
+
+### What the latest run proves
+
+For the four tasks with compatible frozen GT-off rows:
+
+| Metric | Frozen GT-off | GT-on `30597263179` | Delta |
+|---|---:|---:|---:|
+| Reward | 4/4 | 3/4 | worse |
+| Iterations | 195 | 305 | +56.4% |
+| Input tokens | 5,884,607 | 13,875,384 | +135.8% |
+| Output tokens | 90,374 | 298,618 | +230.4% |
+
+The direct GT payload was only 1,302--4,267 characters per task. It cannot
+explain millions of additional input tokens by byte volume. The provider
+requests grew to roughly 120,000--150,000 characters and were resent for
+dozens of iterations. The relevant cost relation is:
+
+`cumulative input ~= iterations * average request context`
+
+The excess therefore comes primarily from behavior induced or not prevented
+by the harness: broad search, redundant verification, stalled work, and
+internal-harness investigation. GT's bytes are small; GT's downstream work is
+not.
+
+### Tool-error ruling
+
+Elevated tool errors are a secondary defect, not the dominant cause established
+by this run:
+
+| Task | Tool outcomes | Non-success | Harmful | Harmful with active GT delivery |
+|---|---:|---:|---:|---:|
+| build | 109 | 6 | 0 | 0 |
+| headless | 99 | 6 | 1 | 0 |
+| batching | 65 | 6 | 1 | 0 |
+| reshard | 122 | 2 | 2 | 0 |
+| sanitizer | 51 | 6 | 5 | 0 |
+
+Build failed with zero harmful outcomes. Sanitizer passed with five and used
+fewer tool calls than its frozen baseline. None of the harmful outcomes was
+action-linked to an active GT delivery. This rejects the strong claim that GT
+payloads directly caused bad tool calls. It does not reject the weaker claim
+that longer GT-on trajectories created more opportunities for errors.
+
+The known shell-lifecycle and timeout cases still require regression coverage
+and actionable error text. They must not displace context, verification, and
+stall control as the first optimization target.
+
+### What frontier labs do differently
+
+The relevant frontier-lab pattern is consistent:
+
+- OpenAI reports that every agent iteration includes prior conversation and
+  tool history, making prompt growth effectively quadratic over a long
+  stateless loop. Codex preserves stable prefixes for caching and compacts the
+  conversation when it crosses a threshold. This directly matches nano's
+  120,000--150,000-character late requests.
+  [OpenAI: Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
+- OpenAI's harness engineering guidance is to give an agent a map, not a
+  thousand-page manual: keep the injected entry point small, expose deeper
+  information progressively, and enforce invariants mechanically with
+  actionable remediation. GT should return a small next-decision map and keep
+  the graph outside the prompt until a boundary needs it.
+  [OpenAI: Harness engineering](https://openai.com/index/harness-engineering/)
+- Anthropic defines good context as the smallest high-signal token set that
+  produces the desired behavior. Claude Code combines just-in-time retrieval
+  with compaction and clears old raw tool results while retaining decisions,
+  unresolved bugs, and recent files. This contradicts permanently protecting
+  every historical evidence-bearing result block.
+  [Anthropic: Effective context engineering for AI agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+- Anthropic recommends a few distinct high-impact tools, targeted searches,
+  concise response modes, and evaluations that record accuracy, token use,
+  tool calls, runtime, and errors. GT's 17 identities are an audit inventory;
+  they must not become 17 competing prompt surfaces.
+  [Anthropic: Writing effective tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents)
+- Anthropic has observed coding agents inspect git history for benchmark
+  answers and identify the benchmark itself. It treats filesystem containment,
+  not a prompt request, as the hard boundary. That is direct support for
+  removing `/installed-agent/nano-harness` rather than trusting the new prompt
+  sentence alone.
+  [Anthropic: How we contain Claude across products](https://www.anthropic.com/engineering/how-we-contain-claude)
+- Microsoft Research's Magentic-One maintains a task ledger and a separate
+  progress ledger; after repeated lack of progress it updates the task state
+  and replans. GT currently records progress transitions but rarely turns them
+  into an early, bounded change of course.
+  [Microsoft Research: Magentic-One](https://www.microsoft.com/en-us/research/articles/magentic-one-a-generalist-multi-agent-system-for-solving-complex-tasks/)
+- Google DeepMind's AlphaEvolve pairs model proposals with automated
+  evaluators and retains candidates according to objective scores. The
+  transferable point is not evolutionary search: deterministic infrastructure
+  should evaluate executable outcomes and select useful state, not add generic
+  reasoning prose.
+  [Google DeepMind: AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/)
+- Anthropic distinguishes the transcript from the outcome and recommends
+  multiple trials because model behavior varies. A single five-task smoke can
+  prove wiring and expose failures; at temperature 1 it cannot establish a
+  stable causal superiority claim.
+  [Anthropic: Demystifying evals for AI agents](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents)
+
+### Open-source terminal-agent context comparison
+
+The strongest open-source agents do not solve context growth with one
+technique. They separate durable history from the active model view, budget
+repository evidence, compact old interaction state, and preserve a recent
+working tail. The implementation details matter:
+
+| Agent | Relevant context mechanism | What GT should adopt | What GT should not copy blindly |
+|---|---|---|---|
+| OpenCode | Replaces old active context with a checkpoint plus a bounded recent tail; its current source caps retained tool output at 2,000 characters and keeps durable messages outside the compact active view | preflight request sizing, checkpoint plus tail, exact tool-output caps, one overflow retry | a model-generated checkpoint as authoritative verification or attribution state |
+| OpenHands | Separates immutable event history from the LLM-ready `View`; condensers can summarize the middle while retaining first and recent events, and record the IDs omitted from the view | a durable GT ledger distinct from a compact provider view, with explicit omission provenance | treating a lossy condensation as deletion of audit evidence |
+| Aider | Ranks repository definitions and references with a graph, excludes files already in chat, and binary-searches the ranked prefix into a hard token budget; map cache keys include files and mentioned identifiers | budgeted `graph.db` projection keyed by active obligations, changed paths, graph revision, and already-visible evidence | dumping the repository map or all graph surfaces into every turn |
+| SWE-agent | Deterministically elides older observations, can always retain or remove tagged observation classes, and batches pruning changes to avoid destroying prompt-cache reuse | typed retention classes and cache-stable compaction epochs | rewriting the whole prompt on every observation |
+| Goose | Uses proactive auto-compaction, summarizes older tool calls while retaining recent calls, has an overflow fallback, and bounds agent turns | proactive rather than emergency-only compaction, recent-tool cutoff, explicit loop ceiling | copying its thresholds or large tool-response limit without nano replay measurements |
+| Gemini CLI | Offers explicit whole-session compression; path inclusion is filtered and large or binary content is skipped or truncated | an operator-visible compression event and repository-aware file filtering | relying on a manual command during an unattended smoke |
+| Codex | Maintains a stable request prefix for prompt caching and compacts before the model context window is exhausted | stable-prefix/cache accounting and automatic thresholding | using the model's maximum context window as the economic operating target |
+
+Primary implementation references:
+
+- [OpenCode compaction documentation](https://opencode.ai/v2/docs/compaction)
+  and [OpenCode compaction source](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/compaction.ts)
+- [OpenHands condenser architecture](https://docs.openhands.dev/sdk/arch/condenser)
+- [Aider repository-map source](https://github.com/Aider-AI/aider/blob/main/aider/repomap.py)
+  and [Aider configuration](https://github.com/Aider-AI/aider/blob/main/aider/website/assets/sample.aider.conf.yml)
+- [SWE-agent history processors](https://swe-agent.com/1.0/reference/history_processor_config/)
+  and [model/cache guidance](https://swe-agent.com/latest/config/models/)
+- [Goose smart context management](https://goose-docs.ai/docs/guides/sessions/smart-context-management/)
+  and [Goose context environment variables](https://github.com/block/goose/blob/main/documentation/docs/guides/environment-variables.md)
+- [Gemini CLI commands](https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/commands.md)
+- [OpenAI: Unrolling the Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
+
+### Target context architecture for nano + GT
+
+Context engineering is necessary but not sufficient. It should reduce
+cumulative input and distraction with high confidence. It cannot repair a
+false verification refusal, select a relevant graph fact, or stop a no-gain
+loop unless P3--P5 are also implemented.
+
+GT should maintain two planes:
+
+```text
+durable evidence plane                         active provider view
+----------------------                         --------------------
+immutable user task -------------------------> task/contract anchor
+full messages and tool results                 stable system/tool prefix
+GT delivery bytes + exposure receipts ------> pending exact capsule (once)
+graph revisions and source provenance ------> one budgeted JIT graph slice
+verification observations ------------------> deterministic GT checkpoint
+iteration and progress ledger --------------> bounded recent interaction tail
+```
+
+The durable plane is the audit source of truth and never needs to fit in the
+model context. The active provider view is reconstructed from durable typed
+state for each request. It contains only:
+
+1. a stable system/tool prefix;
+2. the original task plus its normalized obligation identifiers;
+3. one deterministic GT checkpoint;
+4. the current boundary's just-in-time graph slice;
+5. a bounded recent tail; and
+6. an exact capsule whose first provider exposure is still pending.
+
+The checkpoint must not be a free-form model summary. It is a versioned,
+deterministically rendered record containing:
+
+- task and obligation IDs;
+- active lifecycle boundary and intended next decision;
+- patch fingerprint, changed paths, and graph revision;
+- verified, unresolved, stale, and RED predicate IDs;
+- latest distinct failure fingerprint and smallest next check;
+- recent relevant files/symbols;
+- progress/stall state; and
+- exposed GT delivery IDs, provenance hashes, and outcomes.
+
+This gives GT a structural advantage over generic agents: it can compact
+without paying for a summarization call and without asking a stochastic model
+to preserve verification truth.
+
+#### Retention and compaction policy
+
+Each GT delivery follows an auditable state machine:
+
+```text
+SEALED -> BOUND_TO_REQUEST -> PROVIDER_EXPOSED -> FOLDED_INTO_CHECKPOINT
+                                                    |
+                                                    v
+                                             RAW_BLOCK_ELIDABLE
+```
+
+The exact bytes remain in the durable ledger in every state. They are protected
+in the active view only through the first provider-confirmed exposure. Folding
+records delivery ID, payload hash, request ID, boundary, affected obligation,
+freshness, and observed outcome.
+
+The recent tail should be bounded by both structure and tokens:
+
+- keep the last two complete interaction turns by default;
+- expand only up to a measured 2,000--8,000-token tail budget;
+- keep the current diff, newest useful RED, and newest verification receipt;
+- replace older successful or repetitive tool results with typed references;
+- cap ordinary inline tool output initially at 2,000--4,000 characters and
+  keep the full result in the durable transcript;
+- treat file/media attachments as descriptors after their first useful view;
+  and
+- never elide the original task, unresolved contract, or unexposed capsule.
+
+These are starting ranges from the open-source evidence, not hard-coded final
+values. P0 replay must select nano's thresholds against reward-preserving
+counterfactuals.
+
+#### Preflight, caching, and economic threshold
+
+Compaction must estimate the final provider request--system prompt, tools,
+messages, checkpoint, graph slice, and reserved output--before dispatch. It
+must run before the active request reaches the model's technical context
+limit. Nano's observed failure is economic: repeatedly sending
+120,000--150,000 characters is costly even though the request still fits.
+
+The active view should therefore change in cache-stable epochs:
+
+1. append deltas while the current epoch remains under its replay-selected
+   budget;
+2. fold state at stable lifecycle boundaries such as post-edit and
+   post-verification, or when the size threshold is crossed;
+3. leave the system/tool/task prefix byte-identical;
+4. record pre/post size, checkpoint version, omitted event IDs, and provider
+   cache-read tokens; and
+5. retry once with forced compaction on an actual context-overflow response.
+
+Compacting every turn can reduce prompt-cache hits and make cost worse. Waiting
+until overflow preserves too much irrelevant state. The replay-selected
+threshold and epoch policy must optimize cumulative billed input, not merely
+peak request size.
+
+#### Why this is not “context engineering alone”
+
+Four independent conditions are required for a better agent:
+
+| Condition | Failure if omitted |
+|---|---|
+| bounded active context | old observations and repeated requests dominate token cost |
+| semantically correct receipts | successful work remains “unknown,” causing repeat tests and refusals |
+| decision-linked graph retrieval | compact context is still irrelevant context |
+| deterministic progress control | the agent can resend a compact but useless loop indefinitely |
+
+Accordingly, the correct claim is: context engineering is the largest known
+efficiency lever, while verification, graph selection, and loop control
+determine whether the saved tokens also improve task reward.
+
+### Ranked correction plan
+
+The order matters. Later work is invalid if an earlier gate fails.
+
+#### P0: freeze measurement and prove the regressions by replay
+
+Before changing runtime behavior:
+
+1. add a per-iteration replay report containing request characters, input
+   tokens, cache-read tokens, active delivery, lifecycle phase, changed-file
+   fingerprint, unresolved predicate count, test state, progress state, and
+   next action;
+2. classify every iteration as useful research, edit, useful RED,
+   verification, redundant repeat, harness-internal investigation, or idle
+   narration;
+3. calculate marginal work after each GT delivery instead of attributing the
+   whole subsequent trajectory to GT;
+4. replay context policy with and without historical evidence-block
+   exemptions; and
+5. keep raw task/verifier outcomes immutable.
+
+Go only if the report reproduces the published run totals and accounts for at
+least 95% of provider input tokens and iterations.
+
+#### P1: enforce real harness isolation
+
+The exact staged checkout removal at `6362926` is directionally correct but
+not yet proven live.
+
+1. test that the installed package still imports and runs after source removal;
+2. assert the task agent cannot read `.gt`, the staged nano source, GT source,
+   workflow metadata, verifier files, or answer-bearing harness artifacts;
+3. keep graph indexing and the GT bridge outside the task-visible namespace;
+4. fail the pre-live audit if forbidden paths appear in any provider-visible
+   tool result; and
+5. replay the two contaminated traces to show those commands would return no
+   source.
+
+This removes the largest clearly identified single-task detour. It is not by
+itself an efficiency proof.
+
+#### P2: replace evidence immortality with a compact state ledger
+
+Implement this as four separately testable changes:
+
+1. **Active-view separation:** retain the complete transcript and ledger for
+   replay, but construct a bounded provider view instead of mutating or
+   deleting durable events.
+2. **Deterministic checkpoint:** fold exposed capsules and old observations
+   into the versioned schema above. Preserve a new capsule verbatim only until
+   its first provider-final exposure.
+3. **Typed tail policy:** retain the last two complete turns plus the newest
+   useful RED, diff, and verification receipt under a hard token budget. Elide
+   old output by event type, not naive substring matching.
+4. **Preflight and cache epochs:** size the final provider request, compact at
+   replay-selected lifecycle/size boundaries, keep the prefix byte-stable, and
+   retry one overflow after forced compaction.
+
+The existing `smart_truncate(... delivered_spans=self._gt.delivered_spans)`
+protects blocks containing any historical delivery, including already exposed
+ones. Because the raw delivery-bearing outputs measured only about
+1,500--9,400 characters per task, changing that alone is expected to help but
+not explain the full regression. It must be evaluated as one component of
+state compaction, not shipped as a speculative standalone fix.
+
+P2 acceptance requires:
+
+- every sealed delivery has exactly one provider exposure receipt before its
+  raw block becomes elidable;
+- replay can reconstruct the active provider view byte-for-byte from durable
+  events and policy version;
+- no verified, unresolved, stale, or RED predicate changes meaning across a
+  compaction;
+- original task and active changed-file identities survive every compaction;
+- the stable prefix remains identical within an epoch and cache-read tokens do
+  not regress materially;
+- each immutable task replay shows lower cumulative provider input without
+  changing the sequence of semantically relevant observations; and
+- a synthetic overflow compacts and retries at most once.
+
+#### P3: make verification recognize executable completion
+
+1. compile obligation predicates into explicit verifier plans at task start;
+2. map a passing observation by structured command scope, exit status,
+   measured values, artifacts, and post-edit freshness--not primarily lexical
+   overlap;
+3. let one representative passing suite satisfy every behavior obligation it
+   actually covers;
+4. invalidate only receipts affected by a later edit, rather than clearing all
+   completion state;
+5. render the smallest unresolved predicate set with the exact executable next
+   check; and
+6. never repeat an unchanged generic unknown-state refusal.
+
+Acceptance requires replaying batching and reshard so their successful checks
+become credited at the action where they happened, with no later generic
+refusal for already-proven requirements.
+
+#### P4: turn `graph.db` into just-in-time decision evidence
+
+Do not put all graph rows in context. Use all trustworthy surfaces as a query
+backend:
+
+- FTS/body/passages identify candidate definitions;
+- edges and closure identify callers, callees, importers, and affected tests;
+- properties and assertions supply concrete contracts and invariants;
+- co-change surfaces identify companion files;
+- hashes and revision state establish freshness; and
+- project metadata selects language/build/test adapters.
+
+At each lifecycle boundary, render at most the top facts needed for one
+decision:
+
+| Boundary | Graph question | Required output |
+|---|---|---|
+| orient/research | Where is the behavior and its closest precedent? | ranked paths/symbols plus why |
+| pre-edit | What contracts and dependents can this edit break? | callers, assertions, companion files |
+| post-edit | What changed semantically and what became stale? | signature/impact delta |
+| verify | Which smallest executable checks cover the changed surface? | commands/targets with coverage basis |
+| submit | Which positive facts remain RED or unknown? | only blockers and exact remediation |
+
+Every rendered fact must link to an unresolved obligation or active changed
+target, carry graph revision/provenance, prescribe an intended action, and
+expire after that decision. `_graph_evidence` must either feed these canonical
+features or be deleted; telemetry-only ranking is not product value.
+
+#### P5: make progress state control the loop
+
+1. define progress from patch fingerprint, verified-obligation delta,
+   localization-frontier delta, failure fingerprint, and new information;
+2. after two equivalent no-gain actions, deliver one bounded alternative
+   action;
+3. after a failed check, point to the changed surface and smallest next
+   discriminating probe;
+4. near 80% of the budget, stop broad research and require either an edit, an
+   explicit blocker, or the verification plan; and
+5. suppress further advisory localization once the agent is already editing or
+   verifying the correct surface.
+
+This uses GT deterministically: GT detects state equivalence and chooses a
+predefined intervention class; nano still decides and writes the solution.
+
+#### P6: harden tools without confusing RED with infrastructure failure
+
+1. retain nonzero test exits as useful RED with their output;
+2. preserve the isolated-shell handling for model-authored `exit`;
+3. distinguish command timeout, dependency/environment failure, agent-command
+   error, product failure, and persistent shell death;
+4. make timeout/error responses state the exact recovery action;
+5. prevent stale background-process assumptions after shell restart; and
+6. fail the live gate only on an unrecovered harness lifecycle fault.
+
+This work follows P1--P5 because the latest evidence does not support tool
+errors as the principal GT regression.
+
+#### P7: pre-live and live proof
+
+No live run starts until:
+
+- all local tests and Ruff pass;
+- replay attribution is exact;
+- forbidden harness paths are absent;
+- every eligible feature is delivered at its correct lifecycle boundary;
+- already-exposed capsules compact without losing the first exposure proof;
+- predicate receipts are fresh and semantically valid;
+- unchanged refusals and repeated no-gain actions are bounded; and
+- the predicted token saving is positive on at least four of five immutable
+  replays.
+
+Then run the real five-task `nano + GT` workflow with
+`deepseek-v4-flash`, temperature `1`, Profile 2, concurrency 4, and timeout
+multiplier 1.0. Compare per task against the frozen GT-off rows. The live report
+must include reward, iterations, input/output/cache tokens, wall time, tool
+outcomes, request-size curve, delivered features and boundary, predicate
+receipts, forbidden-path attempts, and the exact next action after every GT
+delivery.
+
+One clean run can prove wiring and demonstrate a candidate improvement. A
+stable claim requires repeated GT-on trials because temperature-1 output is
+stochastic; it does not require another GT-off run.
 
 ## Research basis
 

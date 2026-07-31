@@ -482,9 +482,11 @@ class GTBridge:
         self._tool_outcome_signatures: set[str] = set()
         self._delivery_exposures: dict[str, int] = {}
         self._expired_delivery_ids: set[str] = set()
+        self._last_context_receipt: dict[str, Any] = {}
+        self._active_boundary = "task_start"
         from gt_engine.progress import ProgressLedger
 
-        self._progress = ProgressLedger()
+        self._progress = ProgressLedger(stall_threshold=2)
         self.iteration_budget = 0
         self._last_model_iteration = 0
         self._last_submit_block_reason = ""
@@ -609,7 +611,10 @@ class GTBridge:
         phase = str(phase or "").strip()
         if not phase:
             return
+        self._active_boundary = phase
         self._lifecycle_phases.add(phase)
+        if self._task_contract is not None and self._graph_projection is not None:
+            self._rerank_graph_evidence(phase)
         self._trace_record(
             "lifecycle.checkpoint",
             phase,
@@ -662,6 +667,50 @@ class GTBridge:
             "unmet_ids": unmet_ids,
             "shipped": len(all_ids & self._shipped_obligation_ids),
         }
+
+    def _invalidate_predicate_receipts(
+        self, changed: tuple[str, ...]
+    ) -> None:
+        """Invalidate only receipts whose proved scope can be changed."""
+        changed_set = {
+            self._fwd(path).lower().lstrip("./") for path in changed if path
+        }
+        kept: dict[str, Any] = {}
+        invalidated: list[str] = []
+        for predicate_id, receipt in self._predicate_receipts.items():
+            predicate = self._obligation_predicates.get(
+                getattr(receipt, "obligation_id", "")
+            )
+            kind = str(getattr(predicate, "kind", "") or "")
+            scope = {
+                self._fwd(path).lower().lstrip("./")
+                for path in (getattr(predicate, "scope", ()) or ())
+                if path
+            }
+            # Repository-wide and behavioral claims can be invalidated by any
+            # edit. A scoped artifact claim survives an unrelated change.
+            affected = kind != "artifact" or not scope or bool(
+                changed_set & scope
+            )
+            if affected:
+                invalidated.append(str(predicate_id))
+            else:
+                kept[str(predicate_id)] = receipt
+        self._predicate_receipts = kept
+        self._verified_obligation_ids = {
+            str(getattr(receipt, "obligation_id", "") or "")
+            for receipt in kept.values()
+            if getattr(receipt, "obligation_id", "")
+        }
+        self._trace_record(
+            "contract.receipts_invalidated",
+            "post_edit",
+            {
+                "changed_files": sorted(changed_set),
+                "invalidated_predicate_ids": sorted(invalidated),
+                "preserved_predicate_ids": sorted(kept),
+            },
+        )
 
     def _numpy_compatibility_block(self) -> dict[str, Any] | None:
         """Find positive NumPy-2 removed-alias evidence before submission."""
@@ -1018,7 +1067,10 @@ class GTBridge:
         return ""
 
     def provider_message_view(
-        self, messages: list[dict[str, Any]]
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        char_budget: int = 48_000,
     ) -> list[dict[str, Any]]:
         """Build a request-only view without capsules from past decisions."""
         view = copy.deepcopy(messages)
@@ -1087,6 +1139,24 @@ class GTBridge:
             return value
 
         view = restore(scrub(protect(view)))
+        checkpoint = self._render_context_checkpoint()
+        from gt_engine.context import compact_provider_view
+
+        view, receipt = compact_provider_view(
+            view,
+            checkpoint=checkpoint,
+            char_budget=max(8_000, int(char_budget)),
+            tail_turns=2,
+            tool_output_chars=4000,
+        )
+        checkpoint_hash = hashlib.sha256(
+            checkpoint.encode("utf-8", "surrogatepass")
+        ).hexdigest()
+        receipt["checkpoint_sha256"] = checkpoint_hash
+        receipt["context_policy"] = "gt.compact.v1"
+        receipt["active_boundary"] = self._active_boundary
+        receipt["graph_evidence_count"] = min(4, len(self._graph_evidence))
+        self._last_context_receipt = receipt
         visible = self._message_text(view)
         for delivery_id, text in pending.items():
             if not text or text in visible:
@@ -1094,7 +1164,13 @@ class GTBridge:
             # Defensive seal=>expose fallback. Evidence-aware truncation should
             # preserve the original tool-result block, but a provider must
             # never receive a request that silently omits a committed capsule.
-            view.append({"role": "user", "content": text})
+            content = view[0].get("content")
+            if isinstance(content, str):
+                view[0]["content"] = content.rstrip() + "\n\n" + text
+            else:
+                blocks = list(content or ())
+                blocks.append({"type": "text", "text": text})
+                view[0]["content"] = blocks
             visible += "\n" + text
             self._trace_record(
                 "capsule.reinjected",
@@ -1122,6 +1198,61 @@ class GTBridge:
                 },
             )
         return view
+
+    def _render_context_checkpoint(self) -> str:
+        """Render authoritative typed state plus one decision-linked graph slice."""
+        obligations = tuple(
+            getattr(self._task_contract, "obligations", ()) or ()
+        )
+        all_ids = [
+            str(getattr(item, "obligation_id", "") or "") for item in obligations
+        ]
+        verified = sorted(self._verified_obligation_ids)
+        unresolved = [item for item in all_ids if item not in self._verified_obligation_ids]
+        stale = sorted(
+            predicate_id
+            for predicate_id, receipt in self._predicate_receipts.items()
+            if getattr(receipt, "action_index", 0) < self._last_task_edit_action
+        )
+        graph_lines: list[str] = []
+        for item in self._graph_evidence[:4]:
+            if not item.obligation_ids and not item.active_target_linked:
+                continue
+            link = ",".join(item.obligation_ids) or "active-target"
+            graph_lines.append(
+                f"- {item.file_path}:{item.symbol or '-'} | {item.claim} "
+                f"| for={link} | action={item.intended_action}"
+            )
+        state = {
+            "version": "gt.context.v1",
+            "boundary": self._active_boundary,
+            "action_index": self.action_index,
+            "obligations": {
+                "verified": verified,
+                "unresolved": unresolved,
+                "stale_predicates": stale,
+            },
+            "changed_paths": list(self.edited_files[-12:]),
+            "graph_revision": str(
+                getattr(self._graph_projection, "revision", "") or ""
+            ),
+            "recent_red": (
+                str(self._observed_red.get("signature") or "")
+                if self._observed_red else ""
+            ),
+            "progress": self._progress.state,
+            "exposed_delivery_ids": sorted(
+                delivery_id
+                for delivery_id, count in self._delivery_exposures.items()
+                if count > 0
+            ),
+        }
+        rendered = json.dumps(
+            state, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        if graph_lines:
+            rendered += "\n[jit graph evidence]\n" + "\n".join(graph_lines)
+        return rendered
 
     def trace_model_request(
         self, iteration: int, messages: list[dict[str, Any]]
@@ -1217,6 +1348,7 @@ class GTBridge:
                 "delivery_ids": delivery_ids,
                 "matches": matches,
                 "message_count": len(messages) if isinstance(messages, list) else 0,
+                **self._last_context_receipt,
                 "payload_chars": len(canonical),
                 "payload_sha256": hashlib.sha256(
                     canonical.encode("utf-8", "surrogatepass")
@@ -1273,6 +1405,17 @@ class GTBridge:
             "iteration": int(iteration),
             "delivery_ids": list(delivery_ids),
             "stop_reason": str(getattr(result, "stop_reason", "") or ""),
+            "input_tokens": int(
+                getattr(getattr(result, "usage", None), "input_tokens", 0) or 0
+            ),
+            "output_tokens": int(
+                getattr(getattr(result, "usage", None), "output_tokens", 0) or 0
+            ),
+            "cache_read_tokens": int(
+                getattr(
+                    getattr(result, "usage", None), "cache_read_tokens", 0
+                ) or 0
+            ),
             "tool_calls": [
                 {
                     "id": str(getattr(call, "id", "") or ""),
@@ -2191,6 +2334,41 @@ class GTBridge:
         self._recovery_fired_sigs.add(signature)  # burned on DELIVERY only
         return output + shipped
 
+    def _progress_intervention(
+        self,
+        transition: Any | None,
+        *,
+        classification: str,
+    ) -> tuple[str, str] | None:
+        """Return one deterministic alternative-action steer per stall key."""
+        if (
+            transition is None
+            or transition.current != "STALLED"
+            or transition.streak < 2
+            or classification not in {"success", "expected_negative_probe"}
+            or os.environ.get("GT_HYPOTHESIS", "").strip() != "1"
+        ):
+            return None
+        signature = f"progress-{transition.signature}"
+        if signature in self._recovery_fired_sigs:
+            return None
+        text = (
+            "This action repeated without new information. Do not repeat it; "
+            "use a different discriminating search, inspect a ranked related "
+            "symbol, or make the smallest evidence-backed edit."
+        )
+        self._trace_record(
+            "progress.intervention",
+            "tool_result",
+            {
+                "signature": transition.signature,
+                "streak": transition.streak,
+                "state": transition.current,
+                "strategy": "bounded_alternative_action",
+            },
+        )
+        return text, signature
+
     # ------------------------------------------------------------------ #
     # FIX D: SS-2 observed-RED tracking (the submit gate's broad fallback).
     # Port of production's latch rule (`_ss_record_test` tail,
@@ -2319,6 +2497,7 @@ class GTBridge:
                                 "operator": receipt.operator,
                                 "required_value": receipt.required_value,
                                 "unit": receipt.unit,
+                                "coverage_basis": receipt.coverage_basis,
                                 "action_index": receipt.action_index,
                                 "latest_edit_action": (
                                     self._last_task_edit_action
@@ -2631,8 +2810,7 @@ class GTBridge:
                     self.edited_files.append(rel)  # submit-gate syntax domain
             if changed:
                 self._last_task_edit_action = self.action_index
-                self._verified_obligation_ids.clear()
-                self._predicate_receipts.clear()
+                self._invalidate_predicate_receipts(changed)
                 source_edit = any(_has_source_ext(rel) for rel in changed)
                 if source_edit:
                     self._last_source_edit_action = self.action_index
@@ -2748,11 +2926,21 @@ class GTBridge:
             enriched = self._deliver(cmd, output, rc,
                                      changed_files=changed, viewed_files=viewed,
                                      edit_before_after=eba)
-            if enriched != output or not recovery:
+            if enriched != output:
                 # Gateway dose spent (recovery is the severity FLOOR — SM-10:
-                # it defers to every higher producer) or no candidate: done.
+                # it defers to every higher producer).
                 return enriched
-            return self._deliver_recovery(output, recovery[0], recovery[1])
+            if recovery:
+                return self._deliver_recovery(output, recovery[0], recovery[1])
+            intervention = self._progress_intervention(
+                progress,
+                classification=tool_outcome.classification,
+            )
+            if intervention:
+                return self._deliver_recovery(
+                    output, intervention[0], intervention[1]
+                )
+            return output
         except Exception as exc:  # noqa: BLE001 - GT failure must never break the harness
             self._trace_record(
                 "decision.committed",

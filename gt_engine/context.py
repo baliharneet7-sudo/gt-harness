@@ -21,9 +21,128 @@ original oldest-first pass (GT-off byte identity).
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 _VERIFIED = "VERIFIED"
+
+
+def message_chars(messages: list[dict[str, Any]]) -> int:
+    """Count all provider-visible strings, including tool arguments."""
+    def size(value: Any) -> int:
+        if isinstance(value, str):
+            return len(value)
+        if isinstance(value, list):
+            return sum(size(item) for item in value)
+        if isinstance(value, dict):
+            return sum(size(item) for item in value.values())
+        return 0
+
+    return sum(size(message) for message in messages)
+
+
+def _bound_kept_blocks(
+    messages: list[dict[str, Any]],
+    *,
+    tool_output_chars: int,
+) -> None:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                value = str(block.get("content") or "")
+                if len(value) > tool_output_chars:
+                    head = value[: tool_output_chars // 2]
+                    tail = value[-tool_output_chars // 2:]
+                    block["content"] = (
+                        f"{head}\n[older tool output elided: "
+                        f"{len(value) - tool_output_chars} chars]\n{tail}"
+                    )
+            elif block.get("type") == "tool_use":
+                inputs = block.get("input")
+                if not isinstance(inputs, dict):
+                    continue
+                for key, value in list(inputs.items()):
+                    if isinstance(value, str) and len(value) > tool_output_chars:
+                        inputs[key] = (
+                            f"{value[:tool_output_chars // 2]}\n"
+                            f"[executed argument elided: "
+                            f"{len(value) - tool_output_chars} chars]\n"
+                            f"{value[-tool_output_chars // 2:]}"
+                        )
+
+
+def compact_provider_view(
+    messages: list[dict[str, Any]],
+    *,
+    checkpoint: str,
+    char_budget: int,
+    tail_turns: int = 2,
+    tool_output_chars: int = 4000,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Construct a bounded provider view without mutating durable history."""
+    raw_chars = message_chars(messages)
+    durable = copy.deepcopy(messages)
+    if not durable:
+        durable = [{"role": "user", "content": ""}]
+    anchor = durable[0]
+    anchor_content = anchor.get("content")
+    suffix = f"\n\n[deterministic GT state]\n{checkpoint}".rstrip()
+    if isinstance(anchor_content, str):
+        anchor["content"] = anchor_content.rstrip() + suffix
+    else:
+        anchor["content"] = [
+            {"type": "text", "text": str(anchor_content or "") + suffix}
+        ]
+
+    # Keep complete assistant -> following user/tool-result groups. Starting a
+    # suffix at a tool_result would violate provider tool pairing.
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for message in durable[1:]:
+        if message.get("role") == "assistant" and current:
+            groups.append(current)
+            current = []
+        current.append(message)
+    if current:
+        groups.append(current)
+
+    full_view = [anchor] + [item for group in groups for item in group]
+    _bound_kept_blocks(full_view, tool_output_chars=tool_output_chars)
+    if message_chars(full_view) <= char_budget:
+        active_chars = message_chars(full_view)
+        return full_view, {
+            "raw_message_chars": raw_chars,
+            "active_message_chars": active_chars,
+            "compacted": active_chars < raw_chars,
+            "omitted_message_count": 0,
+            "tail_turns": len(groups),
+        }
+
+    keep_count = min(max(1, int(tail_turns)), len(groups))
+    selected = groups[-keep_count:] if groups else []
+    view = [anchor] + [item for group in selected for item in group]
+    _bound_kept_blocks(view, tool_output_chars=tool_output_chars)
+    omitted = len(durable) - len(view)
+
+    # If the structural tail still exceeds the budget, retain its pairing but
+    # reduce inline output/arguments further. Exact bytes remain durable.
+    inline_limit = max(200, min(tool_output_chars, char_budget // 8))
+    while message_chars(view) > char_budget and inline_limit > 200:
+        inline_limit = max(200, inline_limit // 2)
+        _bound_kept_blocks(view, tool_output_chars=inline_limit)
+    active_chars = message_chars(view)
+    return view, {
+        "raw_message_chars": raw_chars,
+        "active_message_chars": active_chars,
+        "compacted": True,
+        "omitted_message_count": max(0, omitted),
+        "tail_turns": keep_count,
+    }
 
 
 def _block_evidence_rank(content: str, spans) -> int:

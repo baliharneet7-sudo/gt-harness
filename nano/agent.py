@@ -26,6 +26,7 @@ class Agent:
     max_iterations: int = 30
     max_input_tokens: int = 200_000
     truncation_char_budget: int = 120_000  # ~30k tokens of tool_result content
+    gt_context_char_budget: int = 48_000
     verify: bool = True  # gate "done" behind tool evidence (see max_pushbacks)
     max_pushbacks: int = 3  # toolless "done"s challenged before giving in
     on_event: Callable[[dict[str, Any]], None] | None = None
@@ -94,15 +95,7 @@ class Agent:
             # GT integration point 3: evidence-aware truncation. Stock path
             # (and stock bytes) whenever the GT bridge is absent; the GT path
             # itself falls back to stock truncation on any fault.
-            if self._gt is not None:
-                try:
-                    from gt_engine.context import smart_truncate
-                    smart_truncate(messages, transcript,
-                                   char_budget=self.truncation_char_budget,
-                                   delivered_spans=self._gt.delivered_spans)
-                except Exception:  # noqa: BLE001 - GT must never break the loop
-                    self._truncate_if_needed(messages, transcript)
-            else:
+            if self._gt is None:
                 self._truncate_if_needed(messages, transcript)
             provider_exposure_ids: tuple[str, ...] = ()
             request_messages = messages
@@ -110,7 +103,8 @@ class Agent:
                 try:
                     if hasattr(self._gt, "provider_message_view"):
                         request_messages = self._gt.provider_message_view(
-                            messages
+                            messages,
+                            char_budget=self.gt_context_char_budget,
                         )
                 except Exception:  # noqa: BLE001 - telemetry never blocks inference
                     request_messages = messages
