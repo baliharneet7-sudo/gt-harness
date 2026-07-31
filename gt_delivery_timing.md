@@ -230,6 +230,99 @@ Obsolete searches, installation logs, repeated outputs, superseded plans, and
 already-exposed GT capsules must not remain in the active request merely
 because they are recent.
 
+## Research-backed design choices
+
+The implementation must not equate "deeper" with "more context." Current
+coding-agent research supports a smaller, staged interface:
+
+1. **Deterministic lifecycle, bounded autonomy.** Agentless demonstrated that a
+   simple localization -> repair -> validation workflow can be both effective
+   and inexpensive. PatchPilot extends this into reproduction, localization,
+   generation, validation, and refinement. GT should make those lifecycle
+   states explicit while leaving code-level reasoning to the model.
+2. **Hybrid retrieval.** Anthropic's context-engineering guidance recommends a
+   small high-signal context, lightweight identifiers up front, and
+   just-in-time retrieval for details. Therefore task start should contain
+   ranked paths/symbols/reasons, not whole files or a flattened repository.
+3. **Exploration must not pollute solving context.** FastContext reports that
+   separating repository exploration from the solver can improve resolution
+   while reducing coding-agent tokens by up to 60%. GT is deterministic rather
+   than a separate reasoning agent, but it can enforce the same boundary:
+   graph/query internals stay outside provider history and only the ranked
+   result enters working context.
+4. **Localization quality needs fixed-budget ranking.** SWE-Explore evaluates
+   ranked relevant code regions under a fixed line budget and finds exploration
+   quality tracks downstream repair. GT should measure target recall/rank and
+   byte budget, not merely whether any localization capsule was delivered.
+5. **Graph retrieval must be narrow and structured.** RepoGraph found that
+   directly flattening a larger two-hop graph was its worst variant. LocAgent
+   uses hierarchical entities, explicit relation direction, and tree-formatted
+   subgraphs. GT should select a small one-hop decision slice rooted at the
+   active symbol, with relation type and direction, rather than dump graph
+   surfaces.
+6. **Editing needs source, not prose alone.** Controlled context experiments
+   report that compressed edit-relevant source can match whole-file context at
+   far lower token cost, while natural-language summaries alone lose important
+   behavioral information. Typed GT state must preserve the current target
+   source or exact diff, not replace it with a vague summary.
+7. **Condensation must be explicit state transformation.** OpenHands represents
+   conversation state separately and records exactly which events are forgotten
+   during condensation. GT should retain the durable transcript for audit,
+   construct a separate provider view, and receipt which complete tool groups
+   were omitted.
+8. **Budget awareness must be continuous.** Budget-Aware Tool-Use shows that
+   simply granting more tool calls does not improve agents that lack remaining
+   resource awareness. A lightweight tracker can change when an agent should
+   deepen, pivot, or verify. GT must expose remaining iterations, seconds, and
+   affordable tool time at every decision boundary.
+9. **Extra standing context can be harmful.** An empirical study of repository
+   context files found increased inference cost and, on average, reduced task
+   success when unnecessary instructions encouraged broader exploration. GT
+   must be correct-or-quiet and delta-based; permanent generic guidance is a
+   regression.
+
+These findings imply the following concrete architecture:
+
+```text
+durable event log (complete, audit-only)
+        |
+        +--> deterministic typed state
+        |      obligations / decisions / edits / RED-GREEN / budget
+        |
+        +--> graph selector
+               ranked task-start identifiers
+               one-hop JIT decision slice
+        |
+        +--> provider view
+               task + typed state + exact active source/diff
+               + at most two complete recent tool groups
+```
+
+### Primary sources
+
+- Agentless, *Demystifying LLM-based Software Engineering Agents*:
+  https://arxiv.org/abs/2407.01489
+- PatchPilot, *A Cost-Efficient Software Engineering Agent*:
+  https://openreview.net/forum?id=ybODpT8ydV
+- RepoGraph, *Enhancing AI Software Engineering with Repository-level Code
+  Graph*: https://arxiv.org/abs/2410.14684
+- LocAgent, *Graph-Guided LLM Agents for Code Localization*:
+  https://arxiv.org/abs/2503.09089
+- FastContext, *Training Efficient Repository Explorer for Coding Agents*:
+  https://arxiv.org/abs/2606.14066
+- SWE-Explore, *Benchmarking How Coding Agents Explore Repositories*:
+  https://arxiv.org/abs/2606.07297
+- *What Context Does a Coding Agent Actually Need to Act?*:
+  https://arxiv.org/abs/2607.09691
+- Anthropic, *Effective context engineering for AI agents*:
+  https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
+- OpenHands event and condensation architecture:
+  https://docs.openhands.dev/sdk/arch/events
+- *Budget-Aware Tool-Use Enables Effective Agent Scaling*:
+  https://arxiv.org/abs/2511.17006
+- *Evaluating AGENTS.md: Are Repository-Level Context Files Helpful for Coding
+  Agents?*: https://arxiv.org/abs/2602.11988
+
 ## Observable invariants
 
 For every eligible feature:
@@ -258,20 +351,149 @@ Additional timing invariants:
 
 ## Implementation sequence
 
-1. Add RED tests that reproduce missing step-0 localization, oversized retained
-   context, unaffordable tool timeout, and delivery-after-decision timing.
-2. Build a single task-start orientation renderer from the task contract and
-   graph projection.
-3. Record compound task-start feature/capability receipts without duplicating
-   model-facing bytes.
-4. Replace fixed eight-turn retention with typed state plus a small adaptive
-   raw tail.
-5. propagate an outer deadline and reserve into nano's tool dispatcher;
-   clamp/reject unaffordable calls and render verify-and-finish state.
-6. Make timing and action-effect rows first-class live-gate requirements.
-7. Run focused tests, 17-feature tests, full regressions, Ruff, exact replay,
-   then the real five-task DeepSeek V4 Flash smoke at temperature 1,
-   Profile 2, timeout multiplier 1.0, and concurrency 5.
+### Phase 1: executable timing contract
+
+Files: `tests/test_gt_engine.py`, `tests/test_gt_attribution.py`,
+`tests/test_gt_live_gate.py`.
+
+RED witnesses:
+
+- a graph-backed task-start call exposes obligations but not localization;
+- a localization delivered after the first edit is classified as late;
+- a pre-edit checkpoint recorded after tool execution fails ordering;
+- a terminal delivery with no following provider request fails lifecycle;
+- all 17 identities retain explicit eligible/suppressed/ineligible reasons.
+
+Exit gate: tests fail for the timing defect, not fixtures or unavailable graph
+setup.
+
+### Phase 2: unified step-0 orientation
+
+Files: `gt_engine/bridge.py`, `gt_engine/graph_context.py`,
+`gt_engine/attribution.py`.
+
+Implementation:
+
+- select a maximum of 3--5 obligation-linked file/symbol identifiers;
+- render path, line/symbol, relation/relevance claim, and intended action;
+- append this bounded section to the task contract before provider iteration 1;
+- keep one sealed byte block while recording independent obligations,
+  localization, and location-reslot application receipts;
+- explicitly record `graph_not_ready`, `no_ranked_target`, or role suppression
+  instead of silently deferring;
+- later search localization must be novel relative to the step-0 targets.
+
+Exit gate: provider iteration 1 contains the exact ranked identifiers and its
+immediate response is linked to the same delivery; no second dose is created.
+
+### Phase 3: semantic provider view
+
+Files: `gt_engine/context.py`, `gt_engine/bridge.py`,
+`gt_engine/verification_contract.py`.
+
+Implementation:
+
+- make typed state authoritative: obligations, decisions, changed paths,
+  patch intent/delta, latest RED/GREEN, verification freshness, budget;
+- retain exact active source/diff references when available;
+- default to two complete recent tool groups, not eight;
+- add an older group only when it contains an active changed path, current RED,
+  or unresolved verification evidence;
+- mask large stale observations and receipt all omitted group IDs;
+- enforce both a hard character budget and a smaller target budget so the
+  greedy selector does not fill spare context without semantic value.
+
+Exit gates:
+
+- the six-turn regression fixture retains the semantically marked old turn but
+  drops irrelevant recent output;
+- active context remains below target except when exact pending delivery bytes
+  require the hard-budget fallback;
+- durable messages are byte-identical after provider-view construction.
+
+### Phase 4: wall-clock-aware control
+
+Files: `eval/tb_agent.py`, `nano/cli.py`, `nano/agent.py`, `nano/tools.py`,
+`.github/workflows/tb2_gt.yml`.
+
+Implementation:
+
+- propagate the effective Harbor agent budget to nano as seconds;
+- start a monotonic deadline inside `Agent.run`;
+- reserve time for one final provider response and verification/cleanup;
+- clamp each bash timeout to affordable remaining seconds;
+- reject a call when no safe execution window remains;
+- attach structured `budget_exhausted` recovery metadata;
+- place a compact verify-and-finish state in the next provider request;
+- never convert an outer-timeout risk into a false successful tool receipt.
+
+Exit gates:
+
+- a requested 2500-second command inside a 1800-second budget is deterministically
+  clamped or rejected;
+- a near-deadline command leaves enough reserve for a final response;
+- GT-off remains unchanged unless the explicit agent-budget option is supplied;
+- timeout recovery still kills the complete process group and restores shell
+  state.
+
+### Phase 5: lifecycle verification as progress
+
+Files: `gt_engine/bridge.py`, `gt_engine/verification_contract.py`,
+`gt_engine/progress.py`.
+
+Implementation:
+
+- compile the initial verification plan at task start;
+- show only the minimal commands/predicates relevant to current obligations;
+- invalidate receipts on related edits;
+- classify a fresh mapped GREEN as progress toward termination;
+- classify repeated unmapped checks as no-gain;
+- make recovery name the current RED, invalidated obligation, and smallest
+  affordable next check;
+- suppress unchanged submit refusals.
+
+Exit gate: a mapped GREEN followed by no repository mutation causes the next
+state to recommend completion, not further exploration.
+
+### Phase 6: audit and live gate
+
+Files: `scripts/gt_audit.py`, `scripts/gt_live_gate.py`,
+`scripts/gt_replay.py`.
+
+Implementation:
+
+- report produced, sealed, provider-exposed, response-linked and action-consistent
+  iterations separately;
+- add `decision_deadline_iteration` and `timing_status` per delivery;
+- require task-start localization by provider iteration 1 when eligible;
+- report late-but-witnessed as a timing failure, not success;
+- report requested versus allowed tool timeout and remaining wall time;
+- retain exact replay accounting without storing raw sensitive provider text.
+
+Exit gate: replay of run `30603315821` deterministically identifies reshard
+localization at iteration 29 and the batching unaffordable command.
+
+### Phase 7: verification and live proof
+
+Local order:
+
+1. focused RED-to-GREEN tests;
+2. bridge/agent/tool/audit integration tests;
+3. `pytest -m gt_all17`;
+4. full `tests/` suite;
+5. scoped Ruff and `git diff --check`;
+6. exact replay against both latest immutable artifacts.
+
+Live order:
+
+1. push one candidate commit;
+2. dispatch only the GT-on five-task workflow;
+3. use `deepseek-v4-flash`, temperature 1, Profile 2, timeout multiplier 1.0;
+4. set concurrency to exactly 5;
+5. audit provider requests, immediate responses, next actions, tool budgets,
+   verifier results, and per-task economics;
+6. compare with the frozen existing GT-off rows; and
+7. do not claim stable superiority from one stochastic run.
 
 ## Acceptance gates
 
@@ -289,4 +511,3 @@ The next live candidate is accepted only when:
 - token reduction does not hide a correctness regression; and
 - stable superiority is claimed only after repeated GT-on trials because
   temperature 1 is stochastic.
-
