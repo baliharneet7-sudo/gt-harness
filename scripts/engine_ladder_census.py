@@ -30,12 +30,22 @@ TEN = [
 
 
 def _anchors(content_json: str) -> tuple[str, ...]:
-    """Extract stable anchors a later action could target (paths + symbols)."""
+    """Extract stable anchors a later action could target (paths + symbols).
+
+    Reads the rendered fact's content JSON (file/path/target/literal/symbol/
+    name/subjects) and the render's ``anchors:`` line."""
     anchors: list[str] = []
-    for m in re.finditer(r'"(?:file|path|target)":\s*"([^"]+)"', content_json):
+    for m in re.finditer(
+        r'"(?:file|path|target|name|subject|literal|symbol)":\s*"([^"]+)"',
+        content_json,
+    ):
         anchors.append(m.group(1))
-    for m in re.finditer(r'"(?:literal|symbol|name)":\s*"([^"]+)"', content_json):
-        anchors.append(m.group(1))
+    for m in re.finditer(r'"(?:subjects|requirements)":\s*\[([^\]]*)\]', content_json):
+        anchors.extend(
+            a.strip().strip('"') for a in m.group(1).split(",") if a.strip()
+        )
+    for m in re.finditer(r"anchors:\s*([^\n<]+)", content_json):
+        anchors.extend(a.strip() for a in m.group(1).split() if a.strip())
     return tuple(dict.fromkeys(a for a in anchors if a))
 
 

@@ -623,7 +623,8 @@ def _gateway_facts(
         edit_before_after = _edit_before_after(
             getattr(adapter, "repo_root", "") or "", changed_files
         )
-        covering = _covering_result(command, raw, returncode)
+        covering = _covering_result(command, raw, returncode,
+                                    changed_files=changed_files)
         test_outcome = ""
         if covering is not None:
             verdict = str(getattr(covering, "verdict", "") or "").upper()
@@ -1032,7 +1033,11 @@ def _edit_before_after(
 
 
 def _covering_result(
-    command: str, raw: str, returncode: int | None
+    command: str,
+    raw: str,
+    returncode: int | None,
+    *,
+    changed_files: tuple[str, ...] = (),
 ) -> "object | None":
     """Build the CoveringResult the gateway's covering producer threads.
 
@@ -1057,6 +1062,12 @@ def _covering_result(
         if not re.search(r"(test|tests|vendor|site-packages|\.venv|/venv/)", m):
             target = m
             break
+    if not target:
+        # fall back to a changed source file (the code under test)
+        for path in changed_files:
+            if path.endswith(".py") and not re.search(r"(test|tests)", path):
+                target = path
+                break
     verdict = "FAIL" if returncode not in (0, None) else "PASS"
     if not target:
         return None  # honest abstention: no source target derivable
@@ -1172,10 +1183,20 @@ def engine_execute_actions(
         _ensure_gateway_flags()
         if getattr(adapter, "store", None) is not None:
             try:
+                graph_db = getattr(adapter, "graph_db", None) or ""
+                graph_bytes = 0
+                try:
+                    graph_bytes = Path(graph_db).stat().st_size if graph_db else 0
+                except OSError:
+                    graph_bytes = -1
                 adapter.store.append(
                     "engine_init",
-                    graph_db_present=bool(getattr(adapter, "graph_db", None)),
+                    graph_db_present=bool(graph_db),
+                    graph_db_bytes=graph_bytes,
                     graph_fresh=bool(getattr(adapter, "graph_fresh", False)),
+                    issue_text_chars=len(
+                        str(getattr(adapter, "issue_text", "") or "")
+                    ),
                     gateway_flags={
                         flag: os.environ.get(flag, "")
                         for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
