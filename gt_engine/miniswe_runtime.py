@@ -569,6 +569,10 @@ def install_runtime_hooks(
                     environment=environment,
                     original_execute=execute,
                 )
+            except Submitted:
+                # Legitimate end-of-run signal from environment.execute; not an
+                # engine failure. Let Mini-SWE terminate normally.
+                raise
             except Exception as exc:  # noqa: BLE001 - engine failure must fail open
                 # Degrade the session so every later step is stock execution;
                 # the current batch still runs literally via the fall-through.
