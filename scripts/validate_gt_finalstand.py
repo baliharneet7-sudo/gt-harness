@@ -171,12 +171,15 @@ def _github_api_confirms_provenance(
         token = (
             os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
         ).strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(
             url,
             headers=headers,
         )
+        if token:
+            # GitHub artifact downloads redirect to a signed Azure Blob URL.
+            # Authenticate only the GitHub API request; forwarding this header
+            # cross-origin makes Azure reject the otherwise valid signed URL.
+            request.add_unredirected_header("Authorization", f"Bearer {token}")
         return urllib.request.urlopen(request, timeout=10)
 
     def fetch_json(url: str) -> dict[str, object]:
