@@ -321,6 +321,28 @@ def _typed_evidence(request: ActionRequest, typed_result: Mapping[str, Any] | No
     )
 
 
+def _tool_output(observation: CanonicalObservation, returncode: int) -> dict[str, Any]:
+    """Build the Mini-SWE tool-result dict for one engine observation.
+
+    Must match the shape Mini-SWE's formatter renders: ``output``,
+    ``returncode``, ``exception_info`` (the Jinja template accesses it as an
+    attribute and a missing key raises), and ``extra``.
+    """
+    rendered = observation.render()
+    return {
+        "output": rendered,
+        "returncode": returncode,
+        "exception_info": "",
+        "extra": {
+            "gt_engine": True,
+            "engine_decision": observation.decision.decision.value,
+            "canonical_observation_sha256": hashlib.sha256(
+                rendered.encode("utf-8")
+            ).hexdigest(),
+        },
+    }
+
+
 def _execute_and_observe(
     request: ActionRequest,
     decision: InterceptionDecision,
@@ -509,17 +531,7 @@ def engine_execute_actions(
             adapter, session, environment, rt,
         )
         rendered = observation.render()
-        outputs.append({
-            "output": rendered,
-            "returncode": returncode,
-            "extra": {
-                "gt_engine": True,
-                "engine_decision": decision.decision.value,
-                "canonical_observation_sha256": hashlib.sha256(
-                    rendered.encode("utf-8")
-                ).hexdigest(),
-            },
-        })
+        outputs.append(_tool_output(observation, returncode))
         if decision.decision == Decision.SUPPRESS:
             directives.append(rt._refusal_directive(adapter))
 

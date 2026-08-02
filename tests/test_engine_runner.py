@@ -111,6 +111,31 @@ def test_batch_barriers_on_mutations_and_verification():
     assert 1 not in barriers and 3 not in barriers
 
 
+def test_tool_output_shape_matches_formatter_expectations():
+    """Regression: Mini-SWE's Jinja formatter reads result.exception_info as an
+    attribute; a missing key previously crashed the engine (gt_degraded_fail_open)."""
+    from gt_engine.engine.contracts import CanonicalObservation, InterceptionDecision
+    from gt_engine.engine.runner import _tool_output
+
+    request = ActionRequest(
+        action_id="c1", kind=ActionKind.FILE_READ, arguments={},
+        literal_shell_form="cat a", snapshot_token="tok",
+        configuration_digest="cfg", batch_id="b", sequence_position=1,
+    )
+    observation = CanonicalObservation(
+        action_request=request,
+        decision=InterceptionDecision(decision=Decision.PASS_THROUGH, reason="literal"),
+        raw_result="file contents",
+    )
+    out = _tool_output(observation, 0)
+    assert "output" in out
+    assert out["returncode"] == 0
+    assert "exception_info" in out  # formatter attribute access must not raise
+    assert out["extra"]["gt_engine"] is True
+    assert out["extra"]["engine_decision"] == "pass_through"
+    assert len(out["extra"]["canonical_observation_sha256"]) == 64
+
+
 def test_analyzer_state_certified_from_typed_result():
     state = build_analyzer_state(
         ActionRequest(
