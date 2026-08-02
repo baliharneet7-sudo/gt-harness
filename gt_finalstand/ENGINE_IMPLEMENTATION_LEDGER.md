@@ -4,6 +4,83 @@ Authoritative live record for the Inline Engine phase (branch `inline-engine` on
 `harneet2512/gt-harness`). Supersedes nothing; it records what was built, what
 was verified, and what remains. Receipts are appended as units complete.
 
+## Extreme code review (2026-08-02) — three real defects found and fixed
+
+1. **Gateway fact payload was DROPPED (`_gateway_facts`).** The gateway's
+   `EvidenceEnvelope` carries its useful body in `payload` (lines) and
+   `provenance` (`(file,line)` rows); it has NO `content` attribute. The engine
+   read `winner.content` → always `""` → every gateway fact rendered as
+   `{"evidence": "", "target": "..."}` (a bare path, def rows lost). Fixed in
+   `runner.py`: extract `payload`+`provenance` into `evidence`/`rows` and anchor
+   the file:line rows. Gated by `test_regression_gateway_fact_payload_not_empty`.
+2. **Plain bash grep was REPLACE with raw dropped.** `build_analyzer_state`
+   marked a bash search "certified complete" from an EMPTY typed_result
+   (no omissions), so `decide` returned REPLACE with an empty `replaced` and
+   `render()` discarded the exact raw grep/view bytes. Round-7 missed it only
+   because `graph_fresh=False` there. Fixed: `certified` now requires a real
+   typed answer (`bool(answer)`) — bash greps are AUGMENT/PASS_THROUGH with raw
+   preserved + facts. Gated by `test_regression_bash_grep_preserves_raw`.
+3. **Engine loop skipped the lifecycle the seam runs.** `engine_execute_actions`
+   never advanced `adapter.global_action` (batch/action identity frozen at b1/0),
+   never called `before_action` (repeat telemetry + phase guard), never called
+   `note_edit` (RED/GREEN receipts were NEVER invalidated on an edit → the submit
+   gate could block forever on evidence the edit already fixed), and skipped
+   `begin_verify`/`after_observation`. Fixed in the engine loop, matching the
+   seam's ordering (before-action → execute → note_edit/begin_verify →
+   after_observation), all fail-open. Gated by
+   `test_regression_engine_advances_global_action` and
+   `test_regression_edit_invalidates_red`.
+
+All 147 engine tests green; visibility matrix all-16-green; census 9/9
+deliverable; validator `ok: true`.
+
+## Real-seam end-to-end review (2026-08-02) — two more defects found and fixed
+
+Built `scripts/engine_smoke_e2e.py` + `tests/test_engine_e2e_smoke.py`: drives
+the REAL `DefaultAgent` loop with the REAL `MiniSweAdapter` + real
+`install_runtime_hooks` in `GTMode.ENGINE` — the exact production code path the
+paid smoke runs — provider-free (scripted model/env, git-init workspace).
+
+The fake-only visibility harness could NOT catch these; the real seam did:
+
+1. **`record_episode_failure` always ValueError'd in the engine loop.**
+   `FailureIdentity.build` REQUIRES a non-empty `pre_state_revision`
+   (`terminal_evidence` raises otherwise), and the engine passed
+   `adapter.repository_revision` which is `""` in `MiniSweAdapter` (the seam
+   passes a real `pre_snapshot.revision`). The closed blocker that feeds
+   `submit_refusal` was therefore NEVER registered. Fixed: the engine now
+   passes `request.snapshot_token` (its content-addressed pre-action revision).
+2. **`repository_revision` was never populated by the engine**, so the closed
+   blocker's `invalidate_on_repository_revision_change` never fired AND the
+   blocker register gate (`and self.repository_revision`) stayed closed. Fixed:
+   the engine records a per-batch repository snapshot (`engine_batch`) and
+   re-records after each edit (`engine_edit`), so a submit AFTER a fix correctly
+   advances the revision, invalidates the pre-fix blocker, and is accepted —
+   while a submit WHILE the fresh RED blocker exists is SUPPRESSED exactly once.
+   Verified end-to-end: the submit-while-RED trajectory yields exactly 1
+   suppression + 1 `submit_refusal`, then FINISHED + accepted after the edit.
+
+Also confirmed the real-seam rendered observations carry NON-EMPTY payload
+(`localization` `{"evidence": "src/mod.py:1:compute", "rows": ["src/mod.py:1"]}`;
+`covering_red` with `outcome: failed`) and preserve exact raw output after
+`</result>` — the review's bug-1/bug-2 guards hold through the production path.
+`submit_refusal` SUPPRESS needs the real provider boundary (attached only by
+`GroundTruthLitellmModel` in production); the e2e test attaches the real
+`MiniSweProviderBoundary` to prove the path.
+
+All 151 engine tests green (incl. 4 real-seam e2e tests); visibility 16/16;
+census all_17_wired.
+
+## Test-isolation fix (2026-08-02) — `_run_submit_gate` leak
+
+The visibility harness's `deny_submit` monkeypatched
+`miniswe_runtime._run_submit_gate` permanently; the deny-gate leaked into the
+e2e tests run later in the same pytest process, starving their scripted model
+(IndexError) and flipping the submit-while-RED result to 0 suppressions. Fixed:
+`run_engine` now self-captures and restores the original gate in a `finally`,
+and the visibility submit-refusal test asserts the restore. Full engine battery
+(151 tests) + full suite (601 tests) green in one process.
+
 ## Authority
 
 - Spec: the Inline Engine plan (finalstand contract) — outcome B, host-native

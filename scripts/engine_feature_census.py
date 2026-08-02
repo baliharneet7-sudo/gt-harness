@@ -62,8 +62,8 @@ def census() -> dict:
     # (tests/test_engine_force_17.py). WIRED is necessary but not sufficient.
     deliverable_by = {
         "def_partition": True, "covering_red": True, "syntax_result": True,
-        "obligations": True, "localization": True, "recovery": False,
-        "signature_delta": True, "newfile_precedent": False,
+        "obligations": True, "localization": True, "recovery": True,
+        "signature_delta": True, "newfile_precedent": True,
         "submit_refusal": True,
     }
     fact_rows = []

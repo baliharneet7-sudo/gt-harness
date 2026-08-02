@@ -98,6 +98,7 @@ _EVIDENCE_TO_OWNER: dict[str, str] = {
     "covering_verdict": "covering_red",
     "patch_delta": "signature_delta",
     "signature_mismatch": "signature_delta",
+    "caller_break": "signature_delta",  # cross-language caller-impact (F2)
     "localization": "localization",
     "ranked_localization": "localization",
     "def_ref_partition": "def_partition",
@@ -112,6 +113,26 @@ _EVIDENCE_TO_OWNER: dict[str, str] = {
     "name_fold": "def_partition",
     "wrong_surface": "localization",
 }
+
+# change_surface emits missing_role (ZERO_ABSENT route) and
+# missing_role_postcreate (edit-path) evidence_types with a ``base:role`` form
+# (evidence_type == fact_kind in the gateway). Both are newfile_precedent
+# lineage and were silently dropped by exact-match owner lookup (Gap 2).
+_NEWFILE_PRECEDENT_BASES = frozenset({"missing_role", "missing_role_postcreate"})
+
+
+def _owner_for_evidence(evidence_type: str) -> str | None:
+    """Resolve an evidence_type to a registered FACT owner.
+
+    Exact match first; then the change_surface ``base:role`` base form
+    (``missing_role:registration`` / ``missing_role_postcreate:registration``).
+    """
+    if evidence_type in _EVIDENCE_TO_OWNER:
+        return _EVIDENCE_TO_OWNER[evidence_type]
+    base = str(evidence_type or "").split(":", 1)[0]
+    if base in _NEWFILE_PRECEDENT_BASES:
+        return "newfile_precedent"
+    return None
 
 
 def _args_get(args: Mapping[str, Any], *keys: str) -> str:
@@ -279,7 +300,13 @@ def build_analyzer_state(
     kind = request.kind
     is_test = kind in (ActionKind.RUN_VERIFICATION, ActionKind.SYNTAX_QUERY)
     omissions = _typed_omissions(typed_result)
-    certified = not bool(omissions)
+    # A REPLACE substitutes raw output with a deterministic answer. It is only
+    # certifiable when a typed producer actually returned an answer — an empty
+    # ``typed_result`` (plain bash grep/view) must never be "certified complete"
+    # (that vacuous-true state shipped decision="replace" with an empty
+    # ``replaced`` and discarded the exact raw bytes the model needed).
+    answer = _direct_answer(typed_result)
+    certified = bool(answer) and not bool(omissions)
     return AnalyzerState(
         current_revision=repository_revision,
         stale=not graph_fresh,
@@ -512,12 +539,20 @@ def _syntax_artifact(path: str, repo_root: str) -> EvidenceArtifact | None:
 def _covering_red_artifact(
     command: str, raw: str, returncode: int | None
 ) -> EvidenceArtifact | None:
-    """Execution-specific verification evidence for test/build commands."""
+    """Execution-specific verification evidence for test/build commands.
+
+    Detection is two-stage: the fast-path test-command wordlist first; then an
+    OUTPUT-based fallback (F3) — a non-zero run whose output carries a
+    test-failure signature (traceback/assertion/FAILED/ERROR) is a failed
+    verification even when the command spelling is not in the wordlist
+    (``python manage.py test``, ``./run_tests.sh``, ``bash test.sh``, bare
+    ``make``, ``npm run test``). Honest abstention when neither matches.
+    """
     lower = command.lower()
-    if not any(word in lower for word in ("pytest", "make test", "make check",
-                                          "tox", "nosetests", "unittest",
-                                          "cargo test", "go test", "npm test",
-                                          "yarn test")):
+    wordlist_hit = any(word in lower for word in (
+        "pytest", "make test", "make check", "tox", "nosetests", "unittest",
+        "cargo test", "go test", "npm test", "yarn test"))
+    if not wordlist_hit and not _output_shows_test_failure(raw, returncode):
         return None
     outcome = "passed" if returncode in (0, None) else "failed"
     return EvidenceArtifact(
@@ -533,6 +568,34 @@ def _covering_red_artifact(
         coverage="execution_specific",
         model_visible=True,
     )
+
+
+_TEST_FAILURE_SIGNALS = (
+    "traceback",
+    "assertionerror",
+    "assertionerror:",
+    "tests failed",
+    "failures:",
+    "failed",
+    "e   ",
+    "\\n>",
+)
+
+
+def _output_shows_test_failure(raw: str, returncode: int | None) -> bool:
+    """True iff the output carries a test-failure signature on a failed run.
+
+    A pass (returncode 0/None) is never re-classified by output — the wordlist
+    is the only path there. Only a NON-ZERO run's output may imply a failed
+    verification, and only via strong signals (pytest `FAILED`, `Traceback`,
+    `AssertionError`, `tests failed`, an assertion block `E   `). Correct-or-
+    quiet: a non-test failure (e.g. a compile error) with none of the signals
+    abstains, and a test-like failure without them is an omission, never a lie.
+    """
+    if returncode in (0, None):
+        return False
+    blob = (raw or "").lower()
+    return any(signal in blob for signal in _TEST_FAILURE_SIGNALS)
 
 
 _GATEWAY_FLAGS_ENABLED = False
@@ -566,16 +629,13 @@ def _ensure_gateway_flags() -> None:
 
     They default OFF (advisory-era rollout gates). The ENGINE is the canonical
     runtime: localization, signature_delta, def_partition, covering, and the
-    change-surface edit trigger must be able to fire. Idempotent; never
-    disables anything the caller explicitly set.
+    change-surface edit trigger must be able to fire. Idempotent setdefault
+    (always re-applies so test monkeypatch deletions cannot strand the engine);
+    the localizer injection is cached once.
     """
-    global _GATEWAY_FLAGS_ENABLED
-    if _GATEWAY_FLAGS_ENABLED:
-        return
     for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
                  "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE", "GT_EDIT_OVERLAY"):
         os.environ.setdefault(flag, "1")
-    _GATEWAY_FLAGS_ENABLED = True
     _ensure_localizer()
 
 
@@ -638,7 +698,7 @@ def _gateway_facts(
     () and the observation stays raw-only.
     """
     try:
-        from groundtruth.runtime.gateway import ToolEvent, produce_raw
+        from groundtruth.runtime.gateway import ToolEvent, classify_command, produce_raw
         from groundtruth.runtime.adapters.miniswe import arbitrate
     except Exception:  # noqa: BLE001 - gateway is optional
         return ()
@@ -670,7 +730,7 @@ def _gateway_facts(
             semantic.append("submit")
         primary = semantic[0] if semantic else ""
         event = ToolEvent(
-            kind="bash",
+            kind=classify_command(command),
             command=command,
             output=raw,
             exit_status=returncode,
@@ -693,11 +753,16 @@ def _gateway_facts(
         # hygiene + trust preservation). Arbitrate picks the highest-priority
         # envelope, rotating away recently-delivered classes and preferring the
         # fact that answers THIS observation's boundary.
+        # WS-1 rotation needs the delivered EVIDENCE_TYPES (arbitrate's decay
+        # compares evidence_type against recently_delivered), not the hex
+        # dedup chain used for fire-once.
+        delivered_types = getattr(adapter, "_delivered_evidence_types", None)
+        if delivered_types is None:
+            delivered_types = set()
+            adapter._delivered_evidence_types = delivered_types
         winner = arbitrate(
             envelopes,
-            recently_delivered=frozenset(
-                getattr(adapter, "_dedup_chain", ()) or ()
-            ),
+            recently_delivered=frozenset(delivered_types),
             observed_event=event.primary_boundary,
         )
     except Exception:  # noqa: BLE001 - producer failure is an omission
@@ -711,24 +776,49 @@ def _gateway_facts(
     except Exception:  # noqa: BLE001 - fire-once stamping is best-effort
         pass
     evidence_type = str(getattr(winner, "evidence_type", "") or "")
-    owner = _EVIDENCE_TO_OWNER.get(evidence_type)
+    owner = _owner_for_evidence(evidence_type)
     if owner is None or owner not in ENGINE_FACT_OWNERS:
         return ()
+    # Stamp the accepted winner's evidence_type for WS-1 rotation so the next
+    # observation's arbitration demotes this class and lets the runner-up fire.
+    delivered_types = getattr(adapter, "_delivered_evidence_types", None)
+    if isinstance(delivered_types, set):
+        delivered_types.add(evidence_type)
     target = str(getattr(winner, "target", "") or "")
-    content = str(getattr(winner, "content", "") or "")
+    # EvidenceEnvelope has NO ``content`` attribute — the useful payload lives
+    # in ``payload`` (body lines) and ``provenance`` (file,line rows). Reading
+    # ``winner.content`` always yielded "" and shipped every gateway fact as
+    # empty evidence (a bare target). Extract the real payload now.
+    body_lines = tuple(
+        str(line) for line in (getattr(winner, "payload", ()) or ()) if str(line).strip()
+    )
+    provenance = tuple(
+        (str(fp), int(ln))
+        for fp, ln in (getattr(winner, "provenance", ()) or ())
+        if str(fp).strip() and str(ln).strip().lstrip("-").isdigit()
+    )
+    anchors = tuple(dict.fromkeys(
+        [target] + [f"{fp}:{ln}" for fp, ln in provenance]
+    ))[:6]
+    content_payload = {"target": target, "evidence": "\n".join(body_lines)}
+    if provenance:
+        content_payload["rows"] = [f"{fp}:{ln}" for fp, ln in provenance]
     artifact_id = (
         str(getattr(winner, "fact_id", "") or "")
-        or hashlib.sha256(f"{owner}:{target}:{content}".encode("utf-8")).hexdigest()[:16]
+        or hashlib.sha256(
+            f"{owner}:{target}:{content_payload['evidence']}".encode("utf-8")
+        ).hexdigest()[:16]
     )
+    graph_rev = str(getattr(winner, "graph_revision", "") or "") or adapter.repository_revision
     artifact = EvidenceArtifact(
         artifact_id=artifact_id,
         owner=owner,
         semantics=evidence_type,
-        content={"evidence": content, "target": target},
-        anchors=(target,) if target else (),
+        content=content_payload,
+        anchors=anchors,
         producer=str(getattr(winner, "producer", "") or "gateway"),
         producer_version="gateway",
-        freshness_revision=adapter.repository_revision,
+        freshness_revision=graph_rev,
         coverage="produced",
         model_visible=True,
     )
@@ -853,7 +943,10 @@ def _valid_fact_payload(fact: EvidenceArtifact) -> bool:
     if not any(str(v).strip() for v in content.values() if v is not None):
         return False  # all-empty payload
     if fact.owner == "syntax_result" and fact.content.get("ok") is True:
-        return False  # zero-gain "parses OK"
+        # Zero-gain "parses OK" is dropped for plain edits; a NEW-FILE creation
+        # confirmation (created=True, F7) is decision-relevant and kept.
+        if not fact.content.get("created"):
+            return False
     if not fact.freshness_revision and fact.coverage not in (
         "episode_observed", "produced", "execution_specific", "lexical_match",
     ):
@@ -990,6 +1083,64 @@ def _stop_signal_fact(
     )
 
 
+def _recovery_fact(
+    *,
+    command: str,
+    raw: str,
+    returncode: int | None,
+    adapter: Any,
+) -> EvidenceArtifact | None:
+    """Deterministic recovery evidence on the SECOND identical failure.
+
+    A frontier agent repeats the exact failing action hoping for a different
+    result, burning calls. This fact names the exact repeated failure identity
+    (normalized command + exit + diagnostic fingerprint) the moment it happens
+    a second time, independent of the gateway's search-outcome lattice — so
+    covering in arbitration can never starve it. Honest: it only claims what
+    this episode observed.
+    """
+    if returncode in (0, None):
+        return None
+    if not (command or "").strip():
+        return None
+    diagnostic = "".join(
+        line for line in (raw or "").splitlines()
+        if "[exit code" not in line
+    ).strip()[:2000]
+    if not diagnostic:
+        return None
+    fingerprint = hashlib.sha256(
+        f"{command.strip()}|{returncode}|{diagnostic}".encode("utf-8")
+    ).hexdigest()[:16]
+    history = getattr(adapter, "_engine_failure_history", None)
+    if history is None:
+        history = {}
+        adapter._engine_failure_history = history
+    count = history.get(fingerprint, 0)
+    history[fingerprint] = count + 1
+    if count == 0:
+        return None  # first occurrence: record, do not yet emit
+    return EvidenceArtifact(
+        artifact_id=hashlib.sha256(f"recover:{fingerprint}".encode("utf-8")).hexdigest()[:16],
+        owner="recovery",
+        semantics="exact repeated-failure recovery evidence",
+        content={
+            "notice": (
+                "this exact action already failed identically earlier this "
+                "episode; re-running it unchanged is unlikely to succeed"
+            ),
+            "command": command[:200],
+            "occurrences": count + 1,
+        },
+        anchors=(),
+        producer="engine.failure_identity",
+        producer_version="1",
+        freshness_revision=adapter.repository_revision,
+        coverage="episode_observed",
+        model_visible=True,
+    )
+
+
 def _postflight_facts(
     request: ActionRequest,
     *,
@@ -1007,6 +1158,7 @@ def _postflight_facts(
     bytes and the facts only add to the same canonical observation.
     """
     changed = _git_changed_py(repo_root)
+    created = _git_untracked_py(repo_root)
     viewed = _viewed_paths(request)
     facts: list[EvidenceArtifact] = list(
         _gateway_facts(
@@ -1034,6 +1186,28 @@ def _postflight_facts(
         if content.get("ok") is True:
             continue
         facts.append(artifact)
+    for path in created:
+        artifact = _syntax_artifact(path, repo_root)
+        if artifact is None:
+            continue
+        # NEW-FILE trigger (F7): a freshly created .py's "parses OK" IS
+        # decision-relevant — the model created the file and has not seen it
+        # compile. Emit syntax confirmation (or its ERROR) on creation.
+        content = dict(artifact.content or {})
+        content["created"] = True
+        facts.append(EvidenceArtifact(
+            artifact_id=artifact.artifact_id,
+            owner=artifact.owner,
+            semantics=artifact.semantics,
+            content=content,
+            anchors=artifact.anchors,
+            producer=artifact.producer,
+            producer_version=artifact.producer_version,
+            freshness_revision=artifact.freshness_revision,
+            coverage=artifact.coverage,
+            omissions=artifact.omissions,
+            model_visible=artifact.model_visible,
+        ))
     covering = _covering_red_artifact(command, raw, returncode)
     if covering is not None and not any(f.owner == "covering_red" for f in facts):
         outcome = (covering.content or {}).get("outcome")
@@ -1046,6 +1220,11 @@ def _postflight_facts(
     )
     if stop is not None:
         facts.append(stop)
+    recovery = _recovery_fact(
+        command=command, raw=raw, returncode=returncode, adapter=adapter,
+    )
+    if recovery is not None:
+        facts.append(recovery)
     return _dedup_facts(tuple(facts), adapter)
 
 
@@ -1195,6 +1374,40 @@ def _git_changed_py(repo_root: str) -> tuple[str, ...]:
     return tuple(changed)
 
 
+def _git_untracked_py(repo_root: str) -> tuple[str, ...]:
+    """Untracked (new) .py paths via git status --porcelain (deterministic).
+
+    Distinct from _git_changed_py: only NEW files (``??``) qualify — the
+    file-creation trigger the syntax producer uses to confirm a freshly created
+    module parses (the one edit where "parses OK" IS decision-relevant: the
+    model just created the file and has not seen it compile). () when not a git
+    checkout (omission, never a lie).
+    """
+    if not repo_root:
+        return ()
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", repo_root, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - git is optional; omission
+        return ()
+    if proc.returncode != 0:
+        return ()
+    created: list[str] = []
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        status, path = line[:2], line[3:]
+        if status.startswith("??"):
+            path = path.split(" -> ")[-1]
+            if path.endswith(".py") and not path.startswith("."):
+                created.append(path)
+    return tuple(created)
+
+
 def _delivery_receipt(
     request: ActionRequest,
     decision: InterceptionDecision,
@@ -1293,6 +1506,21 @@ def engine_execute_actions(
     cfg_digest = configuration_digest_for(
         repo_root, str(adapter.graph_db or ""), adapter.repository_revision
     )
+    # Seed adapter.repository_revision (the seam does via record_repository_snapshot).
+    # The closed-blocker / submit-SUPPRESS machinery requires a non-empty revision
+    # (FailureIdentity.build + blocker register gate on it); without a per-batch
+    # snapshot the engine loop leaves it "" and submit_refusal can never fire.
+    if not getattr(adapter, "repository_revision", "") and not session.disabled:
+        try:
+            from ..miniswe_runtime import _state_exclusion, capture_workspace
+
+            _pre = capture_workspace(
+                repo_root, excluded_roots=(_state_exclusion(adapter),)
+            )
+            if hasattr(adapter, "record_repository_snapshot"):
+                adapter.record_repository_snapshot(_pre, boundary="engine_batch")
+        except Exception:  # noqa: BLE001 - snapshot seeding is fail-open
+            pass
     workspace_fingerprint = rt._workspace_fingerprint(repo_root)
     snapshot_token = snapshot_token_for(
         adapter.repository_revision, repo_root, workspace_fingerprint, cfg_digest
@@ -1371,6 +1599,16 @@ def engine_execute_actions(
                 eligibility=("submit",),
             )
 
+        # Lifecycle tracking the seam does before execution: advance the global
+        # action counter and register the before-action identity (repeat
+        # telemetry + phase guard). Fail-open: telemetry never blocks the action.
+        if not session.disabled:
+            try:
+                adapter.global_action += 1
+                adapter.before_action("bash", request.literal_shell_form)
+            except Exception:  # noqa: BLE001 - telemetry is fail-open
+                pass
+
         observation, returncode = _execute_and_observe(
             request, decision, action, typed_result, is_typed,
             adapter, session, environment, rt,
@@ -1395,13 +1633,62 @@ def engine_execute_actions(
                 # the submit gate can SUPPRESS on fresh RED (record_episode_failure
                 # was never called by the engine -> submit_refusal could never fire).
                 if returncode not in (0, None) and hasattr(adapter, "record_episode_failure"):
+                    # FailureIdentity.build REQUIRES a non-empty pre-state
+                    # revision (terminal_evidence raises ValueError otherwise),
+                    # and adapter.repository_revision is "" in MiniSweAdapter.
+                    # The engine's content-addressed snapshot token is the real
+                    # pre-action revision the failure was observed at.
+                    pre_revision = (
+                        request.snapshot_token
+                        or adapter.repository_revision
+                        or getattr(adapter, "_engine_pre_revision", "")
+                    )
                     adapter.record_episode_failure(
                         command=request.literal_shell_form,
                         output=raw_output,
                         returncode=returncode,
-                        pre_state_revision=adapter.repository_revision,
+                        pre_state_revision=pre_revision,
                     )
             except Exception:  # noqa: BLE001 - obligation tracking is fail-open
+                pass
+        # Post-execution lifecycle the seam also does: invalidate stale
+        # GREEN/RED receipts on an edit, and advance IMPLEMENT -> VERIFY on a
+        # test command. Without note_edit, a RED receipt from before a fix
+        # survives forever and the submit gate keeps blocking on evidence the
+        # edit already addressed.
+        if not session.disabled:
+            try:
+                changed = _git_changed_py(repo_root)
+                if changed:
+                    if getattr(adapter, "phase", "") != "IMPLEMENT":
+                        adapter.begin_implement()
+                    adapter.note_edit(changed)
+                    # Advance repository_revision after the edit so the closed
+                    # blocker's invalidate_on_repository_revision_change fires
+                    # (the seam does this via record_edit_transaction; the
+                    # engine must too, or a submit after the fix keeps
+                    # SUPPRESSing on the pre-edit revision).
+                    if hasattr(adapter, "record_repository_snapshot"):
+                        try:
+                            from ..miniswe_runtime import _state_exclusion, capture_workspace
+
+                            _post = capture_workspace(
+                                repo_root, excluded_roots=(_state_exclusion(adapter),)
+                            )
+                            adapter.record_repository_snapshot(
+                                _post, boundary="engine_edit"
+                            )
+                        except Exception:  # noqa: BLE001 - revision advance is fail-open
+                            pass
+                lower_command = request.literal_shell_form.lower()
+                if any(word in lower_command for word in ("pytest", "test", "check", "verify")) \
+                        and getattr(adapter, "phase", "") == "IMPLEMENT":
+                    adapter.begin_verify()
+            except Exception:  # noqa: BLE001 - lifecycle tracking is fail-open
+                pass
+            try:
+                adapter.after_observation(observation.raw_result or "")
+            except Exception:  # noqa: BLE001 - after_observation is fail-open
                 pass
         # Incremental graph freshness: mark changed files stale in the overlay
         # (no full rebuild) so graph-backed producers keep firing latest info.

@@ -49,7 +49,6 @@ class FakeStore:
 
 class FakeAdapter:
     repository_revision = "rev-1"
-    repo_root = "."
     graph_db = None
     graph_fresh = True
     global_action = 0
@@ -59,8 +58,11 @@ class FakeAdapter:
     _dedup_chain = set()
     _latest_delivery = None
     _engine_search_history = {}
+    _delivered_evidence_types = set()
+    _engine_failure_history = {}
 
-    def __init__(self):
+    def __init__(self, repo_root="."):
+        self.repo_root = repo_root
         self.store = FakeStore()
 
     def gateway_state(self):
@@ -125,7 +127,9 @@ class FakeAgent:
 
 
 def _run(actions, session=None):
-    adapter = FakeAdapter()
+    import tempfile
+
+    adapter = FakeAdapter(repo_root=tempfile.mkdtemp())
     model = FakeModel()
     agent = FakeAgent()
     env = FakeEnv()
