@@ -49,6 +49,62 @@ def canonical_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def build_pre_artifact_provenance(
+    *,
+    offline_receipt_bytes: bytes,
+    compatibility: dict[str, Any],
+    gt_index_bytes: bytes,
+    workflow_bytes: bytes,
+    groundtruth_commit: str,
+) -> dict[str, Any]:
+    """Bind every FS-023 input available before the Actions artifact exists.
+
+    The successful run and uploaded-artifact identities are necessarily absent
+    while the workflow is still executing.  This receipt makes that bootstrap
+    state explicit; post-run finalization must replace it with API-bound
+    provenance before FS-023 can become COMPLETE.
+    """
+    offline = json.loads(offline_receipt_bytes)
+    graph = offline.get("native_graph_battery")
+    semantic_hash = (
+        graph.get("semantic_artifact_sha256") if isinstance(graph, dict) else None
+    )
+    source_hash = compatibility.get("source_manifest_sha256")
+    if offline.get("terminal") is not True:
+        raise ValueError("FS-023 provenance requires a terminal offline receipt")
+    if re.fullmatch(r"[0-9a-f]{40}", groundtruth_commit) is None:
+        raise ValueError("GroundTruth commit must be an immutable lowercase 40-hex SHA")
+    for name, value in (
+        ("source manifest", source_hash),
+        ("semantic artifact", semantic_hash),
+    ):
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ValueError(f"{name} SHA-256 is missing or invalid")
+    return {
+        "schema": "gt.fs023.provenance.v1",
+        "offline_receipt": "receipts/offline_suite.json",
+        "offline_receipt_sha256": hashlib.sha256(offline_receipt_bytes).hexdigest(),
+        "recorded_groundtruth_commit": groundtruth_commit,
+        "binary_sha256": hashlib.sha256(gt_index_bytes).hexdigest(),
+        "source_manifest_sha256": source_hash,
+        "semantic_artifact_sha256": semantic_hash,
+        "workflow_definition": ".github/workflows/gt_finalstand_provider_free.yml",
+        "workflow_definition_sha256": hashlib.sha256(workflow_bytes).hexdigest(),
+        "workflow_execution_identity_bound": False,
+        "missing_immutable_linkage": [
+            "harness_execution_commit",
+            "github_actions_run_id",
+            "github_actions_run_url",
+            "uploaded_artifact_bundle_sha256",
+        ],
+        "scope": (
+            "Pre-artifact GitHub Actions receipt binding every immutable identity "
+            "available inside the running workflow. It does not claim the run or "
+            "artifact succeeded; post-run API binding remains mandatory."
+        ),
+    }
+
+
 def classify_shell(command: str) -> str:
     """Classify observable shell structure without guessing semantic intent."""
     if not isinstance(command, str) or not command.strip():
@@ -762,6 +818,12 @@ def main() -> int:
     offline.add_argument("--out", type=Path, required=True)
     runbooks = sub.add_parser("runbooks")
     runbooks.add_argument("--out", type=Path, required=True)
+    provenance = sub.add_parser("provenance")
+    provenance.add_argument("--offline-receipt", type=Path, required=True)
+    provenance.add_argument("--groundtruth-root", type=Path, required=True)
+    provenance.add_argument("--gt-index-bin", type=Path, required=True)
+    provenance.add_argument("--workflow", type=Path, required=True)
+    provenance.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
     if args.command == "language":
@@ -793,7 +855,7 @@ def main() -> int:
         )
         if args.require_terminal and not result["terminal"]:
             result["ok"] = False
-    else:
+    elif args.command == "runbooks":
         errors = validate_runbooks(
             [FINALSTAND / "CLEAN_MACHINE_RUNBOOK.md", FINALSTAND / "ROLLBACK_RUNBOOK.md"]
         )
@@ -802,10 +864,26 @@ def main() -> int:
             "ok": not errors,
             "errors": errors,
         }
+    else:
+        groundtruth_commit = subprocess.check_output(
+            ["git", "-C", str(args.groundtruth_root), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        result = build_pre_artifact_provenance(
+            offline_receipt_bytes=args.offline_receipt.read_bytes(),
+            compatibility=json.loads(
+                (FINALSTAND / "language_operation_compatibility.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            gt_index_bytes=args.gt_index_bin.read_bytes(),
+            workflow_bytes=args.workflow.read_bytes(),
+            groundtruth_commit=groundtruth_commit,
+        )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result["ok"] else 1
+    return 0 if result.get("ok", True) else 1
 
 
 if __name__ == "__main__":

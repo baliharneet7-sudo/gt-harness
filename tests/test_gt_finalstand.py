@@ -382,6 +382,9 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
         r"-e\s+['\"]?\./gt-harness\[miniswe\]['\"]?",
         workflow,
     ), "runtime probes require the declared Mini-SWE/LiteLLM dependency set"
+    assert workflow.index("finalstand_offline.py provenance") < workflow.index(
+        "validate_gt_finalstand.py"
+    )
     for field in (
         '"github_actions"',
         '"event_name"',

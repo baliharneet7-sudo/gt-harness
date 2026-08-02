@@ -117,6 +117,12 @@ jobs:
             --task-manifest config/tb2_deepseek_smoke10.json \
             --inspect \
             --out gt_finalstand/receipts/experiment_execution_plan.json
+          python scripts/finalstand_offline.py provenance \
+            --offline-receipt gt_finalstand/receipts/offline_suite.json \
+            --groundtruth-root "$GROUNDTRUTH_ROOT" \
+            --gt-index-bin "$RUNNER_TEMP/gt-index" \
+            --workflow .github/workflows/gt_finalstand_provider_free.yml \
+            --out gt_finalstand/receipts/fs023_provenance.json
           python scripts/validate_gt_finalstand.py
 
       - name: Run Python closeout and harness suites

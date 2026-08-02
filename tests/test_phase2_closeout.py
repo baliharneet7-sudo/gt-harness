@@ -61,6 +61,52 @@ def test_live_go_manifest_contract_matches_210_pair_matrix() -> None:
     )
 
 
+def test_pre_artifact_provenance_binds_inputs_without_claiming_run_success() -> None:
+    offline = _load("finalstand_offline")
+    offline_bytes = (
+        json.dumps(
+            {
+                "schema": "gt.finalstand.offline_suite.v2",
+                "terminal": True,
+                "native_graph_battery": {"semantic_artifact_sha256": "a" * 64},
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    receipt = offline.build_pre_artifact_provenance(
+        offline_receipt_bytes=offline_bytes,
+        compatibility={"source_manifest_sha256": "b" * 64},
+        gt_index_bytes=b"binary",
+        workflow_bytes=b"workflow",
+        groundtruth_commit="c" * 40,
+    )
+    assert receipt["offline_receipt_sha256"] == hashlib.sha256(offline_bytes).hexdigest()
+    assert receipt["binary_sha256"] == hashlib.sha256(b"binary").hexdigest()
+    assert receipt["workflow_definition_sha256"] == hashlib.sha256(b"workflow").hexdigest()
+    assert receipt["workflow_execution_identity_bound"] is False
+    assert set(receipt["missing_immutable_linkage"]) == {
+        "harness_execution_commit",
+        "github_actions_run_id",
+        "github_actions_run_url",
+        "uploaded_artifact_bundle_sha256",
+    }
+
+    broken = json.dumps({"terminal": False}).encode()
+    try:
+        offline.build_pre_artifact_provenance(
+            offline_receipt_bytes=broken,
+            compatibility={"source_manifest_sha256": "b" * 64},
+            gt_index_bytes=b"binary",
+            workflow_bytes=b"workflow",
+            groundtruth_commit="c" * 40,
+        )
+    except ValueError as exc:
+        assert "terminal offline receipt" in str(exc)
+    else:
+        raise AssertionError("non-terminal offline receipt was accepted")
+
+
 def test_harness_consumes_generated_native_language_manifest_authority() -> None:
     from gt_engine.generated_typed_capabilities import (
         LANGUAGE_MANIFEST_SHA256,
