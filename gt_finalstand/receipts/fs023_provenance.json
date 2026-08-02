@@ -1,0 +1,19 @@
+{
+  "schema": "gt.fs023.provenance.v1",
+  "offline_receipt": "receipts/offline_suite.json",
+  "offline_receipt_sha256": "352f92b6148e9df2438acb88be516430638842040146e470c2bc99543065601b",
+  "recorded_groundtruth_commit": "7fcb019104f0e43311e2db009950e60014bc1f4b",
+  "binary_sha256": "7c762a9a4cf27b6a08ae17e30a75b6c2b7f6fb9e94b3d5df73b4cb07bb58b2f5",
+  "source_manifest_sha256": "53afc44596f72668e11b5511f47424c5911f2b24682730bfb90b58a3d2297631",
+  "semantic_artifact_sha256": "98a4e36b6fb4dd75f6c5ea0970a361535b926c3f55c4745f01189273cbd73f79",
+  "workflow_definition": ".github/workflows/gt_finalstand_provider_free.yml",
+  "workflow_definition_sha256": "f6c91ba1cde159505e353576a973c5973ae5529b66af9d7f82c2e80f29c2abc2",
+  "workflow_execution_identity_bound": false,
+  "missing_immutable_linkage": [
+    "harness_execution_commit",
+    "github_actions_run_id",
+    "github_actions_run_url",
+    "uploaded_artifact_bundle_sha256"
+  ],
+  "scope": "Binds every locally available immutable identity to the recorded suite-terminal offline receipt. It does not assert that the undispatched GitHub Actions workflow ran. The missing workflow linkage prevents FS-023 and FS-026 terminal completion."
+}

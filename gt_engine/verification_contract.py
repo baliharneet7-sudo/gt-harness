@@ -77,6 +77,36 @@ _FORMAL_CONTENT_SUITE_RE = re.compile(
     r"(?i)(?:^|[;&|]\s*)(?:python\d*\s+-m\s+)?(?:pytest|unittest)\b"
 )
 _EXIT_CODE_MARKER_RE = re.compile(r"(?im)^\s*\[exit code \d+\]\s*$")
+_SERVICE_PROBE_RE = re.compile(
+    r"(?i)\b(?:curl|wget|nc\b|-z\s+\S+:\d+|ss\s+-tulpn|netstat|lsof\s+-i|"
+    r"systemctl|service\s+\w+\s+status|/health|ping)\b"
+)
+_BUILD_INSTALL_RE = re.compile(
+    r"(?i)\b(?:make\b|pip(?:3)?\s+install|npm\s+install|npm\s+run\s+build|"
+    r"yarn\s+(?:install|build)|cargo\s+build|go\s+build|mvn\s+install|"
+    r"gradle\s+build|python\s+(-m\s+)?(?:compileall|py_compile|setup\.py|build))\b"
+)
+_SERVICE_OBLIGATION_RE = re.compile(
+    r"(?i)\b(?:server|service|daemon|listen|endpoint|port|http|https?://|"
+    r"health|request|response|socket)\b"
+)
+_BUILD_OBLIGATION_RE = re.compile(
+    r"(?i)\b(?:build|install|compile|package|extension|import|setup\.py|"
+    r"Makefile|docker)\b"
+)
+
+
+def is_executable_check(command: str) -> bool:
+    """True iff the command is a real executable verification (test/build/check)."""
+    return bool(_EXECUTABLE_RE.search(command or ""))
+
+
+def is_service_probe(command: str) -> bool:
+    return bool(_SERVICE_PROBE_RE.search(command or ""))
+
+
+def is_build_install(command: str) -> bool:
+    return bool(_BUILD_INSTALL_RE.search(command or ""))
 
 
 @dataclass(frozen=True)
@@ -260,10 +290,15 @@ def compile_obligation_predicates(
 ) -> dict[str, ObligationPredicate]:
     """Compile one conservative primary predicate for every obligation."""
     compiled: dict[str, ObligationPredicate] = {}
+    mode = str(getattr(getattr(contract, "task_mode", None), "value", "") or "")
     for item in contract.obligations:
         text = str(item.text or "")
         paths = tuple(sorted(set(_PATH_RE.findall(text))))
-        if contract.role == "content_scan" or _CONTENT_RE.search(text):
+        if mode == "SERVICE" and _SERVICE_OBLIGATION_RE.search(text):
+            kind = "service_probe"
+        elif mode == "BUILD_INSTALL" and _BUILD_OBLIGATION_RE.search(text):
+            kind = "build_install"
+        elif contract.role == "content_scan" or _CONTENT_RE.search(text):
             kind = "content_scope"
         elif (
             _NUMERIC_RE.search(text)
@@ -369,6 +404,22 @@ def evaluate_passing_observation(
             )
             if verified:
                 coverage_basis = "scoped_artifact_assertion"
+        elif predicate.kind == "service_probe":
+            verified = bool(
+                executable
+                and is_service_probe(command)
+                and item.obligation_id in lexical
+            )
+            if verified:
+                coverage_basis = "service_probe"
+        elif predicate.kind == "build_install":
+            verified = bool(
+                executable
+                and is_build_install(command)
+                and item.obligation_id in lexical
+            )
+            if verified:
+                coverage_basis = "build_install_success"
         elif predicate.kind == "numeric_threshold":
             (
                 verified,

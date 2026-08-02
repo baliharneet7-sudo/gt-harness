@@ -4044,7 +4044,15 @@ class GTBridge:
             import contextlib
             import io
 
-            from groundtruth.pretask.v1r_brief import generate_v1r_brief
+            # Legacy GTBridge is an isolated comparison path. Import by explicit
+            # module name only when that path is invoked so the current
+            # MiniSweAdapter runtime cannot register embedding-backed briefing
+            # merely by importing the bridge's bash target parser.
+            from importlib import import_module
+
+            generate_v1r_brief = import_module(
+                "groundtruth.pretask.v1r_brief"
+            ).generate_v1r_brief
 
             with contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):

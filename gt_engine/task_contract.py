@@ -138,6 +138,38 @@ def significant_tokens(text: str) -> tuple[str, ...]:
     return tuple(sorted(tokens))
 
 
+_WORKFLOW_NOISE_RE = re.compile(
+    r"(?i)^(?:read|learn|recall|study|review|analyze|explore|familiarize|"
+    r"understand|make sure you|be sure to|take a look|look at|navigate|"
+    r"inspect|run)\b.*\b(?:carefully|first|before|repository|code|knowledge|"
+    r"issue)\b"
+)
+_CATALOG_NOISE_RE = re.compile(
+    r"(?i)(?:cwe-[0-9]+|input validation|cross-site|script attacks|"
+    r"injection|escape|sanitize|improper encoding|common weakness enumeration)"
+)
+_WORKFLOW_STEP_RE = re.compile(
+    r"^\s*\d+[.)]\s*(?:read|learn|recall|identify|fix|create|run|verify|"
+    r"check|learn or recall|find|locate|search|use|install|setup)\b"
+)
+
+
+def _is_workflow_noise(text: str) -> bool:
+    """Exclude procedural/workflow bullets and CWE catalog rows from the contract.
+
+    These are process guidance or reference material, not normative
+    requirements. Keeping them pollutes the model-visible prompt (measured
+    gton11 fix-code: 'read and analyze the repository carefully', a full CWE
+    catalog) and makes the verifier ontology incoherent.
+    """
+    low = (text or "").strip()
+    if _WORKFLOW_NOISE_RE.search(low):
+        return True
+    if _CATALOG_NOISE_RE.search(low):
+        return True
+    return bool(_WORKFLOW_STEP_RE.match(low))
+
+
 def _markdown_candidates(issue_text: str) -> list[tuple[str, str]]:
     """Return (source, text) candidates, excluding fenced examples."""
     candidates: list[tuple[str, str]] = []
@@ -155,7 +187,13 @@ def _markdown_candidates(issue_text: str) -> list[tuple[str, str]]:
             return
         for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z])", paragraph):
             sentence = _clean(sentence)
-            if sentence and _DIRECTIVE_RE.search(sentence):
+            if not sentence or not _DIRECTIVE_RE.search(sentence):
+                continue
+            # Strip a trailing numbered workflow step glued to the paragraph
+            # (e.g. "...according to CWE. 1. read and analyze the repository").
+            sentence = _WORKFLOW_STEP_RE.sub("", sentence)
+            sentence = _clean(sentence)
+            if sentence:
                 candidates.append(("directive", sentence.rstrip(".")))
 
     for raw in (issue_text or "").splitlines():
@@ -176,6 +214,7 @@ def _markdown_candidates(issue_text: str) -> list[tuple[str, str]]:
                 and not text.lower().startswith("example output")
                 and "– an analytical cost" not in text.lower()
                 and "– a slow baseline" not in text.lower()
+                and not _is_workflow_noise(text)
             ):
                 candidates.append(("markdown", text.rstrip(".")))
             continue
@@ -321,6 +360,7 @@ def extract_task_contract(issue_text: str) -> TaskContract:
             or low.endswith("pack these into batches so that")
             or low.endswith("replace it with placeholder values as follows")
             or _leaks_test_identity(text)
+            or _is_workflow_noise(text)
         ):
             continue
         # Do not add nested copies of a row already retained.

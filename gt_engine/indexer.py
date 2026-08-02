@@ -15,8 +15,11 @@ tasks (no harm, no noise).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
+import sqlite3
+import tempfile
 from pathlib import Path
 
 # Extensions gt-index parses (tree-sitter structural coverage). A root with at
@@ -71,7 +74,42 @@ def _seed_binary_env() -> None:
             return
 
 
-def ensure_index(root: str) -> str | None:
+def _binary_certification() -> dict[str, str]:
+    candidate = os.environ.get("GT_INDEX_BINARY") or shutil.which("gt-index") or ""
+    if not candidate:
+        try:
+            from groundtruth._binary import CACHE_DIR, GT_INDEX_VERSION
+
+            name = "gt-index.exe" if os.name == "nt" else "gt-index"
+            cached = Path(CACHE_DIR) / GT_INDEX_VERSION / name
+            candidate = str(cached) if cached.is_file() else ""
+        except (ImportError, AttributeError):
+            candidate = ""
+    path = Path(candidate).resolve() if candidate else None
+    if path is None or not path.is_file():
+        return {"path_sha256": "", "binary_sha256": ""}
+    return {
+        "path_sha256": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+        "binary_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def ensure_index(root: str, *, state_dir: str | None = None) -> str | None:
     """Ensure a fresh graph.db exists for ``root``; return its path or None.
 
     When ``GT_STATE_DIR`` is set, the db lives in a root-identity subdirectory
@@ -88,7 +126,7 @@ def ensure_index(root: str) -> str | None:
         _seed_binary_env()
         from groundtruth._binary import run_index
 
-        external = str(os.environ.get("GT_STATE_DIR") or "").strip()
+        external = str(state_dir or os.environ.get("GT_STATE_DIR") or "").strip()
         if external:
             root_key = hashlib.sha256(
                 os.path.realpath(root).encode("utf-8", "surrogatepass")
@@ -102,8 +140,63 @@ def ensure_index(root: str) -> str | None:
             if not ignore.exists():
                 ignore.write_text("*\n", encoding="utf-8")
         db = gt_dir / "graph.db"
-        if not run_index(str(root), str(db)):
+        with tempfile.NamedTemporaryFile(
+            dir=gt_dir, prefix=".graph.", suffix=".db", delete=False
+        ) as handle:
+            candidate = Path(handle.name)
+        candidate.unlink(missing_ok=True)
+        if not run_index(str(root), str(candidate)):
+            candidate.unlink(missing_ok=True)
             return None
-        return str(db) if db.is_file() else None
+        if not candidate.is_file():
+            return None
+        try:
+            con = sqlite3.connect(
+                f"file:{candidate.resolve().as_posix()}?mode=ro", uri=True
+            )
+            try:
+                quick_check = str(con.execute("PRAGMA quick_check").fetchone()[0])
+            finally:
+                con.close()
+        except (sqlite3.Error, OSError):
+            candidate.unlink(missing_ok=True)
+            return None
+        if quick_check.lower() != "ok":
+            candidate.unlink(missing_ok=True)
+            return None
+        graph_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        manifest = {
+            "schema": "gt.graph_certification.v1",
+            "repository_root_sha256": hashlib.sha256(
+                os.path.realpath(root).encode("utf-8", "surrogatepass")
+            ).hexdigest(),
+            "graph_sha256": graph_sha256,
+            "graph_bytes": candidate.stat().st_size,
+            "sqlite_quick_check": "ok",
+            **_binary_certification(),
+        }
+        manifest["binary_certified"] = bool(manifest["binary_sha256"])
+        manifest_bytes = json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        backup = gt_dir / ".graph.previous.db"
+        had_previous = db.is_file()
+        if had_previous:
+            shutil.copyfile(db, backup)
+        try:
+            # The database itself is published in one atomic filesystem swap.
+            os.replace(candidate, db)
+            _atomic_write(db.with_suffix(".manifest.json"), manifest_bytes)
+        except Exception:
+            if had_previous and backup.is_file():
+                os.replace(backup, db)
+            else:
+                db.unlink(missing_ok=True)
+                db.with_suffix(".manifest.json").unlink(missing_ok=True)
+            raise
+        finally:
+            candidate.unlink(missing_ok=True)
+            backup.unlink(missing_ok=True)
+        return str(db)
     except Exception:  # noqa: BLE001 - indexing failure means GT dormant, never a crash
         return None

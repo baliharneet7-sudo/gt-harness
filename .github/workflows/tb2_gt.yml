@@ -168,7 +168,7 @@ jobs:
       - name: Install nano-harness + harbor
         run: |
           python -m pip install --upgrade pip
-          pip install -e . "harbor==0.20.0" vendor/groundtruth_mcp-*.whl numpy pytest
+          pip install -e . "harbor==0.20.0" vendor/groundtruth_mcp-*.whl "numpy==2.5.1" "pytest==9.1.1"
 
       - name: Audit all 17 deterministic trigger paths
         env:

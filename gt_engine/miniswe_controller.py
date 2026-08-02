@@ -8,6 +8,20 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+def _normalize_command(command: str) -> str:
+    """Canonical repeat-identity for a command, crash-safe.
+
+    Mini-SWE models can emit commands with unbalanced quotes (an unclosed
+    ``"`` or ``'``). ``shlex.split`` raises ``ValueError`` on those; a controller
+    must never crash the agent loop, so a parse failure falls back to the raw
+    command as its own identity.
+    """
+    try:
+        return shlex.join(shlex.split(command))
+    except ValueError:
+        return (command or "").strip()
+
+
 class LifecycleError(RuntimeError):
     pass
 
@@ -88,10 +102,29 @@ class GroundtruthController:
         return tuple(sorted(k for k, v in self._status.items() if v is not PredicateStatus.GREEN))
 
     @property
+    def blocking_predicates(self) -> tuple[str, ...]:
+        """Only predicates with a RED receipt (real failing evidence) block.
+
+        D3-G: an UNKNOWN predicate is an open question, not a failure. Refusing
+        a submission because evidence was merely never gathered is what forced
+        the model into verification spirals (measured: modernize 8->31 calls,
+        portfolio 26->70). GT blocks only when it has a receipt that says the
+        obligation is actually failing.
+        """
+        return tuple(sorted(k for k, v in self._status.items() if v is PredicateStatus.RED))
+
+    @property
     def unmet_reasons(self) -> tuple[str, ...]:
         reasons = [f"semantic evidence missing for {key}" for key in self.unmet_predicates]
         if self.verification_plan and not self._verification_plan_evaluated:
             reasons.append("verification_plan not evaluated")
+        return tuple(reasons)
+
+    @property
+    def blocking_reasons(self) -> tuple[str, ...]:
+        reasons = [f"failing obligation evidence for {key}" for key in self.blocking_predicates]
+        # An unevaluated verification plan is UNKNOWN, not positive failure
+        # evidence. Keep it visible in unmet_reasons but never block on it.
         return tuple(reasons)
 
     def _transition(self, target: str) -> None:
@@ -114,16 +147,21 @@ class GroundtruthController:
     def begin_submit(self) -> None:
         self._transition("SUBMIT")
 
-    def note_edit(self, paths: Iterable[str]) -> None:
+    def note_edit(self, paths: Iterable[str], *, invalidate: Iterable[str] | None = None) -> None:
         if self._phase != "IMPLEMENT":
             raise LifecycleError(f"edit is illegal in {self._phase}")
         if list(paths):
             self.workspace_epoch += 1
-            for key in self._status:
-                self._status[key] = PredicateStatus.UNKNOWN
-                self._receipts.pop(key, None)
+            affected = set(invalidate) if invalidate is not None else set(self._status)
+            for key in affected:
+                if key in self._status:
+                    self._status[key] = PredicateStatus.UNKNOWN
+                    self._receipts.pop(key, None)
             self._verification_plan_evaluated = False
             self._verification_plan_epoch = None
+            # C3: a legitimate re-run of the same command AFTER an edit is new
+            # work, not repetition. The repeat budget is per-epoch.
+            self._repeats.clear()
 
     def record_receipt(self, predicate_id: str, command: str, exit_code: int,
                        output: str, *, epoch: int,
@@ -173,19 +211,21 @@ class GroundtruthController:
             raise LifecycleError(
                 f"submit decision requires VERIFY then SUBMIT, got {self._phase}"
             )
-        accepted = not self.unmet_reasons
+        accepted = not self.blocking_reasons
         self._transition("FINISHED" if accepted else "IMPLEMENT")
         return accepted
 
     def before_action(self, tool_kind: str, command: str) -> str:
-        if self._phase in {"FINISHED", "STUCK"}:
+        if self._phase == "FINISHED":
             raise LifecycleError(f"tool action after {self._phase}")
-        key = f"{self._phase}|{tool_kind}|{shlex.join(shlex.split(command))}"
-        count = self._repeats.get(key, 0)
-        if count > self.repeat_budget:
-            self._phase = "STUCK"
-            raise LifecycleError("repeat action budget exhausted")
-        self._repeats[key] = count + 1
+        if self._phase == "STUCK":
+            # Fail open when restoring legacy state: advisory GT cannot keep
+            # Mini-SWE trapped in a GT-owned terminal phase.
+            self._phase = "IMPLEMENT"
+        key = f"{self._phase}|{tool_kind}|{_normalize_command(command)}"
+        # Repetition is telemetry, never execution authority. Legitimate cases
+        # include polling, flaky tests, stability checks, and background work.
+        self._repeats[key] = self._repeats.get(key, 0) + 1
         return key
 
     def recovery_action(
@@ -195,19 +235,22 @@ class GroundtruthController:
         observation: str,
         alternatives: Iterable[str],
     ) -> RecoveryAction:
-        """Select a materially different next action or terminate STUCK."""
+        """Suggest a materially different action without owning strategy."""
         self._recovery_attempts += 1
-        normalized = shlex.join(shlex.split(command))
+        normalized = _normalize_command(command)
         for alternative in alternatives:
-            candidate = shlex.join(shlex.split(str(alternative)))
+            candidate = _normalize_command(str(alternative))
             if candidate and candidate != normalized:
                 return RecoveryAction(
                     candidate,
                     f"changed diagnostic after repeated failure: {observation[:160]}",
                     self._recovery_attempts,
                 )
-        self._phase = "STUCK"
-        raise LifecycleError("STUCK: no discriminating recovery action remains")
+        return RecoveryAction(
+            "",
+            "no deterministic alternative available; Mini-SWE retains strategy ownership",
+            self._recovery_attempts,
+        )
 
     def after_observation(self, output: str, *, diff_hash: str = "") -> None:
         if self._phase in {"FINISHED", "STUCK"}:

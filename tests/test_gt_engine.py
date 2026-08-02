@@ -637,7 +637,14 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
     def fake_run_index(_root, output):
-        Path(output).write_bytes(b"sqlite")
+        import sqlite3
+
+        connection = sqlite3.connect(output)
+        try:
+            connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
+            connection.commit()
+        finally:
+            connection.close()
         return True
 
     monkeypatch.setattr(groundtruth._binary, "run_index", fake_run_index)
@@ -647,7 +654,68 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
     assert db is not None
     assert Path(db).is_relative_to(state)
     assert Path(db).name == "graph.db"
+    manifest = Path(db).with_suffix(".manifest.json")
+    certification = json.loads(manifest.read_text(encoding="utf-8"))
+    assert certification["sqlite_quick_check"] == "ok"
+    assert certification["graph_sha256"] == hashlib.sha256(Path(db).read_bytes()).hexdigest()
     assert not (repo / ".gt").exists()
+
+
+@requires_gt
+def test_failed_index_build_preserves_previous_database(tmp_path, monkeypatch):
+    import groundtruth._binary
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    state = tmp_path / "state"
+    root_key = hashlib.sha256(
+        os.path.realpath(repo).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+    target = state / root_key / "graph.db"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"known-good")
+    monkeypatch.setenv("GT_STATE_DIR", str(state))
+    monkeypatch.setattr(groundtruth._binary, "run_index", lambda *_args: False)
+
+    assert ensure_index(str(repo)) is None
+    assert target.read_bytes() == b"known-good"
+
+
+@requires_gt
+def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch):
+    import sqlite3
+
+    import groundtruth._binary
+
+    import gt_engine.indexer as indexer
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    state = tmp_path / "state"
+    root_key = hashlib.sha256(
+        os.path.realpath(repo).encode("utf-8", "surrogatepass")
+    ).hexdigest()[:16]
+    target = state / root_key / "graph.db"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"known-good")
+    monkeypatch.setenv("GT_STATE_DIR", str(state))
+
+    def valid_index(_root, output):
+        connection = sqlite3.connect(output)
+        connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
+        connection.commit()
+        connection.close()
+        return True
+
+    monkeypatch.setattr(groundtruth._binary, "run_index", valid_index)
+    monkeypatch.setattr(
+        indexer, "_atomic_write",
+        lambda *_args: (_ for _ in ()).throw(OSError("manifest fault")),
+    )
+    assert ensure_index(str(repo)) is None
+    assert target.read_bytes() == b"known-good"
 
 
 # --------------------------------------------------------------------------- #
