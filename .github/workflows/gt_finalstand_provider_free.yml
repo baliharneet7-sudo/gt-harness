@@ -22,6 +22,10 @@ jobs:
     env:
       PYTHONUTF8: "1"
       GROUNDTRUTH_ROOT: ${{ github.workspace }}/Groundtruth
+      GIT_AUTHOR_NAME: GroundTruth CI
+      GIT_AUTHOR_EMAIL: groundtruth-ci@example.invalid
+      GIT_COMMITTER_NAME: GroundTruth CI
+      GIT_COMMITTER_EMAIL: groundtruth-ci@example.invalid
     steps:
       - name: Checkout harness
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -75,6 +79,7 @@ jobs:
           go test -tags sqlite_fts5 ./internal/specs -v
           go test -tags sqlite_fts5 ./...
           go build -tags sqlite_fts5 -o "$RUNNER_TEMP/gt-index" ./cmd/gt-index
+          echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index" >> "$GITHUB_ENV"
           go run -tags sqlite_fts5 ./cmd/gt-index -language-manifest > "$RUNNER_TEMP/language-manifest.json"
 
       - name: Prove generated compatibility is current
