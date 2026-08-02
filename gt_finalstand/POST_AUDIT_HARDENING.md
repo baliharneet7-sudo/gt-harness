@@ -1,6 +1,6 @@
 # Post-Audit Runtime Hardening Verification
 
-This appendix records the GroundTruth hardening implemented after the initial Phase II closeout audit. It is implementation and focused-verification evidence only. It does not change the machine authority in [closeout_status.csv](closeout_status.csv): FS-023, FS-024, FS-025, and FS-026 remain `IN_PROGRESS`, and the current count remains 21 `COMPLETE`, 4 `IN_PROGRESS`, and 1 `REMOVED`.
+This appendix records the GroundTruth hardening implemented after the initial Phase II closeout audit. The current machine authority in [closeout_status.csv](closeout_status.csv) is 22 `COMPLETE`, 3 `IN_PROGRESS`, and 1 `REMOVED`. FS-023 is `COMPLETE`; FS-024, FS-025, and FS-026 remain `IN_PROGRESS` under their separate experiment, promotion, and final-attestation criteria.
 
 ## Provider-free Codespaces receipts
 
@@ -16,9 +16,25 @@ The sole harness and smoke skip is `tests/test_miniswe_smoke.py::test_miniswe_gt
 
 Focused Ruff and whitespace checks pass for `tests/conftest.py` and `tests/runtime/test_runtime_package_isolation_20260801.py`. A wider exploratory Ruff sweep across 18 untracked Python closeout surfaces reports 49 diagnostics, 26 auto-fixable. No edits were applied from that sweep, and this appendix makes no global Ruff-green claim.
 
-These are Codespaces receipts over dirty worktrees, not immutable GitHub Actions receipts. No provider call, paid experiment, GitHub authentication, workflow dispatch, immutable Actions run ID, or immutable Actions run URL is asserted.
+These Codespaces receipts remain useful evidence over their recorded dirty worktrees. They were subsequently complemented by the immutable provider-free Actions receipt below. Neither execution made a provider call or ran the paid causal experiment.
 
-Before the full suites ran, focused provider-free batches were reported as **140/140** runtime/action tests and **57/57** dependency/verification tests. No machine receipt is created for those two historical focused counts because their exact commands, complete outputs, and artifact hashes are not recoverable. They remain non-terminal prose and are superseded for regression status by the machine-readable full-suite receipt above; they do not promote FS-023, FS-024, FS-025, or FS-026.
+Before the full suites ran, focused provider-free batches were reported as **140/140** runtime/action tests and **57/57** dependency/verification tests. No machine receipt is created for those two historical focused counts because their exact commands, complete outputs, and artifact hashes are not recoverable. They remain non-terminal prose and are superseded for regression status by the machine-readable full-suite receipt above and the immutable workflow receipt below.
+
+## Immutable FS-023 GitHub Actions receipt
+
+GitHub Actions [run 30729901088](https://github.com/harneet2512/gt-harness/actions/runs/30729901088) completed successfully on branch `fs023-workflow-deps` at harness/workflow commit `e87cada097f55fe5df203c339148c65fff75c36a`, checking GroundTruth commit `61cfdbce2c42751c11028e46e863b3231f0bb70e`. Every job step was green: immutable-ref validation, dependency installation, Go registry and compatibility parity, generated-authority drift checking, finalstand generation and validation, the Python closeout and harness suites, Ruff, receipt freezing, deterministic bundle construction, and artifact upload. Runtime probes and the workflow receipt record `provider_calls=0`.
+
+Uploaded artifact `8827623572`, `gt-finalstand-provider-free-30729901088`, has GitHub API digest `sha256:1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`. The independently downloaded outer Actions archive matches that digest exactly. It contains the deterministic `provider-free-bundle.zip`, SHA-256 `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`. The bundle includes `provider_free_workflow.json`, the pre-artifact `fs023_provenance.json`, the complete provider-free receipts, the workflow definition, the language manifest, and the generated compatibility authority. Every input hash recorded by `provider_free_workflow.json` matches its bundled receipt.
+
+The workflow was hardened through four environment/dependency/runtime-layout failures and one separate integrity-gate rejection:
+
+1. Run `30729131218` exposed an undeclared Python dependency: `gt_engine.miniswe_typed_actions` imported `litellm`, but the workflow environment had not installed it (`ModuleNotFoundError`).
+2. Run `30729289426` was the distinct provenance bootstrap/integrity-gate failure: the completed offline battery reached the validator, which correctly refused FS-023 because provenance had neither enumerated all missing workflow identities nor cross-bound a successful Actions receipt and artifact API digest.
+3. Run `30729473520` exposed the next undeclared dependency: harness test collection imported `eval.tb_agent` and `eval.miniswe_agent`, which required the uninstalled `harbor` package.
+4. Run `30729588061` exposed two clean-runner assumptions: fixture repositories lacked Git author/committer identity, and graph-wake tests could not resolve the runtime `gt-index`, fell back to the v1.1.0 release URL, and received HTTP 404.
+5. Run `30729715858` proved Git identity was repaired but exposed the remaining runtime-layout mismatch: although `GT_INDEX_BINARY` pointed to the built binary, graph wake-up still searched the runtime-standard location, fell back to the same nonexistent v1.1.0 release asset, and left `graph_db` unset in two tests.
+
+Run `30729901088` repaired the runtime-standard indexer placement and passed all of those gates. This sequence is evidence that the final receipt was produced on a clean hosted runner, not inferred from local success.
 
 ## Implemented hardening
 
@@ -134,7 +150,7 @@ Primary implementation and proof surfaces:
 
 ### Clean full-suite fixture and isolation repairs
 
-The final suite no longer depends on the ignored `artifact_verified/` directory. Verified-adapter comparison artifacts live under `tests/fixtures/verified_adapter/`, and `tests/test_verified_adapter.py` reads that test-owned location. The Codespace byte hashes for the three fixture files are frozen in `receipts/final_codespace_verification.json`. The fixture paths are currently untracked release inputs, so the immutable workflow remains blocked until the scoped release set is committed and pushed.
+The final suite no longer depends on the ignored `artifact_verified/` directory. Verified-adapter comparison artifacts live under `tests/fixtures/verified_adapter/`, and `tests/test_verified_adapter.py` reads that test-owned location. The Codespace byte hashes for the three fixture files are frozen in `receipts/final_codespace_verification.json`. The scoped FS-023 inputs were committed and exercised successfully by run `30729901088`; no broader FS-026 clean-release or rollback-rehearsal claim is inferred.
 
 The shared test process now imports the co-located `src` package before unrelated editable installs, while the package-isolation test performs destructive import-cache checks in a subprocess. Reload-sensitive runtime tests preserve the current producer carrier, compare canonical enum values instead of import-generation identity, and repair the shared embedding-cache alias after module reload. Attempt-suffixed task artifacts retain their initial resolved trial identity. Lock ownership, POSIX/Windows path rewriting, delivery deduplication, and sealed Go workspace metadata fixtures now exercise the current deterministic contracts instead of stale implementation assumptions.
 
@@ -154,4 +170,4 @@ Primary implementation and proof surfaces:
 
 ## Status boundary
 
-This hardening strengthens already implemented deterministic contracts and their regression protection. It does not supply the immutable external offline-workflow identity required by FS-023, the authorized paired experiment required by FS-024, the evidence-based default promotion and rollback proof required by FS-025, or the immutable clean-machine workflow identity and final artifact bundle required by FS-026. Those four rows therefore remain open without qualification.
+This hardening and immutable run `30729901088` supply the complete external provider-free workflow identity required by FS-023, which is now `COMPLETE`. FS-024 remains `IN_PROGRESS` because no user-authorized six-arm provider experiment or independent paired outcome analysis has run. FS-025 remains `IN_PROGRESS` because it depends on FS-024's measured evidence before defaults or duplicate paths may change and still needs GT-off and rollback proof. FS-026 remains `IN_PROGRESS` because final attestation depends on terminal FS-024/FS-025 receipts plus the final clean-machine release bundle and rollback rehearsal.

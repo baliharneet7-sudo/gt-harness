@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -162,13 +163,17 @@ def _github_api_confirms_provenance(
     api_root = f"https://api.github.com/repos/{repository}/actions"
 
     def request(url: str):
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "groundtruth-finalstand-validator",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(
             url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "groundtruth-finalstand-validator",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
         )
         return urllib.request.urlopen(request, timeout=10)
 

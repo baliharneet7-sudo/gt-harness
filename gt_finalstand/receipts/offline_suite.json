@@ -12,14 +12,14 @@
       "symlink": true
     },
     "cost": {
-      "cold_build_p50_ns": 52668422.0,
-      "cold_build_p95_ns": 68912467,
-      "incremental_build_ns": 22378502,
-      "query_p50_ns": 8806,
-      "query_p95_ns": 9878
+      "cold_build_p50_ns": 31232686.5,
+      "cold_build_p95_ns": 33529528,
+      "incremental_build_ns": 15058168,
+      "query_p50_ns": 8647,
+      "query_p95_ns": 9417
     },
     "cost_scope": "native gt-index tiny adversarial fixture; workflow runner input",
-    "database_files_byte_identical": false,
+    "database_files_byte_identical": true,
     "executed": true,
     "failures": [],
     "ok": true,
@@ -41,8 +41,8 @@
   "schema": "gt.finalstand.offline_suite.v2",
   "static_cases": {
     "cost": {
-      "canonical_json_p50_ns": 4769,
-      "canonical_json_p95_ns": 4769
+      "canonical_json_p50_ns": 5069,
+      "canonical_json_p95_ns": 5069
     },
     "cost_scope": "compiler canonicalization microbenchmark only",
     "counts": {

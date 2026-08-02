@@ -312,9 +312,11 @@ def test_fs023_github_api_confirmation_verifies_run_artifact_and_members(
     run, artifact, contents, outer = _mock_github_artifact(
         validator, provenance, workflow
     )
+    monkeypatch.setenv("GH_TOKEN", "fixture-token")
 
     def urlopen(request, timeout):
         assert timeout == 10
+        assert request.get_header("Authorization") == "Bearer fixture-token"
         if request.full_url == artifact["archive_download_url"]:
             return io.BytesIO(outer)
         if "/contents/" in request.full_url:
@@ -389,6 +391,7 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert "/opt/groundtruth/gt-index/gt-index" in workflow
     assert "GIT_AUTHOR_EMAIL: groundtruth-ci@example.invalid" in workflow
     assert "GIT_COMMITTER_EMAIL: groundtruth-ci@example.invalid" in workflow
+    assert "GH_TOKEN: ${{ github.token }}" in workflow
     for field in (
         '"github_actions"',
         '"event_name"',
