@@ -333,7 +333,10 @@ def test_obligations_fact_delivers_on_matching_action():
 
     tc = TaskContract(
         role="patch",
-        obligations=(Obligation("obl-1", "fix the vulnerability in app.py", "task"),),
+        obligations=(
+            Obligation("obl-1", "fix the vulnerability in app.py", "task",
+                       subjects=("app.py",)),
+        ),
     )
 
     class Adapter:
@@ -346,6 +349,10 @@ def test_obligations_fact_delivers_on_matching_action():
     assert fact is not None
     assert fact.owner == "obligations"
     assert "obl-1" in fact.content["matched"]
+    # the content must be USABLE: real requirement text + subject anchors, not
+    # opaque IDs with empty rendered text (the round-5 bug)
+    assert any("vulnerability" in r for r in fact.content["requirements"])
+    assert "app.py" in fact.anchors
     assert fact.model_visible
     # a non-matching action abstains honestly
     none = _obligations_fact(command="ls", raw="", returncode=0, adapter=Adapter())

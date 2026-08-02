@@ -681,33 +681,47 @@ def _obligations_fact(
     """Action-bound task obligations — the highest-gain 'right info'.
 
     The task contract lists the requirements (files/behaviors) the issue asks
-    for. This fact tells the model which obligations its current action matches
-    and what is still outstanding. The model may not have parsed the issue
-    text, so this is information it lacks — delivered at the correct time
-    (same observation, before the next call).
+    for. This fact tells the model which obligations its current action matches,
+    with the ACTUAL requirement text (not opaque IDs) and the files/subjects the
+    obligations reference (anchors the ladder can measure). The model may not
+    have parsed the issue text, so this is information it lacks — delivered at
+    the correct time (same observation, before the next call).
     """
     contract = getattr(adapter, "contract", None)
     if contract is None:
         return None
     try:
-        from ..task_contract import matching_obligation_ids, render_obligation_delta
+        from ..task_contract import matching_obligation_ids
 
-        matched = matching_obligation_ids(contract, command, raw)
+        matched_ids = matching_obligation_ids(contract, command, raw)
     except Exception:  # noqa: BLE001 - obligation matching is fail-open
         return None
-    if not matched:
+    if not matched_ids:
         return None
-    try:
-        rendered, _ = render_obligation_delta(contract, shipped=(), max_chars=800)
-    except Exception:  # noqa: BLE001
-        rendered = ""
+    matched = [
+        item for item in contract.obligations
+        if item.obligation_id in matched_ids
+    ]
+    requirements = [str(item.text) for item in matched if item.text]
+    subjects = [
+        str(s) for item in matched for s in (item.subjects or ())
+        if s and not str(s).startswith("obl-")
+    ]
+    anchors = tuple(dict.fromkeys(subjects))
+    if not requirements and not anchors:
+        return None  # nothing usable -> abstain honestly
     return EvidenceArtifact(
         artifact_id=hashlib.sha256(
-            f"oblig:{','.join(sorted(matched))}".encode("utf-8")
+            f"oblig:{','.join(sorted(matched_ids))}".encode("utf-8")
         ).hexdigest()[:16],
         owner="obligations",
         semantics="task obligation spans bound to this action",
-        content={"matched": sorted(matched), "outstanding": rendered},
+        content={
+            "matched": [item.obligation_id for item in matched],
+            "requirements": requirements[:4],
+            "subjects": list(anchors)[:8],
+        },
+        anchors=anchors,
         producer="contract_delta",
         producer_version="1",
         freshness_revision=adapter.repository_revision,
