@@ -92,20 +92,25 @@ ENGINE_FACT_OWNERS: dict[str, FactOwnerRegistration] = {
     ),
 }
 
-# groundtruth gateway evidence_type -> registered FACT owner.
+# groundtruth gateway evidence_type -> registered FACT owner (the real
+# evidence_type strings the gateway emits, not the producer names).
 _EVIDENCE_TO_OWNER: dict[str, str] = {
-    "covering": "covering_red",
-    "ranked_localization": "localization",
-    "localization": "localization",
+    "covering_verdict": "covering_red",
     "patch_delta": "signature_delta",
-    "signature_delta": "signature_delta",
-    "change_surface": "newfile_precedent",
-    "newfile_precedent": "newfile_precedent",
+    "signature_mismatch": "signature_delta",
+    "localization": "localization",
+    "ranked_localization": "localization",
     "def_ref_partition": "def_partition",
-    "submit_refusal": "submit_refusal",
+    "new_file_destination": "newfile_precedent",
+    "companion_surface": "newfile_precedent",
     "obligations": "obligations",
-    "recovery": "recovery",
-    "syntax_result": "syntax_result",
+    # caller_contract is REMOVE by disposition -> not mapped (never rendered).
+    # body_concept / trace_frame / name_fold / wrong_surface are advisory
+    # classes; body folds into def_partition knowledge, trace into recovery.
+    "body_concept": "def_partition",
+    "trace_frame": "recovery",
+    "name_fold": "def_partition",
+    "wrong_surface": "localization",
 }
 
 

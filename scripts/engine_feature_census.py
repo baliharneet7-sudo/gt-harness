@@ -29,7 +29,8 @@ def census() -> dict:
         "submit_refusal",  # caller_contract is REMOVE by disposition
     ]
     dedicated = {"syntax_result": "engine._syntax_artifact",
-                 "covering_red": "engine._covering_red_artifact + gateway.covering"}
+                 "covering_red": "engine._covering_red_artifact + gateway.covering_verdict",
+                 "submit_refusal": "engine.submit_gate (SUPPRESS under certified blocker)"}
     fact_rows = []
     for feature in facts:
         registered = feature in ENGINE_FACT_OWNERS
