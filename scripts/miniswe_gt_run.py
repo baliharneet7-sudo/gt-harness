@@ -435,7 +435,7 @@ def main() -> int:
     parser.add_argument("--gt-off", action="store_true")
     parser.add_argument(
         "--gt-mode",
-        choices=("off", "shadow", "advisory", "assistive", "enforced"),
+        choices=("off", "shadow", "advisory", "assistive", "enforced", "engine"),
         default="advisory",
     )
     parser.add_argument(

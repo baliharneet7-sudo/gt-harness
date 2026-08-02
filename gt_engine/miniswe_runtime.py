@@ -555,6 +555,20 @@ def install_runtime_hooks(
         return message
 
     def execute_actions(_agent: Any, message: dict) -> list[dict]:
+        from .engine.runner import engine_execute_actions
+        from .gt_session import GTMode
+
+        if session.mode == GTMode.ENGINE and not session.disabled:
+            return engine_execute_actions(
+                _agent,
+                message,
+                session=session,
+                adapter=adapter,
+                model=model,
+                environment=environment,
+                original_execute=execute,
+            )
+
         from .miniswe_typed_actions import (
             execute_typed_action_fail_open,
             is_typed_action,

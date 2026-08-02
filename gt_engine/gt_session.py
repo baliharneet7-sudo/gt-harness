@@ -46,6 +46,9 @@ class GTMode(StrEnum):
     Only ``ENFORCED`` may prevent a baseline action. New mechanisms are
     expected to start in ``SHADOW`` and graduate through ``ADVISORY`` or
     ``ASSISTIVE`` after evidence supports doing so.
+
+    ``ENGINE`` is the Inline Engine posture: every selected action crosses the
+    engine boundary and the engine owns the action-to-observation interface.
     """
 
     OFF = "off"
@@ -53,6 +56,7 @@ class GTMode(StrEnum):
     ADVISORY = "advisory"
     ASSISTIVE = "assistive"
     ENFORCED = "enforced"
+    ENGINE = "engine"
 
 
 @dataclass
@@ -132,7 +136,7 @@ class GTSession:
     @property
     def model_visible(self) -> bool:
         return not self.disabled and self.mode in {
-            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED,
+            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED, GTMode.ENGINE,
         }
 
     @property
@@ -147,7 +151,7 @@ class GTSession:
 
     @property
     def can_enforce(self) -> bool:
-        return not self.disabled and self.mode is GTMode.ENFORCED
+        return not self.disabled and self.mode in (GTMode.ENFORCED, GTMode.ENGINE)
 
     @staticmethod
     def _capability_key(capability: str) -> str:
@@ -182,7 +186,7 @@ class GTSession:
 
     def capability_model_visible(self, capability: str) -> bool:
         return self.capability_active(capability) and self.capability_mode(capability) in {
-            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED,
+            GTMode.ADVISORY, GTMode.ASSISTIVE, GTMode.ENFORCED, GTMode.ENGINE,
         }
 
     def degrade(self, stage: str, error: BaseException) -> None:
@@ -254,7 +258,10 @@ class GTSession:
             iteration == 0
             and not self._task_start_shipped
             and self.config.delivery_path == "compiled"
+            and self.mode is not GTMode.ENGINE
         ):
+            # ENGINE removes predictive task-start localization; only the
+            # immutable session binding (contract) may precede an action.
             self._task_start_shipped = True
             localization = self._engine.task_start_localization()
             if localization:
