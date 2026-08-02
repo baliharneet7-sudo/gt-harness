@@ -650,6 +650,51 @@ def _gateway_facts(
     return (artifact,)
 
 
+def _obligations_fact(
+    *,
+    command: str,
+    raw: str,
+    returncode: int | None,
+    adapter: Any,
+) -> EvidenceArtifact | None:
+    """Action-bound task obligations — the highest-gain 'right info'.
+
+    The task contract lists the requirements (files/behaviors) the issue asks
+    for. This fact tells the model which obligations its current action matches
+    and what is still outstanding. The model may not have parsed the issue
+    text, so this is information it lacks — delivered at the correct time
+    (same observation, before the next call).
+    """
+    contract = getattr(adapter, "contract", None)
+    if contract is None:
+        return None
+    try:
+        from ..task_contract import matching_obligation_ids, render_obligation_delta
+
+        matched = matching_obligation_ids(contract, command, raw)
+    except Exception:  # noqa: BLE001 - obligation matching is fail-open
+        return None
+    if not matched:
+        return None
+    try:
+        rendered, _ = render_obligation_delta(contract, shipped=(), max_chars=800)
+    except Exception:  # noqa: BLE001
+        rendered = ""
+    return EvidenceArtifact(
+        artifact_id=hashlib.sha256(
+            f"oblig:{','.join(sorted(matched))}".encode("utf-8")
+        ).hexdigest()[:16],
+        owner="obligations",
+        semantics="task obligation spans bound to this action",
+        content={"matched": sorted(matched), "outstanding": rendered},
+        producer="contract_delta",
+        producer_version="1",
+        freshness_revision=adapter.repository_revision,
+        coverage="lexical_match",
+        model_visible=True,
+    )
+
+
 def _postflight_facts(
     request: ActionRequest,
     *,
@@ -678,6 +723,11 @@ def _postflight_facts(
             adapter=adapter,
         )
     )
+    obligations = _obligations_fact(
+        command=command, raw=raw, returncode=returncode, adapter=adapter,
+    )
+    if obligations is not None:
+        facts.append(obligations)
     for path in changed:
         artifact = _syntax_artifact(path, repo_root)
         if artifact is None:
@@ -982,6 +1032,24 @@ def engine_execute_actions(
             request, decision, action, typed_result, is_typed,
             adapter, session, environment, rt,
         )
+        # Track obligation GREEN/RED predicates so the submit gate and recovery
+        # facts have real state (the advisory seam did this; the engine must
+        # too, or obligations/RED never populate).
+        if getattr(adapter, "contract", None) is not None:
+            try:
+                raw_output = observation.raw_result or ""
+                adapter.evaluate_observation(
+                    request.literal_shell_form, raw_output,
+                    returncode=returncode,
+                    action_index=adapter.global_action,
+                )
+                adapter.evaluate_failing_observation(
+                    request.literal_shell_form, raw_output,
+                    returncode=returncode,
+                    action_index=adapter.global_action,
+                )
+            except Exception:  # noqa: BLE001 - obligation tracking is fail-open
+                pass
         rendered = observation.render()
         outputs.append(_tool_output(observation, returncode))
         if decision.decision == Decision.SUPPRESS:

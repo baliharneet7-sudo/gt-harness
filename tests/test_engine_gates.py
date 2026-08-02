@@ -321,6 +321,48 @@ def test_ladder_census_referenced_and_acted():
     assert census["localization"]["acted"] == 1
 
 
+# --- Obligations: the 'right info' actually delivered ------------------------
+
+
+def test_obligations_fact_delivers_on_matching_action():
+    """The task-contract obligations producer must fire when an action matches
+    an obligation — the model learns which task requirement it is working on
+    (info it may not have parsed from the issue)."""
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.engine.runner import _obligations_fact
+
+    tc = TaskContract(
+        role="patch",
+        obligations=(Obligation("obl-1", "fix the vulnerability in app.py", "task"),),
+    )
+
+    class Adapter:
+        contract = tc
+        repository_revision = "rev-1"
+
+    fact = _obligations_fact(
+        command="cat app.py", raw="app.py contents", returncode=0, adapter=Adapter(),
+    )
+    assert fact is not None
+    assert fact.owner == "obligations"
+    assert "obl-1" in fact.content["matched"]
+    assert fact.model_visible
+    # a non-matching action abstains honestly
+    none = _obligations_fact(command="ls", raw="", returncode=0, adapter=Adapter())
+    assert none is None
+
+
+def test_obligations_absent_without_contract():
+    from gt_engine.engine.runner import _obligations_fact
+
+    class NoContract:
+        repository_revision = "rev-1"
+
+    assert _obligations_fact(
+        command="cat app.py", raw="", returncode=0, adapter=NoContract()
+    ) is None
+
+
 # --- Gateway delivery path: covering fires on a realistic test failure --------
 
 

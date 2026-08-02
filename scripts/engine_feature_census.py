@@ -21,27 +21,41 @@ HARNESS_ROOT = Path(__file__).resolve().parent.parent
 def census() -> dict:
     from gt_engine.engine.runner import ENGINE_FACT_OWNERS, _EVIDENCE_TO_OWNER
 
-    # FACT features: registered owner + a producer path.
+    runner_src = (HARNESS_ROOT / "gt_engine" / "engine" / "runner.py").read_text(
+        encoding="utf-8"
+    )
+
+    # Producer -> the engine-loop call site it must actually reach.
+    invoked_by = {
+        "def_partition": "_gateway_facts",
+        "covering_red": "_gateway_facts",
+        "syntax_result": "_syntax_artifact",
+        "obligations": "_obligations_fact",
+        "localization": "_gateway_facts",
+        "recovery": "_gateway_facts",
+        "signature_delta": "_gateway_facts",
+        "newfile_precedent": "_gateway_facts",
+        "submit_refusal": "_submit_allowed",
+    }
     gateway_types = set(_EVIDENCE_TO_OWNER.values())
     facts = [
         "def_partition", "covering_red", "syntax_result", "obligations",
         "localization", "recovery", "signature_delta", "newfile_precedent",
         "submit_refusal",  # caller_contract is REMOVE by disposition
     ]
-    dedicated = {"syntax_result": "engine._syntax_artifact",
-                 "covering_red": "engine._covering_red_artifact + gateway.covering_verdict",
-                 "submit_refusal": "engine.submit_gate (SUPPRESS under certified blocker)"}
     fact_rows = []
     for feature in facts:
         registered = feature in ENGINE_FACT_OWNERS
+        # INVOKED = the engine loop actually calls this producer's site.
+        invoked = invoked_by.get(feature, "") in runner_src
         producer = (
-            "gateway:" + feature if feature in gateway_types
-            else dedicated.get(feature, "MISSING")
+            f"gateway:{feature}" if feature in gateway_types
+            else f"engine:{invoked_by.get(feature, 'MISSING')}"
         )
-        ok = registered and "MISSING" not in producer
+        ok = registered and invoked
         fact_rows.append({
             "feature": feature, "registered_owner": registered,
-            "producer_path": producer, "ok": ok,
+            "invoked": invoked, "producer_path": producer, "ok": ok,
         })
 
     # CAP_OWNER lineage: each byte-owner's FACT is registered and delivered.
@@ -78,9 +92,10 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2))
     else:
-        print(f"FACT features wired: {result['facts_ok']}/{result['fact_count']}")
+        print(f"FACT features wired+invoked: {result['facts_ok']}/{result['fact_count']}")
         for row in result["facts"]:
             print(f"  {'OK ' if row['ok'] else 'MISSING'} {row['feature']:<18} "
+                  f"reg={row['registered_owner']} invoked={row['invoked']} "
                   f"-> {row['producer_path']}")
         print(f"CAP_OWNER lineage wired: {result['caps_ok']}/{result['cap_count']}")
         for row in result["cap_owners"]:
