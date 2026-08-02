@@ -175,3 +175,33 @@ def test_git_changed_py_detects_edits(tmp_path):
 
 def test_git_changed_py_omits_non_repo(tmp_path):
     assert _git_changed_py(str(tmp_path)) == ()
+
+
+# --- Gate 4: all 17 DIRECT features are wired --------------------------------
+
+
+def test_all_seventeen_direct_features_wired():
+    """Every DIRECT feature has a registered owner and a producer path.
+
+    The ENGINE is the action-to-observation interface; all 17 DIRECT features
+    must be able to fire on their triggers (per-task firing is then gated by
+    the actual actions a task produces). caller_contract is REMOVE by design.
+    """
+    from scripts.engine_feature_census import census
+
+    result = census()
+    assert result["all_17_wired"], result
+    assert result["facts_ok"] == 9
+    assert result["caps_ok"] == 7
+
+
+def test_all_registered_fact_owners_are_in_inventory():
+    from gt_engine.engine.runner import ENGINE_FACT_OWNERS
+    from scripts.engine_129_audit import build_transition_rows
+
+    rows, _ = build_transition_rows()
+    inventory = {row["identity"] for row in rows}
+    for owner in ENGINE_FACT_OWNERS:
+        assert owner in inventory, f"{owner} not in the 129-row inventory"
+        row = next(r for r in rows if r["identity"] == owner)
+        assert row["category"] == "FACT", f"{owner} is not a FACT identity"

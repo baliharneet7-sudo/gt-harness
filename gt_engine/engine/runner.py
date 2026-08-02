@@ -40,7 +40,9 @@ from .observe import compile_observation
 # Registered FACT byte owners the ENGINE path may render. Only owners listed
 # here may add model-visible deterministic bytes (IE-10 gate). Owners are FACT
 # identities from the 129-row inventory (ACQ rows stay internal; CAP rows are
-# lineage; PERF rows are passive).
+# lineage; PERF rows are passive). The full DIRECT set is registered so the
+# gateway's producers can fire every feature on its trigger; caller_contract is
+# REMOVE by disposition and stays absent.
 ENGINE_FACT_OWNERS: dict[str, FactOwnerRegistration] = {
     "def_partition": FactOwnerRegistration(
         owner="def_partition", role="FACT", producer="exact_literal_search",
@@ -57,6 +59,52 @@ ENGINE_FACT_OWNERS: dict[str, FactOwnerRegistration] = {
         producer_version="1", semantics="execution-specific verification result",
         freshness_authority="repository_revision", model_visible=True,
     ),
+    "obligations": FactOwnerRegistration(
+        owner="obligations", role="FACT", producer="contract_delta",
+        producer_version="1", semantics="task obligation spans bound to an action",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+    "localization": FactOwnerRegistration(
+        owner="localization", role="FACT", producer="ranked_localization",
+        producer_version="1", semantics="action-keyed ranked repository localization",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+    "recovery": FactOwnerRegistration(
+        owner="recovery", role="FACT", producer="failure_identity",
+        producer_version="1", semantics="exact repeated-failure recovery evidence",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+    "signature_delta": FactOwnerRegistration(
+        owner="signature_delta", role="FACT", producer="patch_delta",
+        producer_version="1", semantics="exact post-edit signature delta",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+    "newfile_precedent": FactOwnerRegistration(
+        owner="newfile_precedent", role="FACT", producer="change_surface",
+        producer_version="1", semantics="provenance-rich new-file precedent",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+    "submit_refusal": FactOwnerRegistration(
+        owner="submit_refusal", role="FACT", producer="submit_gate",
+        producer_version="1", semantics="certified fresh closed-scope submit blocker",
+        freshness_authority="repository_revision", model_visible=True,
+    ),
+}
+
+# groundtruth gateway evidence_type -> registered FACT owner.
+_EVIDENCE_TO_OWNER: dict[str, str] = {
+    "covering": "covering_red",
+    "ranked_localization": "localization",
+    "localization": "localization",
+    "patch_delta": "signature_delta",
+    "signature_delta": "signature_delta",
+    "change_surface": "newfile_precedent",
+    "newfile_precedent": "newfile_precedent",
+    "def_ref_partition": "def_partition",
+    "submit_refusal": "submit_refusal",
+    "obligations": "obligations",
+    "recovery": "recovery",
+    "syntax_result": "syntax_result",
 }
 
 
@@ -402,6 +450,7 @@ def _execute_and_observe(
     facts = _postflight_facts(
         request, command=request.literal_shell_form, raw=raw, returncode=rc,
         repo_root=getattr(adapter, "repo_root", "") or os.getcwd(),
+        adapter=adapter,
     )
     if facts and decision.decision == Decision.PASS_THROUGH:
         # Postflight deterministic facts joined -> the decision is AUGMENT:
@@ -480,6 +529,68 @@ def _covering_red_artifact(
     )
 
 
+def _gateway_facts(
+    *,
+    command: str,
+    raw: str,
+    returncode: int | None,
+    changed_files: tuple[str, ...],
+    viewed_files: tuple[str, ...],
+    adapter: Any,
+) -> tuple[EvidenceArtifact, ...]:
+    """Run the groundtruth gateway's deterministic producers for one action.
+
+    This is the port of the full producer set (Q3 research fix): the gateway
+    fires localization on search, covering on test, signature_delta/newfile_
+    precedent/def_partition on edit/search outcomes, submit_refusal on submit
+    — the dominant action types the two ad-hoc producers missed. Fail-open: any
+    gateway fault returns () and the observation stays raw-only.
+    """
+    try:
+        from ..miniswe_evidence import classify_event
+        from groundtruth.runtime.gateway import produce_raw
+    except Exception:  # noqa: BLE001 - gateway is optional
+        return ()
+    try:
+        event = classify_event(
+            command,
+            raw,
+            returncode,
+            action_index=1,
+            changed_files=changed_files,
+            viewed_files=viewed_files,
+            state_revision=adapter.repository_revision,
+        )
+        envelopes = produce_raw(event, adapter.gateway_state())
+    except Exception:  # noqa: BLE001 - producer failure is an omission
+        return ()
+    facts: list[EvidenceArtifact] = []
+    for env in envelopes or ():
+        evidence_type = str(getattr(env, "evidence_type", "") or "")
+        owner = _EVIDENCE_TO_OWNER.get(evidence_type)
+        if owner is None or owner not in ENGINE_FACT_OWNERS:
+            continue
+        target = str(getattr(env, "target", "") or "")
+        content = str(getattr(env, "content", "") or "")
+        artifact_id = (
+            str(getattr(env, "fact_id", "") or "")
+            or hashlib.sha256(f"{owner}:{target}:{content}".encode("utf-8")).hexdigest()[:16]
+        )
+        facts.append(EvidenceArtifact(
+            artifact_id=artifact_id,
+            owner=owner,
+            semantics=evidence_type,
+            content={"evidence": content, "target": target},
+            anchors=(target,) if target else (),
+            producer=str(getattr(env, "producer", "") or "gateway"),
+            producer_version="gateway",
+            freshness_revision=adapter.repository_revision,
+            coverage="produced",
+            model_visible=True,
+        ))
+    return tuple(facts)
+
+
 def _postflight_facts(
     request: ActionRequest,
     *,
@@ -487,25 +598,48 @@ def _postflight_facts(
     raw: str,
     returncode: int | None,
     repo_root: str,
+    adapter: Any,
 ) -> tuple[EvidenceArtifact, ...]:
     """Deterministic post-execution facts for one shell action (IE-06).
 
-    - syntax_result: for each changed .py file (git status --porcelain), exact
-      ast.parse evidence.
-    - covering_red: execution-specific outcome for test/build commands.
-    Both are raw-preserving: the observation keeps the exact raw bytes and the
-    facts only add to the same canonical observation.
+    The full gateway producer set first (localization/covering/signature_delta/
+    newfile_precedent/def_partition), then the engine's own syntax_result on
+    changed .py files. Raw-preserving: the observation keeps the exact raw
+    bytes and the facts only add to the same canonical observation.
     """
-    facts: list[EvidenceArtifact] = []
     changed = _git_changed_py(repo_root)
+    viewed = _viewed_paths(request)
+    facts: list[EvidenceArtifact] = list(
+        _gateway_facts(
+            command=command,
+            raw=raw,
+            returncode=returncode,
+            changed_files=changed,
+            viewed_files=viewed,
+            adapter=adapter,
+        )
+    )
     for path in changed:
         artifact = _syntax_artifact(path, repo_root)
         if artifact is not None:
             facts.append(artifact)
     covering = _covering_red_artifact(command, raw, returncode)
-    if covering is not None:
+    if covering is not None and not any(
+        f.owner == "covering_red" for f in facts
+    ):
         facts.append(covering)
     return tuple(facts)
+
+
+def _viewed_paths(request: ActionRequest) -> tuple[str, ...]:
+    """Best-effort viewed-file list from a FILE_READ/SEARCH shell request."""
+    args = request.arguments or {}
+    path = str(args.get("path") or args.get("paths") or "")
+    if path:
+        return (path,)
+    command = request.literal_shell_form or ""
+    match = re.search(r"(?:cat|less|head|tail|more|view)\s+[\"\']?([\w./-]+)", command)
+    return (match.group(1),) if match else ()
 
 
 def _git_changed_py(repo_root: str) -> tuple[str, ...]:
