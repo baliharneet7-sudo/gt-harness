@@ -549,24 +549,57 @@ def _gateway_facts(
     This is the port of the full producer set (Q3 research fix): the gateway
     fires localization on search, covering on test, signature_delta/newfile_
     precedent/def_partition on edit/search outcomes, submit_refusal on submit
-    — the dominant action types the two ad-hoc producers missed. Fail-open: any
-    gateway fault returns () and the observation stays raw-only.
+    — the dominant action types the two ad-hoc producers missed. The engine
+    threads the state the producers require: a CoveringResult for test events
+    and edit_before_after for edit events. Fail-open: any gateway fault returns
+    () and the observation stays raw-only.
     """
     try:
-        from ..miniswe_evidence import classify_event
-        from groundtruth.runtime.gateway import produce_raw
+        from groundtruth.runtime.gateway import ToolEvent, produce_raw
         from groundtruth.runtime.adapters.miniswe import arbitrate
     except Exception:  # noqa: BLE001 - gateway is optional
         return ()
     try:
-        event = classify_event(
-            command,
-            raw,
-            returncode,
-            action_index=1,
+        edit_before_after = _edit_before_after(
+            getattr(adapter, "repo_root", "") or "", changed_files
+        )
+        covering = _covering_result(command, raw, returncode)
+        test_outcome = ""
+        if covering is not None:
+            verdict = str(getattr(covering, "verdict", "") or "").upper()
+            test_outcome = "fail" if verdict == "FAIL" else "pass"
+        # Authoritative semantic set (the gateway's semantics_authoritative
+        # mode): the ENGINE knows the truth from git/covering/command shapes,
+        # so it does not rely on command-spelling inference (which misses
+        # sed/heredoc edits). Empty set is authoritative (a no-op).
+        semantic: list[str] = []
+        if covering is not None:
+            semantic.append("test_result")
+        elif changed_files:
+            semantic.append("edit_result")
+        elif viewed_files:
+            semantic.append("file_view")
+        elif _is_search_command(command):
+            semantic.append("search_result" if raw.strip() else "failed_search")
+        elif _is_submit_command(command):
+            semantic.append("submit")
+        primary = semantic[0] if semantic else ""
+        event = ToolEvent(
+            kind="bash",
+            command=command,
+            output=raw,
+            exit_status=returncode,
+            cwd=getattr(adapter, "repo_root", "") or "",
             changed_files=changed_files,
             viewed_files=viewed_files,
+            action_index=1,
+            edit_before_after=edit_before_after,
+            covering=covering,
+            semantic_events=tuple(semantic),
+            primary_boundary=primary,
+            test_outcome=test_outcome,
             state_revision=adapter.repository_revision,
+            semantics_authoritative=True,
         )
         envelopes = produce_raw(event, adapter.gateway_state())
         if not envelopes:
@@ -666,6 +699,22 @@ def _postflight_facts(
     return tuple(facts)
 
 
+def _is_search_command(command: str) -> bool:
+    return bool(re.search(
+        r"(?:^|[;&|\s])(?:rg\b|grep\b|git\s+grep\b|\bfind\b|\bag\b|\back\b)",
+        command or "",
+    ))
+
+
+def _is_submit_command(command: str) -> bool:
+    try:
+        from ..miniswe_evidence import is_submit_command
+
+        return is_submit_command(command)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _viewed_paths(request: ActionRequest) -> tuple[str, ...]:
     """Best-effort viewed-file list from a FILE_READ/SEARCH shell request."""
     args = request.arguments or {}
@@ -675,6 +724,82 @@ def _viewed_paths(request: ActionRequest) -> tuple[str, ...]:
     command = request.literal_shell_form or ""
     match = re.search(r"(?:cat|less|head|tail|more|view)\s+[\"\']?([\w./-]+)", command)
     return (match.group(1),) if match else ()
+
+
+def _edit_before_after(
+    repo_root: str, changed: tuple[str, ...]
+) -> dict[str, tuple[str, str]] | None:
+    """Deterministic before/after content for changed tracked files.
+
+    before = `git show HEAD:<path>`, after = current bytes. The gateway's
+    patch_delta/signature producers need this. Returns None when repo_root is
+    not a git checkout or no .py file yields both sides (omission, never a lie).
+    """
+    if not repo_root or not changed:
+        return None
+    import subprocess
+
+    mapping: dict[str, tuple[str, str]] = {}
+    for path in changed:
+        if not path.endswith(".py"):
+            continue
+        try:
+            before = subprocess.run(
+                ["git", "-C", repo_root, "show", f"HEAD:{path}"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            full = path if os.path.isabs(path) else os.path.join(repo_root, path)
+            after = Path(full).read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - a missing side is an omission
+            continue
+        mapping[path] = (before, after)
+    return mapping or None
+
+
+def _covering_result(
+    command: str, raw: str, returncode: int | None
+) -> "object | None":
+    """Build the CoveringResult the gateway's covering producer threads.
+
+    The gateway's leak-law rejects test/demo/docs paths, so the target must be
+    the SOURCE file under test — parsed from the output's traceback frames
+    (non-test, non-vendored .py), falling back to a changed source file. Only
+    explicit test commands produce a result; others abstain honestly.
+    """
+    if _covering_red_artifact(command, raw, returncode) is None:
+        return None
+    try:
+        from groundtruth.runtime.adapters.miniswe import CoveringResult
+    except Exception:  # noqa: BLE001
+        return None
+    test_files = tuple(
+        m for m in re.findall(r"(?:^|\s)([\w./-]*test[\w./-]*\.py)", raw) if m
+    )
+    target = ""
+    # prefer a source frame from the output: a .py path that is not a test /
+    # vendored / venv path (the code under test, not the test itself).
+    for m in re.findall(r"([\w./-]+\.py):\d+", raw):
+        if not re.search(r"(test|tests|vendor|site-packages|\.venv|/venv/)", m):
+            target = m
+            break
+    verdict = "FAIL" if returncode not in (0, None) else "PASS"
+    if not target:
+        return None  # honest abstention: no source target derivable
+    # Body = the failure-relevant pytest lines (traceback/assert/error), not
+    # the summary tail; the render firewall expects the assertion block and an
+    # ERROR tier, and evidence anchors the source line.
+    body = [
+        ln for ln in raw.splitlines()
+        if re.search(r"(Error|assert|raise|E\s|Traceback|\.py:\d+)", ln)
+    ][-8:]
+    return CoveringResult(
+        target=target,
+        verdict=verdict,
+        body_lines=body or [line for line in raw.splitlines()[-4:] if line],
+        evidence=[(target, 1)],
+        tier="ERROR",
+        test_files=test_files,
+    )
 
 
 def _git_changed_py(repo_root: str) -> tuple[str, ...]:

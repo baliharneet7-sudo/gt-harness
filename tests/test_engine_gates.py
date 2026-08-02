@@ -319,3 +319,36 @@ def test_ladder_census_referenced_and_acted():
     assert census["localization"]["delivered"] == 1
     assert census["localization"]["referenced"] == 1
     assert census["localization"]["acted"] == 1
+
+
+# --- Gateway delivery path: covering fires on a realistic test failure --------
+
+
+def test_gateway_covering_delivers_red_fact(monkeypatch):
+    """The gateway's covering producer must deliver a covering_red fact when a
+    test fails with a source traceback frame (the leak-law rejects test paths;
+    the target is the source under test)."""
+    import os
+
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_PATCH_DELTA", "1")
+    from gt_engine.engine.runner import _gateway_facts
+    from groundtruth.runtime.gateway import GatewayState
+
+    class Adapter:
+        repository_revision = "rev-1"
+        repo_root = ""
+
+        def gateway_state(self):
+            return GatewayState(repo_root="")
+
+    raw = ("tests/test_a.py:4: in test_x\n    app_function()\n"
+           "src/app.py:12: in app_function\n    assert x == 1\n"
+           "E   AssertionError\n1 failed, 12 passed")
+    facts = _gateway_facts(
+        command="pytest tests/test_a.py", raw=raw, returncode=1,
+        changed_files=(), viewed_files=(), adapter=Adapter(),
+    )
+    assert any(f.owner == "covering_red" and f.semantics == "covering_verdict"
+               and "src/app.py" in str(f.content.get("target", ""))
+               for f in facts)
