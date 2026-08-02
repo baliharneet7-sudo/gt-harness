@@ -379,9 +379,16 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert action_uses
     assert all(re.fullmatch(r"actions/[\w-]+@[0-9a-f]{40}", use) for use in action_uses)
     assert re.search(
-        r"-e\s+['\"]?\./gt-harness\[miniswe\]['\"]?",
+        r"-e\s+['\"]?\./gt-harness\[miniswe,eval\]['\"]?",
         workflow,
-    ), "runtime probes require the declared Mini-SWE/LiteLLM dependency set"
+    ), "runtime probes and the full suite require the Mini-SWE and eval dependency sets"
+    assert workflow.index("finalstand_offline.py provenance") < workflow.index(
+        "validate_gt_finalstand.py"
+    )
+    assert 'echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index" >> "$GITHUB_ENV"' in workflow
+    assert "/opt/groundtruth/gt-index/gt-index" in workflow
+    assert "GIT_AUTHOR_EMAIL: groundtruth-ci@example.invalid" in workflow
+    assert "GIT_COMMITTER_EMAIL: groundtruth-ci@example.invalid" in workflow
     for field in (
         '"github_actions"',
         '"event_name"',
