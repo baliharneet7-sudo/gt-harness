@@ -87,11 +87,18 @@ def test_e2e_engine_runs_and_delivers_payload(tmp_path):
         )
         assert has_raw, f"raw output dropped after fact: {obs}"
 
-    # localization + covering_red both delivered with real payload
+    # covering_red is graph-independent (execution evidence) and MUST deliver
+    # with real payload + raw on the failing test. localization is graph-backed
+    # (needs the gt-index binary); its real-seam delivery is proven by the
+    # visibility suite against a synthetic graph, so only assert it when the
+    # indexer produced a graph in this environment.
     blob = "\n".join(fact_obs)
-    assert "localization" in blob
-    assert "covering_red" in blob
-    assert "src/mod.py:1:compute" in blob  # localization body line
+    assert "covering_red" in blob, f"covering_red not delivered: {blob}"
+    assert "outcome" in blob, f"covering payload missing: {blob}"
+    assert "1 failed" in blob, f"raw test output not preserved: {blob}"
+    if graph_db:
+        assert "localization" in blob, f"localization not delivered with graph: {blob}"
+        assert "src/mod.py:1:compute" in blob  # localization body line
 
 
 def test_e2e_engine_preserves_raw_on_bash(tmp_path):
@@ -99,12 +106,15 @@ def test_e2e_engine_preserves_raw_on_bash(tmp_path):
     seen = _model_observations(agent)
     agent.run(TASK)
 
-    grep_obs = next(
-        (s for s in seen if "def compute(values)" in s and "<fact" in s), None
+    # the failing-test observation is graph-independent (execution evidence):
+    # it must carry covering_red AND the exact raw pytest output after the
+    # </result> block (bug-2 guard: no REPLACE dropping raw).
+    red_obs = next(
+        (s for s in seen if "<fact owner=\"covering_red\"" in s), None
     )
-    assert grep_obs is not None, "grep observation with fact + raw not found"
-    assert "src/mod.py:1:def compute(values):" in grep_obs, (
-        "raw grep output not preserved in the same observation"
+    assert red_obs is not None, "no covering_red observation delivered"
+    assert "tests/test_mod.py::test_compute FAILED" in red_obs, (
+        f"raw test output not preserved in the same observation: {red_obs}"
     )
 
 
