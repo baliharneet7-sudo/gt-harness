@@ -46,15 +46,15 @@ def _mk_graph(tmp_path) -> str:
     con = sqlite3.connect(db)
     con.execute(
         "CREATE TABLE nodes (id INTEGER PRIMARY KEY, label TEXT, name TEXT, "
-        "file_path TEXT, start_line INTEGER, is_test INTEGER)"
+        "file_path TEXT, start_line INTEGER, is_test INTEGER, signature TEXT)"
     )
     con.executemany(
-        "INSERT INTO nodes (label, name, file_path, start_line, is_test) "
-        "VALUES (?,?,?,?,?)",
-        [("Class", "Bottle", "bottle.py", 30, 0),
-         ("Function", "Route", "bottle.py", 12, 0),
-         ("Function", "send_keystrokes", "base_terminal.py", 6, 0),
-         ("Function", "test_bypass", "tests/test_a.py", 1, 1)],
+        "INSERT INTO nodes (label, name, file_path, start_line, is_test, signature) "
+        "VALUES (?,?,?,?,?,?)",
+        [("Class", "Bottle", "bottle.py", 30, 0, "class Bottle"),
+         ("Function", "Route", "bottle.py", 12, 0, "def Route"),
+         ("Function", "send_keystrokes", "base_terminal.py", 6, 0, "def send_keystrokes"),
+         ("Function", "test_bypass", "tests/test_a.py", 1, 1, "def test_bypass")],
     )
     con.commit()
     try:
