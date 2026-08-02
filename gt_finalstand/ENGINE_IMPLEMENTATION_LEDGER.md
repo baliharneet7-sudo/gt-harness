@@ -97,6 +97,35 @@ Codespaces run is the authority).
   producers, non-repo omission. Full engine battery now **95 green**.
 - Provider-free re-certification: run `30738422522` (in progress).
 
+## Round-7 benchmark (all WS-1/2/3 fixes live) — run `30766572498`
+
+- Rewards: **9/10 solved** (gpt2-codegolf 0.0, same as the frozen baseline;
+  temp-1.0 noise, not GT).
+- **17-feature delivery**: obligations 64 (89% referenced / **91% acted**);
+  **localization 7** (the graph-depth fix landed — the deterministic localizer
+  injection); def_partition 1; syntax_result 1. 4 features now deliver (was 2
+  in round-6). covering_red/recovery/signature_delta/newfile_precedent/
+  submit_refusal still 0 (triggers absent in these tasks).
+- **Delta vs baseline**: headless −68.9%, llm-inference −60.0%,
+  **cobol −40.3% (turnaround: was +132% in r6 / +276% in r5)**,
+  fix-code −34.3%, schemelike +1.6%; regressions write-compressor +131%,
+  portfolio +112%, gpt2 +112% (failed), break-filter +78%, modernize +35%.
+  The cobol turnaround proves the obligation dedup + selectivity + localization
+  fixes: the worst regression is now a win.
+- The delta remains temp-1.0 noisy; L2/L3 ladder is the causal endpoint
+  (obligations 91% acted = facts followed at scale).
+
+## What's still missing (honest)
+
+1. covering_red/recovery/signature_delta/newfile_precedent/submit_refusal fire
+   only when their triggers occur in a task — none of these 10 tasks hit them
+   (tests passed, no broken call-sites, no creates, no RED-at-submit). The
+   forcing suite proves they CAN deliver; the live runs need tasks that trigger
+   them.
+2. The delta is single-run temp-1.0 (gpt2's +112% failed run vs round-5's solve
+   is pure variance). A de-confounded multi-seed measurement is the honest
+   endpoint.
+
 ## Round-3 (W1+W2) + round-4 (gateway threading)
 
 - **Round-3 run `30755837073`** (W1+W2: answer-first render, value-gate, single-
