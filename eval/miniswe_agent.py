@@ -221,8 +221,38 @@ class MiniSweGtAgent(MiniSweAgent):
         # the captured /logs/agent/ tree so a post-run 17-feature census reads
         # the exact evidence_delivery rows instead of heuristic transcript text.
         env["GT_STATE_DIR"] = "/logs/agent/gt-state"
-        # GT state (events.jsonl, graph.db) lives OUTSIDE the graded workspace.
         extra = '--state-dir "$GT_STATE_DIR" --gt-mode advisory '
+        await self.exec_as_agent(
+            environment,
+            self._run_command(instruction, model, extra_args=extra),
+            env=env,
+        )
+
+
+class MiniSweEngineAgent(MiniSweGtAgent):
+    """Mini-SWE-Agent + the Inline Engine (ENGINE posture) as a TB2 agent.
+
+    Same treatment bundle as the advisory GT arm, but the runner selects
+    ``--gt-mode engine``: every selected action crosses the engine boundary,
+    is normalized, decided, executed literally or deterministically, compiled
+    into one canonical observation, and bound to a delivery receipt. GT-off
+    (``MiniSweAgent``) remains the stock-equivalent baseline and rollback path.
+    """
+
+    @staticmethod
+    def name() -> str:
+        return "miniswe-engine"
+
+    @with_prompt_template
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        model, env = self._model_and_env()
+        env.update({k: v for k, v in os.environ.items() if k.startswith("GT_")})
+        env.update(self.resolve_env_vars())
+        env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
+        env["GT_STATE_DIR"] = "/logs/agent/gt-state"
+        extra = '--state-dir "$GT_STATE_DIR" --gt-mode engine '
         await self.exec_as_agent(
             environment,
             self._run_command(instruction, model, extra_args=extra),
