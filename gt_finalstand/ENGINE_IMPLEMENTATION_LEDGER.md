@@ -75,21 +75,32 @@ Codespaces run is the authority).
   (seam) and the single-task merge (workflow) — no re-run needed for the
   witness data (per-task artifacts are authoritative).
 
+## Fixes after witness 30736459512 (gated)
+
+- **Neutral in-band labels**: `CanonicalObservation.render()` no longer emits
+  `<gt-engine>`/`<gt-fact>`/`GT_` — raw output is first (byte-exact,
+  unwrapped), deterministic facts join as a neutral `<result>/<fact>` block.
+  External framing made the model treat facts as out-of-band info.
+- **Real postflight facts**: the bash path now runs deterministic producers —
+  `syntax_result` (ast.parse on changed .py via git status) and `covering_red`
+  (execution-specific test/build outcome); PASS_THROUGH upgrades to AUGMENT
+  when facts attach. Bash submit commands cross the submit gate.
+- **Journal corruption (the silly mistake)**: the `engine_delivery` append
+  passed `schema="gt.engine.delivery_receipt.v1"` which overrode
+  `ExternalStateStore`'s forced `gt.event.v1`, breaking the tamper chain →
+  `research_valid=false`. Removed; gated by `test_engine_gates.py`.
+- **Crash-landslide caught by gates**: missing `os`/`Path` imports in
+  `runner.py` (`engine_execute_actions` survived only by short-circuit) and
+  porcelain `" M"` status parsing would have crashed the next run.
+- **Gates**: `tests/test_engine_gates.py` (10) — journal schema valid + trap
+  documented, render sentinel-free + raw-exact + facts-present, postflight
+  producers, non-repo omission. Full engine battery now **95 green**.
+- Provider-free re-certification: run `30738422522` (in progress).
+
 ## Remaining
 
-- IE-14 witness: ENGINE smoke dispatched — GitHub Actions run
-  `30735955619` (harneet2512/gt-harness, workflow `tb2_miniswe_engine.yml`,
-  ref `inline-engine`, ten frozen tasks, `MINISWE_AGENT_VERSION=2.2.8`).
-  Plan job completed success (provider preflight green, 10 tasks enumerated);
-  10 task jobs in progress. Compare with
-  `scripts/engine_witness_compare.py` vs the frozen baseline.
-- IE-05 hardening: authoritative provider boundary on every overridden query
-  path (runner records `engine_delivery` events; DeliveryReceipt request/
-  response ids wired; full payload-receipt authority pending).
-- IE-13 GHA provider-free closeout workflow (engine battery in Actions; the
-  gt-index binary is built there and live GitHub API is available).
-- IE-14 completion: download trajectories, run the witness comparison, record
-  receipts in this ledger.
+- IE-14 round 2: the next ten-task ENGINE witness after the fix (prove the
+  engine delivers real facts on time with a valid journal).
 
 ## Constraints honored
 
