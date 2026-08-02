@@ -79,6 +79,7 @@ jobs:
           go test -tags sqlite_fts5 ./internal/specs -v
           go test -tags sqlite_fts5 ./...
           go build -tags sqlite_fts5 -o "$RUNNER_TEMP/gt-index" ./cmd/gt-index
+          sudo install -D -m 0755 "$RUNNER_TEMP/gt-index" /opt/groundtruth/gt-index/gt-index
           echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index" >> "$GITHUB_ENV"
           go run -tags sqlite_fts5 ./cmd/gt-index -language-manifest > "$RUNNER_TEMP/language-manifest.json"
 

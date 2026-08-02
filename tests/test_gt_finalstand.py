@@ -386,6 +386,7 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
         "validate_gt_finalstand.py"
     )
     assert 'echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index" >> "$GITHUB_ENV"' in workflow
+    assert "/opt/groundtruth/gt-index/gt-index" in workflow
     assert "GIT_AUTHOR_EMAIL: groundtruth-ci@example.invalid" in workflow
     assert "GIT_COMMITTER_EMAIL: groundtruth-ci@example.invalid" in workflow
     for field in (
