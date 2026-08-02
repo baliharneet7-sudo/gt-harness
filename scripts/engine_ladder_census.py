@@ -58,9 +58,11 @@ def _ladder(msgs: list[dict]) -> dict[str, dict[str, int]]:
     prerequisite for act.
     """
     census: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"delivered": 0, "referenced": 0, "acted": 0}
+        lambda: {"delivered": 0, "referenced": 0, "acted": 0,
+                 "first_acted_index": -1}
     )
     pending: list[dict] = []  # {"feature", "anchors", "referenced", "acted"}
+    action_seq = 0
     for msg in msgs:
         role = msg.get("role")
         content = str(msg.get("content") or "")
@@ -77,6 +79,7 @@ def _ladder(msgs: list[dict]) -> dict[str, dict[str, int]]:
         elif role == "assistant":
             actions = (msg.get("extra") or {}).get("actions") or []
             commands = [str(a.get("command") or a.get("cmd") or "") for a in actions]
+            action_seq += len(commands)
             text = content
             for entry in pending:
                 feature = entry["feature"]
@@ -91,6 +94,8 @@ def _ladder(msgs: list[dict]) -> dict[str, dict[str, int]]:
                 ):
                     census[feature]["acted"] += 1
                     entry["acted"] = True
+                    if census[feature]["first_acted_index"] < 0:
+                        census[feature]["first_acted_index"] = action_seq
     return dict(census)
 
 
