@@ -36,11 +36,13 @@ from .decide import AnalyzerState, decide
 from .observe import compile_observation
 
 # Registered FACT byte owners the ENGINE path may render. Only owners listed
-# here may add model-visible deterministic bytes (IE-10 gate).
+# here may add model-visible deterministic bytes (IE-10 gate). Owners are FACT
+# identities from the 129-row inventory (ACQ rows stay internal; CAP rows are
+# lineage; PERF rows are passive).
 ENGINE_FACT_OWNERS: dict[str, FactOwnerRegistration] = {
-    "lexical_FTS5": FactOwnerRegistration(
-        owner="lexical_FTS5", role="FACT", producer="exact_literal_search",
-        producer_version="1", semantics="exact token/literal search",
+    "def_partition": FactOwnerRegistration(
+        owner="def_partition", role="FACT", producer="exact_literal_search",
+        producer_version="1", semantics="typed definition/partition search result",
         freshness_authority="repository_revision", model_visible=True,
     ),
     "syntax_result": FactOwnerRegistration(
@@ -48,8 +50,8 @@ ENGINE_FACT_OWNERS: dict[str, FactOwnerRegistration] = {
         producer_version="1", semantics="immediate per-file syntax evidence",
         freshness_authority="repository_revision", model_visible=True,
     ),
-    "verification_status": FactOwnerRegistration(
-        owner="verification_status", role="FACT", producer="execution_evidence",
+    "covering_red": FactOwnerRegistration(
+        owner="covering_red", role="FACT", producer="execution_evidence",
         producer_version="1", semantics="execution-specific verification result",
         freshness_authority="repository_revision", model_visible=True,
     ),
@@ -292,11 +294,11 @@ def _typed_evidence(request: ActionRequest, typed_result: Mapping[str, Any] | No
     omissions = _typed_omissions(typed_result)
     answer = _direct_answer(typed_result)
     if request.kind == ActionKind.RUN_VERIFICATION:
-        owner = "verification_status"
+        owner = "covering_red"
     elif request.kind == ActionKind.SYNTAX_QUERY:
         owner = "syntax_result"
     else:
-        owner = "lexical_FTS5"
+        owner = "def_partition"
     artifact_id = hashlib.sha256(
         f"{request.action_id}::{request.kind.value}".encode("utf-8")
     ).hexdigest()[:16]

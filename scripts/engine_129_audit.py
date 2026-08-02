@@ -117,6 +117,10 @@ def build_transition_rows() -> tuple[list[dict], list[str]]:
     dispositions = parse_transition_dispositions(TRANSITION_MD)
     warnings: list[str] = []
     rows: list[dict] = []
+    try:
+        from gt_engine.engine.runner import ENGINE_FACT_OWNERS
+    except Exception:  # noqa: BLE001 - the audit must not depend on engine imports
+        ENGINE_FACT_OWNERS = {}
     for entry in role_rows:
         identity = str(entry.get("identity") or "")
         category = str(entry.get("category") or "")
@@ -127,6 +131,10 @@ def build_transition_rows() -> tuple[list[dict], list[str]]:
         disposition = dispositions.get(identity, "KEEP")
         if identity not in dispositions:
             warnings.append(f"{identity}: disposition not found; defaulted to KEEP")
+        byte_owner = role in ("byte_owner", "CAP_OWNER")
+        model_visible = (category == "FACT" and identity in ENGINE_FACT_OWNERS) or (
+            category == "CAP" and byte_owner
+        )
         rows.append({
             "identity": identity,
             "role": role,
@@ -137,7 +145,7 @@ def build_transition_rows() -> tuple[list[dict], list[str]]:
             "target_disposition": disposition,
             "deterministic_knowledge_semantics": "source:to_determine",
             "representation": "source:to_determine",
-            "byte_owner": "true" if role in ("byte_owner", "CAP_OWNER") else "false",
+            "byte_owner": "true" if byte_owner else "false",
             "timing_class": "source:to_determine",
             "action_trigger": "source:to_determine",
             "preflight_postflight_placement": "source:to_determine",
@@ -146,7 +154,7 @@ def build_transition_rows() -> tuple[list[dict], list[str]]:
             "omission_policy": "source:to_determine",
             "raw_preservation_rule": "source:to_determine",
             "decision_eligibility": "source:to_determine",
-            "model_visibility": "false",
+            "model_visibility": "true" if model_visible else "false",
             "migration_work": "source:to_determine",
             "status": "removed" if disposition == "REMOVE" else "pending",
             "receipt": "",
