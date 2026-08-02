@@ -24,7 +24,7 @@ was verified, and what remains. Receipts are appended as units complete.
 | IE-04 observation | `gt_engine/engine/observe.py` — canonical observation compiler + evidence-delta projection | `tests/test_engine_observe.py` (6) | PASS |
 | IE-07 mutation | `gt_engine/engine/mutation.py` — PROPOSE→PREFLIGHT→COMMIT with CAS (StaleProposal/PreimageMismatch/AtomicWriteFailed), atomic write set + rollback | `tests/test_engine_mutation.py` (12) | PASS |
 | IE-08 batches | `classify_batch_barriers` in runner — sequential dependency barriers honored by ordered execution | runner tests | PASS |
-| IE-09 inventory | `scripts/engine_129_audit.py` → `gt_finalstand/engine_129_transition.csv` (129 rows, 12/48/11/58, zero DEFER) | `tests/test_engine_129_audit.py` (8) | PASS |
+| IE-09 inventory | `scripts/engine_129_audit.py` → `gt_finalstand/engine_129_transition.csv` (129 rows, 12/48/11/58, all dispositions terminal) | `tests/test_engine_129_audit.py` (8) | PASS |
 
 Total engine tests: **73 green**. Full harness suite re-run after seam edits:
 **no regressions** — 5 failures were confirmed pre-existing in the local Windows
@@ -44,7 +44,7 @@ Codespaces run is the authority).
 ## Verified
 
 - `engine_129_audit.py` exits 0: inventory integrity holds (12/48/11/58, 129
-  unique, no DEFER).
+  unique, all dispositions terminal).
 - Codespace `special-fortnight-95p9q5wrpqp2qww` created on `inline-engine`
   (pending full-battery run).
 
