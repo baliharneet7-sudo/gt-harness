@@ -319,13 +319,26 @@ def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
 
 
 def test_fs023_github_api_confirmation_verifies_run_artifact_and_members(
-    monkeypatch,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     validator = _load_validator()
     provenance, workflow = _future_fs023_receipts(validator)
     run, artifact, contents, outer = _mock_github_artifact(
         validator, provenance, workflow
     )
+    isolated_finalstand = tmp_path / "gt_finalstand"
+    isolated_receipts = isolated_finalstand / "receipts"
+    isolated_receipts.mkdir(parents=True)
+    (isolated_finalstand / "language_operation_compatibility.json").write_bytes(
+        (ROOT / "gt_finalstand" / "language_operation_compatibility.json").read_bytes()
+    )
+    (isolated_receipts / "offline_suite.json").write_bytes(
+        (ROOT / "gt_finalstand" / "receipts" / "offline_suite.json").read_bytes()
+    )
+    (isolated_receipts / "provider_free_workflow.json").write_text(
+        json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(validator, "FINALSTAND", isolated_finalstand)
     monkeypatch.setenv("GH_TOKEN", "fixture-token")
 
     def urlopen(request, timeout):
@@ -355,12 +368,27 @@ def test_fs023_github_api_confirmation_verifies_run_artifact_and_members(
     assert not validator._github_api_confirms_provenance(provenance, workflow)
 
 
-def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(monkeypatch) -> None:
+def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(
+    monkeypatch, tmp_path: Path
+) -> None:
     validator = _load_validator()
     provenance, workflow = _future_fs023_receipts(validator)
+    isolated_finalstand = tmp_path / "gt_finalstand"
+    isolated_receipts = isolated_finalstand / "receipts"
+    isolated_receipts.mkdir(parents=True)
+    (isolated_finalstand / "language_operation_compatibility.json").write_bytes(
+        (ROOT / "gt_finalstand" / "language_operation_compatibility.json").read_bytes()
+    )
+    (isolated_receipts / "offline_suite.json").write_bytes(
+        (ROOT / "gt_finalstand" / "receipts" / "offline_suite.json").read_bytes()
+    )
+    monkeypatch.setattr(validator, "FINALSTAND", isolated_finalstand)
 
     def rejected(extra_inner=(), workflow_receipt=None):
         candidate = workflow_receipt or workflow
+        (isolated_receipts / "provider_free_workflow.json").write_text(
+            json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         run, artifact, contents, outer = _mock_github_artifact(
             validator, provenance, candidate, extra_inner=extra_inner
         )
@@ -380,6 +408,7 @@ def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(monkeypat
         monkeypatch.setattr(validator.urllib.request, "urlopen", urlopen)
         return validator._github_api_confirms_provenance(provenance, candidate)
 
+    assert rejected()
     assert not rejected([("../receipts/escape.json", b"escape")])
     assert not rejected([("receipts/offline_suite.json", b"duplicate")])
     stale = copy.deepcopy(workflow)
