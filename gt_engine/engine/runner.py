@@ -671,6 +671,17 @@ def _gateway_facts(
     return (artifact,)
 
 
+def _significant(text: str, _unused: str) -> set[str]:
+    """Significant lowercase tokens (files, symbols, identifiers) for the
+    obligation relevance gate."""
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text or ""))
+    return {t.lower() for t in tokens if t.lower() not in {
+        "the", "and", "for", "are", "with", "that", "this", "you", "should",
+        "must", "from", "have", "not", "was", "will", "can", "all", "into",
+        "out", "its", "has", "but", "any", "your", "our", "their", "them",
+    }}
+
+
 def _obligations_fact(
     *,
     command: str,
@@ -702,6 +713,23 @@ def _obligations_fact(
         item for item in contract.obligations
         if item.obligation_id in matched_ids
     ]
+    # Relevance gate: an obligation is only reported when the action actually
+    # references its subject (file/symbol) or carries a strong token overlap —
+    # otherwise matching_obligation_ids' 1-2 token threshold spams the same
+    # requirement on unrelated actions (the round-5 242x repeat).
+    action_text = f"{command}\n{raw}".lower()
+    relevant = []
+    for item in matched:
+        subjects = [str(s).lower() for s in (item.subjects or ()) if s]
+        subject_hit = any(s and s in action_text for s in subjects)
+        strong_overlap = len(
+            set(_significant(command, raw)) & set(_significant(item.text, ""))
+        ) >= 3
+        if subject_hit or strong_overlap:
+            relevant.append(item)
+    if not relevant:
+        return None
+    matched = relevant
     requirements = [str(item.text) for item in matched if item.text]
     subjects = [
         str(s) for item in matched for s in (item.subjects or ())
@@ -728,6 +756,43 @@ def _obligations_fact(
         coverage="lexical_match",
         model_visible=True,
     )
+
+
+def _fact_dedup_key(fact: EvidenceArtifact) -> str:
+    """Stable per-episode dedup key.
+
+    obligations key on the matched obligation IDs (a requirement fires once per
+    episode even across different actions); everything else keys on
+    owner + anchors (or content hash when no anchors). Fire-once prevents the
+    round-5 spam (242 obligation deliveries of the same requirement).
+    """
+    if fact.owner == "obligations":
+        matched = (fact.content or {}).get("matched") or []
+        return f"obligations:{','.join(sorted(str(x) for x in matched))}"
+    anchors = ":".join(fact.anchors) if fact.anchors else ""
+    return f"{fact.owner}:{anchors or fact.hash()}"
+
+
+def _dedup_facts(
+    facts: tuple[EvidenceArtifact, ...], adapter: Any
+) -> tuple[EvidenceArtifact, ...]:
+    """Fire-once per episode: drop facts already delivered, stamp the new ones.
+
+    The gateway already dedups its own winner via adapter._dedup_chain; this
+    extends the same registry to the engine-direct producers (obligations,
+    syntax, covering) so no fact type spams the conversation.
+    """
+    chain = getattr(adapter, "_dedup_chain", None)
+    if not isinstance(chain, set):
+        return facts
+    out: list[EvidenceArtifact] = []
+    for fact in facts:
+        key = _fact_dedup_key(fact)
+        if key in chain:
+            continue
+        chain.add(key)
+        out.append(fact)
+    return tuple(out)
 
 
 def _postflight_facts(
@@ -781,7 +846,7 @@ def _postflight_facts(
         # adds no information.
         if outcome == "failed":
             facts.append(covering)
-    return tuple(facts)
+    return _dedup_facts(tuple(facts), adapter)
 
 
 def _is_search_command(command: str) -> bool:

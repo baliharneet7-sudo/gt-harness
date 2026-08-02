@@ -370,6 +370,41 @@ def test_obligations_absent_without_contract():
     ) is None
 
 
+def test_dedup_fire_once_per_episode():
+    """The same fact (same obligation requirement / anchor) must not spam the
+    conversation across actions — the round-5 242x repeat."""
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.engine.runner import _postflight_facts
+
+    tc = TaskContract(
+        role="patch",
+        obligations=(
+            Obligation("obl-1", "fix the vulnerability in app.py", "task",
+                       subjects=("app.py",)),
+        ),
+    )
+
+    class Adapter:
+        repository_revision = "rev-1"
+        repo_root = ""
+        contract = tc
+        _dedup_chain = set()
+
+        def gateway_state(self):
+            raise AttributeError("no gateway in test")
+
+    adapter = Adapter()
+    for _ in range(3):
+        facts = _postflight_facts(
+            _request(), command="cat app.py", raw="app.py contents",
+            returncode=0, repo_root="", adapter=adapter,
+        )
+        obligations = [f for f in facts if f.owner == "obligations"]
+        assert len(obligations) <= 1, "same obligation re-fired"
+    # after three identical actions, the obligation was delivered exactly once
+    assert sum(1 for k in adapter._dedup_chain if k.startswith("obligations:")) == 1
+
+
 # --- Gateway producer flags: full GT is enabled ---------------------------------
 
 
