@@ -29,7 +29,8 @@ def census() -> dict:
 
     _ensure_gateway_flags()
     required_flags = ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
-                      "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE")
+                      "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE",
+                      "GT_EDIT_OVERLAY")
     flags = {
         flag: os.environ.get(flag, "").strip() in ("1", "true", "yes", "on")
         for flag in required_flags

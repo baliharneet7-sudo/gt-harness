@@ -550,9 +550,48 @@ def _ensure_gateway_flags() -> None:
     if _GATEWAY_FLAGS_ENABLED:
         return
     for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
-                 "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE"):
+                 "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE", "GT_EDIT_OVERLAY"):
         os.environ.setdefault(flag, "1")
     _GATEWAY_FLAGS_ENABLED = True
+
+
+def _update_graph_freshness(adapter: Any) -> None:
+    """Incremental graph freshness — NO full rebuild (the round-5 gap).
+
+    The advisory seam invalidates the whole graph on any edit (graph_fresh=False
+    forever) so the gateway's graph-backed producers (localization,
+    signature_delta caller-impact, newfile_precedent) abstain permanently. The
+    ENGINE instead keeps the graph live and marks ONLY the changed files stale
+    in the episode overlay via build_episode_overlay_entry — an O(changed-file)
+    read-only signature comparison against the base graph (never a rebuild).
+    Gateway route_delivery then drops base facts about edited files and fires
+    latest info on unchanged files.
+    """
+    repo_root = getattr(adapter, "repo_root", "") or ""
+    graph_db = getattr(adapter, "graph_db", None)
+    if not repo_root or not graph_db:
+        return
+    try:
+        changed = _git_changed_py(repo_root)
+        if not changed:
+            return
+        from groundtruth.runtime.edit_overlay import build_episode_overlay_entry
+
+        gateway_state = adapter.gateway_state()
+        overlay = getattr(gateway_state, "episode_overlay", None)
+        if not isinstance(overlay, dict):
+            return
+        for rel in changed:
+            full = rel if os.path.isabs(rel) else os.path.join(repo_root, rel)
+            try:
+                content = Path(full).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            overlay[rel] = build_episode_overlay_entry(graph_db, rel, content)
+        adapter.graph_fresh = True
+        adapter.graph_stale_since_revision = ""
+    except Exception:  # noqa: BLE001 - freshness is fail-open
+        pass
 
 
 def _gateway_facts(
@@ -1150,6 +1189,9 @@ def engine_execute_actions(
                 )
             except Exception:  # noqa: BLE001 - obligation tracking is fail-open
                 pass
+        # Incremental graph freshness: mark changed files stale in the overlay
+        # (no full rebuild) so graph-backed producers keep firing latest info.
+        _update_graph_freshness(adapter)
         rendered = observation.render()
         outputs.append(_tool_output(observation, returncode))
         if decision.decision == Decision.SUPPRESS:
