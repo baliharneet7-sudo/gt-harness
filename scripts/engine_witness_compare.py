@@ -19,8 +19,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
-DECISION_RE = re.compile(r'decision="([^"]+)"')
-GT_ENGINE_RE = re.compile(r"<gt-engine")
+DECISION_RE = re.compile(r'decision=\\?"([^"]+)"')
+GT_ENGINE_RE = re.compile(r"<result")
 FALLBACK_RE = re.compile(r"notice: .*?(fallback|no answer)")
 
 TEN_SMOKE_TASKS = [

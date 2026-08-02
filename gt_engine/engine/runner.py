@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
+from pathlib import Path
 from typing import Any, Mapping
 
 from .contracts import (
@@ -397,10 +399,146 @@ def _execute_and_observe(
     result = environment.execute(action)
     raw = _observation_output(result)
     rc = _returncode(result)
+    facts = _postflight_facts(
+        request, command=request.literal_shell_form, raw=raw, returncode=rc,
+        repo_root=getattr(adapter, "repo_root", "") or os.getcwd(),
+    )
+    if facts and decision.decision == Decision.PASS_THROUGH:
+        # Postflight deterministic facts joined -> the decision is AUGMENT:
+        # raw preserved exactly, evidence attached to the same observation.
+        decision = InterceptionDecision(
+            decision=Decision.AUGMENT,
+            reason="postflight deterministic facts joined the observation",
+            eligibility=("postflight",),
+        )
     observation = compile_observation(
-        request, decision, raw_result=raw, raw_exact=True
+        request, decision, raw_result=raw, raw_exact=True, evidence=facts
     )
     return observation, rc or 0
+
+
+def _syntax_artifact(path: str, repo_root: str) -> EvidenceArtifact | None:
+    """Deterministic Python syntax evidence for one changed file (IE-06).
+
+    ast.parse of the file's current bytes. Python is exact; any failure to
+    read/parse is an omission on the artifact, never a lie. Non-Python files
+    produce no artifact (the caller records the omission).
+    """
+    import ast
+
+    if not path.endswith(".py"):
+        return None
+    full = path if os.path.isabs(path) else os.path.join(repo_root, path)
+    try:
+        source = Path(full).read_bytes()
+    except OSError:
+        return None
+    try:
+        ast.parse(source, filename=full)
+        ok, detail = True, ""
+    except SyntaxError as exc:
+        ok, detail = False, f"line {exc.lineno}: {exc.msg}"
+    return EvidenceArtifact(
+    artifact_id=hashlib.sha256(
+        f"syntax:{path}:{len(source)}".encode("utf-8")
+    ).hexdigest()[:16],
+        owner="syntax_result",
+        semantics="immediate per-file syntax evidence",
+        content={"file": path, "ok": ok, "detail": detail},
+        anchors=(f"{path}:1",),
+        producer="py_ast",
+        producer_version="1",
+        freshness_revision=hashlib.sha256(source).hexdigest(),
+        coverage="complete" if ok else "exact_error",
+        model_visible=True,
+    )
+
+
+def _covering_red_artifact(
+    command: str, raw: str, returncode: int | None
+) -> EvidenceArtifact | None:
+    """Execution-specific verification evidence for test/build commands."""
+    lower = command.lower()
+    if not any(word in lower for word in ("pytest", "make test", "make check",
+                                          "tox", "nosetests", "unittest",
+                                          "cargo test", "go test", "npm test",
+                                          "yarn test")):
+        return None
+    outcome = "passed" if returncode in (0, None) else "failed"
+    return EvidenceArtifact(
+        artifact_id=hashlib.sha256(
+            f"covering:{command}:{returncode}".encode("utf-8")
+        ).hexdigest()[:16],
+        owner="covering_red",
+        semantics="execution-specific verification outcome",
+        content={"command": command[:200], "outcome": outcome,
+                 "returncode": returncode, "diagnostics_bytes": len(raw.encode("utf-8"))},
+        producer="execution_evidence",
+        producer_version="1",
+        coverage="execution_specific",
+        model_visible=True,
+    )
+
+
+def _postflight_facts(
+    request: ActionRequest,
+    *,
+    command: str,
+    raw: str,
+    returncode: int | None,
+    repo_root: str,
+) -> tuple[EvidenceArtifact, ...]:
+    """Deterministic post-execution facts for one shell action (IE-06).
+
+    - syntax_result: for each changed .py file (git status --porcelain), exact
+      ast.parse evidence.
+    - covering_red: execution-specific outcome for test/build commands.
+    Both are raw-preserving: the observation keeps the exact raw bytes and the
+    facts only add to the same canonical observation.
+    """
+    facts: list[EvidenceArtifact] = []
+    changed = _git_changed_py(repo_root)
+    for path in changed:
+        artifact = _syntax_artifact(path, repo_root)
+        if artifact is not None:
+            facts.append(artifact)
+    covering = _covering_red_artifact(command, raw, returncode)
+    if covering is not None:
+        facts.append(covering)
+    return tuple(facts)
+
+
+def _git_changed_py(repo_root: str) -> tuple[str, ...]:
+    """Changed tracked .py paths via git status --porcelain (deterministic).
+
+    Returns () when repo_root is not a git checkout (omission, never a lie).
+    """
+    if not repo_root:
+        return ()
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", repo_root, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - git is optional; omission
+        return ()
+    if proc.returncode != 0:
+        return ()
+    changed: list[str] = []
+    for line in proc.stdout.splitlines():
+        if len(line) < 4:
+            continue
+        status, path = line[:2], line[3:]
+        # Tracked modifications (M/A anywhere in the pair) and untracked
+        # additions (??) count as edits. Porcelain writes a modified worktree
+        # file as " M" (index space + worktree M), so strip before matching.
+        if status.startswith("??") or status.strip().startswith(("M", "A")):
+            path = path.split(" -> ")[-1]
+            if path.endswith(".py") and not path.startswith("."):
+                changed.append(path)
+    return tuple(changed)
 
 
 def _delivery_receipt(
@@ -517,6 +655,26 @@ def engine_execute_actions(
             graph_available=bool(adapter.graph_db),
             typed_result=typed_result,
         )
+        if not is_typed and request.kind == ActionKind.SHELL:
+            # Bash submit commands must cross the submit boundary (the typed
+            # SUBMIT kind already does). Detect them the same way the advisory
+            # seam does and reclassify so the gate can suppress under a fresh
+            # certified blocker.
+            from ..miniswe_evidence import is_submit_command
+
+            if is_submit_command(request.literal_shell_form):
+                request = ActionRequest(
+                    action_id=request.action_id,
+                    kind=ActionKind.SUBMIT,
+                    arguments=request.arguments,
+                    literal_shell_form=request.literal_shell_form,
+                    snapshot_token=request.snapshot_token,
+                    configuration_digest=request.configuration_digest,
+                    requested_fidelity=request.requested_fidelity,
+                    batch_id=request.batch_id,
+                    sequence_position=request.sequence_position,
+                    raw_fallback=request.raw_fallback,
+                )
         decision = decide(request, (), ENGINE_FACT_OWNERS, state)
 
         if request.kind == ActionKind.SUBMIT and not _submit_allowed(request, session, adapter, rt):
@@ -538,9 +696,13 @@ def engine_execute_actions(
         try:
             receipt = _delivery_receipt(request, decision, observation, adapter)
             if getattr(adapter, "store", None) is not None:
+                # NOTE: do NOT pass schema= here. ExternalStateStore.append
+                # forces gt.event.v1; a payload schema kwarg OVERRIDES it and
+                # breaks the tamper-evident journal (verify_event_journal then
+                # reports 'unsupported or missing schema' and research_valid
+                # becomes false). Covered by test_engine_journal_schema.
                 adapter.store.append(
                     "engine_delivery",
-                    schema="gt.engine.delivery_receipt.v1",
                     delivery_id=receipt.delivery_id,
                     action_id=request.action_id,
                     decision=decision.decision.value,

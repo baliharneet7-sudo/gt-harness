@@ -8,7 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 DECISION_RE = re.compile(r'decision=\\?"([^"]+)"')
-GT_ENGINE_RE = re.compile(r"<gt-engine")
+GT_ENGINE_RE = re.compile(r"<result")
 FALLBACK_RE = re.compile(r"notice: .*?(fallback|no answer)")
 
 
@@ -18,7 +18,7 @@ def analyze_task(task_dir: Path) -> dict:
         "trials": 0,
         "reward": None,
         "engine_deliveries": 0,
-        "gt_engine_blocks": 0,
+        "result_blocks": 0,
         "decisions": Counter(),
         "degraded": [],
         "fallbacks": 0,
@@ -44,7 +44,7 @@ def analyze_task(task_dir: Path) -> dict:
                 )
     for tj in task_dir.rglob("miniswe_trajectory.json"):
         content = tj.read_text(encoding="utf-8")
-        result["gt_engine_blocks"] += len(GT_ENGINE_RE.findall(content))
+        result["result_blocks"] += len(GT_ENGINE_RE.findall(content))
         for decision in DECISION_RE.findall(content):
             result["decisions"][decision] += 1
         result["fallbacks"] += len(FALLBACK_RE.findall(content))
@@ -63,7 +63,7 @@ def main() -> int:
         if task_dir.is_dir() and "-task-" in task_dir.name:
             rows.append(analyze_task(task_dir))
     rows.sort(key=lambda r: r["task"])
-    print(f"| task | reward | solved | engine_deliveries | gt-engine blocks | decisions | degraded | fallbacks |")
+    print(f"| task | reward | solved | engine_deliveries | result blocks | decisions | degraded | fallbacks |")
     print("|---|---|---|---|---|---|---|---|")
     for row in rows:
         solved = "yes" if row["reward"] and row["reward"] >= 1 else ("no" if row["reward"] is not None else "?")
@@ -71,7 +71,7 @@ def main() -> int:
         degraded = ",".join(dict.fromkeys(row["degraded"])) or "-"
         print(
             f"| {row['task']} | {row['reward']} | {solved} | {row['engine_deliveries']} "
-            f"| {row['gt_engine_blocks']} | {json.dumps(decisions, sort_keys=True)} "
+            f"| {row['result_blocks']} | {json.dumps(decisions, sort_keys=True)} "
             f"| {degraded} | {row['fallbacks']} |"
         )
     return 0

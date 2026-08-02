@@ -528,32 +528,45 @@ class CanonicalObservation:
     schema: str = f"gt.engine.canonical_observation.v{CONTRACTS_SCHEMA_VERSION}"
 
     def render(self) -> str:
-        """Render the canonical observation to its model-visible text form."""
-        parts: list[str] = []
-        parts.append(
-            f"<gt-engine action=\"{self.action_request.action_id}\" "
-            f"decision=\"{self.decision.decision.value}\">"
-        )
+        """Render the canonical observation to its model-visible text form.
+
+        The action's own output is emitted first, byte-exact and unwrapped, so
+        the model reads it as its own tool result (no external 'GT' framing
+        that would make the bytes look out-of-band). Deterministic facts join
+        as a bounded, neutral ``<result>`` block the harness still parses.
+        """
         if self.decision.decision in (Decision.REPLACE, Decision.REWRITE):
-            parts.append(self.replaced)
+            body = self.replaced
         elif self.raw_exact:
-            parts.append(self.raw_result)
+            body = self.raw_result
+        else:
+            body = ""
+        lines: list[str] = []
+        if body:
+            lines.append(body)
+        block: list[str] = [
+            f"<result action=\"{self.action_request.action_id}\" "
+            f"decision=\"{self.decision.decision.value}\" "
+            f"receipt=\"{self.receipt_id}\">"
+        ]
         for artifact in self.evidence:
             if artifact.model_visible:
-                parts.append(
-                    f"<gt-fact owner=\"{artifact.owner}\" id=\"{artifact.artifact_id}\">"
-                    f"{artifact.render_content()}</gt-fact>"
+                block.append(
+                    f"<fact owner=\"{artifact.owner}\" "
+                    f"semantics=\"{artifact.semantics}\">"
+                    f"{artifact.render_content()}</fact>"
                 )
         if self.anchors:
-            parts.append("anchors: " + " ".join(self.anchors))
+            block.append("anchors: " + " ".join(self.anchors))
         if self.ambiguity:
-            parts.append("ambiguity: " + "; ".join(self.ambiguity))
+            block.append("ambiguity: " + "; ".join(self.ambiguity))
         if self.omissions:
-            parts.append("omissions: " + "; ".join(self.omissions))
+            block.append("omissions: " + "; ".join(self.omissions))
         if self.fallback_notice:
-            parts.append(f"notice: {self.fallback_notice}")
-        parts.append(f"receipt: {self.receipt_id}</gt-engine>")
-        return "\n".join(parts)
+            block.append(f"notice: {self.fallback_notice}")
+        block.append("</result>")
+        lines.append("\n".join(block))
+        return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
         return {
