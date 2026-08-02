@@ -97,10 +97,36 @@ Codespaces run is the authority).
   producers, non-repo omission. Full engine battery now **95 green**.
 - Provider-free re-certification: run `30738422522` (in progress).
 
-## Remaining
+## Deep research + 17-feature activation (round-3 readiness)
 
-- IE-14 round 2: the next ten-task ENGINE witness after the fix (prove the
-  engine delivers real facts on time with a valid journal).
+`gt_finalstand/ENGINE_DEEP_RESEARCH.md` answers the two questions:
+
+- **Why 0/low facts**: the ENGINE wired only 2 producers (syntax_result via
+  git-status+ast, covering_red via command regex). The groundtruth gateway
+  (`_produce_raw_candidates` / `produce_raw`) — which fires a producer for
+  every semantic event (file_view/edit_result/test_result/search_result/
+  submit) — was never ported. Dominant action types (generic commands, reads,
+  searches, heredoc edits) mapped to no wired producer; schemelike's heredoc
+  edits produced 0 syntax facts.
+- **Why inert**: render put raw first, facts trailing (lost-in-the-middle);
+  syntax facts reported only "parses OK" (zero information gain);
+  `def_partition` results equalled grep; no affordances rendered. Causal trace:
+  delivered→referenced→acted ≈ 0.
+
+**Fix landed (commit `4d78600`)**: the gateway is now ported into the ENGINE
+compile step (`_gateway_facts` = `classify_event` + `produce_raw` → canonical
+EvidenceArtifacts), and the full FACT owner set is registered. Census
+`scripts/engine_feature_census.py`: **all_17_wired = True (9/9 FACT, 7/7
+CAP_OWNER)**; caller_contract is REMOVE by disposition. 97 engine tests green.
+
+## Verified
+
+- Round-2 witness `30738637714` (10 tasks; write-compressor recovered in
+  `30740338420`): 9/10 solved (gpt2 failed 0.0, same as baseline). Token
+  deltas: headless −74%, gpt2 −50%, llm-inference −46%, write-compressor −18%;
+  regressions portfolio +278%, break-filter +193%, schemelike +52%. The delta
+  is descriptive, not causal — the causal trace showed the round-2 facts were
+  inert (see ENGINE_DEEP_RESEARCH.md).
 
 ## Constraints honored
 
