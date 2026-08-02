@@ -559,15 +559,20 @@ def install_runtime_hooks(
         from .gt_session import GTMode
 
         if session.mode == GTMode.ENGINE and not session.disabled:
-            return engine_execute_actions(
-                _agent,
-                message,
-                session=session,
-                adapter=adapter,
-                model=model,
-                environment=environment,
-                original_execute=execute,
-            )
+            try:
+                return engine_execute_actions(
+                    _agent,
+                    message,
+                    session=session,
+                    adapter=adapter,
+                    model=model,
+                    environment=environment,
+                    original_execute=execute,
+                )
+            except Exception as exc:  # noqa: BLE001 - engine failure must fail open
+                # Degrade the session so every later step is stock execution;
+                # the current batch still runs literally via the fall-through.
+                session.degrade("engine_execute_actions", exc)
 
         from .miniswe_typed_actions import (
             execute_typed_action_fail_open,
