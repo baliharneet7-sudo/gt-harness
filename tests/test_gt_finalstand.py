@@ -378,6 +378,10 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     action_uses = re.findall(r"^\s*uses:\s*([^\s#]+)", workflow, re.MULTILINE)
     assert action_uses
     assert all(re.fullmatch(r"actions/[\w-]+@[0-9a-f]{40}", use) for use in action_uses)
+    assert re.search(
+        r"-e\s+['\"]?\./gt-harness\[miniswe\]['\"]?",
+        workflow,
+    ), "runtime probes require the declared Mini-SWE/LiteLLM dependency set"
     for field in (
         '"github_actions"',
         '"event_name"',
