@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -162,14 +163,23 @@ def _github_api_confirms_provenance(
     api_root = f"https://api.github.com/repos/{repository}/actions"
 
     def request(url: str):
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "groundtruth-finalstand-validator",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        token = (
+            os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        ).strip()
         request = urllib.request.Request(
             url,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "groundtruth-finalstand-validator",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=headers,
         )
+        if token:
+            # GitHub artifact downloads redirect to a signed Azure Blob URL.
+            # Authenticate only the GitHub API request; forwarding this header
+            # cross-origin makes Azure reject the otherwise valid signed URL.
+            request.add_unredirected_header("Authorization", f"Bearer {token}")
         return urllib.request.urlopen(request, timeout=10)
 
     def fetch_json(url: str) -> dict[str, object]:

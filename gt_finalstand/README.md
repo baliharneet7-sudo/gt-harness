@@ -6,9 +6,9 @@ There is no open-ended backlog. Every item ends as `BUILD`, `MODIFY`, `KEEP`, or
 
 ## Current state
 
-The machine authority records **21 `COMPLETE`, 4 `IN_PROGRESS`, and 1 `REMOVED`**. The four open rows are FS-023 (immutable external offline-workflow execution and artifact identity), FS-024 (authorized paired experiment), FS-025 (evidence-based promotion and rollback), and FS-026 (final clean-machine workflow and frozen artifact closure). A suite-terminal local receipt does not close FS-023 without its literal external-workflow proof.
+The machine authority records **22 `COMPLETE`, 3 `IN_PROGRESS`, and 1 `REMOVED`**. FS-023 is `COMPLETE`: the complete provider-free battery passed in immutable GitHub Actions [run 30729901088](https://github.com/harneet2512/gt-harness/actions/runs/30729901088) at harness commit `e87cada097f55fe5df203c339148c65fff75c36a` and GroundTruth commit `61cfdbce2c42751c11028e46e863b3231f0bb70e`, every workflow step was green, and the run made zero provider calls. Artifact `8827623572` has GitHub API digest `sha256:1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`; its inner deterministic bundle has SHA-256 `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`.
 
-The latest provider-free Codespaces verification is [final_codespace_verification.json](receipts/final_codespace_verification.json): the GroundTruth Python suite passed 9,980 tests with 415 skips and 6 expected failures; the harness suite passed 591 of 592 collected tests with one declared environment-conditional skip; the offline smoke passed 9 of 10 with the same complementary graph skip; and the full tagged Go suite passed. This evidence is green for its recorded dirty-worktree inputs. It is not an immutable GitHub Actions run and does not change the four open rows.
+The three open rows are FS-024, FS-025, and FS-026. FS-024 still requires the user-authorized six-arm provider experiment and independent paired outcome analysis. FS-025 depends on that measured evidence before changing defaults or removing duplicate model-visible paths, and still requires GT-off and rollback proof. FS-026 depends on terminal FS-024/FS-025 receipts plus the final clean-machine release and rollback artifact; the successful provider-free workflow closes FS-023 but does not substitute for those gates.
 
 ## Authority order
 
@@ -33,7 +33,7 @@ The latest provider-free Codespaces verification is [final_codespace_verificatio
 18. [gt_finalstand_provider_free.yml](../.github/workflows/gt_finalstand_provider_free.yml) is the
     dispatch-only GitHub Actions implementation of the provider-free closeout gate.
 
-Within [receipts/](receipts/), `final_codespace_verification.json` binds the latest product, harness, smoke, Go, worktree, and clean-fixture evidence; `provider_free_smoke10.json` binds the ten-node offline smoke; `experiment_execution_plan.json` binds the deterministic 10-task by 6-arm plan while recording that no trial executed; and `fs023_provenance.json` records the immutable workflow identities that are still missing.
+Within [receipts/](receipts/), `provider_free_workflow.json` binds successful run `30729901088`, both repository commits, the workflow identity, and every input-receipt hash; `fs023_provenance.json` remains the deliberately pre-artifact receipt whose declared missing post-run identities are supplied by the successful Actions run and artifact API record. `final_codespace_verification.json` binds the product, harness, smoke, Go, worktree, and clean-fixture evidence; `provider_free_smoke10.json` binds the ten-node offline smoke; and `experiment_execution_plan.json` binds the deterministic 10-task by 6-arm plan while recording that no provider trial executed.
 
 The accepted monograph under `.research/gt-deterministic-interface/` remains the evidence basis. This directory owns the implementation decision. If prose here conflicts with a CSV inventory, the roadmap governs intent and the CSV must be repaired before work continues.
 

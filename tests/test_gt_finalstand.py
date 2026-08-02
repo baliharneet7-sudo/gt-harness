@@ -49,7 +49,7 @@ def test_live_todo_is_current_only_and_preserves_history_in_archive() -> None:
         encoding="utf-8"
     )
     assert "## Checkpoints" not in live
-    assert "21 `COMPLETE`, 4 `IN_PROGRESS`, 1 `REMOVED`" in live
+    assert "22 `COMPLETE`, 3 `IN_PROGRESS`, 1 `REMOVED`" in live
     assert "LIVE_TODO_HISTORY.md" in live
     assert "historical and superseded" in history.lower()
     assert "### 2026-08-01T20:41:33Z" in history
@@ -85,7 +85,6 @@ def test_fs026_completion_requires_closed_prerequisites_and_final_proofs() -> No
         error.startswith("FS-026 cannot be COMPLETE while prerequisites/proofs are open:")
         and "FS-024" in error
         and "FS-025" in error
-        and "clean_machine_workflow" in error
         and "rollback_rehearsal" in error
         for error in result["errors"]
     )
@@ -106,21 +105,23 @@ def test_promotion_refusal_uses_terminal_offline_receipt() -> None:
     ]
 
 
-def test_fs023_provenance_binds_available_identity_and_names_missing_linkage() -> None:
+def test_fs023_provenance_cross_binds_terminal_workflow_and_artifact() -> None:
     validator = _load_validator()
     receipt = json.loads(
         (ROOT / "gt_finalstand" / "receipts" / "fs023_provenance.json").read_text(
             encoding="utf-8"
         )
     )
-    assert validator._valid_fs023_provenance(receipt)
-    assert receipt["workflow_execution_identity_bound"] is False
-    assert set(receipt["missing_immutable_linkage"]) == {
-        "harness_execution_commit",
-        "github_actions_run_id",
-        "github_actions_run_url",
-        "uploaded_artifact_bundle_sha256",
-    }
+    workflow = json.loads(
+        (ROOT / "gt_finalstand" / "receipts" / "provider_free_workflow.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert validator._valid_fs023_provenance(receipt, workflow)
+    assert receipt["workflow_execution_identity_bound"] is True
+    assert receipt["missing_immutable_linkage"] == []
+    assert receipt["github_actions_run_id"] == "30729901088"
+    assert receipt["uploaded_artifact_id"] == 8827623572
 
 
 def test_fs023_provenance_rejects_authority_hash_mismatches() -> None:
@@ -130,25 +131,38 @@ def test_fs023_provenance_rejects_authority_hash_mismatches() -> None:
             encoding="utf-8"
         )
     )
+    workflow = json.loads(
+        (ROOT / "gt_finalstand" / "receipts" / "provider_free_workflow.json").read_text(
+            encoding="utf-8"
+        )
+    )
     semantic_mismatch = copy.deepcopy(receipt)
     semantic_mismatch["semantic_artifact_sha256"] = "0" * 64
-    assert not validator._valid_fs023_provenance(semantic_mismatch)
+    assert not validator._valid_fs023_provenance(semantic_mismatch, workflow)
 
     source_mismatch = copy.deepcopy(receipt)
     source_mismatch["source_manifest_sha256"] = "0" * 64
-    assert not validator._valid_fs023_provenance(source_mismatch)
+    assert not validator._valid_fs023_provenance(source_mismatch, workflow)
 
 
-def test_fs023_remains_open_without_external_workflow_identity() -> None:
+def test_fs023_is_complete_with_external_workflow_identity() -> None:
     statuses = _load_validator()._rows("closeout_status.csv")
     fs023 = next(row for row in statuses if row["todo"] == "FS-023")
-    assert fs023["status"] == "IN_PROGRESS"
-    assert "immutable external workflow" in fs023["missing_proof"].lower()
+    assert fs023["status"] == "COMPLETE"
+    assert "none for the provider-free immutable workflow criterion" in fs023[
+        "missing_proof"
+    ].lower()
 
 
 def test_fs023_completion_is_rejected_while_workflow_linkage_is_missing() -> None:
     validator = _load_validator()
-    result = _validate_with_status(validator, "FS-023", "COMPLETE")
+    original_optional_json = validator._optional_json
+    validator._optional_json = lambda name: (
+        None
+        if name == "receipts/provider_free_workflow.json"
+        else original_optional_json(name)
+    )
+    result = validator.validate()
     assert any(
         error.startswith("FS-023 cannot be COMPLETE")
         and "external workflow execution identity" in error
@@ -305,16 +319,31 @@ def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
 
 
 def test_fs023_github_api_confirmation_verifies_run_artifact_and_members(
-    monkeypatch,
+    monkeypatch, tmp_path: Path,
 ) -> None:
     validator = _load_validator()
     provenance, workflow = _future_fs023_receipts(validator)
     run, artifact, contents, outer = _mock_github_artifact(
         validator, provenance, workflow
     )
+    isolated_finalstand = tmp_path / "gt_finalstand"
+    isolated_receipts = isolated_finalstand / "receipts"
+    isolated_receipts.mkdir(parents=True)
+    (isolated_finalstand / "language_operation_compatibility.json").write_bytes(
+        (ROOT / "gt_finalstand" / "language_operation_compatibility.json").read_bytes()
+    )
+    (isolated_receipts / "offline_suite.json").write_bytes(
+        (ROOT / "gt_finalstand" / "receipts" / "offline_suite.json").read_bytes()
+    )
+    (isolated_receipts / "provider_free_workflow.json").write_text(
+        json.dumps(workflow, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(validator, "FINALSTAND", isolated_finalstand)
+    monkeypatch.setenv("GH_TOKEN", "fixture-token")
 
     def urlopen(request, timeout):
         assert timeout == 10
+        assert request.unredirected_hdrs["Authorization"] == "Bearer fixture-token"
         if request.full_url == artifact["archive_download_url"]:
             return io.BytesIO(outer)
         if "/contents/" in request.full_url:
@@ -339,12 +368,27 @@ def test_fs023_github_api_confirmation_verifies_run_artifact_and_members(
     assert not validator._github_api_confirms_provenance(provenance, workflow)
 
 
-def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(monkeypatch) -> None:
+def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(
+    monkeypatch, tmp_path: Path
+) -> None:
     validator = _load_validator()
     provenance, workflow = _future_fs023_receipts(validator)
+    isolated_finalstand = tmp_path / "gt_finalstand"
+    isolated_receipts = isolated_finalstand / "receipts"
+    isolated_receipts.mkdir(parents=True)
+    (isolated_finalstand / "language_operation_compatibility.json").write_bytes(
+        (ROOT / "gt_finalstand" / "language_operation_compatibility.json").read_bytes()
+    )
+    (isolated_receipts / "offline_suite.json").write_bytes(
+        (ROOT / "gt_finalstand" / "receipts" / "offline_suite.json").read_bytes()
+    )
+    monkeypatch.setattr(validator, "FINALSTAND", isolated_finalstand)
 
     def rejected(extra_inner=(), workflow_receipt=None):
         candidate = workflow_receipt or workflow
+        (isolated_receipts / "provider_free_workflow.json").write_text(
+            json.dumps(candidate, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         run, artifact, contents, outer = _mock_github_artifact(
             validator, provenance, candidate, extra_inner=extra_inner
         )
@@ -364,6 +408,7 @@ def test_fs023_artifact_rejects_duplicate_traversal_and_stale_receipts(monkeypat
         monkeypatch.setattr(validator.urllib.request, "urlopen", urlopen)
         return validator._github_api_confirms_provenance(provenance, candidate)
 
+    assert rejected()
     assert not rejected([("../receipts/escape.json", b"escape")])
     assert not rejected([("receipts/offline_suite.json", b"duplicate")])
     stale = copy.deepcopy(workflow)
@@ -405,7 +450,7 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert '"receipt_inputs"' in workflow
 
 
-def test_post_audit_receipts_do_not_promote_open_terminal_rows() -> None:
+def test_post_audit_receipts_close_only_fs023_terminal_row() -> None:
     appendix = (
         ROOT / "gt_finalstand" / "POST_AUDIT_HARDENING.md"
     ).read_text(encoding="utf-8")
@@ -421,7 +466,7 @@ def test_post_audit_receipts_do_not_promote_open_terminal_rows() -> None:
         for row in statuses
         if row["todo"] in {"FS-023", "FS-024", "FS-025", "FS-026"}
     } == {
-        "FS-023": "IN_PROGRESS",
+        "FS-023": "COMPLETE",
         "FS-024": "IN_PROGRESS",
         "FS-025": "IN_PROGRESS",
         "FS-026": "IN_PROGRESS",
