@@ -314,11 +314,13 @@ def test_force_submit_refusal_delivers(monkeypatch):
     )
 
 
-# --- 10. typed definition (WS-3 re-enabled, graph-certified) --------------------
+# --- 10. graph definition capability (internal, not schema-advertised) ----------
 def test_force_typed_definition_delivers(tmp_path):
-    """The re-enabled typed `definition` kind returns the graph-certified
-    symbol definition (file:line:signature) — the tool-use-superiority win over
-    bare grep."""
+    """The engine's internal graph-backed definition search returns the
+    symbol's file:line:signature. The typed tool schema does not advertise
+    `definition` (the generator only advertises kinds certified for ALL 30
+    languages), but the engine can answer definition queries internally from
+    the graph — the tool-use-superiority depth over bare grep."""
     from gt_engine.miniswe_typed_actions import _graph_definition_search
 
     db = _mk_graph(tmp_path)
