@@ -45,24 +45,51 @@ Codespaces run is the authority).
 
 - `engine_129_audit.py` exits 0: inventory integrity holds (12/48/11/58, 129
   unique, all dispositions terminal).
-- Codespace `special-fortnight-95p9q5wrpqp2qww` created on `inline-engine`
-  (pending full-battery run).
+- Codespace `special-fortnight-95p9q5wrpqp2qww` on `inline-engine`: all 84
+  engine tests green in a clean Linux env (python 3.12, groundtruth 1.0.0,
+  harbor 0.20.0, mini-swe-agent 2.2.8).
+- Full harness battery in the Codespace: **no regressions**. 4 environment-
+  specific failures only (gt-index Go binary + live GitHub API for FS-023).
+- **IE-13 provider-free gate GREEN in GitHub Actions**: run `30736226330`
+  passed every step (engine battery, 129-row audit, finalstand validator,
+  compliance certificates) with zero provider calls.
+- **First engine smoke exposed a bug**: run `30735955619` — every task's 2nd
+  engine action crashed Mini-SWE's Jinja formatter (engine tool results
+  omitted `exception_info`) and the session degraded to stock (`gt_degraded_
+  fail_open`). fix-code-vulnerability still solved (reward 1.0) via fallback.
+  Fixed in `runner.py::_tool_output` + regression test.
+- **ENGINE witness run `30736459512` (fixed code)**: plan job green, 10 task
+  jobs ran with parallel=10. **Proof from trajectories** (9 trajectories; the
+  gpt2-codegolf artifact upload failed, mirroring that baseline arm's own
+  infra failure):
+  - 9/9 graded tasks solved at reward **1.0** (matching the frozen baseline's
+    9 solved for the same tasks).
+  - Every action crossed the engine boundary: 8-100 `engine_delivery` events
+    and 16-200 canonical `<gt-engine>` observation blocks per task.
+  - All decisions `pass_through`; **GT bytes == raw bytes** (raw preserved
+    exactly inside the canonical observation); zero fallbacks.
+  - Only cosmetic terminal degrade in the first-fixed run (the `Submitted`
+    end-of-run signal); fixed in the seam (`except Submitted: raise`).
+  - Full table: `gt_finalstand/ENGINE_WITNESS_30736459512.md`.
+- **Two follow-up fixes landed after the witness**: `Submitted` propagation
+  (seam) and the single-task merge (workflow) — no re-run needed for the
+  witness data (per-task artifacts are authoritative).
 
 ## Remaining
 
-- IE-05: authoritative provider boundary on every overridden query path +
-  DeliveryReceipt provider-request/response binding (runner records
-  `engine_delivery` events; hardening in progress).
-- IE-06: read/search vertical slice (typed producers already dispatch via
-  `execute_typed_action_fail_open`; literal views stay literal).
-- IE-10: passive PERF certificate (PERF rows never model-visible / never
-  decision-eligible).
-- IE-11: advisory-dependency removal certificate (import closure of the engine
-  package).
-- IE-12: replay/provenance/security for engine events.
-- IE-13: provider-free certification in Codespaces + GitHub Actions.
-- IE-14: exactly ten ENGINE witness trials vs frozen baseline.
-- Phase A: `finalstand.md` authoritative handoff.
+- IE-14 witness: ENGINE smoke dispatched — GitHub Actions run
+  `30735955619` (harneet2512/gt-harness, workflow `tb2_miniswe_engine.yml`,
+  ref `inline-engine`, ten frozen tasks, `MINISWE_AGENT_VERSION=2.2.8`).
+  Plan job completed success (provider preflight green, 10 tasks enumerated);
+  10 task jobs in progress. Compare with
+  `scripts/engine_witness_compare.py` vs the frozen baseline.
+- IE-05 hardening: authoritative provider boundary on every overridden query
+  path (runner records `engine_delivery` events; DeliveryReceipt request/
+  response ids wired; full payload-receipt authority pending).
+- IE-13 GHA provider-free closeout workflow (engine battery in Actions; the
+  gt-index binary is built there and live GitHub API is available).
+- IE-14 completion: download trajectories, run the witness comparison, record
+  receipts in this ledger.
 
 ## Constraints honored
 
