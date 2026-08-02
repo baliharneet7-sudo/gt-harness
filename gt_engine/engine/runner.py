@@ -177,8 +177,11 @@ def _typed_kind(kind_raw: str) -> ActionKind:
 
 
 def _fidelity(value: str | None) -> Fidelity:
+    normalized = str(value or "raw").strip().lower()
+    if normalized in {"sound_overapprox", "sound-overapprox"}:
+        normalized = "sound_overapproximate"
     try:
-        return Fidelity(str(value or "raw"))
+        return Fidelity(normalized)
     except ValueError:
         return Fidelity.RAW
 
