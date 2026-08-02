@@ -54,8 +54,11 @@ class FakeAdapter:
     graph_fresh = True
     global_action = 0
     contract = None
+    iteration = 0
+    blocking_reasons = ("active failure",)
     _dedup_chain = set()
     _latest_delivery = None
+    _engine_search_history = {}
 
     def __init__(self):
         self.store = FakeStore()
@@ -68,6 +71,12 @@ class FakeAdapter:
 
     def evaluate_failing_observation(self, *a, **k):
         return None
+
+    def blocking_obligation_texts(self):
+        return tuple(self.blocking_reasons)
+
+    def next_contract_delta(self, max_chars=1200):
+        return ""
 
 
 class FakeSession:
@@ -168,6 +177,51 @@ def test_test_failure_delivers_covering_in_same_observation():
     assert 'decision="augment"' in content or 'decision="pass_through"' in content
     # the fact is bound to the action in the same observation
     assert "t1" in content or "call" in content
+
+
+def test_submit_blocked_produces_suppress_and_refusal(monkeypatch):
+    """When the submit gate denies, the engine must emit a SUPPRESS observation
+    + a refusal directive (never execute the submit), so the model keeps
+    working instead of finishing with unmet obligations/RED."""
+    import gt_engine.miniswe_runtime as rt
+
+    def deny_gate(session, command):
+        return False
+
+    monkeypatch.setattr(rt, "_run_submit_gate", deny_gate)
+    agent, model, adapter, env = _run([
+        {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+         "tool_call_id": "s1"},
+    ])
+    content = model.observations[0]["content"]
+    assert 'decision="suppress"' in content
+    # the refusal directive was added (agent.add_messages got a user message)
+    assert any(
+        isinstance(m, dict) and m.get("role") == "user" and "GT ENFORCED" in str(m.get("content") or "")
+        for m in agent.sent
+    )
+
+
+def test_repeated_empty_search_emits_stop_signal():
+    """A repeated empty search must emit the certified STOP signal so the model
+    stops wasting calls."""
+    os.environ.setdefault("GT_GATEWAY", "1")
+    from gt_engine.engine.runner import _stop_signal_fact
+
+    class Adapter:
+        repository_revision = "rev-1"
+
+    a = Adapter()
+    assert _stop_signal_fact(command="grep -r foo .", raw="", returncode=1,
+                             adapter=a) is None  # first run: record only
+    stop = _stop_signal_fact(command="grep -r foo .", raw="", returncode=1,
+                             adapter=a)
+    assert stop is not None
+    assert stop.owner == "localization"
+    assert "no matches" in stop.content["notice"]
+    # a non-search command never emits
+    assert _stop_signal_fact(command="cat x", raw="", returncode=0,
+                             adapter=Adapter()) is None
 
 
 def test_submit_command_detected():

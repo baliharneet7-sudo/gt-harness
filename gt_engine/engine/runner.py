@@ -812,26 +812,107 @@ def _fact_dedup_key(fact: EvidenceArtifact) -> str:
     return f"{fact.owner}:{anchors or fact.hash()}"
 
 
+def _valid_fact_payload(fact: EvidenceArtifact) -> bool:
+    """A fact is only delivered if it carries REAL content AND a freshness
+    basis (revision or explicit episode coverage). Rejects dummy/opaque
+    payloads so the model never receives unusable bytes.
+    """
+    content = fact.content or {}
+    if not content:
+        return False
+    blob = json.dumps(content)
+    if fact.owner == "obligations" and "obl-" in blob and not any(
+        key in blob for key in ("requirements", "subjects", "file", "path")
+    ):
+        return False  # opaque obligation IDs with no usable text/subjects
+    if not any(str(v).strip() for v in content.values() if v is not None):
+        return False  # all-empty payload
+    if fact.owner == "syntax_result" and fact.content.get("ok") is True:
+        return False  # zero-gain "parses OK"
+    if not fact.freshness_revision and fact.coverage not in (
+        "episode_observed", "produced", "execution_specific", "lexical_match",
+    ):
+        return False  # no freshness basis
+    return True
+
+
 def _dedup_facts(
     facts: tuple[EvidenceArtifact, ...], adapter: Any
 ) -> tuple[EvidenceArtifact, ...]:
-    """Fire-once per episode: drop facts already delivered, stamp the new ones.
-
-    The gateway already dedups its own winner via adapter._dedup_chain; this
-    extends the same registry to the engine-direct producers (obligations,
-    syntax, covering) so no fact type spams the conversation.
+    """Fire-once per episode + payload gate: drop already-delivered or dummy
+    facts, stamp the survivors. The gateway already dedups its own winner via
+    adapter._dedup_chain; this extends the same registry to the engine-direct
+    producers (obligations, syntax, covering) so no fact type spams the
+    conversation and nothing dummy is sent.
     """
     chain = getattr(adapter, "_dedup_chain", None)
-    if not isinstance(chain, set):
-        return facts
     out: list[EvidenceArtifact] = []
     for fact in facts:
-        key = _fact_dedup_key(fact)
-        if key in chain:
+        if not _valid_fact_payload(fact):
             continue
-        chain.add(key)
+        if isinstance(chain, set):
+            key = _fact_dedup_key(fact)
+            if key in chain:
+                continue
+            chain.add(key)
         out.append(fact)
     return tuple(out)
+
+
+def _stop_signal_fact(
+    *,
+    command: str,
+    raw: str,
+    returncode: int | None,
+    adapter: Any,
+) -> EvidenceArtifact | None:
+    """Certified STOP signal for a REPEATED empty search (no graph needed).
+
+    A frontier agent re-runs the same search hoping for a different answer,
+    wasting calls. When a normalized search returned no matches before, the
+    second empty run emits a localization negative: "this query was already
+    empty — retrying is unlikely to help; change the query or scope." This is
+    decision-relevant (tells the model to STOP searching) and honest (it only
+    claims what this episode observed).
+    """
+    if not _is_search_command(command):
+        return None
+    substantive = "".join(
+        line for line in (raw or "").splitlines()
+        if "[exit code" not in line
+    ).strip()
+    if substantive:
+        return None  # not an empty search
+    if returncode not in (None, 0, 1):
+        return None
+    # normalize the query (drop cwd/globs/quoting) for episode-level identity
+    normalized = re.sub(r"[\"']", "", command or "").strip()
+    history = getattr(adapter, "_engine_search_history", None)
+    if history is None:
+        history = {}
+        adapter._engine_search_history = history
+    count = history.get(normalized, 0)
+    history[normalized] = count + 1
+    if count == 0:
+        return None  # first empty run; record, do not yet emit
+    return EvidenceArtifact(
+        artifact_id=hashlib.sha256(
+            f"stop:{normalized}".encode("utf-8")
+        ).hexdigest()[:16],
+        owner="localization",
+        semantics="certified repeated empty search notice",
+        content={
+            "notice": "this search query already returned no matches this "
+                      "episode; retrying is unlikely to help",
+            "query": normalized[:200],
+            "occurrences": count + 1,
+        },
+        producer="engine.stop_signal",
+        producer_version="1",
+        freshness_revision=adapter.repository_revision,
+        coverage="episode_observed",
+        model_visible=True,
+    )
 
 
 def _postflight_facts(
@@ -885,6 +966,11 @@ def _postflight_facts(
         # adds no information.
         if outcome == "failed":
             facts.append(covering)
+    stop = _stop_signal_fact(
+        command=command, raw=raw, returncode=returncode, adapter=adapter,
+    )
+    if stop is not None:
+        facts.append(stop)
     return _dedup_facts(tuple(facts), adapter)
 
 
@@ -1077,6 +1163,29 @@ def engine_execute_actions(
     """
     from .. import miniswe_runtime as rt
     from ..miniswe_typed_actions import execute_typed_action_fail_open, is_typed_action
+
+    # One-time self-diagnosing init event: graph presence + freshness + flags.
+    # Round-6's events.jsonl then proves whether the graph-backed producers
+    # (localization/signature_delta/newfile_precedent/def_partition) could fire.
+    if not getattr(adapter, "_engine_init_recorded", False):
+        adapter._engine_init_recorded = True
+        _ensure_gateway_flags()
+        if getattr(adapter, "store", None) is not None:
+            try:
+                adapter.store.append(
+                    "engine_init",
+                    graph_db_present=bool(getattr(adapter, "graph_db", None)),
+                    graph_fresh=bool(getattr(adapter, "graph_fresh", False)),
+                    gateway_flags={
+                        flag: os.environ.get(flag, "")
+                        for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
+                                     "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE",
+                                     "GT_EDIT_OVERLAY")
+                    },
+                    repository_revision=adapter.repository_revision,
+                )
+            except Exception:  # noqa: BLE001 - init event is diagnostic only
+                pass
 
     if session.disabled:
         return original_execute(message) if callable(original_execute) else []
