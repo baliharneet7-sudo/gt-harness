@@ -433,6 +433,53 @@ def test_census_requires_flags():
     assert result["flags_ok"], result["flags"]
 
 
+# --- WS-1: localization now delivers (deterministic graph localizer) -----------
+
+
+def test_localizer_injected_into_gateway(monkeypatch):
+    """gateway._localize must be the deterministic localizer, not the None stub
+    that made localization impossible (the round-5/6 gap)."""
+    from gt_engine.engine import runner as _runner
+
+    monkeypatch.delenv("GT_LOC_RESLOT", raising=False)
+    import groundtruth.runtime.gateway as gw
+
+    gw._localize = None
+    _runner._LOCALIZER_INJECTED = False
+    _runner._GATEWAY_FLAGS_ENABLED = False
+    _runner._ensure_gateway_flags()
+    assert callable(gw._localize)
+    assert gw._localize.__module__ == "gt_engine.engine.localizer"
+
+
+def test_deterministic_localize_like_fallback(tmp_path):
+    """The deterministic localizer ranks candidate files from a populated
+    graph (LIKE fallback when no FTS5 table), preferring non-test files."""
+    import sqlite3
+
+    from gt_engine.engine.localizer import deterministic_localize
+
+    db = tmp_path / "graph.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, file_path TEXT, "
+        "start_line INTEGER, is_test INTEGER)"
+    )
+    con.executemany(
+        "INSERT INTO nodes (name, file_path, start_line, is_test) VALUES (?,?,?,?)",
+        [("Bottle", "bottle.py", 30, 0), ("Route", "bottle.py", 12, 0),
+         ("test_x", "tests/test_a.py", 1, 1)],
+    )
+    con.commit()
+    con.close()
+    res = deterministic_localize(
+        "fix the vulnerability in /app/bottle.py", str(db), "/app"
+    )
+    assert res.candidates, "localizer returned no candidates"
+    assert res.candidates[0].file_path == "bottle.py"  # non-test preferred
+    assert any(s for s in res.anchor_symbols)
+
+
 # --- Gateway delivery path: covering fires on a realistic test failure --------
 
 

@@ -536,6 +536,29 @@ def _covering_red_artifact(
 
 
 _GATEWAY_FLAGS_ENABLED = False
+_LOCALIZER_INJECTED = False
+
+
+def _ensure_localizer() -> None:
+    """Inject the deterministic graph localizer into the gateway.
+
+    gateway._localize is None in production (the embedding-backed localizer is
+    an isolated comparison control), so _produce_ranked_localization always
+    abstained — localization could NEVER fire despite a populated graph. This
+    installs the deterministic FTS5 localizer so the graph-backed 'where to
+    look' intelligence delivers. Idempotent.
+    """
+    global _LOCALIZER_INJECTED
+    if _LOCALIZER_INJECTED:
+        return
+    try:
+        import groundtruth.runtime.gateway as _gateway
+        from .localizer import deterministic_localize
+
+        _gateway._localize = deterministic_localize
+        _LOCALIZER_INJECTED = True
+    except Exception:  # noqa: BLE001 - localizer injection is fail-open
+        pass
 
 
 def _ensure_gateway_flags() -> None:
@@ -553,6 +576,7 @@ def _ensure_gateway_flags() -> None:
                  "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE", "GT_EDIT_OVERLAY"):
         os.environ.setdefault(flag, "1")
     _GATEWAY_FLAGS_ENABLED = True
+    _ensure_localizer()
 
 
 def _update_graph_freshness(adapter: Any) -> None:
@@ -1317,6 +1341,16 @@ def engine_execute_actions(
                     returncode=returncode,
                     action_index=adapter.global_action,
                 )
+                # register the CLOSED blocker on a failing executable check so
+                # the submit gate can SUPPRESS on fresh RED (record_episode_failure
+                # was never called by the engine -> submit_refusal could never fire).
+                if returncode not in (0, None) and hasattr(adapter, "record_episode_failure"):
+                    adapter.record_episode_failure(
+                        command=request.literal_shell_form,
+                        output=raw_output,
+                        returncode=returncode,
+                        pre_state_revision=adapter.repository_revision,
+                    )
             except Exception:  # noqa: BLE001 - obligation tracking is fail-open
                 pass
         # Incremental graph freshness: mark changed files stale in the overlay
