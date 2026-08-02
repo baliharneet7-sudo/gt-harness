@@ -97,6 +97,44 @@ Codespaces run is the authority).
   producers, non-repo omission. Full engine battery now **95 green**.
 - Provider-free re-certification: run `30738422522` (in progress).
 
+## Round-3 (W1+W2) + round-4 (gateway threading)
+
+- **Round-3 run `30755837073`** (W1+W2: answer-first render, value-gate, single-
+  dose; dispatched BEFORE the gateway threading landed): 9/9 available tasks
+  solved at reward 1.0 (gpt2 artifact lost again to the root-owned blob upload
+  bug — fixed with sudo chmod). Facts delivered: only 2 (1 covering_red, 1
+  def_partition), both inert. The value-gate correctly dropped the zero-gain
+  syntax-OK facts; the gateway producers still abstained because round-3 ran
+  pre-threading.
+- **Gateway threading (commit `dbf43d5`)**: `_gateway_facts` now builds the
+  ToolEvent authoritatively (semantics_authoritative mode from git/covering/
+  command shapes), threads a CoveringResult with a SOURCE target (survives the
+  leak-law) and edit_before_after (feeds patch_delta). Proven end-to-end:
+  pytest failure with a source frame delivers covering_red/covering_verdict.
+  Regression-gated. Provider-free green (`30756488370`).
+- **Round-4 run `30757560927`** (with threading): dispatched — the gateway-
+  delivery measurement (ladder census per feature).
+
+## What's still missing (audit, 2026-08-02)
+
+Proven: correct timing, neutral labels, valid journal, single-dose, value-gate,
+syntax_result/covering_red/obligations firing, 17 features registered+invoked.
+
+1. Round-5 delivery measurement (obligations+RED code is untested live).
+2. Gateway producers needing real conditions (localization/patch_delta/
+   newfile_precedent/def_partition) — live firing unmeasured; gated by the
+   graph DB (built at startup, invalidated on edits).
+3. Certified-search-completeness negative (STOP signal) — not implemented
+   (needs graph to certify exhaustiveness).
+4. Submit-verification gate (W3) — wired + RED tracking feeds it; end-to-end
+   blocking on RED not verified; submit detection needs a live check.
+5. L2/L3 confound — anchor-match ladder cannot distinguish causation from
+   coincident work; obligations is the first genuinely-causal candidate.
+6. Temp-1.0 noise — deltas descriptive only.
+7. W4 typed-tool superiority — deferred; certified-completeness drives adoption.
+8. TLA+/TLC run — spec authored, never executed.
+9. gpt2 artifact upload — sudo-chmod fix landed; round-4 must confirm.
+
 ## Deep research + 17-feature activation (round-3 readiness)
 
 `gt_finalstand/ENGINE_DEEP_RESEARCH.md` answers the two questions:
