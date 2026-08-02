@@ -363,6 +363,34 @@ def test_obligations_absent_without_contract():
     ) is None
 
 
+# --- Gateway producer flags: full GT is enabled ---------------------------------
+
+
+def test_engine_enables_all_gateway_producer_flags(monkeypatch):
+    """The ENGINE must enable every gateway producer flag. Round-4 failed to
+    deliver most features because GT_GATEWAY/GT_LOC_RESLOT/etc. default OFF and
+    the engine never set them — produce_raw returned [] on every action."""
+    import os
+
+    from gt_engine.engine import runner as _runner
+
+    for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
+                 "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE"):
+        monkeypatch.delenv(flag, raising=False)
+    _runner._GATEWAY_FLAGS_ENABLED = False  # force re-apply
+    _runner._ensure_gateway_flags()
+    for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
+                 "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE"):
+        assert os.environ.get(flag) == "1", f"{flag} not enabled"
+
+
+def test_census_requires_flags():
+    from scripts.engine_feature_census import census
+
+    result = census()
+    assert result["flags_ok"], result["flags"]
+
+
 # --- Gateway delivery path: covering fires on a realistic test failure --------
 
 

@@ -19,8 +19,22 @@ HARNESS_ROOT = Path(__file__).resolve().parent.parent
 
 
 def census() -> dict:
-    from gt_engine.engine.runner import ENGINE_FACT_OWNERS, _EVIDENCE_TO_OWNER
+    import os
 
+    from gt_engine.engine.runner import (
+        ENGINE_FACT_OWNERS,
+        _EVIDENCE_TO_OWNER,
+        _ensure_gateway_flags,
+    )
+
+    _ensure_gateway_flags()
+    required_flags = ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
+                      "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE")
+    flags = {
+        flag: os.environ.get(flag, "").strip() in ("1", "true", "yes", "on")
+        for flag in required_flags
+    }
+    flags_ok = all(flags.values())
     runner_src = (HARNESS_ROOT / "gt_engine" / "engine" / "runner.py").read_text(
         encoding="utf-8"
     )
@@ -78,9 +92,12 @@ def census() -> dict:
         "facts_ok": sum(1 for r in fact_rows if r["ok"]),
         "cap_count": len(cap_rows),
         "caps_ok": sum(1 for r in cap_rows if r["ok"]),
+        "flags": flags,
+        "flags_ok": flags_ok,
         "facts": fact_rows,
         "cap_owners": cap_rows,
-        "all_17_wired": all(r["ok"] for r in fact_rows) and all(r["ok"] for r in cap_rows),
+        "all_17_wired": (all(r["ok"] for r in fact_rows)
+                         and all(r["ok"] for r in cap_rows) and flags_ok),
     }
 
 
@@ -101,6 +118,7 @@ def main() -> int:
         for row in result["cap_owners"]:
             print(f"  {'OK ' if row['ok'] else 'MISSING'} {row['cap_owner']:<18} "
                   f"-> binds {row['binds_fact']}")
+        print(f"gateway producer flags: {result['flags']} (ok={result['flags_ok']})")
         print(f"all_17_wired = {result['all_17_wired']}")
     return 0 if result["all_17_wired"] else 1
 

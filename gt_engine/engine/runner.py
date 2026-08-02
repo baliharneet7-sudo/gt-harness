@@ -535,6 +535,26 @@ def _covering_red_artifact(
     )
 
 
+_GATEWAY_FLAGS_ENABLED = False
+
+
+def _ensure_gateway_flags() -> None:
+    """Enable the gateway's deterministic producers.
+
+    They default OFF (advisory-era rollout gates). The ENGINE is the canonical
+    runtime: localization, signature_delta, def_partition, covering, and the
+    change-surface edit trigger must be able to fire. Idempotent; never
+    disables anything the caller explicitly set.
+    """
+    global _GATEWAY_FLAGS_ENABLED
+    if _GATEWAY_FLAGS_ENABLED:
+        return
+    for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
+                 "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE"):
+        os.environ.setdefault(flag, "1")
+    _GATEWAY_FLAGS_ENABLED = True
+
+
 def _gateway_facts(
     *,
     command: str,
@@ -559,6 +579,7 @@ def _gateway_facts(
         from groundtruth.runtime.adapters.miniswe import arbitrate
     except Exception:  # noqa: BLE001 - gateway is optional
         return ()
+    _ensure_gateway_flags()
     try:
         edit_before_after = _edit_before_after(
             getattr(adapter, "repo_root", "") or "", changed_files
