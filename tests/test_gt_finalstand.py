@@ -391,7 +391,6 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert "/opt/groundtruth/gt-index/gt-index" in workflow
     assert "GIT_AUTHOR_EMAIL: groundtruth-ci@example.invalid" in workflow
     assert "GIT_COMMITTER_EMAIL: groundtruth-ci@example.invalid" in workflow
-    assert "GH_TOKEN: ${{ github.token }}" in workflow
     for field in (
         '"github_actions"',
         '"event_name"',

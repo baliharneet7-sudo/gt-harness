@@ -168,7 +168,9 @@ def _github_api_confirms_provenance(
             "User-Agent": "groundtruth-finalstand-validator",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        token = (
+            os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        ).strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(
