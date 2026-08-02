@@ -530,32 +530,45 @@ class CanonicalObservation:
     def render(self) -> str:
         """Render the canonical observation to its model-visible text form.
 
-        The action's own output is emitted first, byte-exact and unwrapped, so
-        the model reads it as its own tool result (no external 'GT' framing
-        that would make the bytes look out-of-band). Deterministic facts join
-        as a bounded, neutral ``<result>`` block the harness still parses.
+        Decision-aid shape (frontier context engineering): the actionable fact
+        leads (attention), the raw result follows byte-exact as evidence, and
+        affordances give the model a next step. A pure pass-through with no
+        facts renders the raw output alone (no wrapper) — the raw IS the
+        answer and any framing would be noise.
         """
-        if self.decision.decision in (Decision.REPLACE, Decision.REWRITE):
-            body = self.replaced
+        facts = [a for a in self.evidence if a.model_visible]
+        decision = self.decision.decision
+
+        if decision in (Decision.REPLACE, Decision.REWRITE):
+            answer = self.replaced
+            raw_part = ""
         elif self.raw_exact:
-            body = self.raw_result
+            answer = ""
+            raw_part = self.raw_result
         else:
-            body = ""
-        lines: list[str] = []
-        if body:
-            lines.append(body)
-        block: list[str] = [
+            answer = ""
+            raw_part = ""
+
+        if decision is Decision.PASS_THROUGH and not facts and not answer:
+            # Pure literal: the raw output is the observation. No wrapper, no
+            # GT framing — byte-exact and minimal.
+            return raw_part
+
+        block = [
             f"<result action=\"{self.action_request.action_id}\" "
-            f"decision=\"{self.decision.decision.value}\" "
-            f"receipt=\"{self.receipt_id}\">"
+            f"decision=\"{decision.value}\" receipt=\"{self.receipt_id}\">"
         ]
-        for artifact in self.evidence:
-            if artifact.model_visible:
-                block.append(
-                    f"<fact owner=\"{artifact.owner}\" "
-                    f"semantics=\"{artifact.semantics}\">"
-                    f"{artifact.render_content()}</fact>"
-                )
+        if answer:
+            block.append(f"<answer>{answer}</answer>")
+        for artifact in facts:
+            block.append(
+                f"<fact owner=\"{artifact.owner}\" "
+                f"semantics=\"{artifact.semantics}\">"
+                f"{artifact.render_content()}</fact>"
+            )
+        affordances = _affordances(facts)
+        if affordances:
+            block.append("affordances: " + " | ".join(affordances))
         if self.anchors:
             block.append("anchors: " + " ".join(self.anchors))
         if self.ambiguity:
@@ -565,8 +578,10 @@ class CanonicalObservation:
         if self.fallback_notice:
             block.append(f"notice: {self.fallback_notice}")
         block.append("</result>")
-        lines.append("\n".join(block))
-        return "\n".join(lines)
+        parts = ["\n".join(block)]
+        if raw_part:
+            parts.append(raw_part)
+        return "\n".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -901,3 +916,19 @@ def _require_major(schema: str, name: str) -> None:
             f"{name} schema {schema!r} is newer than supported "
             f"v{CONTRACTS_SCHEMA_VERSION}"
         )
+
+
+def _affordances(facts: tuple["EvidenceArtifact", ...]) -> tuple[str, ...]:
+    """Deterministic next-step affordances from fact anchors.
+
+    Options, not recommendations: the model chooses whether to act. Derived
+    from the fact's stable anchors so the pointer is exact (path, or path:line).
+    """
+    opts: list[str] = []
+    seen: set[str] = set()
+    for fact in facts:
+        for anchor in fact.anchors:
+            if anchor and anchor not in seen:
+                seen.add(anchor)
+                opts.append(f"read({anchor})")
+    return tuple(opts[:4])

@@ -205,3 +205,117 @@ def test_all_registered_fact_owners_are_in_inventory():
         assert owner in inventory, f"{owner} not in the 129-row inventory"
         row = next(r for r in rows if r["identity"] == owner)
         assert row["category"] == "FACT", f"{owner} is not a FACT identity"
+
+
+# --- W1: affordances render ------------------------------------------------
+
+
+def test_affordances_render_from_anchors():
+    from gt_engine.engine.observe import compile_observation
+
+    fact = EvidenceArtifact(
+        artifact_id="ev-1", owner="localization", semantics="ranked_localization",
+        content={"evidence": "hits", "target": "src/main.py:6"},
+        anchors=("src/main.py:6",), model_visible=True,
+    )
+    observation = compile_observation(
+        _request(),
+        InterceptionDecision(decision=Decision.AUGMENT, reason="postflight"),
+        raw_result="search done",
+        evidence=(fact,),
+        receipt_id="rcpt-1",
+    )
+    rendered = observation.render()
+    assert "affordances: read(src/main.py:6)" in rendered
+    assert "search done" in rendered  # raw retained after the block
+
+
+# --- W2: information-gain value gate ----------------------------------------
+
+
+class _FakeAdapter:
+    repository_revision = "rev"
+    repo_root = ""
+
+    def gateway_state(self):
+        raise AttributeError("no gateway in test")
+
+
+def test_value_gate_drops_syntax_ok(tmp_path):
+    from gt_engine.engine.runner import _postflight_facts
+
+    git = subprocess.run(["git", "init", "-q", str(tmp_path)], capture_output=True)
+    if git.returncode != 0:
+        pytest.skip("git unavailable")
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t.t"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"],
+                   capture_output=True)
+    (tmp_path / "good.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"],
+                   capture_output=True)
+    (tmp_path / "good.py").write_text("x = 2\n", encoding="utf-8")  # still parses OK
+    facts = _postflight_facts(
+        _request(), command="sed -i s/1/2/ good.py", raw="", returncode=0,
+        repo_root=str(tmp_path), adapter=_FakeAdapter(),
+    )
+    assert not any(f.owner == "syntax_result" for f in facts)  # OK is zero-gain
+
+
+def test_value_gate_keeps_syntax_error(tmp_path):
+    from gt_engine.engine.runner import _postflight_facts
+
+    git = subprocess.run(["git", "init", "-q", str(tmp_path)], capture_output=True)
+    if git.returncode != 0:
+        pytest.skip("git unavailable")
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t.t"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"],
+                   capture_output=True)
+    (tmp_path / "bad.py").write_text("def f(:\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"],
+                   capture_output=True)
+    (tmp_path / "bad.py").write_text("def f():\n    return\n", encoding="utf-8")
+    (tmp_path / "bad.py").write_text("def f(:\n    pass\n", encoding="utf-8")
+    facts = _postflight_facts(
+        _request(), command="cat bad.py", raw="", returncode=0,
+        repo_root=str(tmp_path), adapter=_FakeAdapter(),
+    )
+    assert any(f.owner == "syntax_result" and f.content.get("ok") is False
+               for f in facts)
+
+
+def test_value_gate_drops_covering_pass_keeps_red():
+    from gt_engine.engine.runner import _postflight_facts
+
+    facts_pass = _postflight_facts(
+        _request(), command="pytest tests", raw="1 passed", returncode=0,
+        repo_root="", adapter=_FakeAdapter(),
+    )
+    assert not any(f.owner == "covering_red" for f in facts_pass)
+    facts_fail = _postflight_facts(
+        _request(), command="pytest tests", raw="1 failed", returncode=1,
+        repo_root="", adapter=_FakeAdapter(),
+    )
+    assert any(f.owner == "covering_red" and f.content["outcome"] == "failed"
+               for f in facts_fail)
+
+
+# --- W5: ladder census -----------------------------------------------------
+
+
+def test_ladder_census_referenced_and_acted():
+    from scripts.engine_ladder_census import _ladder
+
+    msgs = [
+        {"role": "tool", "content": '<result decision="augment"><fact owner="localization">'
+                                    '{"target": "src/a.py", "file": "src/a.py"}</fact></result>'},
+        {"role": "assistant", "content": "I should look at src/a.py now.",
+         "extra": {"actions": [{"command": "cat src/a.py"}]}},
+    ]
+    census = _ladder(msgs)
+    assert census["localization"]["delivered"] == 1
+    assert census["localization"]["referenced"] == 1
+    assert census["localization"]["acted"] == 1

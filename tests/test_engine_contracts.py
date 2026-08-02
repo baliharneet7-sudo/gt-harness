@@ -121,6 +121,8 @@ def test_evidence_artifact_roundtrip_and_model_visible():
 
 
 def test_canonical_observation_render_decision_and_receipt():
+    # Pure pass-through with no facts renders the raw alone (no wrapper, no
+    # GT framing) - the raw IS the answer.
     req = make_request()
     decision = InterceptionDecision(
         decision=Decision.PASS_THROUGH, reason="literal file view retains semantics"
@@ -132,9 +134,26 @@ def test_canonical_observation_render_decision_and_receipt():
         receipt_id="rcpt-1",
     )
     rendered = obs.render()
-    assert "pass_through" in rendered
-    assert "def main(): pass" in rendered
-    assert "rcpt-1" in rendered
+    assert rendered == "def main(): pass"
+    assert "<result" not in rendered
+
+    # A fact-bearing observation leads with the decision header + fact.
+    fact = EvidenceArtifact(
+        artifact_id="ev-1", owner="obligations", semantics="task span",
+        content={"file": "src/main.py"}, model_visible=True,
+    )
+    obs2 = CanonicalObservation(
+        action_request=req,
+        decision=InterceptionDecision(decision=Decision.AUGMENT, reason="postflight"),
+        raw_result="def main(): pass",
+        evidence=(fact,),
+        receipt_id="rcpt-1",
+    )
+    rendered2 = obs2.render()
+    assert "pass_through" not in rendered2
+    assert "augment" in rendered2
+    assert "rcpt-1" in rendered2
+    assert "def main(): pass" in rendered2  # raw retained byte-exact after the block
 
 
 def test_canonical_observation_replace_uses_declared_bytes():

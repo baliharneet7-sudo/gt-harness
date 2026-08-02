@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any, Mapping
@@ -549,6 +550,7 @@ def _gateway_facts(
     try:
         from ..miniswe_evidence import classify_event
         from groundtruth.runtime.gateway import produce_raw
+        from groundtruth.runtime.adapters.miniswe import arbitrate
     except Exception:  # noqa: BLE001 - gateway is optional
         return ()
     try:
@@ -562,33 +564,52 @@ def _gateway_facts(
             state_revision=adapter.repository_revision,
         )
         envelopes = produce_raw(event, adapter.gateway_state())
+        if not envelopes:
+            return ()
+        # Single-dose: at most one fact per observation (frontier context
+        # hygiene + trust preservation). Arbitrate picks the highest-priority
+        # envelope, rotating away recently-delivered classes and preferring the
+        # fact that answers THIS observation's boundary.
+        winner = arbitrate(
+            envelopes,
+            recently_delivered=frozenset(
+                getattr(adapter, "_dedup_chain", ()) or ()
+            ),
+            observed_event=event.primary_boundary,
+        )
     except Exception:  # noqa: BLE001 - producer failure is an omission
         return ()
-    facts: list[EvidenceArtifact] = []
-    for env in envelopes or ():
-        evidence_type = str(getattr(env, "evidence_type", "") or "")
-        owner = _EVIDENCE_TO_OWNER.get(evidence_type)
-        if owner is None or owner not in ENGINE_FACT_OWNERS:
-            continue
-        target = str(getattr(env, "target", "") or "")
-        content = str(getattr(env, "content", "") or "")
-        artifact_id = (
-            str(getattr(env, "fact_id", "") or "")
-            or hashlib.sha256(f"{owner}:{target}:{content}".encode("utf-8")).hexdigest()[:16]
-        )
-        facts.append(EvidenceArtifact(
-            artifact_id=artifact_id,
-            owner=owner,
-            semantics=evidence_type,
-            content={"evidence": content, "target": target},
-            anchors=(target,) if target else (),
-            producer=str(getattr(env, "producer", "") or "gateway"),
-            producer_version="gateway",
-            freshness_revision=adapter.repository_revision,
-            coverage="produced",
-            model_visible=True,
-        ))
-    return tuple(facts)
+    if winner is None:
+        return ()
+    try:
+        chain = getattr(adapter, "_dedup_chain", None)
+        if isinstance(chain, set):
+            chain.add(getattr(winner, "dedup_key", "") or "")
+    except Exception:  # noqa: BLE001 - fire-once stamping is best-effort
+        pass
+    evidence_type = str(getattr(winner, "evidence_type", "") or "")
+    owner = _EVIDENCE_TO_OWNER.get(evidence_type)
+    if owner is None or owner not in ENGINE_FACT_OWNERS:
+        return ()
+    target = str(getattr(winner, "target", "") or "")
+    content = str(getattr(winner, "content", "") or "")
+    artifact_id = (
+        str(getattr(winner, "fact_id", "") or "")
+        or hashlib.sha256(f"{owner}:{target}:{content}".encode("utf-8")).hexdigest()[:16]
+    )
+    artifact = EvidenceArtifact(
+        artifact_id=artifact_id,
+        owner=owner,
+        semantics=evidence_type,
+        content={"evidence": content, "target": target},
+        anchors=(target,) if target else (),
+        producer=str(getattr(winner, "producer", "") or "gateway"),
+        producer_version="gateway",
+        freshness_revision=adapter.repository_revision,
+        coverage="produced",
+        model_visible=True,
+    )
+    return (artifact,)
 
 
 def _postflight_facts(
@@ -621,13 +642,22 @@ def _postflight_facts(
     )
     for path in changed:
         artifact = _syntax_artifact(path, repo_root)
-        if artifact is not None:
-            facts.append(artifact)
+        if artifact is None:
+            continue
+        content = artifact.content or {}
+        # Information-gain gate: "file parses OK" carries zero novel signal
+        # (the model sees it by reading the file). Only a syntax ERROR ("line N
+        # broken") is decision-relevant. Omitted syntax (unreadable) is kept.
+        if content.get("ok") is True:
+            continue
+        facts.append(artifact)
     covering = _covering_red_artifact(command, raw, returncode)
-    if covering is not None and not any(
-        f.owner == "covering_red" for f in facts
-    ):
-        facts.append(covering)
+    if covering is not None and not any(f.owner == "covering_red" for f in facts):
+        outcome = (covering.content or {}).get("outcome")
+        # RED (failed) is the actionable fact; a pass is visible in the raw and
+        # adds no information.
+        if outcome == "failed":
+            facts.append(covering)
     return tuple(facts)
 
 
