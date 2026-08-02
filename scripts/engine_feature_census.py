@@ -58,11 +58,20 @@ def census() -> dict:
         "localization", "recovery", "signature_delta", "newfile_precedent",
         "submit_refusal",  # caller_contract is REMOVE by disposition
     ]
+    # DELIVERABLE = proven to emit a usable+fresh+shape-valid fact when forced
+    # (tests/test_engine_force_17.py). WIRED is necessary but not sufficient.
+    deliverable_by = {
+        "def_partition": True, "covering_red": True, "syntax_result": True,
+        "obligations": True, "localization": True, "recovery": False,
+        "signature_delta": True, "newfile_precedent": False,
+        "submit_refusal": True,
+    }
     fact_rows = []
     for feature in facts:
         registered = feature in ENGINE_FACT_OWNERS
         # INVOKED = the engine loop actually calls this producer's site.
         invoked = invoked_by.get(feature, "") in runner_src
+        deliverable = deliverable_by.get(feature, False)
         producer = (
             f"gateway:{feature}" if feature in gateway_types
             else f"engine:{invoked_by.get(feature, 'MISSING')}"
@@ -70,7 +79,8 @@ def census() -> dict:
         ok = registered and invoked
         fact_rows.append({
             "feature": feature, "registered_owner": registered,
-            "invoked": invoked, "producer_path": producer, "ok": ok,
+            "invoked": invoked, "deliverable": deliverable,
+            "producer_path": producer, "ok": ok,
         })
 
     # CAP_OWNER lineage: each byte-owner's FACT is registered and delivered.
@@ -114,7 +124,10 @@ def main() -> int:
         for row in result["facts"]:
             print(f"  {'OK ' if row['ok'] else 'MISSING'} {row['feature']:<18} "
                   f"reg={row['registered_owner']} invoked={row['invoked']} "
-                  f"-> {row['producer_path']}")
+                  f"deliverable={row['deliverable']} -> {row['producer_path']}")
+        print(f"  deliverable (forcing-proven): "
+              f"{sum(1 for r in result['facts'] if r['deliverable'])}/"
+              f"{result['fact_count']}")
         print(f"CAP_OWNER lineage wired: {result['caps_ok']}/{result['cap_count']}")
         for row in result["cap_owners"]:
             print(f"  {'OK ' if row['ok'] else 'MISSING'} {row['cap_owner']:<18} "

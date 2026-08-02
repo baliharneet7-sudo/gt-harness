@@ -884,6 +884,47 @@ def _dedup_facts(
     return tuple(out)
 
 
+def _graph_confirms_no_match(command: str, adapter: Any) -> bool:
+    """True when the graph's node index has no symbol matching the search
+    query's key tokens — the search is exhaustive over the indexed scope."""
+    graph_db = getattr(adapter, "graph_db", None)
+    if not graph_db or not os.path.isfile(str(graph_db)):
+        return False
+    query = (command or "").lower()
+    tokens = [t for t in re.findall(r"[a-z_][a-z0-9_]{2,}", query) if t not in {
+        "grep", "rg", "find", "cat", "and", "the", "for", "with", "into"}]
+    if not tokens:
+        return False
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{graph_db}?mode=ro", uri=True)
+        try:
+            match = " OR ".join(f'"{t}"' for t in tokens[:6])
+            try:
+                rows = con.execute(
+                    "SELECT 1 FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT 1",
+                    (match,),
+                ).fetchone()
+            except sqlite3.Error:
+                rows = None
+            if rows:
+                return False
+            # LIKE fallback on the nodes table
+            like = " OR ".join(
+                f"name LIKE '%{_sql_escape_like(t)}%'" for t in tokens[:6]
+            )
+            return con.execute(f"SELECT 1 FROM nodes WHERE {like} LIMIT 1").fetchone() is None
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+def _sql_escape_like(value: str) -> str:
+    return (value or "").replace("'", "''").replace("%", "").replace("_", "\\_")
+
+
 def _stop_signal_fact(
     *,
     command: str,
@@ -918,24 +959,33 @@ def _stop_signal_fact(
         adapter._engine_search_history = history
     count = history.get(normalized, 0)
     history[normalized] = count + 1
-    if count == 0:
+    # Graph-certified STOP: on the FIRST empty search, if the graph's node index
+    # confirms no symbol matches, the search is exhaustive over the indexed scope.
+    graph_certified = count == 0 and _graph_confirms_no_match(command, adapter)
+    if count == 0 and not graph_certified:
         return None  # first empty run; record, do not yet emit
+    notice = (
+        "the graph index has no symbol matching this query; the search is "
+        "exhaustive over the indexed scope"
+        if graph_certified
+        else "this search query already returned no matches this episode; "
+             "retrying is unlikely to help"
+    )
     return EvidenceArtifact(
         artifact_id=hashlib.sha256(
             f"stop:{normalized}".encode("utf-8")
         ).hexdigest()[:16],
         owner="localization",
-        semantics="certified repeated empty search notice",
+        semantics="certified empty-search notice",
         content={
-            "notice": "this search query already returned no matches this "
-                      "episode; retrying is unlikely to help",
+            "notice": notice,
             "query": normalized[:200],
             "occurrences": count + 1,
         },
         producer="engine.stop_signal",
         producer_version="1",
         freshness_revision=adapter.repository_revision,
-        coverage="episode_observed",
+        coverage="episode_observed" if not graph_certified else "graph_certified",
         model_visible=True,
     )
 

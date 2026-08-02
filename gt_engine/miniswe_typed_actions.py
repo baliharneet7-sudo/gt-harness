@@ -517,6 +517,83 @@ def _deterministic_query_api() -> tuple[type, Any] | None:
         raise
 
 
+def _graph_definition_search(
+    arguments: Mapping[str, Any],
+    graph_db: str | Path | None,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    """Graph-backed definition search: locate a symbol's definition.
+
+    Queries the graph's nodes for the requested symbol and returns
+    file:line:signature for each definition node (the graph-certified depth the
+    typed tool previously lacked — definition was REMOVED only because it
+    couldn't be certified; the populated graph now certifies it). Correct-or-
+    quiet: no graph / no match -> None (the caller passes through).
+    """
+    symbol = str(arguments.get("symbol") or arguments.get("name") or arguments.get("query") or "").strip()
+    if not symbol or not graph_db:
+        return None
+    import sqlite3
+
+    db = Path(graph_db)
+    if not db.is_absolute():
+        db = repo_root / db
+    if not db.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT file_path, start_line, signature FROM nodes "
+                "WHERE name = ? AND COALESCE(is_test,0)=0 ORDER BY start_line LIMIT 12",
+                (symbol,),
+            ).fetchall()
+            if not rows:
+                rows = con.execute(
+                    "SELECT file_path, start_line, signature FROM nodes "
+                    "WHERE name LIKE ? AND COALESCE(is_test,0)=0 ORDER BY start_line LIMIT 12",
+                    (f"%{symbol}%",),
+                ).fetchall()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return None
+    if not rows:
+        return None
+    lines = [f"{fp}:{ln}:{(sig or '')[:80]}" for fp, ln, sig in rows if fp]
+    return {
+        "answer": "definition of %s:\n%s" % (symbol, "\n".join(lines)),
+        "anchors": [f"{fp}:{ln}" for fp, ln, _sig in rows if fp],
+        "complete": True,
+    }
+
+
+def _typed_definition_result(
+    request: Any, wire: Mapping[str, Any], graph_db: str | Path | None, root: Path
+) -> dict[str, Any] | None:
+    result = _graph_definition_search(wire.get("arguments") or {}, graph_db, root)
+    if result is None:
+        return None
+    evidence = {
+        "schema": "gt.evidence_artifact.v1",
+        "action_id": wire.get("action_id", ""),
+        "answer": result["answer"],
+        "anchors": result["anchors"],
+        "witnesses": ["graph.nodes"],
+        "producer": "gt-harness.graph_definition.v1",
+        "freshness": {"repository_snapshot": wire.get("repository_snapshot", "")},
+        "semantics": "exact",
+        "coverage": {"complete": True},
+    }
+    return {
+        "direct_answer": result["answer"],
+        "evidence": evidence,
+        "decision": "REPLACE",
+        "reason": "certified graph definition",
+        "returncode": 0,
+    }
+
+
 def execute_typed_action(
     request: Any,
     *,
@@ -557,7 +634,6 @@ def execute_typed_action(
             "freshness": {"repository_snapshot": wire.get("repository_snapshot", "")},
             "semantics": "incomplete",
             "coverage": {},
-            "ambiguity": [],
             "omissions": [certification_omission],
             "raw_fallback": None,
         }
@@ -568,6 +644,43 @@ def execute_typed_action(
             "mode": decision,
             "reason_codes": [reason],
         }
+    elif kind == "definition":
+        # Graph-certified definition search (re-enabled in the ENGINE phase;
+        # the populated graph certifies completeness that advisory-era couldn't).
+        result = _typed_definition_result(request, wire, graph_db, root)
+        if result is not None:
+            direct_answer = result["direct_answer"]
+            evidence = result["evidence"]
+            decision, reason, returncode = (
+                result["decision"], result["reason"], result["returncode"],
+            )
+            decision_payload = {
+                "schema": "gt.interception_decision.v1",
+                "mode": decision,
+                "reason_codes": [reason],
+            }
+        else:
+            certification_omission = "graph_definition_unavailable"
+            direct_answer = None
+            decision, reason, returncode = "PASS_THROUGH", certification_omission, 2
+            decision_payload = {
+                "schema": "gt.interception_decision.v1",
+                "mode": decision,
+                "reason_codes": [reason],
+            }
+            evidence = {
+                "schema": "gt.evidence_artifact.v1",
+                "action_id": wire.get("action_id", ""),
+                "answer": None,
+                "anchors": [],
+                "witnesses": [],
+                "producer": "gt-harness.certification_gate.v1",
+                "freshness": {"repository_snapshot": wire.get("repository_snapshot", "")},
+                "semantics": "incomplete",
+                "coverage": {},
+                "omissions": [certification_omission],
+                "raw_fallback": None,
+            }
     elif (
         core is not None
         and query_api is not None

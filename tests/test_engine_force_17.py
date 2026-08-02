@@ -314,6 +314,20 @@ def test_force_submit_refusal_delivers(monkeypatch):
     )
 
 
+# --- 10. typed definition (WS-3 re-enabled, graph-certified) --------------------
+def test_force_typed_definition_delivers(tmp_path):
+    """The re-enabled typed `definition` kind returns the graph-certified
+    symbol definition (file:line:signature) — the tool-use-superiority win over
+    bare grep."""
+    from gt_engine.miniswe_typed_actions import _graph_definition_search
+
+    db = _mk_graph(tmp_path)
+    result = _graph_definition_search({"symbol": "Bottle"}, db, tmp_path)
+    assert result is not None
+    assert "bottle.py:30" in result["answer"]
+    assert result["complete"]
+
+
 # --- 8-9. recovery + newfile_precedent (condition-gated producers) --------------
 def test_force_recovery_newfile_are_registered():
     """recovery + newfile_precedent are registered owners with a gateway producer
