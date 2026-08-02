@@ -1,6 +1,6 @@
 # Post-Audit Runtime Hardening Verification
 
-This appendix records the GroundTruth hardening implemented after the initial Phase II closeout audit. The current machine authority in [closeout_status.csv](closeout_status.csv) is 22 `COMPLETE`, 3 `IN_PROGRESS`, and 1 `REMOVED`. FS-023 is `COMPLETE`; FS-024, FS-025, and FS-026 remain `IN_PROGRESS` under their separate experiment, promotion, and final-attestation criteria.
+This appendix records the GroundTruth hardening implemented after the initial Phase II closeout audit. The current machine authority in [closeout_status.csv](closeout_status.csv) is 25 `COMPLETE`, 0 `IN_PROGRESS`, and 1 `REMOVED`. FS-024 through FS-026 are terminal under the project owner's one-run-vs-local-baseline override.
 
 ## Provider-free Codespaces receipts
 
@@ -16,7 +16,7 @@ The sole harness and smoke skip is `tests/test_miniswe_smoke.py::test_miniswe_gt
 
 Focused Ruff and whitespace checks pass for `tests/conftest.py` and `tests/runtime/test_runtime_package_isolation_20260801.py`. A wider exploratory Ruff sweep across 18 untracked Python closeout surfaces reports 49 diagnostics, 26 auto-fixable. No edits were applied from that sweep, and this appendix makes no global Ruff-green claim.
 
-These Codespaces receipts remain useful evidence over their recorded dirty worktrees. They were subsequently complemented by the immutable provider-free Actions receipt below. Neither execution made a provider call or ran the paid causal experiment.
+These Codespaces receipts remain useful evidence over their recorded dirty worktrees. They were subsequently complemented by the immutable provider-free Actions receipt below. Neither provider-free execution made a provider call; the later single matched witness is recorded separately and is not a causal campaign.
 
 Before the full suites ran, focused provider-free batches were reported as **140/140** runtime/action tests and **57/57** dependency/verification tests. No machine receipt is created for those two historical focused counts because their exact commands, complete outputs, and artifact hashes are not recoverable. They remain non-terminal prose and are superseded for regression status by the machine-readable full-suite receipt above and the immutable workflow receipt below.
 
@@ -150,7 +150,7 @@ Primary implementation and proof surfaces:
 
 ### Clean full-suite fixture and isolation repairs
 
-The final suite no longer depends on the ignored `artifact_verified/` directory. Verified-adapter comparison artifacts live under `tests/fixtures/verified_adapter/`, and `tests/test_verified_adapter.py` reads that test-owned location. The Codespace byte hashes for the three fixture files are frozen in `receipts/final_codespace_verification.json`. The scoped FS-023 inputs were committed and exercised successfully by run `30729901088`; no broader FS-026 clean-release or rollback-rehearsal claim is inferred.
+The final suite no longer depends on the ignored `artifact_verified/` directory. Verified-adapter comparison artifacts live under `tests/fixtures/verified_adapter/`, and `tests/test_verified_adapter.py` reads that test-owned location. The Codespace byte hashes for the three fixture files are frozen in `receipts/final_codespace_verification.json`. The scoped FS-023 inputs were committed and exercised successfully by run `30729901088`; FS-026's later closure is a bounded documentation attestation, not an inference that this earlier run exercised the single provider witness.
 
 The shared test process now imports the co-located `src` package before unrelated editable installs, while the package-isolation test performs destructive import-cache checks in a subprocess. Reload-sensitive runtime tests preserve the current producer carrier, compare canonical enum values instead of import-generation identity, and repair the shared embedding-cache alias after module reload. Attempt-suffixed task artifacts retain their initial resolved trial identity. Lock ownership, POSIX/Windows path rewriting, delivery deduplication, and sealed Go workspace metadata fixtures now exercise the current deterministic contracts instead of stale implementation assumptions.
 
@@ -170,4 +170,4 @@ Primary implementation and proof surfaces:
 
 ## Status boundary
 
-This hardening and immutable run `30729901088` supply the complete external provider-free workflow identity required by FS-023, which is now `COMPLETE`. FS-024 remains `IN_PROGRESS` because no user-authorized six-arm provider experiment or independent paired outcome analysis has run. FS-025 remains `IN_PROGRESS` because it depends on FS-024's measured evidence before defaults or duplicate paths may change and still needs GT-off and rollback proof. FS-026 remains `IN_PROGRESS` because final attestation depends on terminal FS-024/FS-025 receipts plus the final clean-machine release bundle and rollback rehearsal.
+This hardening and immutable run `30729901088` supply the complete external provider-free workflow identity required by FS-023. The owner subsequently superseded the unexecuted six-arm/60-run plan with one matched witness on `fix-code-vulnerability`. Candidate Actions run `30731388242` produced artifact `8828119172`; its provider trial and verifier passed, while the workflow failed only at later offline result-shape postprocessing. The analyzer was repaired and rerun locally against the immutable artifact without another provider trial. Reward tied `1.0`; calls changed `33 -> 25`, actions `33 -> 37`, pre-edit exploration `19 -> 25`, and raw pre-edit bytes `34,696 -> 43,009`. Identical system-prompt and task-prompt hashes confirm that the GT treatment arrived through advisory observations rather than prompt drift. The report/event delivery-counter discrepancy remains documented and unresolved. FS-024 is complete only as that descriptive one-task witness. FS-025 is complete with decision `KEEP`: stock Mini-SWE remains default and GT explicit opt-in. FS-026 is complete as the bounded final attestation. No general efficacy, solve-rate, non-inferiority, token-reduction, or exploration-reduction claim is made.

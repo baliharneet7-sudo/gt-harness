@@ -1,6 +1,6 @@
 # GroundTruth Phase II Live TODO
 
-This is the current operational authority for closing FS-001 through FS-026. The machine state remains [closeout_status.csv](closeout_status.csv). A carrier type, dormant producer, source diff, or historical checkpoint is not a completion receipt. Every `IN_PROGRESS` row stays open until its terminal criterion is observed in an external workflow or authorized experiment, as applicable.
+This is the terminal operational authority for FS-001 through FS-026. The machine state remains [closeout_status.csv](closeout_status.csv). All rows are terminal under the project owner's one-run-vs-local-baseline override; there is no remaining execution queue.
 
 ## Live queue
 
@@ -29,28 +29,28 @@ This is the current operational authority for closing FS-001 through FS-026. The
 | FS-021 | BUILD | COMPLETE | Fresh closed-scope blockers alone suppress submit in enforce mode, with provider-absence receipt and rollback. | Exact closed fresh blocker gate, immediate enforce kill switch, zero-provider-byte suppression receipt, and receipt-failure fail-open behavior pass the 67/67 widened suite. |
 | FS-022 | REMOVE | REMOVED | Prohibited capabilities have zero public/default visibility and zero execution; comparison controls are isolated. | AST import closure covers 66 files reachable from Mini-SWE and reports zero forbidden findings; typed schema omits comparison controls. |
 | FS-023 | BUILD | COMPLETE | The complete offline battery passes in one immutable external workflow with artifacts and hashes. | GitHub Actions [run 30729901088](https://github.com/harneet2512/gt-harness/actions/runs/30729901088) passed every step at harness `e87cada097f55fe5df203c339148c65fff75c36a` and GroundTruth `61cfdbce2c42751c11028e46e863b3231f0bb70e` with zero provider calls. Artifact `8827623572` is API-bound by digest `1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`; inner bundle SHA-256 is `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`. |
-| FS-024 | BUILD | IN_PROGRESS | User-authorized six-arm matched experiment finishes with independent outcomes and preregistered paired analysis. | The deterministic [execution plan](receipts/experiment_execution_plan.json) binds 10 tasks, 6 arms, and 60 planned trials with SHA-256 `a3edf2fa...`; `executed=false` and `provider_calls=0`, so authorized paid execution remains absent. |
-| FS-025 | MODIFY | IN_PROGRESS | Measured Pareto-dominant defaults ship; duplicate legacy model-visible paths are removed; GT-off parity and rollback pass. | FS-023 is complete, but promotion machinery correctly refuses mutation until FS-024 supplies measured paired evidence; evidence-based defaults, duplicate-path removal, GT-off parity, and rollback proof remain absent. |
-| FS-026 | BUILD | IN_PROGRESS | Every FS item has a terminal receipt; all hashes, runbooks, benchmark results, and rollback rehearsal are frozen. | Run `30729901088` supplies the immutable provider-free run and artifact identities that closed FS-023. Final attestation still depends on terminal FS-024/FS-025 receipts plus a clean-machine release bundle and completed rollback rehearsal. |
+| FS-024 | BUILD | COMPLETE | Execute the owner-approved single matched witness and freeze a bounded descriptive analysis. | Actions run `30731388242`, artifact `8828119172`: the provider trial and verifier passed; offline postprocessing was repaired locally without another provider call. Both arms received reward `1.0`. Calls changed 33 -> 25, actions 33 -> 37, pre-edit exploration 19 -> 25, and raw pre-edit bytes 34,696 -> 43,009. This supports no general efficacy or exploration-reduction claim. |
+| FS-025 | KEEP | COMPLETE | Make the conservative release decision from the bounded witness without weakening baseline behavior. | Stock Mini-SWE remains the default. GroundTruth remains explicit opt-in behind existing mode controls and rollback switches. The reward tie avoids a one-task regression finding, but the worse exploration/byte measures do not justify default promotion. |
+| FS-026 | BUILD | COMPLETE | Publish a terminal, explicitly bounded attestation for every FS row. | All 26 rows are terminal, with FS-022 removed and every other row complete. The attestation incorporates FS-023's immutable provider-free proof and FS-024's one-task descriptive witness; it does not claim benchmark-wide solve-rate improvement, non-inferiority, or exploration reduction. |
 
 ## Current post-audit proof note
 
-The bounded hardening inventory and proof surfaces are recorded in [POST_AUDIT_HARDENING.md](POST_AUDIT_HARDENING.md). The earlier machine-readable [Codespaces receipt](receipts/final_codespace_verification.json) records GroundTruth **9,980 passed, 415 skipped, 6 expected failures**, harness **592 collected, 591 passed, 1 skipped**, offline smoke **10 collected, 9 passed, 1 skipped**, and a passing full tagged Go suite. Immutable Actions run `30729901088` subsequently reran the provider-free closure at committed inputs, passed every step, uploaded the content-addressed artifact, and closed FS-023. No causal provider experiment ran, so FS-024/FS-025 remain open and FS-026 remains transitively open.
+The bounded hardening inventory and proof surfaces are recorded in [POST_AUDIT_HARDENING.md](POST_AUDIT_HARDENING.md). The earlier machine-readable [Codespaces receipt](receipts/final_codespace_verification.json) records GroundTruth **9,980 passed, 415 skipped, 6 expected failures**, harness **592 collected, 591 passed, 1 skipped**, offline smoke **10 collected, 9 passed, 1 skipped**, and a passing full tagged Go suite. Immutable Actions run `30729901088` subsequently reran the provider-free closure at committed inputs and closed FS-023. The owner then superseded the six-arm protocol with the completed one-task matched witness described above.
 
-## Ten-minute checkpoint loop
+## Closed checkpoint loop
 
-At every checkpoint:
+No recurring checkpoint is required. If the repository is reopened, use this audit sequence:
 
 1. Pull the latest external workflow state by immutable run identity.
 2. Update only evidence that actually changed.
 3. Run `python scripts/generate_gt_finalstand.py --check` and `python scripts/validate_gt_finalstand.py` in the Codespace or GitHub Actions job.
 4. Keep every missing proof attached to its FS row.
-5. Promote a status only when its terminal criterion is fully observed; otherwise leave it `IN_PROGRESS`.
+5. Do not reopen a terminal row without recording a new owner-approved scope.
 
 ## Current execution state
 
-- Machine authority: **22 `COMPLETE`, 3 `IN_PROGRESS`, 1 `REMOVED`**.
+- Machine authority: **25 `COMPLETE`, 0 `IN_PROGRESS`, 1 `REMOVED`**.
 - Provider-free regression state: immutable GitHub Actions run `30729901088` is green at harness `e87cada097f55fe5df203c339148c65fff75c36a` and GroundTruth `61cfdbce2c42751c11028e46e863b3231f0bb70e`; artifact `8827623572` and both archive hashes are recorded above.
-- Open terminal gates: FS-024 authorized paired experiment, FS-025 evidence-based promotion and rollback, and FS-026 final clean-machine release/rollback closure after FS-024 and FS-025.
+- Open terminal gates: none.
 - FS-022 remains `REMOVED` by decision.
 - Historical checkpoint records are preserved in [LIVE_TODO_HISTORY.md](LIVE_TODO_HISTORY.md). They are superseded and are not current status authority.

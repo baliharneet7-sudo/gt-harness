@@ -35,12 +35,20 @@ def test_finalstand_is_machine_valid() -> None:
     }
 
 
-def test_paid_experiment_is_not_claimed_complete() -> None:
+def test_single_witness_closes_fs024_without_claiming_population_efficacy() -> None:
     validator = _load_validator()
     statuses = validator._rows("closeout_status.csv")
     fs024 = next(row for row in statuses if row["todo"] == "FS-024")
-    assert fs024["status"] == "IN_PROGRESS"
-    assert "no paid experiment" in fs024["evidence"].lower()
+    analysis = validator._json("receipts/fs024_single_witness_analysis.json")
+    execution = validator._json("receipts/fs024_single_witness_execution.json")
+    assert fs024["status"] == "COMPLETE"
+    assert analysis["matched_tasks"] == 1
+    assert analysis["inferential_claim"] is False
+    assert validator._valid_single_witness_analysis(analysis)
+    assert validator._valid_single_witness_execution(
+        execution,
+        ROOT / "gt_finalstand" / "receipts" / "fs024_single_witness_analysis.json",
+    )
 
 
 def test_live_todo_is_current_only_and_preserves_history_in_archive() -> None:
@@ -49,7 +57,7 @@ def test_live_todo_is_current_only_and_preserves_history_in_archive() -> None:
         encoding="utf-8"
     )
     assert "## Checkpoints" not in live
-    assert "22 `COMPLETE`, 3 `IN_PROGRESS`, 1 `REMOVED`" in live
+    assert "25 `COMPLETE`, 0 `IN_PROGRESS`, 1 `REMOVED`" in live
     assert "LIVE_TODO_HISTORY.md" in live
     assert "historical and superseded" in history.lower()
     assert "### 2026-08-01T20:41:33Z" in history
@@ -65,29 +73,36 @@ def _validate_with_status(module, todo: str, status: str) -> dict[str, object]:
     return module.validate()
 
 
-def test_fs025_completion_requires_all_promotion_evidence() -> None:
+def test_fs025_completion_requires_conservative_keep_evidence() -> None:
     validator = _load_validator()
-    result = _validate_with_status(validator, "FS-025", "COMPLETE")
-    assert any(
-        error.startswith("FS-025 cannot be COMPLETE without terminal promotion evidence:")
-        and "paid_experiment" in error
-        and "go_source_binary" in error
-        and "rollback_rehearsal" in error
-        and "default_promotion" in error
-        for error in result["errors"]
+    analysis_path = ROOT / "gt_finalstand" / "receipts" / "fs024_single_witness_analysis.json"
+    execution_path = ROOT / "gt_finalstand" / "receipts" / "fs024_single_witness_execution.json"
+    promotion = validator._json("receipts/fs025_promotion_decision.json")
+    assert validator._valid_keep_decision(
+        promotion, execution_path, analysis_path
     )
+    assert promotion["decision"] == "KEEP"
+    assert promotion["mutation_performed"] is False
+    assert promotion["default_behavior"]["groundtruth_default_enabled"] is False
 
 
-def test_fs026_completion_requires_closed_prerequisites_and_final_proofs() -> None:
+def test_fs026_completion_is_hash_bound_and_bounded() -> None:
     validator = _load_validator()
-    result = _validate_with_status(validator, "FS-026", "COMPLETE")
-    assert any(
-        error.startswith("FS-026 cannot be COMPLETE while prerequisites/proofs are open:")
-        and "FS-024" in error
-        and "FS-025" in error
-        and "rollback_rehearsal" in error
-        for error in result["errors"]
+    receipts = ROOT / "gt_finalstand" / "receipts"
+    attestation = validator._json("receipts/fs026_final_attestation.json")
+    assert validator._valid_final_attestation(
+        attestation,
+        receipts / "fs024_single_witness_execution.json",
+        receipts / "fs024_single_witness_analysis.json",
+        receipts / "fs025_promotion_decision.json",
     )
+    assert attestation["claims"]["benchmark_wide_efficacy"] is False
+    assert attestation["terminal_rows"] == {
+        "complete": 25,
+        "in_progress": 0,
+        "removed": 1,
+        "total": 26,
+    }
 
 
 def test_promotion_refusal_uses_terminal_offline_receipt() -> None:
@@ -208,7 +223,9 @@ def _future_fs023_receipts(validator):
     ):
         path = ROOT / "gt_finalstand" / "receipts" / name
         content = path.read_bytes() if path.is_file() else b"{}\n"
-        receipt_inputs[name] = hashlib.sha256(content).hexdigest()
+        receipt_inputs[name] = hashlib.sha256(
+            validator._normalized_text_bytes(content)
+        ).hexdigest()
     workflow = {
         "schema": "gt.provider_free_workflow_receipt.v1",
         "ok": True,
@@ -275,7 +292,12 @@ def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
     for name in workflow["receipt_inputs"]:
         path = ROOT / "gt_finalstand" / "receipts" / name
         receipt_entries.append(
-            (f"receipts/{name}", path.read_bytes() if path.is_file() else b"{}\n")
+            (
+                f"receipts/{name}",
+                validator._normalized_text_bytes(path.read_bytes())
+                if path.is_file()
+                else b"{}\n",
+            )
         )
     inner_entries = [
         *receipt_entries,
@@ -285,9 +307,12 @@ def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
         ),
         (
             ".github/workflows/gt_finalstand_provider_free.yml",
-            workflow_path.read_bytes(),
+            validator._normalized_text_bytes(workflow_path.read_bytes()),
         ),
-        ("language_operation_compatibility.json", compatibility.read_bytes()),
+        (
+            "language_operation_compatibility.json",
+            validator._normalized_text_bytes(compatibility.read_bytes()),
+        ),
         *extra_inner,
     ]
     inner = _zip_bytes(inner_entries)
@@ -313,7 +338,9 @@ def _mock_github_artifact(validator, provenance, workflow, *, extra_inner=()):
     }
     contents = {
         "encoding": "base64",
-        "content": base64.b64encode(workflow_path.read_bytes()).decode(),
+        "content": base64.b64encode(
+            validator._normalized_text_bytes(workflow_path.read_bytes())
+        ).decode(),
     }
     return run, artifact, contents, outer
 
@@ -450,7 +477,7 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert '"receipt_inputs"' in workflow
 
 
-def test_post_audit_receipts_close_only_fs023_terminal_row() -> None:
+def test_post_audit_and_single_witness_receipts_close_terminal_rows() -> None:
     appendix = (
         ROOT / "gt_finalstand" / "POST_AUDIT_HARDENING.md"
     ).read_text(encoding="utf-8")
@@ -467,7 +494,7 @@ def test_post_audit_receipts_close_only_fs023_terminal_row() -> None:
         if row["todo"] in {"FS-023", "FS-024", "FS-025", "FS-026"}
     } == {
         "FS-023": "COMPLETE",
-        "FS-024": "IN_PROGRESS",
-        "FS-025": "IN_PROGRESS",
-        "FS-026": "IN_PROGRESS",
+        "FS-024": "COMPLETE",
+        "FS-025": "COMPLETE",
+        "FS-026": "COMPLETE",
     }
