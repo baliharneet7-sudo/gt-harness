@@ -10,8 +10,7 @@
   "ok": true,
   "schema": "gt.finalstand.validation.v1",
   "status_counts": {
-    "COMPLETE": 21,
-    "IN_PROGRESS": 4,
+    "COMPLETE": 25,
     "REMOVED": 1
   }
 }

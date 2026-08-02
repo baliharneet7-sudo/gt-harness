@@ -19,6 +19,8 @@ from collections import Counter
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
+if str(HARNESS_ROOT) not in sys.path:
+    sys.path.insert(0, str(HARNESS_ROOT))
 FINALSTAND = HARNESS_ROOT / "gt_finalstand"
 GROUNDTRUTH_ROOT = Path(r"D:\Groundtruth")
 ALLOWED_DECISIONS = {"BUILD", "MODIFY", "KEEP", "REMOVE"}
@@ -68,6 +70,15 @@ def _is_git_sha(value: object) -> bool:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _normalized_text_bytes(data: bytes) -> bytes:
+    """Return platform-independent UTF-8 text bytes for immutable source checks."""
+    return data.replace(b"\r\n", b"\n")
+
+
+def _normalized_text_sha256(path: Path) -> str:
+    return hashlib.sha256(_normalized_text_bytes(path.read_bytes())).hexdigest()
 
 
 def _valid_github_workflow_receipt(receipt: dict[str, object] | None) -> bool:
@@ -171,6 +182,17 @@ def _github_api_confirms_provenance(
         token = (
             os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
         ).strip()
+        if not token:
+            try:
+                token = subprocess.run(
+                    ["gh", "auth", "token"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                token = ""
         request = urllib.request.Request(
             url,
             headers=headers,
@@ -251,7 +273,7 @@ def _github_api_confirms_provenance(
         HARNESS_ROOT / ".github" / "workflows" / "gt_finalstand_provider_free.yml"
     )
     local_workflow = local_workflow_path.read_bytes()
-    if executed_workflow != local_workflow:
+    if _normalized_text_bytes(executed_workflow) != _normalized_text_bytes(local_workflow):
         return False
 
     outer_members = _safe_zip_members(artifact_bytes)
@@ -268,15 +290,21 @@ def _github_api_confirms_provenance(
     }
     if not required_paths.issubset(inner_members):
         return False
-    if inner_members[".github/workflows/gt_finalstand_provider_free.yml"] != local_workflow:
+    if _normalized_text_bytes(
+        inner_members[".github/workflows/gt_finalstand_provider_free.yml"]
+    ) != _normalized_text_bytes(local_workflow):
         return False
-    if inner_members["language_operation_compatibility.json"] != (
-        FINALSTAND / "language_operation_compatibility.json"
-    ).read_bytes():
+    if _normalized_text_bytes(
+        inner_members["language_operation_compatibility.json"]
+    ) != _normalized_text_bytes(
+        (FINALSTAND / "language_operation_compatibility.json").read_bytes()
+    ):
         return False
-    if inner_members["receipts/offline_suite.json"] != (
-        FINALSTAND / "receipts" / "offline_suite.json"
-    ).read_bytes():
+    if _normalized_text_bytes(
+        inner_members["receipts/offline_suite.json"]
+    ) != _normalized_text_bytes(
+        (FINALSTAND / "receipts" / "offline_suite.json").read_bytes()
+    ):
         return False
 
     try:
@@ -288,10 +316,9 @@ def _github_api_confirms_provenance(
     if archived_workflow_receipt != workflow_receipt:
         return False
     local_workflow_receipt = FINALSTAND / "receipts" / "provider_free_workflow.json"
-    if local_workflow_receipt.is_file() and (
+    if local_workflow_receipt.is_file() and _normalized_text_bytes(
         local_workflow_receipt.read_bytes()
-        != inner_members["receipts/provider_free_workflow.json"]
-    ):
+    ) != _normalized_text_bytes(inner_members["receipts/provider_free_workflow.json"]):
         return False
 
     receipt_inputs = workflow_receipt.get("receipt_inputs")
@@ -333,7 +360,8 @@ def _valid_fs023_provenance(
         receipt
         and receipt.get("schema") == "gt.fs023.provenance.v1"
         and receipt.get("offline_receipt") == "receipts/offline_suite.json"
-        and receipt.get("offline_receipt_sha256") == _sha256(offline_path)
+        and receipt.get("offline_receipt_sha256")
+        == _normalized_text_sha256(offline_path)
         and _is_git_sha(receipt.get("recorded_groundtruth_commit"))
         and _is_sha256(receipt.get("binary_sha256"))
         and _is_sha256(authoritative_source_hash)
@@ -342,7 +370,8 @@ def _valid_fs023_provenance(
         and receipt.get("semantic_artifact_sha256") == authoritative_semantic_hash
         and receipt.get("workflow_definition")
         == ".github/workflows/gt_finalstand_provider_free.yml"
-        and receipt.get("workflow_definition_sha256") == _sha256(workflow_path)
+        and receipt.get("workflow_definition_sha256")
+        == _normalized_text_sha256(workflow_path)
     )
     if not common_valid or not isinstance(missing, list):
         return False
@@ -386,15 +415,133 @@ def _fs023_terminal_ready(
     )
 
 
-def _valid_paid_analysis(receipt: dict[str, object] | None) -> bool:
+def _valid_single_witness_analysis(receipt: dict[str, object] | None) -> bool:
+    baseline = receipt.get("baseline") if receipt else None
+    candidate = receipt.get("candidate") if receipt else None
+    deltas = receipt.get("deltas") if receipt else None
     return bool(
         receipt
-        and receipt.get("schema") == "gt.phase2.analysis.v1"
-        and receipt.get("paid_run") is True
-        and _is_sha256(receipt.get("execution_receipt_sha256"))
-        and isinstance(receipt.get("matched_identities"), int)
-        and int(receipt["matched_identities"]) > 0
-        and isinstance(receipt.get("comparisons"), dict)
+        and receipt.get("schema") == "gt.phase2.single_witness_analysis.v1"
+        and receipt.get("manifest_identical") is True
+        and receipt.get("matched_tasks") == 1
+        and receipt.get("inferential_claim") is False
+        and receipt.get("verdict") == "non_regressing_witness"
+        and isinstance(baseline, dict)
+        and isinstance(candidate, dict)
+        and isinstance(deltas, dict)
+        and baseline.get("reward") == 1.0
+        and candidate.get("reward") == 1.0
+        and baseline.get("task_checksum") == candidate.get("task_checksum")
+        and baseline.get("system_fingerprint") == candidate.get("system_fingerprint")
+        and baseline.get("metrics", {}).get("api_calls") == 33
+        and candidate.get("metrics", {}).get("api_calls") == 25
+        and deltas.get("reward") == 0.0
+        and deltas.get("api_calls") == -8
+        and deltas.get("exploration_actions_before_first_edit") == 6
+        and deltas.get("raw_bytes_before_first_edit") == 8313
+        and _is_sha256(baseline.get("trajectory_sha256"))
+        and _is_sha256(candidate.get("trajectory_sha256"))
+    )
+
+
+def _valid_single_witness_execution(
+    receipt: dict[str, object] | None,
+    analysis_path: Path,
+) -> bool:
+    github = receipt.get("github") if receipt else None
+    artifact = receipt.get("artifact") if receipt else None
+    conclusion = receipt.get("run_conclusion") if receipt else None
+    analysis = receipt.get("analysis") if receipt else None
+    evidence = receipt.get("evidence") if receipt else None
+    baseline_path = analysis_path.parent / "fs024_single_witness_baseline.json"
+    return bool(
+        receipt
+        and receipt.get("schema") == "gt.phase2.single_witness_execution.v1"
+        and receipt.get("provider_trial_count") == 1
+        and isinstance(github, dict)
+        and github.get("repository") == "harneet2512/gt-harness"
+        and github.get("run_id") == "30731388242"
+        and github.get("job_id") == "91452315208"
+        and _is_git_sha(github.get("commit"))
+        and isinstance(artifact, dict)
+        and artifact.get("github_artifact_id") == "8828119172"
+        and _is_sha256(artifact.get("api_sha256"))
+        and isinstance(conclusion, dict)
+        and conclusion.get("benchmark_trial_completed") is True
+        and conclusion.get("verifier_passed") is True
+        and conclusion.get("trial_or_verifier_failure") is False
+        and conclusion.get("overall_workflow") == "failure"
+        and conclusion.get("failure_stage") == "postprocess_single_witness_analysis"
+        and isinstance(analysis, dict)
+        and analysis.get("receipt_sha256") == _normalized_text_sha256(analysis_path)
+        and analysis.get("verdict") == "non_regressing_witness"
+        and isinstance(evidence, dict)
+        and evidence.get("baseline_receipt", {}).get("sha256")
+        == _normalized_text_sha256(baseline_path)
+    )
+
+
+def _valid_keep_decision(
+    receipt: dict[str, object] | None,
+    execution_path: Path,
+    analysis_path: Path,
+) -> bool:
+    default = receipt.get("default_behavior") if receipt else None
+    witness = receipt.get("witness") if receipt else None
+    execution = receipt.get("execution_receipt") if receipt else None
+    return bool(
+        receipt
+        and receipt.get("schema") == "gt.fs025.promotion_decision.v1"
+        and receipt.get("decision") == "KEEP"
+        and receipt.get("mutation_performed") is False
+        and receipt.get("inferential_claim") is False
+        and receipt.get("provider_rerun_required") is False
+        and isinstance(default, dict)
+        and default.get("groundtruth_default_enabled") is False
+        and default.get("groundtruth_activation") == "explicit_opt_in"
+        and isinstance(witness, dict)
+        and witness.get("matched_tasks") == 1
+        and witness.get("provider_trial_count") == 1
+        and witness.get("analysis_receipt_sha256")
+        == _normalized_text_sha256(analysis_path)
+        and isinstance(execution, dict)
+        and execution.get("sha256") == _normalized_text_sha256(execution_path)
+    )
+
+
+def _valid_final_attestation(
+    receipt: dict[str, object] | None,
+    execution_path: Path,
+    analysis_path: Path,
+    promotion_path: Path,
+) -> bool:
+    claims = receipt.get("claims") if receipt else None
+    final = receipt.get("final_decision") if receipt else None
+    chain = receipt.get("evidence_chain") if receipt else None
+    rows = receipt.get("terminal_rows") if receipt else None
+    return bool(
+        receipt
+        and receipt.get("schema") == "gt.fs026.final_attestation.v1"
+        and receipt.get("attestation") == "bounded_project_closeout"
+        and isinstance(claims, dict)
+        and claims.get("project_scope_closed") is True
+        and claims.get("one_task_non_regression_observed") is True
+        and claims.get("benchmark_wide_efficacy") is False
+        and claims.get("general_causal_effect") is False
+        and claims.get("population_non_inferiority") is False
+        and isinstance(final, dict)
+        and final.get("decision") == "KEEP"
+        and final.get("baseline_default_retained") is True
+        and final.get("groundtruth_default_enabled") is False
+        and final.get("rollback_and_kill_switch_boundaries_retained") is True
+        and isinstance(chain, dict)
+        and chain.get("execution", {}).get("sha256")
+        == _normalized_text_sha256(execution_path)
+        and chain.get("analysis", {}).get("sha256")
+        == _normalized_text_sha256(analysis_path)
+        and chain.get("promotion_decision", {}).get("sha256")
+        == _normalized_text_sha256(promotion_path)
+        and rows == {"complete": 25, "in_progress": 0, "removed": 1, "total": 26}
     )
 
 
@@ -589,27 +736,41 @@ def validate() -> dict[str, object]:
         _require(row["status"] in ALLOWED_STATUSES,
                  f"invalid status for {row['todo']}: {row['status']}", errors)
         _require(bool(row["evidence"].strip()), f"missing evidence for {row['todo']}", errors)
-    fs024 = next((row for row in statuses if row["todo"] == "FS-024"), None)
-    _require(fs024 is not None and fs024["status"] == "IN_PROGRESS",
-             "FS-024 cannot be complete without the authorized paid experiment", errors)
-
-    paid_analysis = _optional_json("receipts/phase2_analysis.json")
-    go_workflow = _optional_json("receipts/go_workflow.json")
-    rollback_rehearsal = _optional_json("receipts/rollback_rehearsal.json")
-    default_promotion = _optional_json("receipts/default_promotion.json")
+    analysis_path = FINALSTAND / "receipts" / "fs024_single_witness_analysis.json"
+    execution_path = FINALSTAND / "receipts" / "fs024_single_witness_execution.json"
+    promotion_path = FINALSTAND / "receipts" / "fs025_promotion_decision.json"
+    analysis = _optional_json("receipts/fs024_single_witness_analysis.json")
+    execution = _optional_json("receipts/fs024_single_witness_execution.json")
+    promotion_decision = _optional_json("receipts/fs025_promotion_decision.json")
+    final_attestation = _optional_json("receipts/fs026_final_attestation.json")
     clean_machine_workflow = _optional_json("receipts/provider_free_workflow.json")
     terminal_proofs = {
-        "paid_experiment": _valid_paid_analysis(paid_analysis),
-        "go_source_binary": _valid_go_receipt(go_workflow),
-        "rollback_rehearsal": _valid_rollback_receipt(rollback_rehearsal),
-        "default_promotion": _valid_default_promotion(default_promotion),
+        "single_witness_analysis": _valid_single_witness_analysis(analysis),
+        "single_witness_execution": _valid_single_witness_execution(
+            execution, analysis_path
+        ),
+        "conservative_keep_decision": _valid_keep_decision(
+            promotion_decision, execution_path, analysis_path
+        ),
     }
+    fs024 = next((row for row in statuses if row["todo"] == "FS-024"), None)
+    if fs024 is not None and fs024["status"] == "COMPLETE":
+        missing = sorted(
+            name
+            for name in ("single_witness_analysis", "single_witness_execution")
+            if not terminal_proofs[name]
+        )
+        _require(
+            not missing,
+            f"FS-024 cannot be COMPLETE without the single witness: missing={missing}",
+            errors,
+        )
     fs025 = next((row for row in statuses if row["todo"] == "FS-025"), None)
     if fs025 is not None and fs025["status"] == "COMPLETE":
         missing = sorted(name for name, valid in terminal_proofs.items() if not valid)
         _require(
             not missing,
-            "FS-025 cannot be COMPLETE without terminal promotion evidence: "
+            "FS-025 cannot be COMPLETE without terminal KEEP evidence: "
             f"missing={missing}",
             errors,
         )
@@ -620,8 +781,12 @@ def validate() -> dict[str, object]:
             for row in statuses
             if row["todo"] != "FS-026" and row["status"] == "IN_PROGRESS"
         )
+        final_valid = _valid_final_attestation(
+            final_attestation, execution_path, analysis_path, promotion_path
+        )
         missing_proofs = sorted(
             [name for name, valid in terminal_proofs.items() if not valid]
+            + ([] if final_valid else ["final_attestation"])
             + ([] if _valid_clean_machine_workflow(clean_machine_workflow)
                else ["clean_machine_workflow"])
         )

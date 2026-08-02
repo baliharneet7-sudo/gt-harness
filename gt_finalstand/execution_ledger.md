@@ -1,6 +1,6 @@
 # GroundTruth Final Stand Execution Ledger
 
-This ledger records the implementation state observed on 2026-08-01. It is an evidence record, not a claim that the terminal roadmap is finished. The machine authority for all 26 item states is [closeout_status.csv](closeout_status.csv). The validator rejects missing IDs, invalid states, missing evidence, and any claim that FS-024 is complete without the authorized paid experiment.
+This ledger records the terminal implementation state through 2026-08-02. The machine authority for all 26 item states is [closeout_status.csv](closeout_status.csv). Under the project owner's final override, the one-run-vs-local-baseline witness replaces the previously planned six-arm experiment.
 
 ## Program manifest
 
@@ -20,7 +20,7 @@ This ledger records the implementation state observed on 2026-08-01. It is an ev
 | Native language manifest SHA-256 | `53afc44596f72668e11b5511f47424c5911f2b24682730bfb90b58a3d2297631` | GroundTruth registry-derived source manifest; generated into and consumed by the harness configuration binding |
 | Codespace Go receipt | GroundTruth `7fcb019104f0e43311e2db009950e60014bc1f4b`; `CGO_ENABLED=1 go test -tags sqlite_fts5 ./...` PASS | All Go packages compiled and passed in Codespaces; immutable workflow URL and artifact bundle remain a project-closeout input to FS-026 |
 | Final Codespaces verification | `receipts/final_codespace_verification.json` | Binds product, harness, smoke, tagged-Go, worktree, and clean-fixture evidence; explicitly non-terminal for FS-023 through FS-026 |
-| Paid Phase II experiment | not executed | FS-024 remains `IN_PROGRESS`; no provider call or paid run is claimed |
+| Phase II terminal witness | one GT advisory candidate compared with one frozen local GT-off baseline | FS-024 is complete under the owner's bounded override; the old six-arm/60-run plan was not executed |
 
 The repository trees are dirty and contain pre-existing user work. The two tracked-diff hashes are not complete worktree manifests because Git diffs omit untracked paths. A release manifest must content-address the final tracked and untracked release set after FS-025 and FS-026 close it.
 
@@ -32,7 +32,7 @@ Only these current states are legal:
 - `IN_PROGRESS`: code or design exists, but at least one acceptance proof is absent.
 - `REMOVED`: the implementation and advertised surface are absent and zero visibility is proven.
 
-Current machine count: **22 COMPLETE, 3 IN_PROGRESS, 1 REMOVED**.
+Current machine count: **25 COMPLETE, 0 IN_PROGRESS, 1 REMOVED**.
 
 The complete 26-row status, decision, confidence, evidence, and missing-proof table is [closeout_status.csv](closeout_status.csv). A status is intentionally conservative: partial implementation never becomes `COMPLETE`, and a removal objective remains `IN_PROGRESS` while legacy execution paths still exist.
 
@@ -92,7 +92,7 @@ The complete 26-row status, decision, confidence, evidence, and missing-proof ta
 - **Observed battery:** `terminal=true`, `ok=true`, zero limitations/failures, 10 cold native `sqlite_fts5` builds, byte-identical semantic artifacts, complete declared adversarial corpus coverage, runtime/static probes, GT-off and stock-Bash parity, sentinel replacement/leak checks, cost measurements, and `provider_calls=0`.
 - **Artifact binding:** uploaded artifact `8827623572` has API digest `sha256:1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`; the downloaded outer archive matches it exactly and contains inner deterministic bundle SHA-256 `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`.
 - **Provenance interpretation:** `fs023_provenance.json` is intentionally pre-artifact and explicitly lists the post-run identities it cannot know. `provider_free_workflow.json`, the successful run API record, and the artifact API digest supply those identities; all ten receipt-input hashes in the workflow receipt independently match the bundle entries.
-- **Boundary:** this closes FS-023 only. It does not execute FS-024's paid causal experiment, establish FS-025's measured promotion, or complete FS-026's final release and rollback attestation.
+- **Boundary:** this closes the provider-free FS-023 scope. FS-024 is separately closed by the owner-approved single matched witness; FS-025 keeps the baseline default; FS-026 is the bounded final attestation.
 
 ### FS-010/FS-011/FS-014/FS-020 — bounded evidence completion cluster
 
@@ -106,7 +106,7 @@ The complete 26-row status, decision, confidence, evidence, and missing-proof ta
 
 [POST_AUDIT_HARDENING.md](POST_AUDIT_HARDENING.md) records the subsequent runtime hardening: injected runtime closure, action-specific freshness and snapshot manifests, same-byte syntax checking, removal of definition/reference/caller execution surfaces, response-committed receipts, Rust task-owned dependency provenance, bounded presubmit syntax execution, exact-only canonical submit suppression, restored clean-CI coverage, and independent acquisition/delivery counters.
 
-The terminal provider-free Codespaces receipt records GroundTruth **9,980 passed, 415 skipped, 6 expected failures** with JUnit SHA-256 `2e96bae37da6761c1a1088a988d08ad0642ffc447190cdbf94cf160e8dbac688`; harness **592 collected, 591 passed, 1 skipped** with JUnit SHA-256 `0a26259408a93879563f288c7f1433331aff27ecf20c59350ec32733ff075189`; offline smoke **10 collected, 9 passed, 1 skipped** with JUnit SHA-256 `c420152806eabc9dfa73ef98394d3acf0482926ad8974913ef4a1795a5716234`; and a passing full tagged Go suite. `scripts/ci/substrate_proof.sh` also passed Bash syntax checking after LF normalization. Immutable Actions run `30729901088` subsequently exercised the committed provider-free closure and supplied the external run/artifact linkage that completes FS-023. No provider-bound causal experiment ran, so FS-024 and FS-025 remain open and FS-026 remains transitively open.
+The terminal provider-free Codespaces receipt records GroundTruth **9,980 passed, 415 skipped, 6 expected failures** with JUnit SHA-256 `2e96bae37da6761c1a1088a988d08ad0642ffc447190cdbf94cf160e8dbac688`; harness **592 collected, 591 passed, 1 skipped** with JUnit SHA-256 `0a26259408a93879563f288c7f1433331aff27ecf20c59350ec32733ff075189`; offline smoke **10 collected, 9 passed, 1 skipped** with JUnit SHA-256 `c420152806eabc9dfa73ef98394d3acf0482926ad8974913ef4a1795a5716234`; and a passing full tagged Go suite. `scripts/ci/substrate_proof.sh` also passed Bash syntax checking after LF normalization. Immutable Actions run `30729901088` subsequently exercised the committed provider-free closure and supplied the external run/artifact linkage that completes FS-023. FS-024 through FS-026 are closed separately under the owner-approved bounded witness and conservative default decision.
 
 Focused Ruff and whitespace checks pass on the final package-isolation fixture repair. An exploratory wider Ruff sweep over 18 untracked Python closeout surfaces reports 49 diagnostics, including 26 auto-fixable findings. No global Ruff-green claim is made, and no broad mechanical lint rewrite was applied.
 
@@ -114,9 +114,9 @@ Focused Ruff and whitespace checks pass on the final package-isolation fixture r
 
 The Go implementation has now been compiled and tested in Codespaces at GroundTruth commit `7fcb019104f0e43311e2db009950e60014bc1f4b`: the specs gate passed, the Python compatibility suite passed 17/17, and `CGO_ENABLED=1 go test -tags sqlite_fts5 ./...` passed across all Go packages. FS-003, FS-007, and FS-015 therefore have executable external evidence. The generated native registry is the harness language authority, identified by source manifest SHA-256 `53afc44596f72668e11b5511f47424c5911f2b24682730bfb90b58a3d2297631`; FS-026 owns the final workflow URL, logs, hashes, and rollback bundle.
 
-The final dirty-worktree Python and smoke evidence is frozen in `receipts/final_codespace_verification.json`. For FS-023, the previously absent workflow identities are now populated by run `30729901088`, artifact `8827623572`, API digest `1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`, and inner bundle SHA-256 `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`. FS-026 still owns the broader final release, experiment, promotion, and rollback attestation.
+The final dirty-worktree Python and smoke evidence is frozen in `receipts/final_codespace_verification.json`. For FS-023, the previously absent workflow identities are populated by run `30729901088`, artifact `8827623572`, API digest `1de4fa253719edf851484d8ab98b7e9b7077f11552a6f8c18ecf0401c328ac74`, and inner bundle SHA-256 `64f416aee72fdc3ed6828ca0cb68ceda68455b3d363997053280cc71cf92150f`. FS-026 incorporates that provider-free authority plus the bounded FS-024/FS-025 closure decision.
 
-The final FS-026 receipt fields remain:
+The immutable FS-023 workflow fields incorporated by the final FS-026 attestation are:
 
 | Field | Required value |
 |---|---|
@@ -128,11 +128,17 @@ The final FS-026 receipt fields remain:
 | Result | exit status and test/package counts |
 | Artifacts | binary, manifest, and log SHA-256 values |
 
-## Paid experiment boundary
+## Owner-approved matched-witness boundary
 
-FS-024 is not executed. The accepted paper specifies a six-arm paired causal experiment, but this session did not receive authorization to spend provider funds. Existing trajectories remain observational evidence only. No solve-rate improvement, non-inferiority result, confidence interval, or Pareto-dominant release default is claimed.
+The original paper specified a six-arm paired causal experiment. The project owner superseded it with exactly one authorized GT advisory candidate run against the frozen local GT-off baseline on `fix-code-vulnerability`. The historical 10-task × 6-arm plan remains unexecuted (`executed=false`, `provider_calls=0`) and is not required for closure.
 
-This fact blocks terminal completion of FS-024, evidence-based default promotion in FS-025, and final project attestation in FS-026. It does not block offline code construction or external no-provider CI.
+Candidate GitHub Actions run `30731388242`, attempt 1, job `91452315208`, executed at harness commit `cdefd9a52c915364d346b790a65dde3104c17286`. Artifact `8828119172` has API SHA-256 `bbd7b620bfd9285c8a88a12714ce1331586052286fe2d96f9efcd36e2d6d12b5`. The provider trial and verifier passed. The workflow's overall failure occurred later when offline postprocessing rejected Harbor's per-trial result shape; the analyzer was fixed and rerun locally against the immutable downloaded artifact, with no provider rerun.
+
+Both arms earned reward `1.0`. Provider calls changed `33 -> 25`, total actions `33 -> 37`, exploration actions before the first edit `19 -> 25`, and raw bytes before the first edit `34,696 -> 43,009`. Both arms bind the same Mini-SWE `2.2.8`, model and provider fingerprint, task checksum, task-prompt hash, system-prompt hash, temperature, and budgets. GroundTruth's treatment was delivered through advisory observations, not a changed system prompt.
+
+This is a descriptive one-task engineering witness. It cannot support a benchmark-wide solve-rate, efficacy, non-inferiority, confidence-interval, token-reduction, or exploration-reduction claim. FS-025 therefore keeps stock Mini-SWE as the default and GT as explicit opt-in. FS-026 closes the requested scope with that limitation intact.
+
+The archived baseline does not bind a resolved container-image digest. The candidate's GT event journal and trajectory show advisory observation delivery, but `miniswe_report.json` reports aggregate `delivered_evidence=0`; the delivery-count instrumentation discrepancy remains unresolved and is not converted into a stronger delivery-frequency claim.
 
 ## Machine validation receipt
 
@@ -144,7 +150,7 @@ This fact blocks terminal completion of FS-024, evidence-based default promotion
 - 30 unique native registry languages;
 - 210 unique language-operation classifications across seven typed operations;
 - exactly FS-001 through FS-026, each with a legal current status and nonempty evidence;
-- FS-024 remains `IN_PROGRESS` while the paid experiment has not run;
+- terminal status counts equal 25 `COMPLETE`, 0 `IN_PROGRESS`, and 1 `REMOVED` under the owner-approved single-witness override;
 - local Markdown links resolve;
 - prohibited closeout-state text is absent from the final artifact set;
 - forbidden product identifiers are absent from the Mini-SWE typed public surfaces;
@@ -157,14 +163,15 @@ Provider-free Phase II receipts are stored under [receipts](receipts/):
 - `offline_suite.json` is the immutable terminal provider-free v2 receipt covering static identification/evidence/freshness/leak/determinism/cost cases, 10 cold native graph builds with byte-identical semantic artifacts, the declared adversarial corpus, runtime probes, GT-off parity, and zero provider calls;
 - `fs023_provenance.json` binds every identity available before artifact upload and explicitly enumerates the post-run linkage it cannot know; `provider_free_workflow.json` plus run `30729901088` and artifact `8827623572` supply and cross-check that linkage;
 - `final_codespace_verification.json` binds the terminal GroundTruth and harness regression suites, the ten-node provider-free smoke, full tagged Go result, exact Codespace worktree identities, and clean-fixture hashes without claiming an immutable workflow;
-- `provider_free_smoke10.json` records the ten-node offline Mini-SWE runtime smoke and explicitly distinguishes it from the ten-task by six-arm provider experiment;
-- `experiment_execution_plan.json` binds the deterministic 10-task by 6-arm, 60-trial plan with SHA-256 `a3edf2fa4147b66219f87fca2632cdbb320596c4ca96ac94bd901bb06b5f15db`, `executed=false`, and `provider_calls=0`;
-- `experiment_dry_run.json` plans all six arms with `executed=false` and `provider_calls=0`;
+- `provider_free_smoke10.json` records the ten-node offline Mini-SWE runtime smoke and is not the owner-approved provider witness;
+- `fs024_single_witness_baseline.json` freezes the local GT-off comparator identity and metrics;
+- `fs024_single_witness_analysis.json` freezes the one-task matched identities, exact deltas, limitations, and `inferential_claim=false`;
+- `experiment_execution_plan.json` and `experiment_dry_run.json` preserve the superseded deterministic 10-task × 6-arm design with `executed=false` and `provider_calls=0`; no part of that 60-trial plan is claimed as executed or required for closure;
 - `forbidden_scan.json` proves the 66-file Mini-SWE import closure and public surface contain zero forbidden comparison-control registrations;
-- `promotion_refusal.json` proves defaults are not mutated without the paid analysis, Go source/binary receipt, and rollback rehearsal;
+- `promotion_refusal.json` preserves the earlier six-arm promotion refusal. The final owner-approved decision reaches the same conservative outcome through a different terminal rule: keep stock Mini-SWE default and GT explicit opt-in;
 - `runbook_validation.json` proves the clean-machine and rollback documents contain their required operational sections.
 
-These receipts validate machinery, not terminal benchmark acceptance. Synthetic cases do not replace the real trajectory corpus, an experiment dry-run does not replace the authorized experiment, and a structurally valid rollback document does not replace a rollback rehearsal.
+The provider-free receipts validate machinery, while the single-witness receipts validate only the frozen one-task comparison. Neither source supports a general benchmark-efficacy claim.
 
 ## All-language certification receipt
 
@@ -179,21 +186,22 @@ The generated typed schema exposes only exact literal search, certified syntax, 
 
 ## Regression state
 
-The stock Mini-SWE Bash surface remains present. Typed-router failure produces incomplete evidence and a pass-through decision rather than executing malformed typed content as shell. The runtime authority and immutable external workflow now close provider-byte binding, feature control, atomic transactions, syntax/patch evidence, public analyzer narrowing, deterministic advisory localization, generated language-registry authority, bounded new-file precedent, freshness, and the complete provider-free validation battery for their implemented scope. Remaining project gates are attached to three `IN_PROGRESS` rows: the authorized causal experiment, measured default promotion, and final clean-machine release/rollback attestation.
+The stock Mini-SWE Bash surface remains present. Typed-router failure produces incomplete evidence and a pass-through decision rather than executing malformed typed content as shell. The runtime authority and immutable external workflow close provider-byte binding, feature control, atomic transactions, syntax/patch evidence, public analyzer narrowing, deterministic advisory localization, generated language-registry authority, bounded new-file precedent, freshness, and the complete provider-free validation battery for their implemented scope. No FS row remains `IN_PROGRESS`; stock Mini-SWE stays the release default and GT stays explicit opt-in.
 
 ## Project attestation
 
-The project is **not terminally complete** in this workspace state. The honest closure test is:
+The project is **terminally complete under the owner's bounded one-task override**. The honest closure test is:
 
 - 26 FS rows exist: yes;
 - 17 DIRECT rows exist with four-axis decisions: yes;
 - 129 role-audit rows exist exactly once: yes;
 - 30 languages and 210 language-operation pairs are terminally classified: yes;
-- all 26 FS rows have terminal implementation/removal receipts: no;
+- all 26 FS rows have terminal implementation/removal decisions: yes, 25 `COMPLETE` and 1 `REMOVED`;
 - Go source compiles and the complete tagged Go suite passes in Codespaces: yes;
 - the complete offline battery is bound to one immutable external workflow execution with artifacts and hashes: yes, run `30729901088` and artifact `8827623572`; FS-023 is complete;
-- source, vendored binary, workflow logs, and hashes are frozen together in the final release artifact: no, FS-026 remains open;
-- paid paired Mini-SWE experiment and independent solve-rate verification are complete: no;
-- measured promotion, legacy removal, clean-machine rehearsal, and rollback rehearsal are complete: no.
+- the owner-approved one-task matched witness is frozen and honestly bounded: yes;
+- the superseded six-arm/60-run experiment was executed: no, and it is explicitly not required;
+- a general solve-rate or exploration-reduction claim is supported: no;
+- the release decision preserves baseline safety: yes, stock Mini-SWE remains default and GT remains explicit opt-in.
 
-`gt_finalstand` is now an honest closeout authority: it distinguishes completed code from partially implemented roadmap work and makes every inventory/count claim executable. It must not be used to assert that the entire Phase II program has already passed its own terminal gates.
+`gt_finalstand` is the terminal bounded closeout authority. It must not be used to convert the single matched task into a benchmark-wide efficacy, non-inferiority, token-reduction, or exploration-reduction claim.

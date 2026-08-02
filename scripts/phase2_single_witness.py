@@ -35,6 +35,8 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def _trial(result: dict[str, Any], task_id: str) -> dict[str, Any]:
+    if result.get("task_name") == task_id:
+        return result
     matches = [
         row
         for row in result.get("trial_results", [])

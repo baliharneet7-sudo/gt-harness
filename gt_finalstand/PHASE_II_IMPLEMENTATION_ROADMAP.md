@@ -17,7 +17,7 @@ The claim “GT never reduces baseline performance” cannot be established for 
 2. Unsupported, stale, ambiguous, or incomplete analysis falls back to raw behavior.
 3. Each capability has a kill switch and an augmentation-only fallback.
 4. Replacement and suppression require offline equivalence, leak, freshness, and determinism gates.
-5. Default promotion requires a one-sided 95% paired confidence bound for solve-rate delta at or above zero.
+5. Without population-level paired evidence, stock Mini-SWE remains the default and GroundTruth remains explicit opt-in.
 6. A capability that fails a gate is removed from replacement or suppression, not left in an unfinished state.
 
 ## 2. Final architecture
@@ -166,9 +166,9 @@ The receipt binds action-request hash, pre-state revision, raw-result hash, tran
 | P3-01 | MODIFY | Final provenance-rich advisory `newfile_precedent` | Expected low | Can avoid precedent searches; small evidence cost | Moderate from misleading precedent | Medium | P0-06, P2-03 |
 | P3-02 | BUILD | Fresh closed-scope submit blocker and narrow suppression | Expected moderate through fewer invalid submissions | Avoids doomed submit iterations | Very high | High | P1-03, P1-05, P2-04 |
 | P3-03 | REMOVE | Predictive dynamic test dependency as a product claim | Protects against false omission | Reduces compute and misleading tokens | Low | Low | P1-05 |
-| P3-04 | BUILD | Execute final six-arm matched Mini-SWE campaign | Selects the demonstrably best release | Paid compute; produces causal evidence | Methodological risk if manifests differ | Very high | All implementation and offline gates |
-| P3-05 | MODIFY | Promote only measured Pareto-dominant defaults | Realized gain determined by P3-04 | Retains only useful interventions | Moderate | Medium | P3-04 |
-| P3-06 | REMOVE | Duplicate bridges, receipt paths, stale flags, and dead delivery routes | Neutral/positive reliability | Lower maintenance and duplicate tokens | High if consumers remain | High | P3-05 |
+| P3-04 | BUILD | Execute owner-approved single matched Mini-SWE witness | Reward tied on one task; descriptive only | Calls fell, while actions/exploration/raw bytes rose | High risk of overgeneralizing one sample | Medium | All implementation and offline gates |
+| P3-05 | KEEP | Keep stock Mini-SWE default and GT explicit opt-in | Protects baseline under insufficient efficacy evidence | Preserves optional deterministic tooling without forced overhead | Low | Low | P3-04 |
+| P3-06 | KEEP | Retain implemented controlled paths; remove nothing solely from one witness | Avoids unsupported migration churn | Existing switches retain rollback and isolation | Low | Low | P3-05 |
 | P3-07 | BUILD | Final runbook, schemas, compatibility manifest, benchmark report, rollback and release checklist | Operational protection | Reduces support and incident time | Low | Medium | P3-04, P3-06 |
 | P3-08 | KEEP | Permanent stock Mini-SWE path | Baseline control and emergency recovery | No GT benefit; essential comparison path | Low | Low | P0-08 |
 | P3-09 | BUILD | Terminal completion/removal receipt for every roadmap item | Project-closeout integrity | Small documentation cost | Low | Medium | All items |
@@ -410,31 +410,29 @@ Every TODO below is terminal. “Remove operation” is a successful terminal re
 - **Acceptance:** zero material information-loss failures; byte-identical semantic artifacts for identical recorded inputs; no leaked suppressed sentinel; matched revision outputs; complete action accounting.
 - **Expected outcome:** prevents unsound promotion. Test cost is intentional.
 
-### FS-024: Final paired Mini-SWE experiment
+### FS-024: Final matched Mini-SWE witness — COMPLETE
 
-- **Decision / objective:** BUILD and execute the terminal causal validation with six matched arms: stock raw, current prepend-only, action-bound augmentation, certified replacement, typed interface, and proactive-map/embedding comparison controls.
-- **Likely files:** experiment manifests and runner configuration outside production paths; result ledger under final artifacts.
-- **Data and algorithm:** fixed model, prompt, tasks, environment, budget, one model call per iteration; manifest-identical pairs; McNemar outcome analysis, paired bootstrap task deltas, registered missing-run handling and multiplicity correction.
-- **Acceptance:** independently verified solve rate is primary; every run identity is recoverable; unmatched runs are descriptive only; provider cost authorization occurs before execution.
-- **Regression gate:** replacement/suppression default requires one-sided 95% paired lower confidence bound at or above zero and no material correctness loss.
-- **Expected outcome:** measured release selection rather than speculative percentages.
+- **Decision / objective:** BUILD the owner-approved one-run witness comparing GT advisory with the frozen local GT-off baseline on `fix-code-vulnerability`.
+- **Superseded design:** the six-arm, 10-task, 60-trial manifest and dry-run were never executed. They remain historical artifacts with `executed=false` and `provider_calls=0`; the owner explicitly removed them from the completion requirement.
+- **Controlled identity:** Mini-SWE `2.2.8`, `deepseek-v4-flash`, identical provider fingerprint, task checksum, task prompt, temperature `1.0`, step/cost/timeout budgets, one attempt, and concurrency one.
+- **Recorded outcome:** reward `1.0 -> 1.0`; provider calls `33 -> 25`; total actions `33 -> 37`; pre-edit exploration `19 -> 25`; raw pre-edit bytes `34,696 -> 43,009`.
+- **Acceptance:** the matching identities, complete trajectories, GT receipts, independent reward, and descriptive analysis are frozen.
+- **Claim boundary:** complete for the owner-defined engineering witness only. It supplies no population solve-rate, confidence-interval, non-inferiority, general efficacy, or exploration-reduction result.
 
-### FS-025: Promotion, migration, and dead-path removal
+### FS-025: Conservative release decision — COMPLETE
 
-- **Decision / objective:** MODIFY defaults to the measured Pareto-dominant configuration and REMOVE legacy prepend/bridge/duplicate receipt paths.
-- **Likely files:** runner, runtime, integration, bridge, receipt modules, flags, tests, manifests.
-- **Algorithm:** two-release migration: compiler parity with legacy disabled by test-only switch, then consumer audit and deletion; stock path remains.
-- **Acceptance:** one model-visible GT path; no duplicate fact bytes; no stale flags; GT-off parity; all capability lineage joins new receipts.
-- **Tests:** old/new artifact replay, config migration, forbidden import scan, end-to-end task smoke, rollback.
-- **Expected outcome:** lower maintenance, fewer duplicate tokens, simpler failure surface.
+- **Decision / objective:** KEEP the stock Mini-SWE path as the default and KEEP GroundTruth explicit opt-in.
+- **Reason:** the candidate tied reward and reduced calls on one task, but increased actions, pre-edit exploration, and raw bytes. One observation cannot establish a Pareto-dominant default.
+- **Acceptance:** no baseline-default mutation; GT remains behind existing activation, fail-open, kill-switch, and rollback controls.
+- **Expected outcome:** baseline behavior remains protected while the completed deterministic interface remains available for explicit use.
 
-### FS-026: Release documentation and closeout
+### FS-026: Release documentation and bounded closeout — COMPLETE
 
-- **Decision / objective:** BUILD final schemas, compatibility manifest, operational runbook, benchmark report, rollback guide, frozen manifest, and completion ledger.
+- **Decision / objective:** BUILD final schemas, compatibility manifest, operational runbook, bounded benchmark report, rollback guide, frozen evidence references, and completion ledger.
 - **Likely files:** `gt_finalstand/` and final versioned release artifacts.
-- **Acceptance:** all 26 TODO IDs have terminal receipts; all 17 DIRECT rows and 129 role-audit rows are accounted for; all language-operation pairs are terminal; source/binary/wheel hashes are frozen; no unowned flag or capability remains.
+- **Acceptance:** all 26 TODO IDs are terminal; all 17 DIRECT rows and 129 role-audit rows are accounted for; all language-operation pairs are terminal; FS-023's provider-free artifact and FS-024's descriptive matched witness are recorded; the conservative FS-025 default decision is explicit.
 - **Tests:** link checker, CSV/schema validation, hash verification, clean-machine runbook rehearsal, rollback rehearsal.
-- **Expected outcome:** a reproducible release and a closed project rather than an undocumented prototype.
+- **Expected outcome:** a closed project with an explicit one-task claim boundary rather than an inflated benchmark-wide conclusion.
 
 ## 6. Regression register
 
@@ -498,10 +496,10 @@ There is no experimental state at closure. A dynamic language may ship a deliber
 
 ### 8.5 Performance gate
 
-- Primary: independently verified solve rate.
-- Promotion: one-sided 95% paired lower confidence bound for solve-rate delta is at least zero.
+- Terminal owner-approved witness: independently verified reward on the single matched task.
+- Default decision: retain the baseline default because one task cannot establish a confidence bound or Pareto-dominant promotion.
 - Secondary: exploration actions, correct-file/symbol/edit latency, wrong-surface edits, repeated acquisition, raw bytes, verification quality, tool latency, compute cost, false interventions, stale/incomplete incidents.
-- Token or exploration reductions never override a failed solve-rate or correctness gate.
+- Token or exploration reductions never override a failed solve-rate or correctness gate. In the recorded witness, exploration and raw bytes increased, so no reduction claim is made.
 
 ## 9. Execution order
 
@@ -535,7 +533,7 @@ GroundTruth Phase II is complete only when all conditions are true:
 7. Duplicate bridge, prepend, and receipt paths are removed.
 8. GT-off passes byte/state parity with stock Mini-SWE.
 9. Every default replacement and submit suppression passes all release gates.
-10. The six-arm matched validation campaign is complete and reproducible.
+10. The owner-approved single matched witness is complete and reproducible within its frozen one-task inputs; the superseded six-arm/60-run plan remains unexecuted and is not a closure requirement.
 11. The release configuration and global/per-capability rollback configurations are rehearsed.
 12. Repository HEADs, dirty-diff hashes, task/model/environment manifests, graph schema, runner, wheel, and native indexer binaries are frozen and recorded.
 13. No capability is marked experimental, planned, pending, or unowned.

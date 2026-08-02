@@ -97,26 +97,22 @@ def _candidate_root(tmp_path: Path, *, checksum: str = CHECKSUM) -> Path:
         json.dumps(trajectory), encoding="utf-8"
     )
     result = {
-        "trial_results": [
-            {
-                "id": "candidate-trial",
-                "task_name": TASK,
-                "task_checksum": checksum,
-                "task_id": {
-                    "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
-                },
-                "config": {
-                    "agent_timeout_multiplier": 1.0,
-                    "agent": {
-                        "name": "eval.miniswe_agent:MiniSweGtAgent",
-                        "model_name": "deepseek-v4-flash",
-                    },
-                },
-                "verifier_result": {"rewards": {"reward": 1.0}},
-            }
-        ]
+        "id": "candidate-trial",
+        "task_name": TASK,
+        "task_checksum": checksum,
+        "task_id": {
+            "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+        },
+        "config": {
+            "agent_timeout_multiplier": 1.0,
+            "agent": {
+                "name": "eval.miniswe_agent:MiniSweGtAgent",
+                "model_name": "deepseek-v4-flash",
+            },
+        },
+        "verifier_result": {"rewards": {"reward": 1.0}},
     }
-    (root / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    (trial / "result.json").write_text(json.dumps(result), encoding="utf-8")
     return root
 
 
