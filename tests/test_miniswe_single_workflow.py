@@ -49,6 +49,17 @@ def test_single_witness_workflow_builds_gt_and_preserves_receipts_on_failure():
     assert "results/terminal-bench/" in text
 
 
+def test_single_witness_compiles_pair_and_binds_execution_identity():
+    text = _workflow_text()
+
+    assert "scripts/phase2_single_witness.py analyze" in text
+    assert "fs024_single_witness_baseline.json" in text
+    assert '"provider_trial_count": 1' in text
+    assert 'os.environ["GITHUB_RUN_ID"]' in text
+    assert "single_witness_analysis.json" in text
+    assert "witness-receipts/execution.json" in text
+
+
 def test_single_witness_workflow_requires_verifier_trajectory_and_gt_receipts():
     text = _workflow_text()
 

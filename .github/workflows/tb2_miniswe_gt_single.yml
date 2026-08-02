@@ -274,6 +274,53 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Compile matched comparison and execution receipt
+        env:
+          JOB_NAME: ${{ steps.harbor.outputs.job_name }}
+        run: |
+          set -euo pipefail
+          candidate_root="results/terminal-bench/${JOB_NAME}"
+          python scripts/phase2_single_witness.py analyze \
+            --baseline-receipt gt_finalstand/receipts/fs024_single_witness_baseline.json \
+            --candidate-root "$candidate_root" \
+            --out witness-receipts/single_witness_analysis.json
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def sha256(path):
+              return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+          receipt = {
+              "schema": "gt.phase2.single_witness_execution.v1",
+              "authorized_by": "project_owner_single_run_instruction",
+              "github_actions_run_id": os.environ["GITHUB_RUN_ID"],
+              "github_actions_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "github_repository": os.environ["GITHUB_REPOSITORY"],
+              "github_commit": os.environ["GITHUB_SHA"],
+              "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+              "provider_trial_count": 1,
+              "baseline_receipt_sha256": sha256(
+                  "gt_finalstand/receipts/fs024_single_witness_baseline.json"
+              ),
+              "provider_preflight_sha256": sha256(
+                  "witness-receipts/provider_preflight.json"
+              ),
+              "task_receipt_sha256": sha256(
+                  "witness-receipts/task_checksum.json"
+              ),
+              "analysis_sha256": sha256(
+                  "witness-receipts/single_witness_analysis.json"
+              ),
+          }
+          Path("witness-receipts/execution.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload complete witness artifacts
         if: always()
         uses: actions/upload-artifact@v4
