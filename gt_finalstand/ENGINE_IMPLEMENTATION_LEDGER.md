@@ -131,7 +131,7 @@ syntax_result/covering_red/obligations firing, 17 features registered+invoked.
 5. L2/L3 confound — anchor-match ladder cannot distinguish causation from
    coincident work; obligations is the first genuinely-causal candidate.
 6. Temp-1.0 noise — deltas descriptive only.
-7. W4 typed-tool superiority — deferred; certified-completeness drives adoption.
+7. W4 typed-tool superiority — not yet shipped; certified-completeness drives adoption.
 8. TLA+/TLC run — spec authored, never executed.
 9. gpt2 artifact upload — sudo-chmod fix landed; round-4 must confirm.
 
