@@ -65,7 +65,7 @@ jobs:
       - name: Install provider-free test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ./Groundtruth -e './gt-harness[miniswe]' pytest ruff
+          python -m pip install -e ./Groundtruth -e './gt-harness[miniswe,eval]' pytest ruff
 
       - name: Prove Go registry and compatibility parity
         working-directory: Groundtruth/gt-index
