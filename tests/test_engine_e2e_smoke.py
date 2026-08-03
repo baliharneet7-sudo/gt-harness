@@ -162,10 +162,10 @@ def test_e2e_engine_red_invalidated_on_edit(tmp_path):
     ]
     assert any(r.get("event") == "semantic_red" for r in rows)
     assert any(r.get("event") == "red_invalidated_by_edit" for r in rows)
-    assert any(r.get("event") == "episode_failure_recorded" for r in rows)
+    assert any(r.get("event") == "failure_recorded" for r in rows)
     # the failing test's closed blocker was registered (feeds submit_refusal)
     assert any(
-        bool(r.get("blocker_id")) and r.get("event") == "episode_failure_recorded"
+        bool(r.get("blocker_id")) and r.get("event") == "failure_recorded"
         for r in rows
     )
 

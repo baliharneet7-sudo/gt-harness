@@ -282,7 +282,7 @@ class MiniSweAdapter(GroundtruthController):
         returncode: int,
         pre_state_revision: str,
     ) -> str:
-        """Record one exact failed-action identity in the bound terminal session."""
+        """Record one exact repeated-action identity in the bound terminal session."""
         if self._episode is None or self.terminal_evidence_session is None:
             return ""
         try:
@@ -308,7 +308,7 @@ class MiniSweAdapter(GroundtruthController):
                 outcome="failed",
             )
             blocker_id = ""
-            candidate_blocker_id = f"failed-action:{identity.sha256}"
+            candidate_blocker_id = f"fld-{identity.sha256}"
             invalidation_key = hashlib.sha256(
                 (identity.sha256 + "|any_repository_edit").encode("utf-8")
             ).hexdigest()
@@ -332,7 +332,7 @@ class MiniSweAdapter(GroundtruthController):
                 blocker_id = candidate_blocker_id
                 self._submit_invalidation_keys[blocker_id] = invalidation_key
             self.store.append(
-                "episode_failure_recorded",
+                "failure_recorded",
                 failure_identity_sha256=identity.sha256,
                 pre_state_revision=identity.pre_state_revision,
                 diagnostic_sha256=identity.diagnostic_sha256,
@@ -365,7 +365,7 @@ class MiniSweAdapter(GroundtruthController):
         if receipt is None:
             return None
         self.store.append(
-            "submit_suppression_zero_delivery",
+            "zero_delivery_recorded",
             schema=receipt.schema,
             repository_revision=receipt.repository_revision,
             action_sha256=receipt.action_sha256,

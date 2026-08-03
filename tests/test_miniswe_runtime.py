@@ -893,8 +893,8 @@ def test_gt_on_binds_terminal_failure_and_authorizes_zero_delivery_suppression(
         for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
     ]
     assert any(row["event"] == "terminal_evidence_bound" for row in rows)
-    assert any(row["event"] == "episode_failure_recorded" for row in rows)
-    zero = next(row for row in rows if row["event"] == "submit_suppression_zero_delivery")
+    assert any(row["event"] == "failure_recorded" for row in rows)
+    zero = next(row for row in rows if row["event"] == "zero_delivery_recorded")
     assert zero["provider_dispatched"] is False
     assert zero["chars_delivered"] == 0
 
@@ -929,7 +929,7 @@ def test_submit_suppression_kill_switch_off_fails_open_to_native_action(
     agent.execute_actions({"extra": {"actions": [{"command": command}]}})
     assert command in agent.env.executed
     assert not any(
-        "submit_suppression_zero_delivery" in line
+        "zero_delivery_recorded" in line
         for line in adapter.store.path.read_text(encoding="utf-8").splitlines()
     )
 
