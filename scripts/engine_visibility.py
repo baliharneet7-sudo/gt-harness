@@ -83,12 +83,12 @@ def _matrix() -> dict:
         }
 
     def _row_suppress(name: str, out: dict, obs_index: int = 0) -> None:
-        """submit_refusal is a SUPPRESS decision + GT ENFORCED refusal directive
+        """submit_refusal is a SUPPRESS decision + neutral refusal directive
         (never executed bytes), not a `<fact>` block."""
         obs = out["observations"][obs_index]["content"]
         directive = any(
             isinstance(m, dict) and m.get("role") == "user"
-            and "GT ENFORCED" in str(m.get("content") or "")
+            and "Submission not executed" in str(m.get("content") or "")
             for m in out["agent_sent"]
         )
         fired = 'decision="suppress"' in obs and directive

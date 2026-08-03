@@ -118,12 +118,12 @@ def audit(run_dir: Path) -> dict[str, dict[str, int]]:
                 ))
                 _bump(stats, "localization", acted)
             elif row.get("event") == "submit_refusal":
-                # the refusal is a role=user GT ENFORCED directive; the model
+                # the refusal is a role=user neutral directive; the model
                 # ACCEPTS it when its next action verifies before resubmitting
                 refusal_idx = next(
                     (i for i, m in enumerate(msgs)
                      if m.get("role") == "user"
-                     and "GT ENFORCED" in str(m.get("content") or "")),
+                     and "Submission not executed" in str(m.get("content") or "")),
                     None,
                 )
                 nxt_msg = None
