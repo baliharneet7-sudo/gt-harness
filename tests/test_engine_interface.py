@@ -201,7 +201,7 @@ def test_submit_blocked_produces_suppress_and_refusal(monkeypatch):
     assert 'decision="suppress"' in content
     # the refusal directive was added (agent.add_messages got a user message)
     assert any(
-        isinstance(m, dict) and m.get("role") == "user" and "GT ENFORCED" in str(m.get("content") or "")
+        isinstance(m, dict) and m.get("role") == "user" and "Submission not executed" in str(m.get("content") or "")
         for m in agent.sent
     )
 

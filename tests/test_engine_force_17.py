@@ -309,7 +309,7 @@ def test_force_submit_refusal_delivers(monkeypatch):
     content = model.observations[0]["content"]
     assert 'decision="suppress"' in content
     assert any(
-        isinstance(m, dict) and m.get("role") == "user" and "GT ENFORCED" in str(m.get("content") or "")
+        isinstance(m, dict) and m.get("role") == "user" and "Submission not executed" in str(m.get("content") or "")
         for m in agent.sent
     )
 

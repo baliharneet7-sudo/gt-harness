@@ -168,7 +168,7 @@ def test_vis_submit_refusal(tmp_path):
     obs = out["observations"][0]["content"]
     assert 'decision="suppress"' in obs, obs
     assert any(
-        isinstance(m, dict) and m.get("role") == "user" and "GT ENFORCED" in str(m.get("content") or "")
+        isinstance(m, dict) and m.get("role") == "user" and "Submission not executed" in str(m.get("content") or "")
         for m in out["agent_sent"]
     )
 
