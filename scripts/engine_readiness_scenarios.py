@@ -236,6 +236,29 @@ def scenario_submit_refusal():
     )
 
 
+def scenario_typed_search():
+    """Typed exact_literal_search (model-selected tool) must deliver an answer
+    through the real seam when a graph is present (production)."""
+    return build_scenario_engine(
+        files={"app.py": "def bottle():\n    return 1\n"},
+        graph=([(1, "Function", "bottle", "app.py", 1, 0, "def bottle")], []),
+        script={
+            "grep -R -F -- bottle .": {
+                "output": "app.py:1: def bottle():\n", "returncode": 0,
+            },
+        },
+        trajectory=[
+            {"role": "assistant", "content": "search bottle",
+             "extra": {"actions": [
+                 {"gt_action": {"kind": "exact_literal_search",
+                                "arguments": {"literal": "bottle", "paths": ["."]}},
+                  "tool_call_id": "g1"}],
+                 "response": {"model": "m", "usage": {}}}},
+        ],
+        issue_text="find bottle",
+    )
+
+
 SCENARIOS = {
     "obligations": (scenario_obligations, ("obligations",)),
     "covering_red": (scenario_covering_red, ("covering_red",)),
@@ -246,4 +269,5 @@ SCENARIOS = {
     "signature_delta": (scenario_signature_delta, ("signature_delta",)),
     "newfile_precedent": (scenario_newfile_precedent, ("newfile_precedent",)),
     "submit_refusal": (scenario_submit_refusal, ("submit_refusal",)),
+    "typed_search": (scenario_typed_search, ("localization",)),
 }
