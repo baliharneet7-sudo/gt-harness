@@ -881,6 +881,11 @@ class MiniSweAdapter(GroundtruthController):
         for, never the ones it merely lacks evidence about (UNKNOWN). Naming
         UNKNOWN obligations as "unmet" was the false claim that sent the model
         re-proving already-satisfied work.
+
+        Never falls back to an internal ``pred-<sha>`` identity: round-8
+        evidence showed the model reverse-engineers gt_engine/ when it sees
+        internal IDs (token blowup up to +3842%). A RED predicate with no
+        obligation text abstains from a name rather than leaking its ID.
         """
         text_by_id = (
             {
@@ -894,7 +899,8 @@ class MiniSweAdapter(GroundtruthController):
         for predicate_id in self.blocking_predicates:
             obligation_id = self._obligation_by_predicate.get(predicate_id)
             text = text_by_id.get(obligation_id) if obligation_id else None
-            out.append(text if text else predicate_id)
+            if text:
+                out.append(text)
         return tuple(dict.fromkeys(out))
 
     def task_start_localization(self) -> str:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
@@ -65,7 +66,9 @@ class ScriptedEnv:
         self.executed.append(command)
         for marker, (path, content) in self.writes.items():
             if marker in command:
-                Path(path).write_text(content, encoding="utf-8")
+                target = Path(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
                 break
         result = self.script.get(command, {"output": "", "returncode": 0})
         output = result["output"]
@@ -89,19 +92,36 @@ class ScriptedModel:
         self.outputs = outputs
         self.index = -1
 
+    def _next(self):
+        self.index += 1
+        if self.index < len(self.outputs):
+            return self.outputs[self.index]
+        # Out of scripted turns: emit a terminal submit so the run ends
+        # cleanly (the provider boundary double-consumes query/_query, so the
+        # audit supplies a few extra turns per scenario).
+        return {
+            "role": "assistant",
+            "content": "done",
+            "extra": {
+                "actions": [
+                    {"command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                     "tool_call_id": "end"},
+                ],
+                "response": {"model": "m", "usage": {}},
+            },
+        }
+
     def _prepare_messages_for_api(self, messages):
         return [{k: v for k, v in item.items() if k != "extra"} for item in messages]
 
     def query(self, messages, **kwargs):
         self._prepare_messages_for_api(messages)
-        self.index += 1
-        return self.outputs[self.index]
+        return self._next()
 
     def _query(self, messages, **kwargs):
         # mirror LitellmModel's private query surface the provider boundary
         # wraps; ScriptedModel routes through the same scripted outputs.
-        self.index += 1
-        return self.outputs[self.index]
+        return self._next()
 
     def format_message(self, **kwargs):
         return dict(kwargs)
@@ -323,6 +343,101 @@ def build_engine_run_submit_red(tmp_root: str | None = None):
         system_template=system_template,
         instance_template="Task: {{ task }}",
         step_limit=10,
+        output_path=None,
+    )
+    install_runtime_hooks(agent, session)
+    return agent, adapter, graph_db, root
+
+
+def build_scenario_engine(
+    *,
+    tmp_root: str | None = None,
+    files: dict[str, str] | None = None,
+    graph: tuple[list[tuple], list[tuple]] | None = None,
+    script: dict | None = None,
+    trajectory: list[dict] | None = None,
+    writes: dict | None = None,
+    task: str = TASK,
+    issue_text: str | None = None,
+    task_id: str = "engine-scenario",
+):
+    """Generic REAL-seam scenario runner (P1 readiness audit).
+
+    Builds a git workspace from ``files``, optionally injects a synthetic graph
+    (``graph`` = (nodes, edges) using the real gateway schema — deterministic,
+    no gt-index binary needed), runs the provided scripted trajectory through
+    the REAL DefaultAgent + MiniSweAdapter + install_runtime_hooks, and returns
+    (agent, adapter, graph_db, root). The real MiniSweProviderBoundary attaches
+    via the production path.
+    """
+    apply_profile_env()
+    # The ENGINE is the canonical runtime: the submit gate's zero-delivery
+    # SUPPRESS is enforced (same flags the paid smoke workflow sets).
+    os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+    root = Path(tmp_root or tempfile.mkdtemp(prefix="miniswe-gt-scenario-"))
+    for rel, content in (files or {}).items():
+        full = root / rel
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+
+    import subprocess
+
+    for cmd in (["git", "-C", str(root), "init", "-q"],
+                ["git", "-C", str(root), "config", "user.email", "t@t.t"],
+                ["git", "-C", str(root), "config", "user.name", "t"],
+                ["git", "-C", str(root), "add", "."],
+                ["git", "-C", str(root), "commit", "-qm", "init"]):
+        subprocess.run(cmd, capture_output=True, check=False)
+
+    graph_db = None
+    if graph is not None:
+        from tests.engine_visibility_core import _mk_graph
+
+        graph_db = str(root.parent / f"{root.name}-graph.db")
+        _mk_graph(Path(graph_db), graph[0], graph[1])
+
+    contract = extract_task_contract(task)
+    compiled = compile_obligation_predicates(contract)
+    predicates = tuple(
+        Predicate(compiled[o.obligation_id].predicate_id, o.text)
+        for o in contract.obligations
+    )
+    resolved_issue = issue_text if issue_text is not None else task
+    # State lives OUTSIDE the repo root (mirrors production: /logs/agent/gt-state
+    # vs /app). If state or graph.db sat inside repo_root, the gateway's
+    # change_surface repo walk would scan them and leak internal paths into
+    # model-visible newfile_precedent evidence (found by the readiness audit).
+    state_dir = root.parent / f"{root.name}-state"
+    adapter = MiniSweAdapter(
+        task_id=task_id, state_dir=str(state_dir), predicates=predicates,
+        contract=contract, repo_root=str(root), graph_db=graph_db,
+        issue_text=resolved_issue,
+    )
+    session = GTSession(
+        GTSessionConfig(
+            task_id=adapter.task_id,
+            repo_root=str(root),
+            state_dir=str(state_dir),
+            graph_db=graph_db,
+            issue_text=resolved_issue,
+            mode=GTMode.ENGINE,
+        ),
+        engine=adapter,
+    )
+    # resolve relative write targets against the scenario root (ScriptedEnv
+    # writes via Path() relative to the process CWD otherwise)
+    resolved_writes = {}
+    for marker, (path, content) in (writes or {}).items():
+        target = path if Path(path).is_absolute() else str(root / path)
+        resolved_writes[marker] = (target, content)
+    env = ScriptedEnv(script or {}, writes=resolved_writes)
+    model = ScriptedModel(trajectory or [])
+    agent = DefaultAgent(
+        model, env,
+        config_class=AgentConfig,
+        system_template="You are a coding agent.",
+        instance_template="Task: {{ task }}",
+        step_limit=20,
         output_path=None,
     )
     install_runtime_hooks(agent, session)

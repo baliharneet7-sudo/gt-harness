@@ -71,6 +71,40 @@ Also confirmed the real-seam rendered observations carry NON-EMPTY payload
 All 151 engine tests green (incl. 4 real-seam e2e tests); visibility 16/16;
 census all_17_wired.
 
+## Round-8 benchmark (post-review fixes) — run `30772336112`
+
+- Rewards: **9/10 solved** (gpt2-codegolf 0.0, identical to the frozen baseline
+  and round-7; temp-1.0 noise task). All 10 task jobs + merge green.
+- **Ladder census (causal endpoint) across all 10 tasks**: obligations 102
+  delivered / **98 acted (96%)**, localization 13 delivered / 7 acted (54%),
+  **covering_red 22 delivered (was 0 in round-7** — output-based detection
+  fires at scale), **def_partition 5 delivered (was 1** — kind-threading +
+  rotation works). L3-acted is the causal signal, not token deltas.
+- **Payload integrity in production: 142 facts, 0 empty-evidence.** Samples:
+  localization `{"evidence": "filter.py:6:remove_js", "rows": ["filter.py:6"]}`;
+  covering_red `{"evidence": "A covering test fails:\nAssertionError: ValueError
+  not raised by append", "rows": ["bottle.py:1"]}`. The review's bug-1 guard
+  holds at scale.
+- **r8 token explosion root cause (found in post-run audit): the model audits
+  the harness.** 4 tasks hit the 100-action cap (llm 102, break-filter 113,
+  headless 102, cobol 105) yet ALL solved. r8 introduced harness-probing
+  actions (0 in r2/r5/r6/r7; 27 in llm, 35 in break-filter) — the model
+  verbatim said "Let me understand how failed-action blockers get
+  resolved/cleared", "how the gate's bounce/override works", "how the store
+  append works, since triggering an exception there could fail-open the gate".
+  This is reverse-engineering the submit gate + RED/predicate machinery, NOT a
+  payload leak (0 empty evidence) and NOT a broken feature. Open item: reduce
+  the model's incentive to probe (neutral refusal wording; don't render
+  internal `pred-<sha>` predicate IDs in model-visible bytes).
+- **Raw preservation (bug-2)**: the only `decision="replace"` observations are
+  the model's own typed `exact_literal_search` calls with certified answers
+  (e.g. `HeadlessTerminal` match rows) — no bash grep was REPLACEd with dropped
+  raw.
+- The four trigger-rare features (recovery/signature_delta/newfile_precedent/
+  submit_refusal) still require their live triggers; they are proven by the
+  provider-free gate's e2e smoke (submit-while-RED: exactly 1 SUPPRESS) and the
+  visibility matrix.
+
 ## Test-isolation fix (2026-08-02) — `_run_submit_gate` leak
 
 The visibility harness's `deny_submit` monkeypatched

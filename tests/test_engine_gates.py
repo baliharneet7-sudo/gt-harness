@@ -3,6 +3,7 @@ the witness run: journal-schema corruption, external-looking GT labels in model
 bytes, and empty postflight payloads."""
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -348,7 +349,11 @@ def test_obligations_fact_delivers_on_matching_action():
     )
     assert fact is not None
     assert fact.owner == "obligations"
-    assert "obl-1" in fact.content["matched"]
+    # Gap-1: obligation IDs ride in witnesses (audit-only, never rendered) so
+    # the fire-once dedup identity is preserved WITHOUT leaking `obl-` into the
+    # model-visible payload.
+    assert "obl-1" in fact.witnesses
+    assert "obl-" not in json.dumps(fact.content)
     # the content must be USABLE: real requirement text + subject anchors, not
     # opaque IDs with empty rendered text (the round-5 bug)
     assert any("vulnerability" in r for r in fact.content["requirements"])

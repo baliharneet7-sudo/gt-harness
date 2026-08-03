@@ -63,6 +63,38 @@ def _facts_and_raw(observation: str):
     return facts, decisions, has_raw_after
 
 
+def test_e2e_engine_renders_no_internal_ids(tmp_path):
+    """Gap-1 gate: NO internal harness identifiers may appear in any
+    model-visible observation. Round-8 evidence: the model read
+    `matched: ["obl-<sha>"]` / `pred-<sha>` and spent 27-35 actions
+    reverse-engineering gt_engine/ source (token blowup +3324%..+3842%).
+    Rendered bytes may carry task text/anchors, never harness internals."""
+    agent, adapter, graph_db, root = build_engine_run_submit_red()
+    from groundtruth.runtime.miniswe_provider_boundary import (
+        MiniSweProviderBoundary,
+    )
+    import os
+
+    os.environ["GT_SUBMIT_SUPPRESSION_ENFORCE"] = "1"
+    adapter.provider_boundary = MiniSweProviderBoundary(
+        model=agent.model, agent=agent, fault_handler=lambda stage, exc: None,
+    )
+    seen = _model_observations(agent)
+    agent.run(TASK)
+
+    forbidden = re.compile(
+        r"obl-[0-9a-f]{6,}|pred-[0-9a-f]{6,}|gt_engine|site-packages|"
+        r"miniswe_runtime|miniswe_integration|task_contract\.py|"
+        r"verification_contract\.py|gt_session\.py|engine/runner|"
+        r"miniswe_controller|\.gt-state|gt-state"
+    )
+    violations = [
+        (i, s[:200]) for i, s in enumerate(seen)
+        if forbidden.search(s)
+    ]
+    assert not violations, f"internal IDs leaked into model-visible bytes: {violations}"
+
+
 def test_e2e_engine_runs_and_delivers_payload(tmp_path):
     agent, adapter, graph_db, root = build_engine_run()
     seen = _model_observations(agent)

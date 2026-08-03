@@ -892,18 +892,26 @@ def _obligations_fact(
     anchors = tuple(dict.fromkeys(subjects))
     if not requirements and not anchors:
         return None  # nothing usable -> abstain honestly
+    # The matched obligation IDs ride in ``witnesses`` (audit-only, never
+    # rendered) so fire-once dedup keeps its exact identity WITHOUT leaking
+    # `obl-<sha>` into the model-visible payload (Gap-1 fix).
     return EvidenceArtifact(
         artifact_id=hashlib.sha256(
             f"oblig:{','.join(sorted(matched_ids))}".encode("utf-8")
         ).hexdigest()[:16],
         owner="obligations",
         semantics="task obligation spans bound to this action",
+        # NO internal obligation IDs (`obl-<sha>`) in the model-visible payload.
+        # Round-8 evidence: the temp-1.0 model read `matched: ["obl-<sha>", ...]`
+        # and spent 27-35 actions reverse-engineering gt_engine/ source instead
+        # of solving (token blowup up to +3842%). The requirement TEXT and
+        # subjects carry all the usable signal; the ID list is an audit invite.
         content={
-            "matched": [item.obligation_id for item in matched],
             "requirements": requirements[:4],
             "subjects": list(anchors)[:8],
         },
         anchors=anchors,
+        witnesses=tuple(sorted(str(i) for i in matched_ids)),
         producer="contract_delta",
         producer_version="1",
         freshness_revision=adapter.repository_revision,
@@ -916,13 +924,15 @@ def _fact_dedup_key(fact: EvidenceArtifact) -> str:
     """Stable per-episode dedup key.
 
     obligations key on the matched obligation IDs (a requirement fires once per
-    episode even across different actions); everything else keys on
-    owner + anchors (or content hash when no anchors). Fire-once prevents the
-    round-5 spam (242 obligation deliveries of the same requirement).
+    episode even across different actions) — the IDs ride in ``witnesses``
+    (audit-only, never rendered) so the key stays exact without leaking
+    ``obl-<sha>`` to the model. Everything else keys on owner + anchors (or
+    content hash when no anchors). Fire-once prevents the round-5 spam (242
+    obligation deliveries of the same requirement).
     """
     if fact.owner == "obligations":
-        matched = (fact.content or {}).get("matched") or []
-        return f"obligations:{','.join(sorted(str(x) for x in matched))}"
+        matched = tuple(fact.witnesses or ())
+        return f"obligations:{','.join(sorted(matched))}"
     anchors = ":".join(fact.anchors) if fact.anchors else ""
     return f"{fact.owner}:{anchors or fact.hash()}"
 
@@ -936,6 +946,12 @@ def _valid_fact_payload(fact: EvidenceArtifact) -> bool:
     if not content:
         return False
     blob = json.dumps(content)
+    # Gap-1 guard: no internal harness identifier may reach the model. Round-8
+    # showed `obl-<sha>`/`pred-<sha>` bytes made the model audit gt_engine/
+    # source instead of solving (+3324%..+3842% tokens). Reject any payload
+    # that would render an internal ID.
+    if re.search(r"obl-[0-9a-f]{6,}|pred-[0-9a-f]{6,}", blob):
+        return False
     if fact.owner == "obligations" and "obl-" in blob and not any(
         key in blob for key in ("requirements", "subjects", "file", "path")
     ):
