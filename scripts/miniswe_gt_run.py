@@ -256,6 +256,17 @@ def build_agent(
     from gt_engine.verification_contract import compile_obligation_predicates
 
     apply_profile_env()
+    # Set the gateway producer flags INTERNALLY (never rely on container env:
+    # round-11 the model read GT_* from `env` and audited the harness source).
+    # _ensure_gateway_flags covers the 6 producer flags; submit suppression is
+    # the enforcement arm the submit gate reads.
+    try:
+        from gt_engine.engine.runner import _ensure_gateway_flags
+
+        _ensure_gateway_flags()
+        os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+    except Exception:  # noqa: BLE001 - flags default off; engine sets them lazily
+        pass
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
     predicates = tuple(

@@ -187,17 +187,11 @@ jobs:
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
       MINISWE_AGENT_VERSION: "2.2.8"
-      # Enable the gateway's deterministic producers (they default OFF). The
-      # ENGINE is the canonical runtime; without these, localization/
-      # signature_delta/def_partition/covering never fire. Forwarded into the
-      # container by MiniSweEngineAgent.
-      GT_GATEWAY: "1"
-      GT_LOC_RESLOT: "1"
-      GT_PATCH_DELTA: "1"
-      GT_CS_EDIT_TRIGGER: "1"
-      GT_CHANGE_SURFACE: "1"
-      GT_EDIT_OVERLAY: "1"
-      GT_SUBMIT_SUPPRESSION_ENFORCE: "1"
+      # The gateway producer flags are NOT exported to the container: they are
+      # set internally by the engine (`_ensure_gateway_flags`) so the model's
+      # `env` never reveals harness configuration. Round-11 evidence: the model
+      # read GT_EDIT_CHECK/GT_VERIFY_EXECUTE/etc from `env` and audited the
+      # harness source. MINISWE_AGENT_VERSION stays (it is benign + required).
     steps:
       - uses: actions/checkout@v4
         with:
