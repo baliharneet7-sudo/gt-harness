@@ -320,6 +320,24 @@ CAP_OWNER)**; caller_contract is REMOVE by disposition. 97 engine tests green.
   This is a model-behavior cost (tokens on 3-4 tasks), not a GT delivery
   defect — 0 empty-evidence, correct payload/timing, tasks still solve.
 
+## Round-11 + env-var leak fix (2026-08-03)
+
+- **Round-11 smoke `30837898981`: 9/10 solved** (write-compressor held 1.0;
+  gpt2-codegolf 0.0 noise). `errored` dropped 5→3.
+- **Trajectory audit: probes went BACK UP 38→101** — round-10's grep-anchor
+  removal helped, but the model read `env` and found the `GT_*` producer flags
+  the workflow exported to the container (GT_EDIT_CHECK, GT_VERIFY_EXECUTE,
+  GT_VERIFICATION_PLAN, GT_SDLC_VERIFY), then grepped those names into the
+  harness source.
+- **Fix (`8205fbb`)**: removed all `GT_*` from the container env in
+  `tb2_miniswe_engine.yml`; the flags are now set internally by
+  `_ensure_gateway_flags()` + `GT_SUBMIT_SUPPRESSION_ENFORCE` setdefault in
+  `miniswe_gt_run.py`. The model's `env` is clean; the harness still gets its
+  flags. **r12 measures the probe drop.**
+- **Ladder (r11)**: obligations 105 delivered / 92 acted (87%); localization
+  24/13 (54%). Payload integrity: 151 facts, 0 empty-evidence.
+- Full status: `gt_finalstand/ENGINE_ROUND11_STATUS.md`.
+
 ## Verified
 
 - Round-2 witness `30738637714` (10 tasks; write-compressor recovered in

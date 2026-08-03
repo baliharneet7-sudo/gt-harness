@@ -3,7 +3,18 @@
 Run: `python scripts/engine_round_audit.py` (regenerates the tables below).
 Rounds: r2=30738637714(+30740338420), r3=30755837073, r4=30757560927,
 r5=30759441102, r6=30762787550, r7=30766572498, r8=30772336112,
-r9=30789635818, r10=30816206132.
+r9=30789635818, r10=30816206132, r11=30837898981.
+
+## Round-11 summary (2026-08-03)
+
+- Rewards: **9/10 solved** (write-compressor held 1.0; gpt2-codegolf 0.0 noise).
+  `errored` 5→3.
+- **Harness-probes went 49→101**: round-10 grep-anchor removal helped, but r11's
+  model read `env` and found the `GT_*` producer flags the workflow exported.
+  Fixed in `8205fbb` (GT_* no longer in the container env). r12 measures the drop.
+- **Ladder (r11)**: obligations 105 delivered / 92 acted (87%); localization
+  24/13 (54%). Payload: 151 facts, 0 empty-evidence.
+- Full status: `ENGINE_ROUND11_STATUS.md`.
 
 ## Round-10 summary (2026-08-03)
 
