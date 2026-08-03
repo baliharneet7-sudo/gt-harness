@@ -1,5 +1,12 @@
 # GroundTruth Final Stand
 
+> **Current architecture notice (2026-08-03):** the installed inline engine is
+> retained only as a historical and rollback path. Active GT-on development is
+> the host-owned central runtime documented in
+> [CENTRAL_RUNTIME_IMPLEMENTATION.md](CENTRAL_RUNTIME_IMPLEMENTATION.md). Round
+> 11 established neither efficacy nor efficiency and its readiness claim has
+> been superseded.
+
 This directory is the terminal execution authority for GroundTruth Phase II. It converts the accepted deterministic-observation monograph into implementation, validation, release, and closeout work. It does not reopen the research question.
 
 There is no open-ended backlog. Every item ends as `BUILD`, `MODIFY`, `KEEP`, or `REMOVE`, and every execution item ends with evidence of completion or removal.

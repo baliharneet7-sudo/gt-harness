@@ -1,5 +1,12 @@
 # GT ENGINE — Round 11 Final Status (handoff for next session)
 
+> **SUPERSEDED 2026-08-03:** This is a historical Round 11 record, not current
+> architecture or readiness authority. The environment fix did not reach the
+> model shell, the audit did not cover the live execution surface, and the
+> remaining defect was not merely readable source. See
+> `CENTRAL_RUNTIME_IMPLEMENTATION.md`. The active GT-on path is now the
+> host-owned central runtime; the inline engine is legacy/forensic only.
+
 **Branch:** `inline-engine` · **HEAD:** `8205fbb` · **Date:** 2026-08-03
 
 ## 1. Feature-working count (authoritative)

@@ -1,15 +1,14 @@
-# Terminal-Bench 2.0 MINI-SWE INLINE ENGINE matrix, one job per task.
+# Terminal-Bench 2.0 MINI-SWE CENTRAL RUNTIME matrix, one job per task.
 #
-# Same shape as the GT-off baseline matrix, but runs the Inline Engine posture
-# (eval.miniswe_agent:MiniSweEngineAgent -> scripts/miniswe_gt_run.py
-# --gt-mode engine). Every selected action crosses the engine boundary,
-# is normalized, decided, executed literally or deterministically, compiled
-# into one canonical observation, and bound to a delivery receipt.
+# Same shape as the GT-off baseline matrix, but runs the host-owned GT-on
+# control plane (eval.gt_central_agent:MiniSweCentralAgent). Private runtime
+# code, state, provider credentials, and feature configuration stay on the
+# Harbor host; only literal model-selected Bash commands enter the task image.
 #
 # Matched control for the frozen GT-off baseline (66/89; the ten smoke tasks =
 # 9 solved + gpt2-codegolf failed). Not a leaderboard submission:
 # --agent-timeout-multiplier 1.0. Do not rerun the baseline.
-name: TB2 miniswe engine matrix (Inline Engine)
+name: TB2 miniswe central matrix (GT-on)
 
 on:
   workflow_dispatch:
@@ -46,6 +45,16 @@ on:
         description: "Repository ref to check out (the ENGINE code lives on the inline-engine branch)"
         type: string
         default: "inline-engine"
+      arm:
+        description: "GT-on arm: treatment delivers the selected feature; shadow computes it privately"
+        type: choice
+        options: [treatment, shadow]
+        default: treatment
+      feature:
+        description: "Single-feature ablation or the final integrated candidate"
+        type: choice
+        options: [lint, submit_readiness, integrated]
+        default: integrated
 
 jobs:
   plan:
@@ -69,7 +78,7 @@ jobs:
       - name: Install nano-harness + harbor
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[miniswe]" "harbor==0.20.0"
+          pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0"
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |
@@ -186,12 +195,8 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
-      MINISWE_AGENT_VERSION: "2.2.8"
-      # The gateway producer flags are NOT exported to the container: they are
-      # set internally by the engine (`_ensure_gateway_flags`) so the model's
-      # `env` never reveals harness configuration. Round-11 evidence: the model
-      # read GT_EDIT_CHECK/GT_VERIFY_EXECUTE/etc from `env` and audited the
-      # harness source. MINISWE_AGENT_VERSION stays (it is benign + required).
+      # Provider credentials remain on the Harbor host. The external agent
+      # passes an empty env mapping to every model-selected task command.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -209,7 +214,7 @@ jobs:
       - name: Install nano-harness + harbor
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[miniswe]" "harbor==0.20.0"
+          pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0"
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |
@@ -251,20 +256,35 @@ jobs:
           MODEL: ${{ inputs.model }}
           DATASET: ${{ inputs.dataset }}
           TASK: ${{ matrix.task }}
+          ARM: ${{ inputs.arm }}
+          FEATURE: ${{ inputs.feature }}
         run: |
           set -uo pipefail
-          JOB_NAME="tb2-miniswe-engine-${GITHUB_RUN_ID}-${TASK}"
+          if [ "$ARM" = "shadow" ]; then
+            AGENT="eval.gt_central_agent:MiniSweCentralShadowAgent"
+          else
+            AGENT="eval.gt_central_agent:MiniSweCentralAgent"
+          fi
+          FEATURE_ARGS=()
+          case "$FEATURE" in
+            lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
+            submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
+            integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true) ;;
+            *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
+          esac
+          JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
           harbor run \
             -d "$DATASET" \
-            -a eval.miniswe_agent:MiniSweEngineAgent \
+            --agent-import-path "$AGENT" \
             -m "$MODEL" \
             -o results/terminal-bench \
             --job-name "$JOB_NAME" \
             --agent-timeout-multiplier 1.0 \
             -n 1 \
             -y \
+            "${FEATURE_ARGS[@]}" \
             -i "$TASK"
 
       - name: Cache task image for future runs
@@ -301,11 +321,7 @@ jobs:
       - name: Fix artifact permissions
         if: always()
         run: |
-          # The runner writes provider_requests/*.json blobs inside the task
-          # container as root:root with restrictive modes; they come back to
-          # the runner root-owned, and upload-artifact's zip step (running as
-          # the 'runner' user) gets EACCES on them. Plain chmod silently fails
-          # on root-owned files, so use sudo.
+          # Some task verifiers still return root-owned result artifacts.
           sudo find results -type f -exec chmod a+r {} + 2>/dev/null || \
             sudo chmod -R a+r results || true
 
@@ -317,7 +333,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tb2-miniswe-engine-${{ github.run_id }}-task-${{ matrix.task }}
+          name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-${{ matrix.task }}
           path: results/terminal-bench/
           if-no-files-found: warn
 
@@ -334,7 +350,7 @@ jobs:
       - name: Download all task artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: tb2-miniswe-engine-${{ github.run_id }}-task-*
+          pattern: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-*
           path: tasks
           merge-multiple: false
 
@@ -376,7 +392,9 @@ jobs:
           n_solved = sum(1 for t in graded if solved(t))
           n_expected = len(expected) if expected else 0
 
-          out = ["# TB2 miniswe engine matrix (Inline Engine)", ""]
+          out = ["# TB2 miniswe central matrix (GT-on)", ""]
+          out.append("- arm: **${{ inputs.arm }}**")
+          out.append("- feature: **${{ inputs.feature }}**")
           if missing:
               out.append(f"> **INCOMPLETE**: {len(missing)} task(s) produced no "
                          f"result.json: {', '.join(missing)}. The score below covers "
@@ -423,7 +441,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tb2-miniswe-engine-${{ github.run_id }}-MERGED
+          name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-MERGED
           path: |
             merged.json
             SUMMARY.md
