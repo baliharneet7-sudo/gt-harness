@@ -297,6 +297,29 @@ EvidenceArtifacts), and the full FACT owner set is registered. Census
 `scripts/engine_feature_census.py`: **all_17_wired = True (9/9 FACT, 7/7
 CAP_OWNER)**; caller_contract is REMOVE by disposition. 97 engine tests green.
 
+## Round-10 + grep-anchor removal (2026-08-03)
+
+- **Round-10 smoke `30816206132`: 9/10 solved.** write-compressor recovered to
+  1.0 (was 0.0 in r9); gpt2-codegolf 0.0 (temp-1.0 noise). Trajectory audit:
+  harness-probe actions dropped from **109 (r9) → 38 (r10)**, but the model
+  still greps internal event/blocker NAMES (`episode_failure_recorded`,
+  `submit_suppression_zero_delivery`, `failed-action:`) in readable files.
+- **Grep-anchor removal (`6a193da`)**: renamed the anchors a model greps for to
+  neutral identifiers — `failed-action:<sha>` → `fld-<sha>`,
+  `episode_failure_recorded` → `failure_recorded`,
+  `submit_suppression_zero_delivery` → `zero_delivery_recorded`. Now zero of
+  the model's grep anchors exist in any file it can read (scan-verified).
+- **GHA provider-free gate GREEN `30820611906`**: all-16-green, Gate 1 READY,
+  Gate 2 META READY (13 checks), `on_disk_internal_id_leaks=0`, validator ok.
+- **Ladder census (r10)**: obligations 109 delivered / **95 acted (87%)**;
+  localization 11/7 (64%); covering_red 32 delivered. Facts deliver usable
+  payload the model follows.
+- **Honest limit**: the harness source in site-packages is inherently readable;
+  a temp-1.0 frontier model that discovers it via `find /` will audit it. Each
+  round removes the grep-able anchors, but the source itself is discoverable.
+  This is a model-behavior cost (tokens on 3-4 tasks), not a GT delivery
+  defect — 0 empty-evidence, correct payload/timing, tasks still solve.
+
 ## Verified
 
 - Round-2 witness `30738637714` (10 tasks; write-compressor recovered in

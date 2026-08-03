@@ -2,7 +2,21 @@
 
 Run: `python scripts/engine_round_audit.py` (regenerates the tables below).
 Rounds: r2=30738637714(+30740338420), r3=30755837073, r4=30757560927,
-r5=30759441102, r6=30762787550, r7=30766572498, r8=30772336112.
+r5=30759441102, r6=30762787550, r7=30766572498, r8=30772336112,
+r9=30789635818, r10=30816206132.
+
+## Round-10 summary (2026-08-03)
+
+- Rewards: **9/10 solved** (write-compressor recovered to 1.0 after 0.0 in r9;
+  gpt2-codegolf 0.0, temp-1.0 noise). All task jobs + merge green.
+- **Harness-probe actions dropped 109 (r9) → 38 (r10)**. The r9 fix (journal
+  ID sanitization) helped but the model still greps internal event/blocker
+  NAMES in readable files. Fixed in `6a193da` (renamed to neutral ids); the
+  r11 smoke measures the effect.
+- **Ladder census (r10)**: obligations 109 delivered / 95 acted (87%);
+  localization 11/7 (64%); covering_red 32 delivered. Facts deliver usable
+  payload the model follows.
+- Payload integrity: 161 facts, 0 empty-evidence across r10 trajectories.
 
 ## A. Which of the 17 features worked (delivered >= 1 usable fact, per round)
 
