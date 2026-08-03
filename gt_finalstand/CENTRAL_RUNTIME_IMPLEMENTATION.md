@@ -150,6 +150,21 @@ hold was recorded. Aggregate usage was 448 model calls, 459 actions, and about
 failure against the frozen 9/10 reference. Shadow and 89-task runs remain
 blocked pending timeout diagnosis.
 
+### Smoke delta against frozen GT-off
+
+| metric | frozen GT-off | GT-on treatment | delta | interpretation |
+|---|---:|---:|---:|---|
+| solved | 9/10 | 8/10 | -1 task, -10 percentage points | regression |
+| timeout/error tasks | 1 | 2 | +1 | regression |
+| model calls | 420 | 448 | +28 (+6.7%) | not more efficient |
+| actions | 483 | 459 | -24 (-5.0%) | fewer actions, but two tasks did not finish |
+| reported tokens | 29.22M | 26.11M | -3.11M (-10.6%) | censored by timeouts; not evidence of savings |
+
+Task-level change was eight unchanged solves, one unchanged `gpt2-codegolf`
+failure, and one new `write-compressor` regression. Therefore this smoke does
+not show that GT helps. It shows that the host boundary works in Harbor, while
+the treatment still needs timeout diagnosis and repeated matched trials.
+
 ## Remaining execution gates
 
 1. Run the provider-free workflow at an immutable commit.
