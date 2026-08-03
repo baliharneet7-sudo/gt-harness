@@ -165,6 +165,49 @@ failure, and one new `write-compressor` regression. Therefore this smoke does
 not show that GT helps. It shows that the host boundary works in Harbor, while
 the treatment still needs timeout diagnosis and repeated matched trials.
 
+### Feature status and per-task map
+
+The historical 17-feature inventory belongs to the retired inline engine. The
+provider-free census reports all nine FACT producers and seven CAP_OWNER links
+wired and forcing-tested; `caller_contract` is intentionally `REMOVE`. That
+does not mean all features fired in live tasks. In the historical Round 11
+trajectories, the live FACT coverage was:
+
+| feature | wired/forcing-tested | Round 11 tasks with live evidence |
+|---|---|---|
+| obligations | yes | all 10 |
+| localization | yes | break-filter, headless, llm-inference, modernize-scientific, portfolio, schemelike, write-compressor |
+| def_partition | yes | headless, llm-inference, portfolio |
+| covering_red | yes | break-filter, headless, llm-inference, portfolio, schemelike, write-compressor |
+| syntax_result | yes | none |
+| recovery | yes | none |
+| signature_delta | yes | none |
+| newfile_precedent | yes | none |
+| submit_refusal | yes | none |
+
+The CAP_OWNER aliases follow their FACT: `GT_LOC_RESLOT` fired on the seven
+localization tasks; `GT_EDIT_CHECK`, `GT_PATCH_DELTA`, `GT_SS_SUBMIT_RED`,
+`GT_HYPOTHESIS`, and `GT_CHANGE_SURFACE` fired on none. `GT_CERT_DELIVERY` is
+an infrastructure receipt emitted for all ten deliveries, not a task-triggered
+fact. `caller_contract` was removed by disposition. Thus the active inventory
+was wired, but not all features were live in the smoke.
+
+The new central treatment deliberately has only two candidates. Its per-task
+map and solve delta are:
+
+| task | old inline FACTs (Round 11) | central smoke candidates | frozen GT-off → central GT-on |
+|---|---|---|---|
+| fix-code-vulnerability | obligations | lint, submit readiness | Y → Y |
+| portfolio-optimization | obligations, localization, def_partition, covering_red | lint, submit readiness | Y → Y |
+| modernize-scientific-stack | obligations, localization | lint, submit readiness | Y → Y |
+| headless-terminal | obligations, localization, def_partition, covering_red | lint, submit readiness | Y → Y |
+| llm-inference-batching-scheduler | obligations, localization, def_partition, covering_red | lint, submit readiness | Y → Y |
+| break-filter-js-from-html | obligations, localization, covering_red | lint, submit readiness | Y → Y |
+| write-compressor | obligations, localization, covering_red | lint only; timed out before submit | Y → N |
+| gpt2-codegolf | obligations | lint only; timed out before submit | N → N |
+| schemelike-metacircular-eval | obligations, localization, covering_red | lint, submit readiness | Y → Y |
+| cobol-modernization | obligations | lint, submit readiness | Y → Y |
+
 ## Remaining execution gates
 
 1. Run the provider-free workflow at an immutable commit.
