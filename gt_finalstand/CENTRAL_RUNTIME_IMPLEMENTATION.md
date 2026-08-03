@@ -140,6 +140,16 @@ structural audit reported `READY`, and Ruff passed. A live canary remains
 pending because the local Docker Linux daemon is stopped and no provider
 credential is present locally; no provider request was attempted.
 
+The first GitHub ten-task GT-on treatment smoke then completed as run
+`30856353817`. All ten verifier results and all ten host receipt bundles were
+returned; eight tasks solved and two timed out at Harbor's 900-second agent
+limit (`gpt2-codegolf`, `write-compressor`). All ten sensors remained healthy,
+no private GT terms appeared in model trajectories, and no repeated submit
+hold was recorded. Aggregate usage was 448 model calls, 459 actions, and about
+26.1M tokens. This is a runtime/wiring success but a smoke non-regression
+failure against the frozen 9/10 reference. Shadow and 89-task runs remain
+blocked pending timeout diagnosis.
+
 ## Remaining execution gates
 
 1. Run the provider-free workflow at an immutable commit.
