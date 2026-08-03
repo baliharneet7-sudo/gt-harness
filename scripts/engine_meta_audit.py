@@ -244,6 +244,23 @@ def main() -> int:
     m9_ok = fires == 1
     checks.append(("M9 recovery fires once per failure identity", m9_ok))
 
+    # --- M10: stop-signal fires ONCE per query identity -----------------------
+    class _SAdapter:
+        repository_revision = "r1"
+        _engine_search_history = {}
+        _dedup_chain = set()
+
+    sa = _SAdapter()
+    stop_fires = 0
+    for _ in range(5):
+        f = runner._stop_signal_fact(
+            command="grep -r foo .", raw="", returncode=1, adapter=sa,
+        )
+        if f is not None:
+            stop_fires += 1
+    m10_ok = stop_fires == 1
+    checks.append(("M10 stop-signal fires once per query identity", m10_ok))
+
     # --- M8: delivered obligation text must appear in the actual task ---------
     m8_ok = True
     for feature, (builder, owners) in SCENARIOS.items():

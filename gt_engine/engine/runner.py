@@ -1080,8 +1080,14 @@ def _stop_signal_fact(
     # Graph-certified STOP: on the FIRST empty search, if the graph's node index
     # confirms no symbol matches, the search is exhaustive over the indexed scope.
     graph_certified = count == 0 and _graph_confirms_no_match(command, adapter)
-    if count == 0 and not graph_certified:
-        return None  # first empty run; record, do not yet emit
+    # Emit ONCE per query identity: either the graph-certified first run
+    # (count==0) or the plain second run (count==1). Later repeats (3rd, 4th,
+    # ...) must not re-fire — the content carries ``occurrences`` which changes,
+    # so a content-hash dedup would re-deliver every empty search (same class
+    # of bug fixed in recovery).
+    emit_on = (count == 0 and graph_certified) or count == 1
+    if not emit_on:
+        return None
     notice = (
         "the graph index has no symbol matching this query; the search is "
         "exhaustive over the indexed scope"
