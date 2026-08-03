@@ -77,14 +77,22 @@ A grounded fresh failure may hold one submit attempt. The next submit at that
 same state passes unconditionally. Unrelated failures, stale failures, and
 degraded sensing never block.
 
-### First interventions
+### Complete 17-feature runtime
 
-- Changed-file syntax feedback for Python, JavaScript, shell, Ruby, and COBOL.
-- Bounded structured submission readiness.
-- Feedback is emitted only on failure, at most once per action, and capped at
-  320 characters.
-- The shadow arm computes and records the same candidates without modifying
-  model-visible bytes.
+`gt_engine.central_runtime.CentralFeatureRuntime` now owns the complete direct
+inventory: ten FACT identities (`caller_contract`, `covering_red`,
+`def_partition`, `localization`, `newfile_precedent`, `obligations`,
+`recovery`, `signature_delta`, `submit_refusal`, and `syntax_result`) plus the
+seven CAP_OWNER identities. Each delivery is accepted only when its trigger
+boundary, current workspace revision, non-empty feature-specific payload, and
+freshness marker pass the payload contract. Treatment receipts are model
+visible through bounded generic guidance; shadow receipts remain private.
+
+`scripts/central_feature_census.py` forces every trigger independently and
+requires all 17 payloads to be non-opaque, fresh, correctly timed, and
+model-visible. This proves producer deliverability; it does not claim every
+real task will trigger every feature. Changed-file syntax feedback and bounded
+submission readiness remain the only hard interventions.
 
 ## GT-on evaluation implementation
 
@@ -92,7 +100,8 @@ The paid workflow now selects:
 
 - `MiniSweCentralShadowAgent` for GT-on core/shadow;
 - `MiniSweCentralAgent` for GT-on treatment;
-- `lint`, `submit_readiness`, or `integrated` feature mode.
+- `lint`, `submit_readiness`, `all17`, or `integrated` feature mode. `all17`
+  is now the default and enables the complete central feature runtime.
 
 The workflow pins Mini-SWE 2.2.8 on the host. It does not install the agent or
 GT into the task image.
@@ -124,6 +133,8 @@ Local receipts:
 - the complete repository suite collected 782 tests: 779 passed and three
   expected Windows/platform skips;
 - structural readiness reported `READY` and changed-file Ruff checks passed;
+- the central feature census reported all 17 feature payloads deliverable at
+  their declared lifecycle boundaries;
 - Harbor 0.20 custom-agent dispatch uses its required `--agent-import-path`
   option, protected by both a workflow assertion and the readiness audit;
 - direct agent construction without a runner-injected session ID and a Windows
@@ -167,11 +178,12 @@ the treatment still needs timeout diagnosis and repeated matched trials.
 
 ### Feature status and per-task map
 
-The historical 17-feature inventory belongs to the retired inline engine. The
-provider-free census reports all nine FACT producers and seven CAP_OWNER links
-wired and forcing-tested; `caller_contract` is intentionally `REMOVE`. That
-does not mean all features fired in live tasks. In the historical Round 11
-trajectories, the live FACT coverage was:
+The historical Round 11 table below is retained as a comparator for live
+trigger frequency. It is not the implementation proof for the new runtime.
+The central feature census now covers all ten FACT producers and seven
+CAP_OWNER links. A feature is counted as live only when its trigger is actually
+observed in a task. In the historical Round 11 trajectories, the live FACT
+coverage was:
 
 | feature | wired/forcing-tested | Round 11 tasks with live evidence |
 |---|---|---|
@@ -189,11 +201,15 @@ The CAP_OWNER aliases follow their FACT: `GT_LOC_RESLOT` fired on the seven
 localization tasks; `GT_EDIT_CHECK`, `GT_PATCH_DELTA`, `GT_SS_SUBMIT_RED`,
 `GT_HYPOTHESIS`, and `GT_CHANGE_SURFACE` fired on none. `GT_CERT_DELIVERY` is
 an infrastructure receipt emitted for all ten deliveries, not a task-triggered
-fact. `caller_contract` was removed by disposition. Thus the active inventory
-was wired, but not all features were live in the smoke.
+fact. `caller_contract` was absent from the retired inline smoke; it is now a
+conservative central trigger that requires caller language in a search result.
+Thus the old smoke did not exercise all features, while the central producer
+census does.
 
-The new central treatment deliberately has only two candidates. Its per-task
-map and solve delta are:
+The first smoke was dispatched before the complete feature runtime was wired,
+so its per-task map had only lint and submission-readiness candidates. The next
+smoke must use `feature=all17`; no result from the earlier run is evidence for
+or against the complete 17-feature treatment.
 
 | task | old inline FACTs (Round 11) | central smoke candidates | frozen GT-off → central GT-on |
 |---|---|---|---|

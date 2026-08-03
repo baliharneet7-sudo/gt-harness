@@ -24,6 +24,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from eval.gt_central_agent import MiniSweCentralAgent
+from scripts.central_feature_census import census as central_feature_census
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,12 +32,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
     setup_source = inspect.getsource(MiniSweCentralAgent.setup)
-    workflow = (ROOT / ".github/workflows/tb2_miniswe_engine.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (ROOT / ".github/workflows/tb2_miniswe_engine.yml").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
         model = agent._build_model()
+    feature_result = central_feature_census()
     return {
         "host_base_agent": issubclass(MiniSweCentralAgent, BaseAgent),
         "not_installed_agent": not issubclass(MiniSweCentralAgent, BaseInstalledAgent),
@@ -54,6 +54,7 @@ def audit() -> dict[str, bool]:
         "legacy_agent_not_in_paid_workflow": (
             "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
         ),
+        "central_features_all_17_deliverable": bool(feature_result["all_17_deliverable"]),
     }
 
 

@@ -37,6 +37,7 @@ from minisweagent.exceptions import InterruptAgentFlow
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from gt_engine.central_runtime import (
+    CentralFeatureRuntime,
     EvidenceLedger,
     InterventionDecision,
     WorkspaceSensor,
@@ -75,6 +76,7 @@ class MiniSweCentralAgent(BaseAgent):
         max_submit_holds: int = 1,
         enable_lint: bool = True,
         enable_submit_readiness: bool = True,
+        enable_all_features: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, model_name, **kwargs)
@@ -87,8 +89,13 @@ class MiniSweCentralAgent(BaseAgent):
         self.cost_limit = cost_limit
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
+        self.enable_all_features = enable_all_features
         self._ledger = EvidenceLedger(max_holds=max_submit_holds)
         self._sensor = WorkspaceSensor()
+        self._features = CentralFeatureRuntime(
+            enabled=enable_all_features,
+            model_visible=self.runtime_mode == "treatment",
+        )
         self._model_factory: Callable[[], Any] = self._build_model
 
     @staticmethod
@@ -141,6 +148,7 @@ class MiniSweCentralAgent(BaseAgent):
         environment: BaseEnvironment,
         changed_paths: tuple[str, ...],
         revision: str,
+        action_id: int,
     ) -> str:
         for path, command in lint_commands(changed_paths):
             try:
@@ -161,9 +169,21 @@ class MiniSweCentralAgent(BaseAgent):
                     revision=revision,
                     grounded=True,
                 )
+                self._features.record_syntax(
+                    action_id=action_id,
+                    revision=revision,
+                    failed=True,
+                    reason="changed_file_syntax_failure",
+                )
                 return render_runtime_feedback(detail)
             self._ledger.record_check(
                 f"syntax:{path}", returncode=0, revision=revision, grounded=True
+            )
+            self._features.record_syntax(
+                action_id=action_id,
+                revision=revision,
+                failed=False,
+                reason="changed_file_syntax_pass",
             )
         return ""
 
@@ -224,7 +244,7 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                 )
                 cursor += 1
-            raw_choice = ((response.get("choices") or [{}])[0].get("message") or {})
+            raw_choice = (response.get("choices") or [{}])[0].get("message") or {}
             steps.append(
                 Step(
                     step_id=len(steps) + 1,
@@ -309,6 +329,7 @@ class MiniSweCentralAgent(BaseAgent):
         ]
         explicit_checks = explicit_check_commands(instruction)
         snapshot = await self._sensor.scan(environment, cwd=self.cwd)
+        self._features.begin_task(instruction, revision=snapshot.revision)
         calls = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -328,7 +349,7 @@ class MiniSweCentralAgent(BaseAgent):
                 messages.append(message)
                 extra = message.get("extra") or {}
                 cost += float(extra.get("cost") or 0.0)
-                usage = ((extra.get("response") or {}).get("usage") or {})
+                usage = (extra.get("response") or {}).get("usage") or {}
                 input_tokens += int(usage.get("prompt_tokens") or 0)
                 output_tokens += int(usage.get("completion_tokens") or 0)
                 cache_tokens += int(
@@ -351,6 +372,12 @@ class MiniSweCentralAgent(BaseAgent):
                             self.runtime_mode == "treatment"
                             and decision.decision == InterventionDecision.HOLD_ONCE
                         ):
+                            self._features.record_submit(
+                                action_id=actions_count,
+                                revision=snapshot.revision,
+                                refused=True,
+                                sensor_healthy=snapshot.healthy,
+                            )
                             detail = "A fresh required check is still failing: " + ", ".join(
                                 decision.blockers
                             )
@@ -370,6 +397,12 @@ class MiniSweCentralAgent(BaseAgent):
                                 }
                             )
                             continue
+                        self._features.record_submit(
+                            action_id=actions_count,
+                            revision=snapshot.revision,
+                            refused=False,
+                            sensor_healthy=snapshot.healthy,
+                        )
                         receipts.append(
                             {
                                 "action": actions_count,
@@ -402,9 +435,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "returncode": result.return_code,
                         "exception_info": "",
                     }
-                    after = await self._sensor.scan(
-                        environment, cwd=self.cwd, previous=snapshot
-                    )
+                    after = await self._sensor.scan(environment, cwd=self.cwd, previous=snapshot)
                     transition = diff_snapshots(
                         snapshot,
                         after,
@@ -412,6 +443,14 @@ class MiniSweCentralAgent(BaseAgent):
                         command=command,
                     )
                     snapshot = after
+                    self._features.observe_action(
+                        action_id=actions_count,
+                        command=command,
+                        output=output["output"],
+                        returncode=result.return_code,
+                        transition=transition,
+                        revision=snapshot.revision,
+                    )
 
                     if is_check_command(command):
                         self._ledger.record_check(
@@ -429,7 +468,7 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     if self.enable_lint and changed_files and snapshot.healthy:
                         lint_feedback = await self._run_lint(
-                            environment, changed_files, snapshot.revision
+                            environment, changed_files, snapshot.revision, actions_count
                         )
                         receipts.append(
                             {
@@ -438,12 +477,17 @@ class MiniSweCentralAgent(BaseAgent):
                                 "decision": (
                                     "ADVISE"
                                     if lint_feedback and self.runtime_mode == "treatment"
-                                    else "SHADOW" if lint_feedback else "PASS"
+                                    else "SHADOW"
+                                    if lint_feedback
+                                    else "PASS"
                                 ),
                                 "revision": snapshot.revision,
                                 "paths": list(changed_files),
                             }
                         )
+                    feature_feedback = self._features.model_feedback()
+                    if feature_feedback and self.runtime_mode == "treatment":
+                        output["output"] = feature_feedback + "\n" + output["output"]
                     if lint_feedback and self.runtime_mode == "treatment":
                         output["output"] = lint_feedback + "\n" + output["output"]
                     outputs.append(output)
@@ -451,9 +495,7 @@ class MiniSweCentralAgent(BaseAgent):
                         terminal = "Submitted"
                         break
 
-                messages.extend(
-                    model.format_observation_messages(message, outputs, variables)
-                )
+                messages.extend(model.format_observation_messages(message, outputs, variables))
 
             if not terminal:
                 terminal = "LimitsExceeded"
@@ -500,6 +542,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "elapsed_seconds": time.monotonic() - started,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
+                        "features": self._features.summary(),
                         "interventions": receipts,
                     },
                     indent=2,

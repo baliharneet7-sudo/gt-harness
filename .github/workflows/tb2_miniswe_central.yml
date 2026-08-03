@@ -53,8 +53,8 @@ on:
       feature:
         description: "Single-feature ablation or the final integrated candidate"
         type: choice
-        options: [lint, submit_readiness, integrated]
-        default: integrated
+        options: [lint, submit_readiness, all17, integrated]
+        default: all17
 
 jobs:
   plan:
@@ -269,7 +269,7 @@ jobs:
           case "$FEATURE" in
             lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
             submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
-            integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true) ;;
+            all17|integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak enable_all_features=true) ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
           esac
           JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
