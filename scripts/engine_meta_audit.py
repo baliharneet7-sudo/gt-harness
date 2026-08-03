@@ -97,7 +97,8 @@ def main() -> int:
 
         return EvidenceArtifact(
             artifact_id=fact.artifact_id, owner=fact.owner, semantics=fact.semantics,
-            content={**dict(fact.content), "matched": ["obl-deadbeef00"]},
+            content={**dict(fact.content),
+                     "matched": ["obl-deadbeefdeadbeefdeadbeefdeadbeef"]},
             anchors=fact.anchors, witnesses=fact.witnesses, producer=fact.producer,
             producer_version=fact.producer_version,
             freshness_revision=fact.freshness_revision, coverage=fact.coverage,
@@ -164,12 +165,25 @@ def main() -> int:
     m4_caught = (not correct_time) and detached["detected"]
     checks.append(("M4 detached fact -> correct_time red", m4_caught))
 
+    # --- M7: audit-invite wording (old refusal text) must be flagged ----------
+    # Deep-audit D2: plant the legacy "Transparent bypass: run this harness in
+    # advisory mode" refusal text into a user message; the audit's
+    # audit_invite_bytes scan must catch it.
+    from engine_readiness_audit import AUDIT_INVITE_RE
+
+    invite_test = (
+        "Transparent bypass: run this harness in advisory mode to restore "
+        "stock Mini-SWE submission behavior."
+    )
+    m7_caught = bool(AUDIT_INVITE_RE.search(invite_test))
+    checks.append(("M7 audit-invite wording flagged", m7_caught))
+
     # --- M5: independent re-derivation exact match ----------------------------
     match_ok = True
     for feature, (builder, owners) in SCENARIOS.items():
         agent, adapter, graph_db, root = builder()
         stream = _model_messages(agent)
-        agent.run(TASK)
+        agent.run(str(getattr(agent, "_gt_scenario_task", "") or TASK))
         tool_obs = [c for r, c in stream if r == "tool"]
         counts: dict[str, int] = {}
         for o in tool_obs:
@@ -194,7 +208,7 @@ def main() -> int:
     for feature, (builder, owners) in SCENARIOS.items():
         agent, adapter, graph_db, root = builder()
         tool_obs = [c for r, c in _model_messages(agent) if r == "tool"]
-        agent.run(TASK)
+        agent.run(str(getattr(agent, "_gt_scenario_task", "") or TASK))
         for o in tool_obs:
             for fm in FACT_RE.finditer(o):
                 owner, body = fm.group(1), fm.group(2)
@@ -206,6 +220,53 @@ def main() -> int:
                         gt_ok = False
                         print(f"  M6 MISSING {feature}/{owner}: {anchor} not under {root}")
     checks.append(("M6 ground-truth anchors resolve", gt_ok))
+
+    # --- M9: recovery fires ONCE per failure identity (no repeat spam) --------
+    # Correctness: the recovery fact content carries `occurrences`, so a
+    # content-hash dedup re-delivers on the 3rd/4th identical failure. The
+    # producer must emit once per fingerprint.
+    import gt_engine.engine.runner as runner
+
+    class _RAdapter:
+        repository_revision = "r1"
+        _engine_failure_history = {}
+        _dedup_chain = set()
+
+    ra = _RAdapter()
+    fires = 0
+    for _ in range(5):
+        f = runner._recovery_fact(
+            command="pytest", raw="Traceback\nE AssertionError",
+            returncode=1, adapter=ra,
+        )
+        if f is not None:
+            fires += 1
+    m9_ok = fires == 1
+    checks.append(("M9 recovery fires once per failure identity", m9_ok))
+
+    # --- M8: delivered obligation text must appear in the actual task ---------
+    m8_ok = True
+    for feature, (builder, owners) in SCENARIOS.items():
+        agent, adapter, graph_db, root = builder()
+        scenario_task = str(getattr(agent, "_gt_scenario_task", "") or TASK)
+        stream = _model_messages(agent)
+        agent.run(scenario_task)
+        tool_obs = [c for r, c in stream if r == "tool"]
+        for o in tool_obs:
+            for fm in FACT_RE.finditer(o):
+                if fm.group(1) != "obligations":
+                    continue
+                body = fm.group(2)
+                for m in re.finditer(r'"requirements":\s*\[([^\]]*)\]', body):
+                    raw = m.group(1)
+                    for req in re.findall(r'"([^"]+)"', raw):
+                        # requirement must be grounded in the task text
+                        words = [w for w in req.lower().split() if len(w) > 3]
+                        if not any(w in scenario_task.lower() for w in words):
+                            m8_ok = False
+                            print(f"  M8 UNGROUNDED {feature}: req={req!r} "
+                                  f"not in task={scenario_task!r}")
+    checks.append(("M8 obligation text grounded in the actual task", m8_ok))
 
     all_ok = all(ok for _, ok in checks)
     print("META-AUDIT (Gate 2)")

@@ -375,8 +375,14 @@ def test_refusal_names_obligation_text_not_opaque_predicate_id(tmp_path):
     a.start_task()
     directive = _refusal_directive(a)
     assert directive["role"] == "user"
-    assert "GT ENFORCED SUBMIT GATE" in directive["content"]
+    assert "Submission not executed" in directive["content"]
     assert "may continue" in directive["content"]
+    # Deep-audit D2: the refusal must NEVER frame the harness or offer a bypass
+    # (round-8: that text sent the model reading gt_engine/ source).
+    assert "GT ENFORCED" not in directive["content"]
+    assert "harness" not in directive["content"].lower()
+    assert "advisory" not in directive["content"].lower()
+    assert "bypass" not in directive["content"].lower()
     assert "compute()" in directive["content"]
     assert "pred-" not in directive["content"]
 

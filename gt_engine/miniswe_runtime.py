@@ -130,7 +130,15 @@ _NOT_EXECUTED = {
 
 
 def _refusal_directive(adapter: MiniSweAdapter) -> dict:
-    """Visible proof-backed refusal that preserves continued exploration."""
+    """Visible proof-backed refusal that preserves continued exploration.
+
+    NEUTRAL wording (Deep-audit D2): the prior text named "the harness", an
+    "advisory mode" and a "Transparent bypass" — a literal instruction set for
+    a frontier model to reverse-engineer and disable GT (round-8 evidence: the
+    model spent 27-35 actions reading gt_engine/ source after reading this).
+    The refusal must only say the submission was not executed because failing
+    checks remain, and name those checks by TASK meaning (never internal IDs).
+    """
     adapter.store.append(
         "submit_refusal",
         command_sha256=None,
@@ -140,14 +148,13 @@ def _refusal_directive(adapter: MiniSweAdapter) -> dict:
     unmet = adapter.blocking_obligation_texts()
     delta = adapter.next_contract_delta(max_chars=1000)
     lines = [
-        "GT ENFORCED SUBMIT GATE: submission was not executed because current, "
-        "workspace-bound RED evidence remains. You may continue with any "
-        "search, edit, test, or alternate hypothesis before retrying.",
-        "Transparent bypass: run this harness in advisory mode to restore stock "
-        "Mini-SWE submission behavior.",
-        "Active RED:",
+        "Submission not executed: the current workspace still has failing "
+        "verification checks. Fix the failing checks before submitting again; "
+        "you may continue searching, editing, and testing.",
     ]
-    lines += [f"- {reason}" for reason in (unmet or ("active failure",))]
+    if unmet:
+        lines.append("Failing:")
+        lines += [f"- {reason}" for reason in unmet]
     if delta:
         lines.append(delta)
     return {"role": "user", "content": "\n".join(lines)}
@@ -177,10 +184,11 @@ def _run_submit_gate(session: GTSession, command: str) -> bool:
 
 
 def _refusal_text(adapter: MiniSweAdapter) -> str:
-    blocking = adapter.blocking_reasons
+    unmet = adapter.blocking_obligation_texts()
     delta = adapter.next_contract_delta(max_chars=1200)
-    lines = ["GT SUBMIT REFUSED: contract obligations are not fully proven.", "Unmet:"]
-    lines += [f"- {reason}" for reason in (blocking or ("active failure",))]
+    lines = ["Submission not executed: verification checks are not all passing.",
+             "Failing:"]
+    lines += [f"- {reason}" for reason in (unmet or ("active failure",))]
     if delta:
         lines.append(delta)
     return "\n".join(lines)

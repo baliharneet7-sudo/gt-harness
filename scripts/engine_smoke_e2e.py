@@ -440,6 +440,9 @@ def build_scenario_engine(
         step_limit=20,
         output_path=None,
     )
+    # The audit runs the SAME issue the adapter's contract was built from, so
+    # delivered obligation facts can be verified against the real task.
+    agent._gt_scenario_task = resolved_issue
     install_runtime_hooks(agent, session)
     return agent, adapter, graph_db, root
 

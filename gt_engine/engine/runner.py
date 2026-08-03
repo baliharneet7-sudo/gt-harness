@@ -106,10 +106,14 @@ _EVIDENCE_TO_OWNER: dict[str, str] = {
     "companion_surface": "newfile_precedent",
     "obligations": "obligations",
     # caller_contract is REMOVE by disposition -> not mapped (never rendered).
-    # body_concept / trace_frame / name_fold / wrong_surface are advisory
-    # classes; body folds into def_partition knowledge, trace into recovery.
+    # body_concept / name_fold fold into def_partition knowledge.
+    # trace_frame ("deepest in-repo failure frame") is FAILURE-LOCATION, so it
+    # maps to localization, NOT recovery: recovery is the exact repeated-failure
+    # identity (engine._recovery_fact). Mapping trace_frame->recovery double-
+    # satisfied the feature (a single traceback counted as "recovery") and hid
+    # the true 2nd-identical-failure signal in the census.
     "body_concept": "def_partition",
-    "trace_frame": "recovery",
+    "trace_frame": "localization",
     "name_fold": "def_partition",
     "wrong_surface": "localization",
 }
@@ -484,6 +488,7 @@ def _execute_and_observe(
         request, command=request.literal_shell_form, raw=raw, returncode=rc,
         repo_root=getattr(adapter, "repo_root", "") or os.getcwd(),
         adapter=adapter,
+        action_index=int(getattr(adapter, "global_action", 0) or 1),
     )
     if facts and decision.decision == Decision.PASS_THROUGH:
         # Postflight deterministic facts joined -> the decision is AUGMENT:
@@ -686,6 +691,7 @@ def _gateway_facts(
     changed_files: tuple[str, ...],
     viewed_files: tuple[str, ...],
     adapter: Any,
+    action_index: int = 1,
 ) -> tuple[EvidenceArtifact, ...]:
     """Run the groundtruth gateway's deterministic producers for one action.
 
@@ -737,7 +743,7 @@ def _gateway_facts(
             cwd=getattr(adapter, "repo_root", "") or "",
             changed_files=changed_files,
             viewed_files=viewed_files,
-            action_index=1,
+            action_index=action_index,
             edit_before_after=edit_before_after,
             covering=covering,
             semantic_events=tuple(semantic),
@@ -949,8 +955,11 @@ def _valid_fact_payload(fact: EvidenceArtifact) -> bool:
     # Gap-1 guard: no internal harness identifier may reach the model. Round-8
     # showed `obl-<sha>`/`pred-<sha>` bytes made the model audit gt_engine/
     # source instead of solving (+3324%..+3842% tokens). Reject any payload
-    # that would render an internal ID.
-    if re.search(r"obl-[0-9a-f]{6,}|pred-[0-9a-f]{6,}", blob):
+    # that would render an internal ID. Precise: the generated IDs are
+    # `obl-<64 hex>` / `pred-<64 hex>` (sha256); a shorter match (e.g. a real
+    # file named `obl-1a2b3c4d.py`) is legitimate task content and must NOT be
+    # dropped.
+    if re.search(r"(?:obl|pred)-[0-9a-f]{16,}", blob):
         return False
     if fact.owner == "obligations" and "obl-" in blob and not any(
         key in blob for key in ("requirements", "subjects", "file", "path")
@@ -1134,8 +1143,12 @@ def _recovery_fact(
         adapter._engine_failure_history = history
     count = history.get(fingerprint, 0)
     history[fingerprint] = count + 1
-    if count == 0:
-        return None  # first occurrence: record, do not yet emit
+    # Emit ONCE per failure identity: on the transition to the 2nd occurrence
+    # (count==1). Later repeats (3rd, 4th, ...) must NOT re-fire — the fact
+    # content carries ``occurrences`` which changes, so a content-hash dedup
+    # would re-deliver every repeat.
+    if count != 1:
+        return None
     return EvidenceArtifact(
         artifact_id=hashlib.sha256(f"recover:{fingerprint}".encode("utf-8")).hexdigest()[:16],
         owner="recovery",
@@ -1165,6 +1178,7 @@ def _postflight_facts(
     returncode: int | None,
     repo_root: str,
     adapter: Any,
+    action_index: int = 1,
 ) -> tuple[EvidenceArtifact, ...]:
     """Deterministic post-execution facts for one shell action (IE-06).
 
@@ -1184,6 +1198,7 @@ def _postflight_facts(
             changed_files=changed,
             viewed_files=viewed,
             adapter=adapter,
+            action_index=action_index,
         )
     )
     obligations = _obligations_fact(

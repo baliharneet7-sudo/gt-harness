@@ -38,10 +38,18 @@ from engine_smoke_e2e import TASK  # noqa: E402
 
 FACT_RE = re.compile(r'<fact owner="([^"]+)"[^>]*>(.*?)</fact>', re.S)
 INTERNAL_ID_RE = re.compile(
-    r"obl-[0-9a-f]{6,}|pred-[0-9a-f]{6,}|gt_engine|site-packages|"
+    r"(?:obl|pred)-[0-9a-f]{16,}|gt_engine|site-packages|"
     r"miniswe_runtime|miniswe_integration|task_contract\.py|"
     r"verification_contract\.py|gt_session\.py|engine/runner|"
     r"miniswe_controller|\.gt-state|gt-state"
+)
+# Deep-audit D1/D2: any harness-framing or audit-invite wording in ANY
+# model-visible byte (tool results, refusal directives, system/user) would let
+# the model reverse-engineer GT (round-8: 27-35 gt_engine/ probe actions).
+AUDIT_INVITE_RE = re.compile(
+    r"Transparent bypass|advisory mode|restore stock|GT ENFORCED SUBMIT GATE|"
+    r"GT SUBMIT REFUSED|run this harness|the harness's|harness internals|"
+    r"caller_contract|GT_CERT_DELIVERY|GT_SS_SUBMIT_RED|authorize_submit"
 )
 
 # submit_refusal delivers as a SUPPRESS decision, not a <fact> block.
@@ -89,7 +97,8 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
     else:
         agent, adapter, graph_db, root = builder()
     stream = _model_messages(agent)
-    agent.run(TASK)
+    scenario_task = str(getattr(agent, "_gt_scenario_task", "") or TASK)
+    agent.run(scenario_task)
 
     predictive = any(
         role != "tool" and FACT_RE.search(content) for role, content in stream
@@ -186,12 +195,23 @@ def main() -> int:
         1 for r in results.values() for o in r["all_observations"]
         if '"evidence": ""' in o
     )
+    # Deep-audit D1/D2: scan the FULL conversation (every role: system, user,
+    # assistant, tool, directives) for harness-internal or audit-invite bytes.
+    full_stream = [c for r in results.values() for _r, c in r["stream"]]
+    audit_invite_bytes = sum(1 for c in full_stream if AUDIT_INVITE_RE.search(c))
+    full_internal_bytes = sum(1 for c in full_stream if INTERNAL_ID_RE.search(c))
+    caller_contract_bytes = sum(1 for c in full_stream if "caller_contract" in c)
 
     if args.json:
         out = {
             "results": {k: v["owners"] for k, v in results.items()},
-            "global": {"internal_id_bytes": internal_id_bytes,
-                       "empty_facts": empty_facts},
+            "global": {
+                "internal_id_bytes": internal_id_bytes,
+                "empty_facts": empty_facts,
+                "audit_invite_bytes": audit_invite_bytes,
+                "full_internal_bytes": full_internal_bytes,
+                "caller_contract_bytes": caller_contract_bytes,
+            },
         }
         print(json.dumps(out, indent=2, default=str))
         return 0
@@ -210,7 +230,11 @@ def main() -> int:
             if not all(cells):
                 ok = False
     print(f"\ninternal_id_bytes={internal_id_bytes} empty_facts={empty_facts}")
-    if internal_id_bytes or empty_facts:
+    print(f"audit_invite_bytes={audit_invite_bytes} "
+          f"full_internal_bytes={full_internal_bytes} "
+          f"caller_contract_bytes={caller_contract_bytes}")
+    if (internal_id_bytes or empty_facts or audit_invite_bytes
+            or full_internal_bytes or caller_contract_bytes):
         ok = False
     print("READY" if ok else "NOT READY")
     return 0 if ok else 1

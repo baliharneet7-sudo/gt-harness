@@ -257,7 +257,7 @@ def test_enforced_mode_refuses_only_current_red_evidence(monkeypatch, tmp_path):
     ]}})
     assert adapter.phase == "IMPLEMENT"
     assert not agent.env.executed
-    assert any(m.get("role") == "user" and "GT ENFORCED" in str(m.get("content"))
+    assert any(m.get("role") == "user" and "Submission not executed" in str(m.get("content"))
                for m in msgs)
 
 
@@ -352,7 +352,7 @@ def test_result_level_submit_interception_refuses_bypass(monkeypatch, tmp_path):
     # The gate refused at the RESULT level: the run continues (no Submitted
     # propagates) and the model sees an explicit, nonterminal GT advisory.
     assert adapter.phase == "IMPLEMENT"
-    assert any(m.get("role") == "user" and "GT ENFORCED" in str(m.get("content"))
+    assert any(m.get("role") == "user" and "Submission not executed" in str(m.get("content"))
                for m in msgs)
     assert agent.env.executed
 
