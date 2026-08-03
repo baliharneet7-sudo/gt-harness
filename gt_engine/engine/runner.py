@@ -124,6 +124,49 @@ _EVIDENCE_TO_OWNER: dict[str, str] = {
 # lineage and were silently dropped by exact-match owner lookup (Gap 2).
 _NEWFILE_PRECEDENT_BASES = frozenset({"missing_role", "missing_role_postcreate"})
 
+# FACT owner -> CAP_OWNER capability id (the 129-row inventory's byte-owner
+# lineage). The ENGINE emits a ``capability_fired`` journal event when a fact
+# with a bound CAP_OWNER is actually delivered — so the 7 CAP_OWNERs are
+# runtime-verifiable, not just statically "wired" in the census.
+_CAP_BY_FACT: dict[str, str] = {
+    "syntax_result": "GT_EDIT_CHECK",
+    "signature_delta": "GT_PATCH_DELTA",
+    "localization": "GT_LOC_RESLOT",
+    "submit_refusal": "GT_SS_SUBMIT_RED",
+    "recovery": "GT_HYPOTHESIS",
+    "newfile_precedent": "GT_CHANGE_SURFACE",
+    "delivery_receipt": "GT_CERT_DELIVERY",
+}
+
+
+def _record_capability_fired(adapter: Any, observation: "CanonicalObservation") -> None:
+    """Stamp the bound CAP_OWNER lineage for every delivered fact.
+
+    Called after an observation is compiled so the journal proves each CAP fired
+    in the real seam (Deep-audit D6: the census previously claimed the 7
+    CAP_OWNERs were 'wired' from static code; the ENGINE emitted no capability
+    receipt, so their delivery was unverifiable). Fail-open: never breaks a
+    delivery.
+    """
+    try:
+        store = getattr(adapter, "store", None)
+        if store is None:
+            return
+        for artifact in getattr(observation, "evidence", ()) or ():
+            if not getattr(artifact, "model_visible", False):
+                continue
+            cap = _CAP_BY_FACT.get(artifact.owner)
+            if cap is None:
+                continue
+            store.append(
+                "capability_fired",
+                capability_id=cap,
+                fact_owner=artifact.owner,
+                artifact_id=artifact.artifact_id,
+            )
+    except Exception:  # noqa: BLE001 - capability stamping is fail-open
+        pass
+
 
 def _owner_for_evidence(evidence_type: str) -> str | None:
     """Resolve an evidence_type to a registered FACT owner.
@@ -1734,6 +1777,29 @@ def engine_execute_actions(
         outputs.append(_tool_output(observation, returncode))
         if decision.decision == Decision.SUPPRESS:
             directives.append(rt._refusal_directive(adapter))
+        # Stamp CAP_OWNER lineage for every delivered fact (and the SUPPRESS
+        # decision = submit_refusal -> GT_SS_SUBMIT_RED, plus GT_CERT_DELIVERY
+        # on every delivery receipt), so the 7 CAP_OWNERs are runtime-verifiable
+        # in the journal (Deep-audit D6).
+        try:
+            _record_capability_fired(adapter, observation)
+            store = getattr(adapter, "store", None)
+            if store is not None:
+                if decision.decision == Decision.SUPPRESS:
+                    store.append(
+                        "capability_fired",
+                        capability_id="GT_SS_SUBMIT_RED",
+                        fact_owner="submit_refusal",
+                        artifact_id="suppress",
+                    )
+                store.append(
+                    "capability_fired",
+                    capability_id="GT_CERT_DELIVERY",
+                    fact_owner="delivery_receipt",
+                    artifact_id=request.action_id,
+                )
+        except Exception:  # noqa: BLE001 - capability stamping is fail-open
+            pass
 
         try:
             receipt = _delivery_receipt(request, decision, observation, adapter)

@@ -285,6 +285,83 @@ def main() -> int:
                                   f"not in task={scenario_task!r}")
     checks.append(("M8 obligation text grounded in the actual task", m8_ok))
 
+    # --- M11: capability receipt present when the bound FACT fires ------------
+    # D6: the 7 CAP_OWNERs must emit a journal receipt when their FACT delivers,
+    # not just be statically "wired". Verify every delivered FACT with a bound
+    # CAP has a capability_fired receipt in the same scenario's journal.
+    m11_ok = True
+    CAP_BY_FACT = {
+        "syntax_result": "GT_EDIT_CHECK",
+        "signature_delta": "GT_PATCH_DELTA",
+        "localization": "GT_LOC_RESLOT",
+        "submit_refusal": "GT_SS_SUBMIT_RED",
+        "recovery": "GT_HYPOTHESIS",
+        "newfile_precedent": "GT_CHANGE_SURFACE",
+        "delivery_receipt": "GT_CERT_DELIVERY",
+    }
+    for feature, (builder, owners) in SCENARIOS.items():
+        agent, adapter, graph_db, root = builder()
+        agent.run(str(getattr(agent, "_gt_scenario_task", "") or TASK))
+        from pathlib import Path as _P
+
+        state_dir = _P(root).parent / f"{_P(root).name}-state"
+        caps: set[str] = set()
+        try:
+            for journal in state_dir.rglob("events.jsonl"):
+                for line in journal.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    import json as _json
+
+                    rec = _json.loads(line)
+                    if rec.get("event") == "capability_fired":
+                        caps.add(str(rec.get("capability_id") or ""))
+        except Exception:  # noqa: BLE001
+            pass
+        stream = _model_messages(agent)
+        tool_obs = [c for r, c in stream if r == "tool"]
+        for owner in owners:
+            if owner not in CAP_BY_FACT:
+                continue
+            fact_fired = any(
+                f'<fact owner="{owner}"' in o for o in tool_obs
+            ) or (owner == "submit_refusal"
+                  and any('decision="suppress"' in o for o in tool_obs))
+            if fact_fired and CAP_BY_FACT[owner] not in caps:
+                m11_ok = False
+                print(f"  M11 MISSING {feature}/{owner}: "
+                      f"{CAP_BY_FACT[owner]} no receipt despite FACT firing")
+    checks.append(("M11 capability receipt present when FACT fires", m11_ok))
+
+    # --- M12: obligations relevance gate (no false positives) -----------------
+    from gt_engine.task_contract import Obligation, TaskContract
+    from gt_engine.engine.runner import _obligations_fact
+
+    class _OAdapter:
+        repository_revision = "r1"
+        contract = TaskContract(
+            role="patch",
+            obligations=(
+                Obligation("obl-1", "fix the vulnerability in app.py", "task",
+                           subjects=("app.py",)),
+            ),
+        )
+
+    m12_ok = True
+    # positive: subject referenced -> fires
+    if _obligations_fact(command="cat app.py", raw="app.py contents",
+                         returncode=0, adapter=_OAdapter()) is None:
+        m12_ok = False
+    # unrelated -> abstain
+    if _obligations_fact(command="cat requirements.txt", raw="flask==2.0",
+                         returncode=0, adapter=_OAdapter()) is not None:
+        m12_ok = False
+    # near-miss (no subject, weak overlap) -> abstain
+    if _obligations_fact(command="echo fix", raw="",
+                         returncode=0, adapter=_OAdapter()) is not None:
+        m12_ok = False
+    checks.append(("M12 obligations relevance gate (no false positives)", m12_ok))
+
     all_ok = all(ok for _, ok in checks)
     print("META-AUDIT (Gate 2)")
     for name, ok in checks:

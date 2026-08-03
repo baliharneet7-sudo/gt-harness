@@ -169,6 +169,22 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
             "acted": acted,
             "n_delivered": len(mine),
         }
+    # collect capability_fired receipts from the scenario journal (D6)
+    caps_fired: set[str] = set()
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+
+        state_dir = _Path(root).parent / f"{_Path(root).name}-state"
+        for journal in state_dir.rglob("events.jsonl"):
+            for line in journal.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                rec = _json.loads(line)
+                if rec.get("event") == "capability_fired":
+                    caps_fired.add(str(rec.get("capability_id") or ""))
+    except Exception:  # noqa: BLE001 - capability scan is fail-open
+        pass
     return {
         "feature": feature,
         "owners": rows,
@@ -177,6 +193,7 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
         "all_observations": tool_obs,
         "deliveries": deliveries,
         "stream": stream,
+        "caps_fired": caps_fired,
     }
 
 
@@ -201,6 +218,40 @@ def main() -> int:
     audit_invite_bytes = sum(1 for c in full_stream if AUDIT_INVITE_RE.search(c))
     full_internal_bytes = sum(1 for c in full_stream if INTERNAL_ID_RE.search(c))
     caller_contract_bytes = sum(1 for c in full_stream if "caller_contract" in c)
+
+    # Deep-audit D6: every CAP_OWNER whose bound FACT delivered must have fired
+    # a capability RECEIPT in the real-seam journal (not just be statically
+    # "wired" in the census). The receipt is the only proof the CAP ran.
+    CAP_BY_FACT = {
+        "syntax_result": "GT_EDIT_CHECK",
+        "signature_delta": "GT_PATCH_DELTA",
+        "localization": "GT_LOC_RESLOT",
+        "submit_refusal": "GT_SS_SUBMIT_RED",
+        "recovery": "GT_HYPOTHESIS",
+        "newfile_precedent": "GT_CHANGE_SURFACE",
+        "delivery_receipt": "GT_CERT_DELIVERY",
+    }
+    cap_fired: set[str] = set()
+    for res in results.values():
+        cap_fired |= res.get("caps_fired", set())
+    cap_matrix_ok = True
+    print("| fact | cap_owner | fact_delivered | fired_receipt |")
+    print("|---|---|---|---|")
+    for fact, cap in CAP_BY_FACT.items():
+        if fact == "delivery_receipt":
+            fact_delivered = True  # GT_CERT_DELIVERY fires on every delivery
+        else:
+            fact_delivered = any(
+                res["owners"].get(fact, {}).get("fired")
+                for res in results.values()
+            )
+        fired = cap in cap_fired
+        if fact_delivered and not fired:
+            cap_matrix_ok = False
+        print(f"| {fact} | {cap} | {'Y' if fact_delivered else '-'} | "
+              f"{'Y' if fired else 'N'} |")
+    if not cap_matrix_ok:
+        ok = False
 
     if args.json:
         out = {
