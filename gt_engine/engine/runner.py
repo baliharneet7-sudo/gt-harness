@@ -143,10 +143,10 @@ def _record_capability_fired(adapter: Any, observation: "CanonicalObservation") 
     """Stamp the bound CAP_OWNER lineage for every delivered fact.
 
     Called after an observation is compiled so the journal proves each CAP fired
-    in the real seam (Deep-audit D6: the census previously claimed the 7
-    CAP_OWNERs were 'wired' from static code; the ENGINE emitted no capability
-    receipt, so their delivery was unverifiable). Fail-open: never breaks a
-    delivery.
+    in the real seam (Deep-audit D6). The journal is a readable file in the task
+    container, so the receipt records the bound FACT owner (audit-meaningful,
+    not an internal switchboard name) — the 7 GT_* capability NAMES are never
+    written (round-9: the model audits GT_* config it finds on disk).
     """
     try:
         store = getattr(adapter, "store", None)
@@ -160,7 +160,6 @@ def _record_capability_fired(adapter: Any, observation: "CanonicalObservation") 
                 continue
             store.append(
                 "capability_fired",
-                capability_id=cap,
                 fact_owner=artifact.owner,
                 artifact_id=artifact.artifact_id,
             )
@@ -1564,12 +1563,17 @@ def engine_execute_actions(
                     issue_text_chars=len(
                         str(getattr(adapter, "issue_text", "") or "")
                     ),
-                    gateway_flags={
-                        flag: os.environ.get(flag, "")
+                    # Do NOT store the GT_* flag NAMES: the journal is a readable
+                    # file in the container and round-9 showed the model audits
+                    # harness config (GT_GATEWAY/GT_LOC_RESLOT/...) it finds.
+                    # A single boolean preserves the diagnostic without leaking
+                    # the internal switchboard.
+                    gateway_producers_enabled=all(
+                        os.environ.get(flag, "").strip() in ("1", "true", "yes", "on")
                         for flag in ("GT_GATEWAY", "GT_LOC_RESLOT", "GT_PATCH_DELTA",
                                      "GT_CS_EDIT_TRIGGER", "GT_CHANGE_SURFACE",
                                      "GT_EDIT_OVERLAY")
-                    },
+                    ),
                     repository_revision=adapter.repository_revision,
                 )
             except Exception:  # noqa: BLE001 - init event is diagnostic only
@@ -1788,13 +1792,11 @@ def engine_execute_actions(
                 if decision.decision == Decision.SUPPRESS:
                     store.append(
                         "capability_fired",
-                        capability_id="GT_SS_SUBMIT_RED",
                         fact_owner="submit_refusal",
                         artifact_id="suppress",
                     )
                 store.append(
                     "capability_fired",
-                    capability_id="GT_CERT_DELIVERY",
                     fact_owner="delivery_receipt",
                     artifact_id=request.action_id,
                 )

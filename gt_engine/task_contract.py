@@ -426,7 +426,7 @@ def render_obligation_delta(
     shipped = set(shipped_ids)
     remaining = [item for item in contract.obligations
                  if item.obligation_id not in shipped]
-    header = "GT remaining contract obligations:"
+    header = "Remaining task requirements:"
     lines = [header]
     selected: list[str] = []
     for item in remaining:

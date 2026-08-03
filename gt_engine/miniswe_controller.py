@@ -260,5 +260,9 @@ class GroundtruthController:
         _ = (output, diff_hash)
 
     def provider_suffix(self) -> str:
-        unmet = ", ".join(self.unmet_predicates[:2]) or "none"
-        return f"phase={self._phase}; unmet={unmet}; epoch={self.workspace_epoch}"
+        # NEVER leak pred-<sha> IDs: the journal is a readable file in the task
+        # container and round-9 showed the model cat's it (a harness audit +
+        # internal-ID leak into its own observation bytes). Report the COUNT of
+        # unmet predicates, not their internal identities.
+        n_unmet = len(self.unmet_predicates)
+        return f"phase={self._phase}; unmet_count={n_unmet}; epoch={self.workspace_epoch}"

@@ -493,7 +493,7 @@ def test_syntax_probe_catches_broken_edit(monkeypatch, tmp_path):
          "tool_call_id": "c1"},
     ]}})
     joined = "\n".join(str(m.get("content")) for m in msgs)
-    assert "[GT_EVIDENCE:syntax_result]" in joined
+    assert "[Syntax check]" in joined
     assert "syntax error" in joined
 
 
@@ -563,7 +563,7 @@ def test_newfile_precedent_delivered_on_file_create(tmp_path, monkeypatch):
          ), "tool_call_id": "c1"},
     ]}})
     joined = "\n".join(str(m.get("content")) for m in msgs)
-    assert "[GT_EVIDENCE:new_file_destination]" in joined
+    assert "[New file precedent]" in joined
     assert "advisory precedent" in joined
     assert "reason=same_directory,same_extension" in joined
     assert "inspect=src/util.py" in joined

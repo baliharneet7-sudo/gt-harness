@@ -967,7 +967,7 @@ def test_render_obligation_delta_repairs_unshipped_contract():
     delta, delta_ids = render_obligation_delta(contract, shipped, max_chars=500)
     assert delta_ids
     assert set(delta_ids).isdisjoint(shipped)
-    assert "remaining contract" in delta
+    assert "Remaining task requirements" in delta
 
 
 @requires_gt

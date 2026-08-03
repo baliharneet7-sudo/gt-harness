@@ -261,7 +261,10 @@ def test_task_start_localization_delivered_with_graph(tmp_path):
         encoding="utf-8"
     ))
     rendered = json.dumps(request["messages"], ensure_ascii=False)
-    assert rendered.count("GT_TASK_CONTRACT") == 1
+    assert rendered.count("Task contract") == 1
+    # no harness framing (round-9: the model audits GT_* markers on disk)
+    assert "GT_TASK_CONTRACT" not in rendered
+    assert "GT_" not in rendered
     loc_rows = [r for r in rows if r.get("event") == "evidence_delivery"
                 and r.get("evidence_type") == "localization"]
     assert len(loc_rows) <= 1

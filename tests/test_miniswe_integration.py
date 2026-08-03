@@ -26,7 +26,7 @@ def test_lexical_localization_is_stable_advisory_and_includes_dirty_files(tmp_pa
         outputs.append(adapter.task_start_localization())
 
     assert outputs[0] == outputs[1]
-    assert outputs[0].startswith("[GT_EVIDENCE:localization]")
+    assert outputs[0].startswith("[Localized files]")
     assert outputs[0].index("alpha.py:1") < outputs[0].index("beta.py:1")
     assert "score=1 reasons=content_token:needle" in outputs[0]
     blobs = list((tmp_path / "state" / "first" / "localization_advisory").rglob("*"))
@@ -64,7 +64,7 @@ def test_stale_or_unreadable_graph_localization_falls_back_to_lexical(tmp_path):
         issue_text="repair quasar",
     )
     rendered = adapter.task_start_localization()
-    assert rendered.startswith("[GT_EVIDENCE:localization]")
+    assert rendered.startswith("[Localized files]")
     assert "target.py:1 score=1 reasons=content_token:quasar" in rendered
 
 

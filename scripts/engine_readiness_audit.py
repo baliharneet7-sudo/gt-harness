@@ -169,7 +169,9 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
             "acted": acted,
             "n_delivered": len(mine),
         }
-    # collect capability_fired receipts from the scenario journal (D6)
+    # collect capability_fired receipts from the scenario journal (D6). The
+    # journal stores only the bound FACT owner (never the GT_* name — it is a
+    # readable file in the container); map owner -> CAP name in memory.
     caps_fired: set[str] = set()
     try:
         import json as _json
@@ -182,7 +184,8 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
                     continue
                 rec = _json.loads(line)
                 if rec.get("event") == "capability_fired":
-                    caps_fired.add(str(rec.get("capability_id") or ""))
+                    owner = str(rec.get("fact_owner") or "")
+                    caps_fired.add(_CAP_OWNER_TO_NAME.get(owner, owner))
     except Exception:  # noqa: BLE001 - capability scan is fail-open
         pass
     return {
@@ -194,6 +197,7 @@ def audit_feature(feature: str, builder, owners: tuple[str, ...], *,
         "deliveries": deliveries,
         "stream": stream,
         "caps_fired": caps_fired,
+        "root": root,
     }
 
 
@@ -219,18 +223,104 @@ def main() -> int:
     full_internal_bytes = sum(1 for c in full_stream if INTERNAL_ID_RE.search(c))
     caller_contract_bytes = sum(1 for c in full_stream if "caller_contract" in c)
 
+    # Deep-audit D7: scan the ON-DISK artifacts a real model can READ (the
+    # state journal, provider_requests blobs, repository snapshots, and every
+    # workspace file) for internal IDs. Round-9 exposed this: the rendered
+    # observations were clean, but the model `cat`'d the state journal and
+    # surfaced `pred-<sha>` into its own bytes. Offline audit MUST equal the
+    # full observable surface a real run exposes.
+    on_disk_leaks: list[str] = []
+    for res in results.values():
+        root = res.get("root")
+        if not root:
+            continue
+        state_dir = Path(root).parent / f"{Path(root).name}-state"
+        for scan_root in (state_dir, Path(root)):
+            if not scan_root.exists():
+                continue
+            for f in scan_root.rglob("*"):
+                if not f.is_file():
+                    continue
+                try:
+                    blob = f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for mm in INTERNAL_ID_RE.finditer(blob):
+                    on_disk_leaks.append(
+                        f"{Path(root).name}:{str(f.relative_to(scan_root))}"
+                        f"@{mm.start()}:{mm.group(0)[:20]}"
+                    )
+    on_disk_leaks = list(dict.fromkeys(on_disk_leaks))[:10]
+
+# Deep-audit D6: every CAP_OWNER whose bound FACT delivered must have fired
+# a capability RECEIPT in the real-seam journal (not just be statically
+# "wired" in the census). The receipt is the only proof the CAP ran.
+CAP_BY_FACT = {
+    "syntax_result": "GT_EDIT_CHECK",
+    "signature_delta": "GT_PATCH_DELTA",
+    "localization": "GT_LOC_RESLOT",
+    "submit_refusal": "GT_SS_SUBMIT_RED",
+    "recovery": "GT_HYPOTHESIS",
+    "newfile_precedent": "GT_CHANGE_SURFACE",
+    "delivery_receipt": "GT_CERT_DELIVERY",
+}
+# FACT owner -> CAP name, used only IN MEMORY to interpret the journal's
+# fact_owner receipts (the journal itself never stores the GT_* names).
+_CAP_OWNER_TO_NAME = {fact: cap for fact, cap in CAP_BY_FACT.items()}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    results: dict[str, dict] = {}
+    for feature, (builder, owners) in SCENARIOS.items():
+        results[feature] = audit_feature(feature, builder, owners)
+
+    all_obs = [o for r in results.values() for o in r["all_observations"]]
+    internal_id_bytes = sum(1 for o in all_obs if INTERNAL_ID_RE.search(o))
+    empty_facts = sum(
+        1 for r in results.values() for o in r["all_observations"]
+        if '"evidence": ""' in o
+    )
+    full_stream = [c for r in results.values() for _r, c in r["stream"]]
+    audit_invite_bytes = sum(1 for c in full_stream if AUDIT_INVITE_RE.search(c))
+    full_internal_bytes = sum(1 for c in full_stream if INTERNAL_ID_RE.search(c))
+    caller_contract_bytes = sum(1 for c in full_stream if "caller_contract" in c)
+
+    # Deep-audit D7: scan the ON-DISK artifacts a real model can READ (the
+    # state journal, provider_requests blobs, repository snapshots, and every
+    # workspace file) for internal IDs. Round-9 exposed this: the rendered
+    # observations were clean, but the model `cat`'d the state journal and
+    # surfaced `pred-<sha>` into its own bytes. Offline audit MUST equal the
+    # full observable surface a real run exposes.
+    on_disk_leaks: list[str] = []
+    for res in results.values():
+        root = res.get("root")
+        if not root:
+            continue
+        state_dir = Path(root).parent / f"{Path(root).name}-state"
+        for scan_root in (state_dir, Path(root)):
+            if not scan_root.exists():
+                continue
+            for f in scan_root.rglob("*"):
+                if not f.is_file():
+                    continue
+                try:
+                    blob = f.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for mm in INTERNAL_ID_RE.finditer(blob):
+                    on_disk_leaks.append(
+                        f"{Path(root).name}:{str(f.relative_to(scan_root))}"
+                        f"@{mm.start()}:{mm.group(0)[:20]}"
+                    )
+    on_disk_leaks = list(dict.fromkeys(on_disk_leaks))[:10]
+
     # Deep-audit D6: every CAP_OWNER whose bound FACT delivered must have fired
     # a capability RECEIPT in the real-seam journal (not just be statically
     # "wired" in the census). The receipt is the only proof the CAP ran.
-    CAP_BY_FACT = {
-        "syntax_result": "GT_EDIT_CHECK",
-        "signature_delta": "GT_PATCH_DELTA",
-        "localization": "GT_LOC_RESLOT",
-        "submit_refusal": "GT_SS_SUBMIT_RED",
-        "recovery": "GT_HYPOTHESIS",
-        "newfile_precedent": "GT_CHANGE_SURFACE",
-        "delivery_receipt": "GT_CERT_DELIVERY",
-    }
     cap_fired: set[str] = set()
     for res in results.values():
         cap_fired |= res.get("caps_fired", set())
@@ -250,6 +340,7 @@ def main() -> int:
             cap_matrix_ok = False
         print(f"| {fact} | {cap} | {'Y' if fact_delivered else '-'} | "
               f"{'Y' if fired else 'N'} |")
+    ok = True
     if not cap_matrix_ok:
         ok = False
 
@@ -269,7 +360,6 @@ def main() -> int:
 
     print("| feature | fired | payload_true | no_ids | correct_time | non_pred |")
     print("|---|---|---|---|---|---|")
-    ok = True
     for feature, res in results.items():
         for owner, row in res["owners"].items():
             cells = [
@@ -284,8 +374,12 @@ def main() -> int:
     print(f"audit_invite_bytes={audit_invite_bytes} "
           f"full_internal_bytes={full_internal_bytes} "
           f"caller_contract_bytes={caller_contract_bytes}")
+    print(f"on_disk_internal_id_leaks={len(on_disk_leaks)}")
+    if on_disk_leaks:
+        for leak in on_disk_leaks:
+            print(f"  LEAK {leak}")
     if (internal_id_bytes or empty_facts or audit_invite_bytes
-            or full_internal_bytes or caller_contract_bytes):
+            or full_internal_bytes or caller_contract_bytes or on_disk_leaks):
         ok = False
     print("READY" if ok else "NOT READY")
     return 0 if ok else 1

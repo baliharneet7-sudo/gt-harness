@@ -315,7 +315,10 @@ def main() -> int:
 
                     rec = _json.loads(line)
                     if rec.get("event") == "capability_fired":
-                        caps.add(str(rec.get("capability_id") or ""))
+                        # journal stores the bound FACT owner (never GT_* name)
+                        owner = str(rec.get("fact_owner") or "")
+                        caps.add({f: c for c, f in CAP_BY_FACT.items()}.get(
+                            owner, owner))
         except Exception:  # noqa: BLE001
             pass
         stream = _model_messages(agent)
@@ -361,6 +364,36 @@ def main() -> int:
                          returncode=0, adapter=_OAdapter()) is not None:
         m12_ok = False
     checks.append(("M12 obligations relevance gate (no false positives)", m12_ok))
+
+    # --- M13: on-disk journal leak detection (D7) -----------------------------
+    # The D7 disk scan must catch an internal ID planted in a readable file
+    # (the round-9 leak: the model cat's the state journal). Plant one into the
+    # state journal of a fresh scenario and verify the audit's regex flags it.
+    from engine_readiness_audit import INTERNAL_ID_RE
+
+    planted = {}
+    for feature, (builder, owners) in SCENARIOS.items():
+        if feature == "typed_search":
+            continue
+        agent, adapter, graph_db, root = builder()
+        agent.run(str(getattr(agent, "_gt_scenario_task", "") or TASK))
+        from pathlib import Path as _P
+
+        state_dir = _P(root).parent / f"{_P(root).name}-state"
+        journals = list(state_dir.rglob("events.jsonl"))
+        if not journals:
+            continue
+        j = journals[0]
+        j.write_text(
+            j.read_text(encoding="utf-8")
+            + '\n{"event":"state","unmet":["pred-deadbeefdeadbeefdeadbeefdeadbeef"]}\n',
+            encoding="utf-8",
+        )
+        blob = j.read_text(encoding="utf-8")
+        planted[feature] = bool(INTERNAL_ID_RE.search(blob))
+        break
+    m13_ok = bool(planted) and all(planted.values())
+    checks.append(("M13 on-disk internal-ID leak detected", m13_ok))
 
     all_ok = all(ok for _, ok in checks)
     print("META-AUDIT (Gate 2)")

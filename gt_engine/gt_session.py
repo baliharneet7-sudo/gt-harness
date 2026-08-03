@@ -244,7 +244,11 @@ class GTSession:
             max_chars=self.config.context_budget_bytes
         )
         if delta:
-            tag = "GT_TASK_CONTRACT" if iteration == 0 else "GT_OBLIGATION_DELTA"
+            # NEUTRAL tag: a `[GT_TASK_CONTRACT]` label is harness framing a
+            # model can audit (round-8/9: it read the marker and went probing
+            # gt_engine/). The contract TEXT is decision-relevant; the GT_
+            # prefix is not.
+            tag = "Task contract" if iteration == 0 else "Obligation updates"
             rendered = f"[{tag}]\n{delta}"
             if self.model_visible:
                 additions.append(rendered)

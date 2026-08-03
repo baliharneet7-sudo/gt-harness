@@ -204,11 +204,16 @@ class MiniSweAdapter(GroundtruthController):
         self._submit_invalidation_keys: dict[str, str] = {}
 
     def _record_state(self) -> None:
+        # Do NOT record raw pred-<sha> IDs: the journal is a readable file in
+        # the task container, and round-9 showed the model `cat`s it, surfacing
+        # internal predicate hashes into its own observation bytes (a harness
+        # audit + ID leak). Record task-meaningful obligation text instead.
+        unmet = [self._predicate_text(pid) for pid in self.unmet_predicates]
         self.store.append(
             "state",
             phase=self.phase,
             epoch=self.workspace_epoch,
-            unmet=list(self.unmet_predicates),
+            unmet=list(unmet),
             iteration=self.iteration,
         )
 
@@ -396,7 +401,8 @@ class MiniSweAdapter(GroundtruthController):
         if active_red:
             self.store.append(
                 "red_invalidated_by_edit",
-                predicate_ids=sorted(active_red),
+                predicate_texts=[self._predicate_text(pid)
+                                 for pid in sorted(active_red)],
                 paths=list(normalized_paths),
                 epoch=self.workspace_epoch,
             )
@@ -679,7 +685,7 @@ class MiniSweAdapter(GroundtruthController):
             "semantic_observation",
             command_sha256=hashlib.sha256(command.encode("utf-8")).hexdigest(),
             action_index=action_index,
-            predicate_ids=green,
+            predicate_texts=[self._predicate_text(pid) for pid in green],
         )
         return tuple(green)
 
@@ -852,6 +858,25 @@ class MiniSweAdapter(GroundtruthController):
             transaction_sha256=self._latest_transaction_sha256,
         )
 
+    def _predicate_text(self, predicate_id: str) -> str:
+        """Map a predicate ID to its task-meaningful obligation text.
+
+        The journal is a readable file in the task container (round-9: the
+        model cat's it and surfaces raw pred-<sha> into its own observation
+        bytes). Never leak an internal hash; fall back to the obligation ID
+        (obl-<sha>) or a neutral label, both of which carry no actionable
+        internal identity the model should reverse-engineer.
+        """
+        try:
+            oid = self._obligation_by_predicate.get(predicate_id)
+            if oid and self.contract is not None:
+                for o in self.contract.obligations:
+                    if o.obligation_id == oid and o.text:
+                        return o.text
+        except Exception:  # noqa: BLE001
+            pass
+        return "unmet"
+
     def unmet_obligation_texts(self) -> tuple[str, ...]:
         """The actual requirement text for every unmet predicate.
 
@@ -960,7 +985,8 @@ class MiniSweAdapter(GroundtruthController):
                     )
                     from .miniswe_evidence import cap_evidence
 
-                    tagged = f"[GT_EVIDENCE:{result.envelope.evidence_type}]\n"
+                    # neutral marker (a `GT_EVIDENCE:` label is harness framing)
+                    tagged = f"[Verified: {result.envelope.evidence_type}]\n"
                     return tagged + cap_evidence(result.rendered, 600)
             except Exception:  # noqa: BLE001 - deterministic lexical fallback follows
                 pass
@@ -1074,7 +1100,9 @@ class MiniSweAdapter(GroundtruthController):
             action_index=0,
             iteration=0,
         )
-        return "[GT_EVIDENCE:localization]\n" + rendered
+        # neutral marker (a `GT_EVIDENCE:` label is harness framing the model
+        # can audit; the localized rows are the value)
+        return "[Localized files]\n" + rendered
 
     def next_contract_delta(self, *, max_chars: int = 2400) -> str:
         """One full contract dose at task start, then obligation deltas only.
@@ -1135,7 +1163,8 @@ class MiniSweAdapter(GroundtruthController):
             red.append(predicate_id)
         if red:
             self.store.append("semantic_red", action_index=action_index,
-                              predicate_ids=red)
+                              predicate_texts=[self._predicate_text(pid)
+                                               for pid in red])
         return tuple(red)
 
     def note_failure_fingerprint(self, fingerprint: str, *, epoch: int) -> bool:
@@ -1222,7 +1251,8 @@ class MiniSweAdapter(GroundtruthController):
             "submit_decision",
             accepted=True,
             enforced=False,
-            active_red=list(self.blocking_predicates),
+            active_red_texts=[self._predicate_text(p)
+                              for p in self.blocking_predicates],
             phase=self.phase,
             iteration=self.iteration,
         )

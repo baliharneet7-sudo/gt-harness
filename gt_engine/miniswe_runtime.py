@@ -143,7 +143,9 @@ def _refusal_directive(adapter: MiniSweAdapter) -> dict:
         "submit_refusal",
         command_sha256=None,
         iteration=adapter.iteration,
-        reasons=list(adapter.blocking_reasons),
+        # task-meaningful obligation texts, never pred-<sha> (the journal is a
+        # readable file in the container; round-9 the model cat's it)
+        reasons=list(adapter.blocking_obligation_texts()),
     )
     unmet = adapter.blocking_obligation_texts()
     delta = adapter.next_contract_delta(max_chars=1000)
@@ -346,7 +348,7 @@ def _run_evidence(
                 action_index=action_index,
                 iteration=adapter.iteration,
             )
-            return f"[GT_EVIDENCE:new_file_destination]\n{cap_evidence(precedent, 600)}"
+            return f"[New file precedent]\n{cap_evidence(precedent, 600)}"
     covering = None
     if changed_files and allow_live_probes:
         from .miniswe_covering import run_covering_lane
@@ -421,7 +423,7 @@ def _run_evidence(
                 action_index=action_index,
                 iteration=adapter.iteration,
             )
-            return f"[GT_EVIDENCE:syntax_result]\n{cap_evidence(syntax)}"
+            return f"[Syntax check]\n{cap_evidence(syntax)}"
     result = run_evidence_pipeline(
         adapter.gateway_state(),
         event,
@@ -455,7 +457,7 @@ def _run_evidence(
         )
         # Self-diagnosing splice: the trajectory tool messages carry the exact
         # evidence type so a post-run census is exact, not heuristic.
-        return f"[GT_EVIDENCE:{result.envelope.evidence_type}]\n{cap_evidence(result.rendered)}"
+        return f"[Verified: {result.envelope.evidence_type}]\n{cap_evidence(result.rendered)}"
     return cap_evidence(result.rendered)
 
 
