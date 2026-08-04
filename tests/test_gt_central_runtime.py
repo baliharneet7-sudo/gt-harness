@@ -471,13 +471,19 @@ def test_all_seventeen_census_proves_producers_and_fails_consumer_proof():
         row["not_predictive"] and row["not_late"] and row["delivered_before_next_decision"]
         for row in result["decision_window_audit"]
     )
-    # Consumer, effect-timing, and grounding gates must FAIL on the current
-    # producer-only implementation.  A producer receipt is not a delivery and
-    # an empty effect set is not a timing pass.
-    assert result["all_17_consumers_proven"] is False
-    assert result["all_effects_timing_valid"] is False
+    # Consumers and effect timing are proven once every ID routes to a
+    # registered consumer and every effect observes its evidence before it
+    # acts.  Payload grounding is still failing until producers name concrete
+    # evidence, so the terminal gate stays closed.
+    assert result["all_17_consumers_proven"] is True
+    assert result["all_effects_timing_valid"] is True
     assert result["all_payloads_semantically_grounded"] is False
     assert result["all_17_consumer_paths_proven"] is False
+    assert result["effect_window_audit"]
+    assert all(
+        row["evidence_before_effect"] and row["effect_before_next_action"] and row["non_late"]
+        for row in result["effect_window_audit"]
+    )
 
 
 def test_signature_delta_is_eligible_but_discarded_by_one_message_selection():
@@ -730,3 +736,53 @@ def test_runtime_validation_log_records_declared_checks():
     assert log[0]["command_class"] == "declared_validation"
     assert log[0]["declared_check_id"] == "pytest -q"
     assert log[0]["result_code"] == 0
+
+
+def test_effect_timing_consumes_evidence_before_the_next_action():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Fix it", revision="r0")
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 failed: assert error",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+    )
+
+    effects = runtime.consume_effects(action_id=1, call=1)
+
+    assert effects
+    for effect in effects:
+        row = effect.as_dict()
+        assert row["evidence_before_effect"] is True
+        assert row["effect_before_next_action"] is True
+        assert row["non_late"] is True
+        assert row["predecided_actions_executed_after_evidence"] == 0
+    # Full 17-ID consumer coverage is proven by the census, not one action.
+    assert runtime.summary()["consumer_paths"]
+
+
+def test_batch_interrupt_stamps_cancellation_on_the_effect():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Fix it", revision="r0")
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 failed: assert error",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+    )
+    effects = runtime.consume_effects(action_id=1, call=1)
+    assert any(effect.required_before_action == 1 for effect in effects)
+
+    runtime.record_batch_interrupt(action_id=1, cancelled=2, reason="covering_red")
+
+    stamped = next(
+        effect
+        for effect in runtime.summary()["effects"]
+        if effect["feature_id"] == "covering_red"
+    )
+    assert stamped["predecided_actions_cancelled"] == 2
+    assert runtime.summary()["action_metrics"]["batch_interrupts"] == 1

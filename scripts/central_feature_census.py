@@ -106,8 +106,12 @@ def audit_timing(summary: dict) -> dict:
 def census() -> dict:
     runtime = CentralFeatureRuntime(model_visible=True)
     decision_windows = []
+    effect_windows = []
 
     def deliver_next(after_action: int) -> None:
+        effects = runtime.consume_effects(action_id=after_action, call=after_action)
+        for effect in effects:
+            effect_windows.append(effect.as_dict())
         feedback = runtime.model_feedback(deferred=True)
         if not feedback:
             return
@@ -180,6 +184,7 @@ def census() -> dict:
     summary["timing_audit"] = audit_timing(summary)
     summary["all_17_timing_valid"] = all(row["valid"] for row in summary["timing_audit"].values())
     summary["decision_window_audit"] = decision_windows
+    summary["effect_window_audit"] = effect_windows
     summary["all_guidance_on_time"] = bool(decision_windows) and all(
         row["delivered_before_next_decision"] and row["not_predictive"] and row["not_late"]
         for row in decision_windows

@@ -404,3 +404,130 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
     assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
     assert receipt["metrics"]["actions"] == 0
     assert context.metadata["exit_status"] == "ModelTimeout"
+
+
+@pytest.mark.asyncio
+async def test_syntax_failure_interrupts_multi_action_batch(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+    class MultiActionModel:
+        config = type("Config", (), {"model_name": "test"})()
+        queries = 0
+
+        def format_message(self, **kwargs):
+            return kwargs
+
+        def get_template_vars(self):
+            return {
+                "observation_template": "{{ output.output }}",
+                "format_error_template": "error",
+            }
+
+        def query(self, messages):
+            type(self).queries += 1
+            if type(self).queries == 1:
+                return {
+                    "role": "assistant",
+                    "content": "act",
+                    "extra": {
+                        "actions": [
+                            {"command": "write broken", "tool_call_id": "call-1"},
+                            {"command": "echo MUST_NOT_EXECUTE", "tool_call_id": "call-2"},
+                            {"command": "echo ALSO_MUST_NOT_EXECUTE", "tool_call_id": "call-3"},
+                        ],
+                        "response": {
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 2,
+                                "total_tokens": 12,
+                            }
+                        },
+                        "cost": 0.0,
+                    },
+                }
+            return {
+                "role": "assistant",
+                "content": "submit",
+                "extra": {
+                    "actions": [{"command": submit, "tool_call_id": "call-4"}],
+                    "response": {
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 2,
+                            "total_tokens": 12,
+                        }
+                    },
+                    "cost": 0.0,
+                },
+            }
+
+        def format_observation_messages(self, message, outputs, template_vars=None):
+            return [
+                {"role": "tool", "content": outputs[i]["output"]} for i in range(len(outputs))
+            ]
+
+    class InterruptEnvironment(_Environment):
+        def __init__(self):
+            super().__init__()
+            self.state = "empty"
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                if self.state == "empty":
+                    raw = ""
+                elif self.state == "bad":
+                    raw = "f\t4\t2.0\t2.0\tapp.py\t\n"
+                else:
+                    raw = "f\t3\t3.0\t3.0\tapp.py\t\n"
+                return ExecResult(stdout=raw, return_code=0)
+            if command.startswith("sha256sum"):
+                return ExecResult(stdout=("a" * 64) + "  app.py\n", return_code=0)
+            if "py_compile" in command:
+                if self.state == "bad":
+                    return ExecResult(stderr="SyntaxError: invalid syntax\n", return_code=1)
+                return ExecResult(return_code=0)
+            if command == "write broken":
+                self.state = "bad"
+                return ExecResult(return_code=0)
+            if command == submit:
+                return ExecResult(stdout=submit + "\n", return_code=0)
+            raise AssertionError(f"unexpected command: {command}")
+
+    environment = InterruptEnvironment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_submit_readiness=False,
+    )
+    agent._model_factory = lambda: MultiActionModel()
+    context = AgentContext()
+
+    await agent.run("Fix the syntax error.", environment, context)
+
+    executed = [
+        command
+        for command, _ in environment.commands
+        if not command.startswith("uname")
+        and "-printf" not in command
+        and not command.startswith("sha256sum")
+        and "py_compile" not in command
+    ]
+    assert executed == ["write broken", submit]
+    trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
+    assert "Runtime evidence: Repair the syntax failure in app.py" in trajectory
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["batch_interrupts"] == 1
+    assert receipt["metrics"]["interrupted_actions"] == 2
+    assert receipt["features"]["batch_interrupts"][0]["cancelled"] == 2
+    syntax_effect = next(
+        effect
+        for effect in receipt["features"]["effects"]
+        if effect["feature_id"] == "syntax_result"
+    )
+    assert syntax_effect["predecided_actions_cancelled"] == 2
+    assert syntax_effect["predecided_actions_executed_after_evidence"] == 0
+    assert syntax_effect["effect_before_next_action"] is True
+    assert context.metadata["exit_status"] == "Submitted"

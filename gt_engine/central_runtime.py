@@ -16,6 +16,11 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
+from gt_engine.central_controls import (
+    FeatureEffect,
+    consumer_spec_for,
+)
+
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
     "-printf '%y\\t%s\\t%T@\\t%C@\\t%P\\t%l\\n' 2>/dev/null "
@@ -1022,6 +1027,8 @@ class CentralFeatureRuntime:
             "lint_failures": 0,
             "submit_attempts": 0,
             "submit_holds": 0,
+            "batch_interrupts": 0,
+            "interrupted_actions": 0,
         }
         self._command_counts: dict[str, int] = {}
         self._lifecycle: dict[str, dict[str, Any]] = {}
@@ -1029,7 +1036,9 @@ class CentralFeatureRuntime:
         self._unvalidated_material_edits = 0
         self._validation_debt_notified = False
         self._consumer_paths: dict[str, list[str]] = {}
-        self._effects: list[dict[str, Any]] = []
+        self._effects: list[FeatureEffect] = []
+        self._effect_cursor = 0
+        self._batch_interrupts: list[dict[str, Any]] = []
         self._task_deliverables: set[str] = set()
         self._source_epoch = 0
         self._declared_check_states: dict[str, str] = {}
@@ -1100,6 +1109,7 @@ class CentralFeatureRuntime:
                 ),
             )
         )
+        self._route_effect(self.receipts[-1])
         # CAP_OWNER delivery is a separate auditable row, not an alias that
         # inflates the FACT count.
         for cap_id, owner in CENTRAL_CAP_OWNERS.items():
@@ -1669,6 +1679,68 @@ class CentralFeatureRuntime:
             },
         )
 
+    def _route_effect(self, receipt: FeatureReceipt) -> None:
+        """Route one produced receipt to its registered consumer."""
+        spec = consumer_spec_for(receipt.feature_id)
+        if spec is None:
+            return
+        effect = FeatureEffect(
+            feature_id=receipt.feature_id,
+            receipt_id=f"receipt-{len(self.receipts)}",
+            effect_kind=spec.effect_kind,
+            effect_action=dict(receipt.payload),
+            required_before_action=(
+                receipt.action_id if spec.required_before_next_action else None
+            ),
+            model_visible=bool(spec.model_visible and receipt.model_visible),
+            evidence_action=receipt.action_id,
+        )
+        self._effects.append(effect)
+        self._consumer_paths.setdefault(receipt.feature_id, []).append(
+            spec.effect_kind.value
+        )
+
+    def consume_effects(self, *, action_id: int, call: int) -> list[FeatureEffect]:
+        """Return effects produced since the last consume, with timing bound."""
+        fresh = self._effects[self._effect_cursor :]
+        self._effect_cursor = len(self._effects)
+        consumed: list[FeatureEffect] = []
+        for offset, effect in enumerate(fresh):
+            applied = max(effect.evidence_action, action_id)
+            required = effect.required_before_action
+            updated = replace(
+                effect,
+                applied_after_action=applied,
+                delivered_before_call=call,
+                predecided_actions_executed_after_evidence=max(
+                    0, applied - effect.evidence_action - 1
+                ),
+                late=required is not None and applied > required,
+                predictive=applied == effect.evidence_action,
+            )
+            self._effects[self._effect_cursor - len(fresh) + offset] = updated
+            consumed.append(updated)
+        return consumed
+
+    def record_skipped_action(self, *, action_id: int) -> None:
+        """Count one pre-decided action cancelled by an immediate control."""
+        self._action_metrics["interrupted_actions"] += 1
+        self._mark_lifecycle("batch_interrupted", action_id=action_id)
+
+    def record_batch_interrupt(self, *, action_id: int, cancelled: int, reason: str) -> None:
+        self._action_metrics["batch_interrupts"] += 1
+        self._batch_interrupts.append(
+            {"evidence_action": action_id, "cancelled": cancelled, "reason": reason}
+        )
+        for index, effect in enumerate(self._effects):
+            if (
+                effect.evidence_action == action_id
+                and effect.required_before_action is not None
+            ):
+                self._effects[index] = replace(
+                    effect, predecided_actions_cancelled=cancelled
+                )
+
     def summary(self) -> dict[str, Any]:
         by_feature = {feature_id: 0 for feature_id in CENTRAL_FEATURE_IDS}
         for receipt in self.receipts:
@@ -1690,7 +1762,8 @@ class CentralFeatureRuntime:
             "lifecycle": dict(self._lifecycle),
             "produced_counts": by_feature,
             "consumer_paths": dict(self._consumer_paths),
-            "effects": list(self._effects),
+            "effects": [effect.as_dict() for effect in self._effects],
+            "batch_interrupts": list(self._batch_interrupts),
             "source_epoch": self._source_epoch,
             "validation_log": list(self._validation_log),
             "declared_check_states": dict(self._declared_check_states),

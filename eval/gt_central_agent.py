@@ -47,6 +47,7 @@ from gt_engine.central_runtime import (
     is_check_command,
     is_submit_command,
     lint_commands,
+    render_runtime_advisory,
     render_runtime_feedback,
     source_revision_of,
     task_deliverable_paths,
@@ -485,8 +486,9 @@ class MiniSweCentralAgent(BaseAgent):
                 if not actions:
                     no_action_assistant_steps += 1
                 outputs: list[dict[str, Any]] = []
+                batch_interrupted = False
 
-                for action in actions:
+                for index, action in enumerate(actions):
                     actions_count += 1
                     command = str(action.get("command") or "")
                     submit = is_submit_command(command)
@@ -535,7 +537,26 @@ class MiniSweCentralAgent(BaseAgent):
                                 }
                             )
                             submit_held = True
-                            continue
+                            remaining = len(actions) - index - 1
+                            for _ in range(remaining):
+                                actions_count += 1
+                                self._features.record_skipped_action(action_id=actions_count)
+                                outputs.append(
+                                    {
+                                        "output": (
+                                            "Submission was held by the runtime; no "
+                                            "further actions in this batch were executed."
+                                        ),
+                                        "returncode": 2,
+                                        "exception_info": "batch interrupted before execution",
+                                    }
+                                )
+                            self._features.record_batch_interrupt(
+                                action_id=actions_count - remaining,
+                                cancelled=remaining,
+                                reason="submit_hold",
+                            )
+                            break
                         self._features.record_submit(
                             action_id=actions_count,
                             revision=source_revision,
@@ -647,8 +668,60 @@ class MiniSweCentralAgent(BaseAgent):
                     if submit:
                         terminal = "Submitted"
                         break
+                    effects = self._features.consume_effects(
+                        action_id=actions_count, call=calls
+                    )
+                    interrupt_effect = next(
+                        (
+                            effect
+                            for effect in effects
+                            if effect.required_before_action is not None
+                        ),
+                        None,
+                    )
+                    if interrupt_effect is not None:
+                        remaining = len(actions) - index - 1
+                        if remaining > 0:
+                            batch_interrupted = True
+                            evidence_action = interrupt_effect.evidence_action
+                            control = render_runtime_advisory(
+                                str(
+                                    interrupt_effect.effect_action.get("message")
+                                    or "Stop and re-decide after the runtime control."
+                                ),
+                                limit=160,
+                            )
+                            for _ in range(remaining):
+                                actions_count += 1
+                                self._features.record_skipped_action(
+                                    action_id=actions_count
+                                )
+                                outputs.append(
+                                    {
+                                        "output": control,
+                                        "returncode": 2,
+                                        "exception_info": (
+                                            "batch interrupted before execution"
+                                        ),
+                                    }
+                                )
+                            self._features.record_batch_interrupt(
+                                action_id=evidence_action,
+                                cancelled=remaining,
+                                reason=interrupt_effect.effect_kind.value,
+                            )
+                            receipts.append(
+                                {
+                                    "action": actions_count,
+                                    "kind": "batch_interrupt",
+                                    "decision": "ADVISE",
+                                    "reason": interrupt_effect.effect_kind.value,
+                                    "cancelled": remaining,
+                                }
+                            )
+                            break
 
-                if submit_held:
+                if submit_held or batch_interrupted:
                     self._features.discard_model_feedback()
                 elif not terminal:
                     feature_feedback = self._features.model_feedback(deferred=True)
