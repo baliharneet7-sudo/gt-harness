@@ -166,6 +166,27 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     assert by_feature["submit_refusal"]["payload"]["refused"] is True
 
 
+def test_model_guidance_is_one_prioritized_advisory_per_action():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement the requested change", revision="r0")
+    first_feedback = runtime.model_feedback()
+    assert first_feedback
+    runtime.observe_action(
+        action_id=1,
+        command="rg -n 'Bottle' .",
+        output="bottle.py:10:class Bottle\ntests/test_bottle.py:20:references Bottle",
+        returncode=0,
+        transition=WorkspaceTransition(1, "search", "r0", "r0"),
+        revision="r0",
+    )
+    feedback = runtime.model_feedback()
+    assert "Inspect the verified callers" in feedback
+    assert runtime.model_feedback() == ""
+    summary = runtime.summary()
+    assert summary["guidance_events"] == 2
+    assert summary["guidance_chars"] == len(first_feedback) + len(feedback)
+
+
 @pytest.mark.asyncio
 async def test_sensor_carries_hash_without_reinventing_an_edit():
     class Result:

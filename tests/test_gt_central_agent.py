@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
@@ -96,10 +97,7 @@ def test_shadow_and_treatment_are_both_central_gt_on_arms(tmp_path):
 
 def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     workflow = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "tb2_miniswe_engine.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
 
     assert 'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
@@ -135,10 +133,12 @@ async def test_model_shell_receives_no_host_credentials_or_private_env(tmp_path)
                 "role": "assistant",
                 "content": "submit",
                 "extra": {
-                    "actions": [{
-                        "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
-                        "tool_call_id": "call-1",
-                    }],
+                    "actions": [
+                        {
+                            "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                            "tool_call_id": "call-1",
+                        }
+                    ],
                     "response": {"usage": {}},
                     "cost": 0.0,
                 },
@@ -154,9 +154,7 @@ async def test_model_shell_receives_no_host_credentials_or_private_env(tmp_path)
     assert len(model_actions) == 1
     assert model_actions[0][1] in (None, {})
     assert not any(
-        name.startswith("GT_")
-        for _, env in environment.commands
-        for name in (env or {})
+        name.startswith("GT_") for _, env in environment.commands for name in (env or {})
     )
 
 
@@ -194,9 +192,7 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
             if command == "pytest -q":
                 return ExecResult(stdout="1 passed\n", return_code=0)
             if "COMPLETE_TASK" in command:
-                return ExecResult(
-                    stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0
-                )
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
             raise AssertionError(f"unexpected command: {command}")
 
     environment = StatefulEnvironment()
@@ -224,6 +220,13 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     atif = (tmp_path / "trajectory.json").read_text(encoding="utf-8")
     assert '"schema_version": "ATIF-v1.7"' in atif
     assert '"function_name": "bash"' in atif
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    metrics = receipt["metrics"]
+    assert metrics["total_tokens"] == metrics["input_tokens"] + metrics["output_tokens"]
+    assert metrics["api_calls"] == context.metadata["api_calls"]
+    assert metrics["actions"] == context.metadata["actions"]
+    assert metrics["assistant_steps"] == context.metadata["assistant_steps"]
+    assert metrics["trajectory_messages"] >= metrics["assistant_steps"]
 
 
 @pytest.mark.asyncio
@@ -238,9 +241,7 @@ async def test_grounded_failure_holds_first_submit_only(tmp_path):
             if command == "pytest -q":
                 return ExecResult(stdout="failed\n", return_code=1)
             if "COMPLETE_TASK" in command:
-                return ExecResult(
-                    stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0
-                )
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
             raise AssertionError(command)
 
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
@@ -269,9 +270,7 @@ async def test_format_error_is_returned_to_model_instead_of_aborting(tmp_path):
         def query(self, messages):
             self.queries += 1
             if self.queries == 1:
-                raise FormatError(
-                    {"role": "user", "content": "Use the bash tool correctly."}
-                )
+                raise FormatError({"role": "user", "content": "Use the bash tool correctly."})
             return super().query(messages)
 
     class Environment(_Environment):

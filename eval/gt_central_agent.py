@@ -542,6 +542,20 @@ class MiniSweCentralAgent(BaseAgent):
                         "elapsed_seconds": time.monotonic() - started,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
+                        "metrics": {
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "cache_tokens": cache_tokens,
+                            "total_tokens": input_tokens + output_tokens,
+                            "api_calls": calls,
+                            "actions": actions_count,
+                            "assistant_steps": sum(
+                                1 for message in messages if message.get("role") == "assistant"
+                            ),
+                            "trajectory_messages": len(messages),
+                            "guidance_events": self._features.summary()["guidance_events"],
+                            "guidance_chars": self._features.summary()["guidance_chars"],
+                        },
                         "features": self._features.summary(),
                         "interventions": receipts,
                     },
@@ -565,6 +579,15 @@ class MiniSweCentralAgent(BaseAgent):
                 "runtime_mode": self.runtime_mode,
                 "api_calls": calls,
                 "actions": actions_count,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_tokens": cache_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "assistant_steps": sum(
+                    1 for message in messages if message.get("role") == "assistant"
+                ),
+                "trajectory_messages": len(messages),
+                "guidance_events": self._features.summary()["guidance_events"],
                 "exit_status": terminal,
                 "workspace_sensor_healthy": snapshot.healthy,
             }

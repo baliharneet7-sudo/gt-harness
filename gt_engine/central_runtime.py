@@ -541,6 +541,9 @@ class CentralFeatureRuntime:
         self._failed_actions: dict[tuple[str, int], int] = {}
         self._searched = False
         self._feedback_cursor = 0
+        self._guidance_events = 0
+        self._guidance_chars = 0
+        self._guidance_features: list[str] = []
 
     @staticmethod
     def _spec(feature_id: str) -> dict[str, str]:
@@ -861,6 +864,9 @@ class CentralFeatureRuntime:
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
             "feature_ids": list(CENTRAL_FEATURE_IDS),
+            "guidance_events": self._guidance_events,
+            "guidance_chars": self._guidance_chars,
+            "guidance_features": list(self._guidance_features),
             "delivered_counts": by_feature,
             "receipts": [
                 {
@@ -880,13 +886,33 @@ class CentralFeatureRuntime:
         }
 
     def model_feedback(self, *, limit: int = 320) -> str:
-        """Return bounded generic guidance for newly delivered visible facts."""
-        messages = [
-            str(item.payload.get("message") or "")
+        """Return one bounded, highest-priority advisory for this action."""
+        visible = [
+            item
             for item in self.receipts[self._feedback_cursor :]
             if item.model_visible and item.payload.get("message")
         ]
         self._feedback_cursor = len(self.receipts)
-        if not messages:
+        if not visible:
             return ""
-        return render_runtime_feedback(" ".join(dict.fromkeys(messages)), limit=limit)
+        priority = {
+            "submit_refusal": 0,
+            "recovery": 1,
+            "syntax_result": 2,
+            "covering_red": 3,
+            "signature_delta": 4,
+            "caller_contract": 5,
+            "newfile_precedent": 6,
+            "def_partition": 7,
+            "localization": 8,
+            "obligations": 9,
+        }
+        selected = min(
+            enumerate(visible),
+            key=lambda item: (priority.get(item[1].feature_id, 10), item[0]),
+        )[1]
+        feedback = render_runtime_feedback(str(selected.payload["message"]), limit=limit)
+        self._guidance_events += 1
+        self._guidance_chars += len(feedback)
+        self._guidance_features.append(selected.feature_id)
+        return feedback
