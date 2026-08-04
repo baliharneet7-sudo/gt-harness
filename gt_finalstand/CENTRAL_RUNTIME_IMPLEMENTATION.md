@@ -188,6 +188,24 @@ def_partition (4), signature_delta and `GT_PATCH_DELTA` (2), and
 claim that the producers are broken; the forcing census is the proof for those
 paths.
 
+### Trajectory and token-accounting audit
+
+I read every downloaded all17 trajectory and receipt. All ten task directories
+had `feature_count=17`, `enabled=true`, healthy sensors, valid payloads, and no
+private GT terms in model-visible trajectory text. The treatment did emit
+bounded generic guidance; this was visible in every task and occurred 6--21
+times per trajectory. That guidance volume is a possible efficiency cost and
+must be measured, not assumed harmless.
+
+The frozen `per_task_tokens.json` values sum to 28,682,113 tokens for the ten
+tasks. Raw all17 trajectories sum to 19,812,623 tokens only because `gpt2` was
+cut off and `schemelike` was cancelled before verifier completion. The eight
+unchanged solved tasks alone are 11,407,692 baseline tokens versus 10,054,842
+all17 tokens (minus 1,352,850, or 11.9%), but calls increased 261 to 276. This
+selected-success subset is descriptive, not an efficiency proof. The earlier
+29.22M baseline figure came from a different aggregate artifact, so the token
+accounting source itself needs normalization before any release decision.
+
 ### Smoke delta against frozen GT-off
 
 | metric | frozen GT-off | GT-on treatment | delta | interpretation |
