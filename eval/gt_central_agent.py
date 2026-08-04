@@ -516,6 +516,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 source_revision=source_revision,
                                 refused=True,
                                 sensor_healthy=snapshot.healthy,
+                                blockers=decision.blockers,
                                 **readiness_kwargs,
                             )
                             detail = "A fresh required check is still failing: " + ", ".join(

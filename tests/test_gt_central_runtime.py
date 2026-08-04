@@ -16,6 +16,7 @@ from gt_engine.central_runtime import (
     classify_validation_command,
     diff_snapshots,
     explicit_check_commands,
+    feature_payload_grounded,
     parse_manifest,
     render_runtime_feedback,
     select_declared_check,
@@ -471,14 +472,12 @@ def test_all_seventeen_census_proves_producers_and_fails_consumer_proof():
         row["not_predictive"] and row["not_late"] and row["delivered_before_next_decision"]
         for row in result["decision_window_audit"]
     )
-    # Consumers and effect timing are proven once every ID routes to a
-    # registered consumer and every effect observes its evidence before it
-    # acts.  Payload grounding is still failing until producers name concrete
-    # evidence, so the terminal gate stays closed.
+    # Every produced receipt routes to a registered consumer with valid
+    # timing, and every model-visible payload names concrete evidence.
     assert result["all_17_consumers_proven"] is True
     assert result["all_effects_timing_valid"] is True
-    assert result["all_payloads_semantically_grounded"] is False
-    assert result["all_17_consumer_paths_proven"] is False
+    assert result["all_payloads_semantically_grounded"] is True
+    assert result["all_17_consumer_paths_proven"] is True
     assert result["effect_window_audit"]
     assert all(
         row["evidence_before_effect"] and row["effect_before_next_action"] and row["non_late"]
@@ -786,3 +785,72 @@ def test_batch_interrupt_stamps_cancellation_on_the_effect():
     )
     assert stamped["predecided_actions_cancelled"] == 2
     assert runtime.summary()["action_metrics"]["batch_interrupts"] == 1
+
+
+def test_grounded_payloads_require_concrete_evidence():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",))
+    classification = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+        result_code=1,
+        output="1 failed: assert error at tests/test_app.py:42",
+        source_revision="r0",
+        workspace_revision="r0",
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 failed: assert error at tests/test_app.py:42",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+        source_revision="r0",
+        validation=classification,
+    )
+
+    covering = next(
+        row
+        for row in runtime.summary()["receipts"]
+        if row["feature_id"] == "covering_red"
+    )
+    assert covering["model_visible"] is True
+    assert feature_payload_grounded("covering_red", covering["payload"]) is True
+    assert covering["payload"]["command"] == "pytest -q"
+    assert "assert error" in covering["payload"]["diagnostic"]
+    assert covering["payload"]["attribution"] == "pytest -q"
+
+
+def test_localization_payload_names_concrete_anchors():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Find Bottle", revision="r0")
+    runtime.observe_action(
+        action_id=1,
+        command="rg -n 'class Bottle' .",
+        output="bottle.py:10:class Bottle\n",
+        returncode=0,
+        transition=WorkspaceTransition(1, "rg -n 'class Bottle' .", "r0", "r0"),
+        revision="r0",
+    )
+
+    receipt = next(
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "localization"
+    )
+    assert receipt["payload"]["anchors"][0]["path"] == "bottle.py"
+    assert receipt["payload"]["anchors"][0]["line"] == 10
+
+
+def test_signature_delta_payload_names_the_symbol():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.observe_action(
+        action_id=2,
+        command="sed -i 's/def f(/def f(x, /' app.py",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(2, "edit", "r1", "r2", modified=("app.py",)),
+        revision="r2",
+    )
+
+    receipt = next(
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "signature_delta"
+    )
+    assert receipt["payload"]["symbol"] == "f"
+    assert receipt["payload"]["before_signature"] != receipt["payload"]["after_signature"]

@@ -1025,6 +1025,7 @@ class CentralFeatureRuntime:
             "lint_checks": 0,
             "lint_passes": 0,
             "lint_failures": 0,
+            "engine_actions": 0,
             "submit_attempts": 0,
             "submit_holds": 0,
             "batch_interrupts": 0,
@@ -1043,6 +1044,8 @@ class CentralFeatureRuntime:
         self._source_epoch = 0
         self._declared_check_states: dict[str, str] = {}
         self._validation_log: list[dict[str, Any]] = []
+        self._recent_source_paths: tuple[str, ...] = ()
+        self._precedent_path = ""
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -1057,6 +1060,25 @@ class CentralFeatureRuntime:
         item["last_action"] = action_id
         item["status"] = status
         item["observations"] += 1
+
+    @staticmethod
+    def _search_anchors(output: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """Parse ``path:line:text`` anchors from search output."""
+        anchors: list[dict[str, Any]] = []
+        for line in (output or "").splitlines():
+            match = re.match(r"^([^:\s][^:]*):(\d+):(.*)$", line)
+            if not match:
+                continue
+            path = match.group(1).strip()
+            try:
+                line_no = int(match.group(2))
+            except ValueError:
+                continue
+            text = match.group(3).strip()
+            anchors.append({"path": path, "line": line_no, "text": text[:80]})
+            if len(anchors) >= limit:
+                break
+        return anchors
 
     @staticmethod
     def _spec(feature_id: str) -> dict[str, str]:
@@ -1200,6 +1222,10 @@ class CentralFeatureRuntime:
                 reason="non_empty_task_instruction",
                 payload={
                     "requirements_present": True,
+                    "obligation_ids": list(self._explicit_checks)
+                    or sorted(self._task_deliverables)
+                    or ["task:instruction"],
+                    "declared_checks": list(self._explicit_checks),
                     "message": self._payload(
                         "obligations", "task_start", "non_empty_task_instruction"
                     )["message"],
@@ -1307,6 +1333,7 @@ class CentralFeatureRuntime:
             if model_authored:
                 # Any authored source change makes prior check results stale.
                 self._source_epoch += 1
+                self._recent_source_paths = tuple(model_authored)
                 self._declared_check_states = {
                     check: ("stale" if state == "passed" else state)
                     for check, state in self._declared_check_states.items()
@@ -1403,6 +1430,7 @@ class CentralFeatureRuntime:
         if is_search and output.strip():
             self._searched = True
             self._mark_lifecycle("location_anchored", action_id=action_id)
+            anchors = self._search_anchors(output)
             self._emit(
                 "localization",
                 boundary="search_result",
@@ -1412,12 +1440,20 @@ class CentralFeatureRuntime:
                 reason="non_empty_search_result",
                 payload={
                     "candidate_locations": True,
+                    "anchors": anchors,
+                    "query": normalized[:120],
                     "message": self._payload(
                         "localization", "search_result", "non_empty_search_result"
                     )["message"],
                 },
             )
-            if self._DEFINITION.search(output) and len(output.splitlines()) >= 2:
+            definition_anchors = [
+                anchor for anchor in anchors if self._DEFINITION.search(anchor["text"])
+            ]
+            reference_anchors = [
+                anchor for anchor in anchors if not self._DEFINITION.search(anchor["text"])
+            ]
+            if definition_anchors:
                 self._emit(
                     "def_partition",
                     boundary="search_result",
@@ -1428,11 +1464,14 @@ class CentralFeatureRuntime:
                     payload={
                         "definitions": True,
                         "references": True,
+                        "definition_anchors": definition_anchors,
+                        "reference_anchors": reference_anchors,
                         "message": self._payload(
                             "def_partition", "search_result", "definitions_and_references_present"
                         )["message"],
                     },
                 )
+            callers = [anchor for anchor in anchors if self._CALLSITE.search(anchor["text"])]
             if self._CALLSITE.search(output):
                 self._mark_lifecycle("impact_captured", action_id=action_id)
                 self._emit(
@@ -1444,6 +1483,7 @@ class CentralFeatureRuntime:
                     reason="verified_caller_language_in_search_result",
                     payload={
                         "callers_verified": True,
+                        "callers": callers,
                         "message": self._payload(
                             "caller_contract",
                             "search_result",
@@ -1453,6 +1493,13 @@ class CentralFeatureRuntime:
                 )
             if self._PRECEDENT.search(output):
                 self._precedent_verified = True
+                precedent_anchor = next(
+                    (anchor for anchor in anchors if self._PRECEDENT.search(anchor["text"])),
+                    None,
+                )
+                self._precedent_path = (
+                    precedent_anchor["path"] if precedent_anchor else ""
+                )
                 self._emit(
                     "newfile_precedent",
                     boundary="search_result",
@@ -1462,6 +1509,7 @@ class CentralFeatureRuntime:
                     reason="precedent_marker_in_search_result",
                     payload={
                         "precedent_verified": True,
+                        "precedent_path": self._precedent_path,
                         "message": self._payload(
                             "newfile_precedent",
                             "search_result",
@@ -1477,6 +1525,11 @@ class CentralFeatureRuntime:
             and failure_kind == "validation_failure"
         ):
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
+            bounded_diagnostic = " ".join(
+                line.strip()
+                for line in (output or "").splitlines()
+                if self._FAILURE.search(line)
+            )[:240]
             self._emit(
                 "covering_red",
                 boundary="test_result",
@@ -1488,9 +1541,13 @@ class CentralFeatureRuntime:
                     "check_failed": True,
                     "returncode": returncode,
                     "phase": check_phase,
+                    "command": classification.normalized_command[:200],
                     "command_class": classification.command_class,
                     "failure_kind": failure_kind,
-                    "attribution": "validation_result_unattributed",
+                    "attribution": (
+                        classification.declared_check_id or classification.command_class
+                    ),
+                    "diagnostic": bounded_diagnostic,
                     "message": self._payload(
                         "covering_red", "test_result", "failed_check_or_failure_output"
                     )["message"],
@@ -1525,9 +1582,15 @@ class CentralFeatureRuntime:
                     payload={
                         "repeat_count": count,
                         "failure_fingerprint": failure_fingerprint,
-                        "message": self._payload(
-                            "recovery", "test_result", "same_failure_repeated"
-                        )["message"],
+                        "alternate_action": {
+                            "kind": "inspect_then_edit",
+                            "paths": list(self._recent_source_paths),
+                            "discriminator": "exact repeat at unchanged source revision",
+                        },
+                        "message": (
+                            "The same validation failure repeated at an unchanged source "
+                            "revision; inspect and edit the anchored source before rerunning."
+                        ),
                     },
                 )
 
@@ -1541,6 +1604,7 @@ class CentralFeatureRuntime:
                 reason="new_file_after_verified_precedent",
                 payload={
                     "created_files": len(transition.created),
+                    "precedent_path": self._precedent_path,
                     "message": self._payload(
                         "newfile_precedent",
                         "edit_result",
@@ -1552,6 +1616,11 @@ class CentralFeatureRuntime:
         signature_replacement = self._explicit_signature_replacement(normalized)
         if transition.changed_paths and signature_replacement:
             before_signature, after_signature = signature_replacement
+            symbol_match = re.search(
+                r"\b(?:def|function|func|sub|procedure|class)\s+([A-Za-z_]\w*)\s*\(",
+                before_signature,
+            )
+            symbol = symbol_match.group(1) if symbol_match else ""
             self._emit(
                 "signature_delta",
                 boundary="edit_result",
@@ -1562,6 +1631,7 @@ class CentralFeatureRuntime:
                 payload={
                     "changed_paths": list(transition.changed_paths),
                     "signature_edit": True,
+                    "symbol": symbol,
                     "before_signature": before_signature,
                     "after_signature": after_signature,
                     "signature_fingerprint": hashlib.sha256(
@@ -1588,6 +1658,7 @@ class CentralFeatureRuntime:
     ) -> None:
         self._action_metrics["lint_checks"] += 1
         self._action_metrics["lint_failures" if failed else "lint_passes"] += 1
+        self._action_metrics["engine_actions"] += 1
         self._mark_lifecycle(
             "static_validated",
             action_id=action_id,
@@ -1627,6 +1698,7 @@ class CentralFeatureRuntime:
         check_count: int = 0,
         passing_checks: int = 0,
         failing_checks: int = 0,
+        blockers: tuple[str, ...] = (),
         source_revision: str | None = None,
     ) -> None:
         self._action_metrics["submit_attempts"] += 1
@@ -1645,6 +1717,7 @@ class CentralFeatureRuntime:
                 payload={
                     "refused": True,
                     "fresh_failure": True,
+                    "blockers": list(blockers),
                     "message": self._payload("submit_refusal", "submit", "fresh_grounded_failure")[
                         "message"
                     ],

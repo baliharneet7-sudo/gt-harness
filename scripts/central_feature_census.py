@@ -178,7 +178,13 @@ def census() -> dict:
             revision="r1",
         )
         deliver_next(action_id)
-    runtime.record_submit(action_id=5, revision="r1", refused=True, sensor_healthy=True)
+    runtime.record_submit(
+        action_id=5,
+        revision="r1",
+        refused=True,
+        sensor_healthy=True,
+        blockers=("pytest -q",),
+    )
     deliver_next(5)
     summary = runtime.summary()
     summary["timing_audit"] = audit_timing(summary)
