@@ -1896,13 +1896,43 @@ class CentralFeatureRuntime:
             available_paths = set(transition.before_contents)
             if snapshot is not None:
                 available_paths.update(snapshot.entries)
+            source_precedent_paths = {
+                path
+                for path in available_paths
+                if (
+                    (candidate := classify_change(
+                        path,
+                        kind=(
+                            snapshot.entries[path].kind
+                            if snapshot is not None and path in snapshot.entries
+                            else "f"
+                        ),
+                        task_deliverables=self._task_deliverables,
+                    )).origin
+                    == ChangeOrigin.MODEL_AUTHORED
+                    and candidate.validation_relevant
+                )
+            }
             precedent_path = ""
             for created_path in transition.created:
+                # Precedent is guidance for a model-authored source file only.
+                # Workspace sensors also report caches, build products, generated
+                # binaries, and task outputs; treating those as new source files
+                # creates provider-visible spam and can steer the agent toward
+                # irrelevant artifacts.  The shared classification is the source
+                # of truth for this boundary.
+                created_classification = classified.get(created_path)
+                if (
+                    created_classification is None
+                    or created_classification.origin != ChangeOrigin.MODEL_AUTHORED
+                    or not created_classification.validation_relevant
+                ):
+                    continue
                 parent = created_path.rsplit("/", 1)[0] if "/" in created_path else ""
                 suffix = "." + created_path.rsplit(".", 1)[-1] if "." in created_path else ""
                 candidates = sorted(
                     path
-                    for path in available_paths
+                    for path in source_precedent_paths
                     if path not in transition.created
                     and (path.rsplit("/", 1)[0] if "/" in path else "") == parent
                     and (not suffix or path.lower().endswith(suffix.lower()))

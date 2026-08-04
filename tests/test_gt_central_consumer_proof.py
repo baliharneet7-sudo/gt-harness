@@ -232,6 +232,31 @@ def test_newfile_precedent_records_a_concrete_precedent_path():
     assert row["payload"]["precedent_path"] == "bottle.py"
 
 
+def test_newfile_precedent_ignores_derived_and_cache_artifacts():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1, command="run generator", output="", returncode=0,
+        transition=_transition(
+            1,
+            "run generator",
+            WR0,
+            SR1,
+            created=("__pycache__/bottle.cpython-313.pyc",),
+            before_contents={"__pycache__/other.cpython-313.pyc": "binary"},
+            after_contents={
+                "__pycache__/other.cpython-313.pyc": "binary",
+                "__pycache__/bottle.cpython-313.pyc": "binary",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    _assert_quiet(runtime, "newfile_precedent")
+
+
 def test_covering_red_records_grounded_failure_and_must_precede_next_action():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Run `pytest -q`.", revision=WR0, source_revision=SR0)
