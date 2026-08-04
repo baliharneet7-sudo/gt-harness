@@ -161,6 +161,31 @@ hold was recorded. Aggregate usage was 448 model calls, 459 actions, and about
 failure against the frozen 9/10 reference. Shadow and 89-task runs remain
 blocked pending timeout diagnosis.
 
+### All17 smoke after payload proof
+
+After the feature census and payload contract passed, all17 treatment smoke
+run `30864114805` was dispatched from commit `b67d213` on the same ten-task
+panel. The workflow was cancelled only after
+`schemelike-metacircular-eval` remained inside Harbor for roughly 30 minutes;
+its partial receipt was retained, but it produced no completed trial. The
+merge returned 9 trials, 8 solved, and one agent timeout (`gpt2`), with the
+scheme task missing from the graded set. Against the frozen 9/10 baseline this
+is still 8/10 planned (minus one task): eight unchanged solves, `gpt2`
+unchanged failed, and `schemelike` censored by timeout. `write-compressor`
+recovered to a solve in this run.
+
+Every returned or partial task receipt reported `feature_count=17`,
+`enabled=true`, a healthy sensor, and zero invalid payloads under
+`feature_payload_valid`. The union of features that actually triggered was 11:
+obligations (10 tasks), localization and `GT_LOC_RESLOT` (9),
+newfile_precedent (8), covering_red (7), syntax_result and `GT_EDIT_CHECK` (6),
+def_partition (4), signature_delta and `GT_PATCH_DELTA` (2), and
+`GT_CERT_DELIVERY` (9). Six features did not trigger in this panel:
+`caller_contract`, `recovery`, `submit_refusal`, `GT_CHANGE_SURFACE`,
+`GT_HYPOTHESIS`, and `GT_SS_SUBMIT_RED`. That is correct trigger gating, not a
+claim that the producers are broken; the forcing census is the proof for those
+paths.
+
 ### Smoke delta against frozen GT-off
 
 | metric | frozen GT-off | GT-on treatment | delta | interpretation |
