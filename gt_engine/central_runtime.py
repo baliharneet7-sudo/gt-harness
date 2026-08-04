@@ -1723,14 +1723,14 @@ class CentralFeatureRuntime:
                     ],
                 },
             )
-            self._emit(
-                "GT_CERT_DELIVERY",
-                boundary="submit",
-                action_id=action_id,
-                revision=revision,
-                source_revision=source_revision,
-                decision="DELIVERED" if sensor_healthy else "PASS",
-                reason="submission_readiness_receipt",
+        self._emit(
+            "GT_CERT_DELIVERY",
+            boundary="submit",
+            action_id=action_id,
+            revision=revision,
+            source_revision=source_revision,
+            decision="DELIVERED" if sensor_healthy else "PASS",
+            reason="submission_readiness_receipt",
             payload={
                 "sensor_healthy": sensor_healthy,
                 "refused": refused,

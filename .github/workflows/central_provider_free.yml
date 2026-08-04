@@ -33,6 +33,7 @@ jobs:
         run: |
           python -m pytest tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py -q
 
       - name: Structural readiness audit
@@ -41,10 +42,12 @@ jobs:
       - name: Static checks
         run: |
           python -m ruff check gt_engine/central_runtime.py \
+            gt_engine/central_controls.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py
 
       - name: Provider-free receipt
