@@ -55,6 +55,12 @@ Before a paid smoke, run `python scripts/central_pre_smoke_gate.py`. Only its
 entrypoints, the exact paid workflow, and a deterministic all-17 run through
 the real `MiniSweCentralAgent` lifecycle, including terminal submit effects.
 
+The additive `features.effect_trace` ledger distinguishes application from
+downstream influence. It records existing consumer reads and confirmed
+provider-delivery IDs; `audit_only` is not trajectory influence. This tracing
+must not alter model prompts, effect routing, timing, action order, shadow
+visibility, or submit behavior.
+
 ## What this is
 An agent harness — the code that wraps an LLM and turns it into something that does work (loop, tools, context management, system prompt). This one is single-purpose: a coding agent. Built to score on benchmarks while staying tiny enough to read end-to-end.
 

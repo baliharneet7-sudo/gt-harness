@@ -19,6 +19,16 @@ Keep these states distinct in every audit:
    the first provider request after the evidence action. GT never blocks,
    replaces, rejects, or cancels Mini-SWE actions.
 
+## Effect provenance (2026-08-04)
+
+`central_receipt.json.features.effect_trace` is an additive provenance ledger.
+It links each applied effect to existing state reads and confirmed provider
+deliveries without changing routing, prompt selection, timing, or action
+execution. `audit_only` means the effect was recorded but no existing
+downstream consumer was exercised; it must not be reported as trajectory
+influence. `provider_payload` and `existing_engine_actuation` require a
+recorded downstream event. Unknown dispositions fail the audit.
+
 Private receipts must never be mistaken for an inactive engine. Conversely,
 receipt counts must never be claimed as causal help.
 

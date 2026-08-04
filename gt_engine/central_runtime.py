@@ -1156,6 +1156,10 @@ class CentralFeatureRuntime:
         self._effect_cursor = 0
         self._controller_state = CentralControllerState()
         self._effect_applications: list[dict[str, Any]] = []
+        # Additive provenance only.  This trace never participates in routing
+        # or policy; it records whether an already-existing consumer path was
+        # actually exercised.
+        self._effect_trace: list[dict[str, Any]] = []
         self._batch_interrupts: list[dict[str, Any]] = []
         self._task_deliverables: set[str] = set()
         self._source_epoch = 0
@@ -1849,6 +1853,12 @@ class CentralFeatureRuntime:
         if signature_deltas:
             primary = signature_deltas[0]
             caller_payload = self._controller_state.impact.get("caller_contract") or {}
+            if caller_payload:
+                self.record_existing_consumer_read(
+                    feature_id="caller_contract",
+                    action_id=action_id,
+                    purpose="signature_delta_caller_impact",
+                )
             callers = list(caller_payload.get("callers") or [])
             contributors = ["signature_delta", "GT_PATCH_DELTA"]
             if callers:
@@ -2086,6 +2096,69 @@ class CentralFeatureRuntime:
                 "applied_before_call": call + 1,
             }
         )
+        self._effect_trace.append(
+            {
+                "effect_id": effect.receipt_id,
+                "feature_id": effect.feature_id,
+                "effect_kind": effect.effect_kind.value,
+                "evidence_action": effect.evidence_action,
+                "applied_call": call,
+                "state_fields_changed": [section_name] if before != after else [],
+                "state_reads": [],
+                "actuator_events": [],
+                "provider_delivery_ids": [],
+                "disposition": "audit_only",
+                "timing": {
+                    "evidence_before_effect": (
+                        effect.applied_after_action is not None
+                        and effect.applied_after_action >= effect.evidence_action
+                    ),
+                    "late": effect.late,
+                    "predictive": effect.predictive,
+                },
+            }
+        )
+
+    def _trace_for_effect(
+        self, feature_id: str, *, evidence_action: int | None = None
+    ) -> dict[str, Any] | None:
+        candidates = [
+            row
+            for row in self._effect_trace
+            if row["feature_id"] == feature_id
+            and (evidence_action is None or row["evidence_action"] == evidence_action)
+        ]
+        return candidates[-1] if candidates else None
+
+    def record_existing_consumer_read(
+        self, *, feature_id: str, action_id: int, purpose: str
+    ) -> None:
+        """Record an existing state read without changing runtime behavior."""
+        row = self._trace_for_effect(feature_id)
+        if row is None:
+            return
+        row["state_reads"].append(
+            {"action": action_id, "purpose": purpose}
+        )
+        if row["disposition"] == "audit_only":
+            row["disposition"] = "existing_engine_actuation"
+        row["actuator_events"].append(
+            {"kind": "existing_consumer_read", "action": action_id, "purpose": purpose}
+        )
+
+    def record_provider_delivery(
+        self, *, effect_ids: Iterable[str], delivery_id: str
+    ) -> None:
+        """Link a confirmed provider delivery to its contributing effects."""
+        ids = set(effect_ids)
+        for row in self._effect_trace:
+            if row["effect_id"] not in ids:
+                continue
+            row["provider_delivery_ids"].append(delivery_id)
+            row["actuator_events"].append(
+                {"kind": "provider_payload", "delivery_id": delivery_id}
+            )
+            row["disposition"] = "provider_payload"
 
     def consume_effects(self, *, action_id: int, call: int) -> list[FeatureEffect]:
         """Return effects produced since the last consume, with timing bound."""
@@ -2166,6 +2239,7 @@ class CentralFeatureRuntime:
             "consumer_paths": dict(self._consumer_paths),
             "effects": [effect.as_dict() for effect in self._effects],
             "effect_applications": list(self._effect_applications),
+            "effect_trace": [dict(row) for row in self._effect_trace],
             "controller_state": self._controller_state.as_dict(),
             "batch_interrupts": list(self._batch_interrupts),
             "source_epoch": self._source_epoch,
@@ -2193,6 +2267,12 @@ class CentralFeatureRuntime:
     def _record_guidance(self, metadata: dict[str, Any]) -> None:
         feedback = str(metadata["feedback"])
         feature_id = str(metadata["feature_id"])
+        delivery_id = str(metadata.get("delivery_id") or f"guidance-{self._guidance_events + 1}")
+        metadata["delivery_id"] = delivery_id
+        self.record_provider_delivery(
+            effect_ids=metadata.get("effect_ids") or (),
+            delivery_id=delivery_id,
+        )
         self._guidance_events += 1
         self._guidance_chars += len(feedback)
         self._guidance_features.append(feature_id)
@@ -2373,6 +2453,15 @@ class CentralFeatureRuntime:
         metadata = {
             "feature_id": selected.feature_id,
             "contributing_features": contributing_features,
+            "effect_ids": [
+                row["effect_id"]
+                for row in self._effect_trace
+                if any(
+                    row["feature_id"] == item.feature_id
+                    and row["evidence_action"] == item.action_id
+                    for item in selected_items
+                )
+            ],
             "evidence_action": selected.action_id,
             "evidence_actions": [item.action_id for item in selected_items],
             "revision": selected.revision,

@@ -907,3 +907,32 @@ def test_absent_events_remain_correct_quiet():
         "GT_CHANGE_SURFACE", "GT_PATCH_DELTA", "GT_EDIT_CHECK", "GT_HYPOTHESIS",
         "GT_SS_SUBMIT_RED",
     )
+
+
+def test_effect_trace_is_additive_and_links_confirmed_provider_delivery():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Fix it", revision=WR0, source_revision=SR0)
+    runtime.record_syntax(
+        action_id=1,
+        revision=SR1,
+        source_revision=SR1,
+        failed=True,
+        reason="changed_file_syntax_failure",
+        path="app.py",
+        command="python3 -m py_compile app.py",
+        returncode=1,
+        diagnostic="SyntaxError: invalid syntax",
+    )
+    runtime.consume_effects(action_id=1, call=1)
+    feedback = runtime.model_feedback(deferred=True)
+    assert feedback
+    prepared = runtime.prepared_guidance()
+    assert prepared and prepared["effect_ids"]
+    confirmed = runtime.confirm_prepared_guidance()
+    assert confirmed and confirmed["delivery_id"]
+    trace = runtime.summary()["effect_trace"]
+    assert trace
+    assert all(row["disposition"] != "unknown" for row in trace)
+    syntax = next(row for row in trace if row["feature_id"] == "syntax_result")
+    assert syntax["disposition"] == "provider_payload"
+    assert syntax["provider_delivery_ids"] == [confirmed["delivery_id"]]

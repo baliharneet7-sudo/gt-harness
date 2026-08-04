@@ -439,6 +439,8 @@ class MiniSweCentralAgent(BaseAgent):
                     evidence_action = int(delivery_metadata.get("evidence_action") or 0)
                     guidance_deliveries.append(
                         {
+                            "delivery_id": delivery_metadata.get("delivery_id"),
+                            "effect_ids": delivery_metadata.get("effect_ids", []),
                             "feature_id": delivery_metadata.get("feature_id"),
                             "contributing_features": delivery_metadata.get(
                                 "contributing_features", []
@@ -776,6 +778,31 @@ class MiniSweCentralAgent(BaseAgent):
                 "state_mutations": sum(
                     bool(row.get("state_fields_changed"))
                     for row in feature_summary["effect_applications"]
+                ),
+                "effect_trace_rows": len(feature_summary["effect_trace"]),
+                "effect_dispositions": {
+                    disposition: sum(
+                        row.get("disposition") == disposition
+                        for row in feature_summary["effect_trace"]
+                    )
+                    for disposition in sorted(
+                        {
+                            row.get("disposition")
+                            for row in feature_summary["effect_trace"]
+                        }
+                    )
+                },
+                "provider_payload_effects": sum(
+                    row.get("disposition") == "provider_payload"
+                    for row in feature_summary["effect_trace"]
+                ),
+                "existing_engine_actuation_effects": sum(
+                    row.get("disposition") == "existing_engine_actuation"
+                    for row in feature_summary["effect_trace"]
+                ),
+                "audit_only_effects": sum(
+                    row.get("disposition") == "audit_only"
+                    for row in feature_summary["effect_trace"]
                 ),
                 "payload_deliveries": len(guidance_deliveries),
                 "timely_payload_deliveries": timely_deliveries,
