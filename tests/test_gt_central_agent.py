@@ -128,13 +128,16 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "enable_submit_readiness=false" in workflow
 
 
-def test_paid_engine_workflow_keeps_provider_timeout_below_loop_budget():
+def test_paid_engine_workflow_has_no_time_censors():
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
 
-    assert "--ak model_timeout_sec=300" in workflow
-    assert "--ak model_loop_timeout_sec=900" in workflow
+    # Benchmark treatment is bounded by step_limit and cost_limit only; no
+    # wall-time or per-call time censors that can cut a hard task mid-run.
+    assert "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
+    assert "--ak model_timeout_sec" not in workflow
+    assert "--ak model_loop_timeout_sec" not in workflow
 
 
 @pytest.mark.asyncio

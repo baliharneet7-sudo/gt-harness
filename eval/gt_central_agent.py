@@ -102,8 +102,8 @@ class MiniSweCentralAgent(BaseAgent):
         temperature: float = 1.0,
         step_limit: int = 100,
         command_timeout_sec: int = 30,
-        model_timeout_sec: int = 120,
-        model_loop_timeout_sec: int = 900,
+        model_timeout_sec: int | None = None,
+        model_loop_timeout_sec: int | None = None,
         cost_limit: float = 3.0,
         max_submit_holds: int = 1,
         enable_lint: bool = True,
@@ -145,7 +145,9 @@ class MiniSweCentralAgent(BaseAgent):
     def _build_model(self) -> LitellmModel:
         assert self.model_name is not None
         model = self.model_name
-        kwargs: dict[str, Any] = {"temperature": self.temperature}
+        # Benchmark runs never retry provider errors: a bad request fails fast
+        # instead of burning wall time in litellm backoff.
+        kwargs: dict[str, Any] = {"temperature": self.temperature, "num_retries": 0}
         api_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
         if api_base:
             if "/" not in model:
@@ -409,7 +411,10 @@ class MiniSweCentralAgent(BaseAgent):
                     terminal = "CostLimitExceeded"
                     censored_reason = "cost_limit"
                     break
-                if elapsed >= self.model_loop_timeout_sec:
+                if (
+                    self.model_loop_timeout_sec is not None
+                    and elapsed >= self.model_loop_timeout_sec
+                ):
                     terminal = "WallTimeExceeded"
                     censored_reason = "model_loop_wall_time"
                     break

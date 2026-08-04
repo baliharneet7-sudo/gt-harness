@@ -54,8 +54,10 @@ def audit() -> dict[str, bool]:
         "legacy_agent_not_in_paid_workflow": (
             "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
         ),
-        "paid_integrated_timeout_is_pinned": (
-            "--ak model_timeout_sec=300 --ak model_loop_timeout_sec=900" in workflow
+        "paid_integrated_has_no_time_censors": (
+            "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
+            and "--ak model_timeout_sec" not in workflow
+            and "--ak model_loop_timeout_sec" not in workflow
         ),
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]
