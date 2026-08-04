@@ -83,33 +83,81 @@ def _category(command: str) -> str:
     return "other"
 
 
-def _receipt_ladder(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> dict[str, int]:
-    delivered = referenced = acted = 0
-    for row in (receipt.get("features") or {}).get("receipts") or []:
-        if not row.get("model_visible") or row.get("decision") != "DELIVERED":
-            continue
+def _payload_anchors(payload: dict[str, Any]) -> list[str]:
+    """Extract concrete anchor strings from a receipt payload."""
+    anchors: list[str] = []
+    for key in ("path", "command", "declared_check", "precedent_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            anchors.append(value.strip())
+    for key in ("changed_paths", "blockers"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            anchors.extend(str(item) for item in value if str(item).strip())
+    for key in ("anchors", "callers", "definition_anchors", "reference_anchors"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    path = item.get("path")
+                    if isinstance(path, str) and path.strip():
+                        anchors.append(path.strip())
+    return list(dict.fromkeys(anchors))
+
+
+def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> dict[str, int]:
+    """Feature funnel grounded in the receipt, never inferred from prose.
+
+    ``guidance_deliveries`` counts payloads that actually reached a model
+    request; ``behaviorally_aligned`` counts deliveries whose concrete anchor
+    appears in a later command.  Neither is causal proof.
+    """
+    features = receipt.get("features") or {}
+    produced = sum(int(value) for value in (features.get("produced_counts") or {}).values())
+    effects = features.get("effects") or []
+    consumed = len(effects)
+    applied = sum(1 for effect in effects if effect.get("applied_after_action") is not None)
+    deliveries = receipt.get("guidance_deliveries") or []
+    receipts_by_key = {
+        (row.get("feature_id"), int(row.get("action") or 0)): row
+        for row in (features.get("receipts") or [])
+        if row.get("model_visible")
+    }
+    delivered = 0
+    aligned = 0
+    for row in deliveries:
         delivered += 1
-        payload = row.get("payload") or {}
-        anchors: list[str] = []
-        for key in ("path", "command"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                anchors.append(value.strip())
-        for key in ("changed_paths", "blockers"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                anchors.extend(str(item) for item in value if str(item).strip())
+        evidence_action = int(row.get("evidence_action") or 0)
+        receipt_row = receipts_by_key.get((row.get("feature_id"), evidence_action)) or {}
+        payload = receipt_row.get("payload") or {}
+        anchors = _payload_anchors(payload)
         if not anchors:
             continue
-        later = [item for item in actions if item["index"] > int(row.get("action") or 0)]
-        if any(any(anchor in item["reasoning"] for anchor in anchors) for item in later):
-            referenced += 1
+        later = [item for item in actions if item["index"] > evidence_action]
         if any(any(anchor in item["command"] for anchor in anchors) for item in later):
-            acted += 1
+            aligned += 1
     return {
-        "guidance_l1_delivered": delivered,
-        "guidance_l2_referenced": referenced,
-        "guidance_l3_acted": acted,
+        "feature_produced": produced,
+        "feature_consumed": consumed,
+        "feature_effects_applied": applied,
+        "guidance_deliveries": delivered,
+        "guidance_behaviorally_aligned": aligned,
+        "guidance_suppressed": int(features.get("guidance_suppressed") or 0),
+    }
+
+
+def _lifecycle_metrics(features: dict[str, Any]) -> dict[str, int | None]:
+    lifecycle = features.get("lifecycle") or {}
+
+    def first(phase: str) -> int | None:
+        item = lifecycle.get(phase) or {}
+        return item.get("first_action")
+
+    return {
+        "first_anchored_location_action": first("location_anchored"),
+        "first_workspace_edit_action": first("workspace_edited"),
+        "first_focused_validation_action": first("focused_check_validated"),
+        "first_behavior_observed_action": first("behavior_observed"),
     }
 
 
@@ -272,13 +320,13 @@ def extract_trajectory(
                 for row in validation_log
                 if row.get("command_class") == "recognized_validation"
             )
-        result.update(_receipt_ladder(receipt, action_rows))
+        result.update(_feature_funnel(receipt, action_rows))
+        result.update(_lifecycle_metrics(feature_summary))
         result.update(
             {
                 "guidance_events": int(feature_summary.get("guidance_events") or 0),
                 "guidance_chars": int(feature_summary.get("guidance_chars") or 0),
                 "guidance_candidates": int(feature_summary.get("guidance_candidates") or 0),
-                "guidance_suppressed": int(feature_summary.get("guidance_suppressed") or 0),
                 "feature_receipts": sum(
                     int(value) for value in (feature_summary.get("produced_counts") or {}).values()
                 ),

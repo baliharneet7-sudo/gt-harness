@@ -121,3 +121,55 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["runtime_advisory_context_chars"] == 80
     assert metrics["stock_context_chars_from_receipt"] == 250
     assert metrics["max_context_chars_from_receipt"] == 230
+
+
+def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
+    trajectory = tmp_path / "task_trajectory.json"
+    trajectory.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "fix it"},
+                    _assistant("write app.py", prompt=10, completion=1),
+                    _assistant("pytest app.py", prompt=10, completion=1),
+                ],
+            }
+        )
+    )
+    receipt = tmp_path / "central_receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "features": {
+                    "produced_counts": {"syntax_result": 1},
+                    "guidance_suppressed": 2,
+                    "effects": [{"applied_after_action": 1}],
+                    "receipts": [
+                        {
+                            "feature_id": "syntax_result",
+                            "action": 1,
+                            "model_visible": True,
+                            "payload": {
+                                "path": "app.py",
+                                "command": "python3 -m py_compile app.py",
+                            },
+                        }
+                    ],
+                },
+                "guidance_deliveries": [
+                    {"feature_id": "syntax_result", "evidence_action": 1}
+                ],
+            }
+        )
+    )
+
+    metrics = extract_trajectory(trajectory, task="task", receipt_path=receipt)
+
+    assert metrics["feature_produced"] == 1
+    assert metrics["feature_consumed"] == 1
+    assert metrics["feature_effects_applied"] == 1
+    assert metrics["guidance_deliveries"] == 1
+    assert metrics["guidance_behaviorally_aligned"] == 1
+    assert metrics["guidance_suppressed"] == 2
+    assert "guidance_l1_delivered" not in metrics
+    assert "guidance_l3_acted" not in metrics

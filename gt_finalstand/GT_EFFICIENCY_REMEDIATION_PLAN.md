@@ -167,8 +167,11 @@ matrix.
   `tests/test_gt_deep_metrics.py`: boundary, deduplication, timeout, metrics,
   censoring, and Pareto proofs.
 
-The provider-free timing census additionally reports
-`ALL_17_TIMING_VALID`, `ALL_GUIDANCE_ON_TIME`, and `ALL_17_DELIVERABLE`.
+The provider-free census reports the five gates
+`ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
+`ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`, and
+`ALL_17_CONSUMER_PATHS_PROVEN`; the terminal gate cannot pass on producer
+receipts alone.
 
 ## 8. Live canary status
 

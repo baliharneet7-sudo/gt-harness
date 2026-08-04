@@ -21,19 +21,29 @@ the model/action loop, observes every execution transition, and keeps GT code,
 state, credentials, and receipts outside the task container. The model never
 asks a GT tool for help.
 
-Do not equate a delivered feature receipt with a model intervention. The engine
-can observe a valid lifecycle fact privately, execute a policy decision that
-passes, or actively change the next decision via a bounded runtime payload or
-a one-time submit hold. Only the latter two are behavior-changing channels.
+Do not equate a produced feature receipt with a model intervention. The engine
+observes a valid lifecycle fact privately, executes a controller decision that
+passes, or actively changes the next decision via a bounded runtime payload or
+a one-time submit hold. Only controller consumption or model delivery can
+change a trajectory.
 
-The historical all-17 policy sent 94 generic/pass/repeated advisories and was
-inefficient. The current policy keeps those passive facts private and delivers
-only grounded failure/impact evidence. It additionally emits one `GT_EDIT_CHECK`
-validation-debt control after three material source revisions without a completed
-recognized declared check; it resets after validation and ignores cache files.
-Every delivery is transient, next-decision-only, and audit-recorded with its
-evidence action and revision. See `AGENTS.md` for the executable contract and
-`gt_finalstand/GT_EFFICIENCY_REMEDIATION_PLAN.md` for the release gates.
+The 17 feature identities all have a registered consumer (`central_controls.py`);
+most effects are internal and cost zero prompt tokens. The source revision is
+separate from the whole-workspace revision: caches, binaries, build products,
+logs, and background output never stale validation evidence. One immutable
+validation classification is shared by the runtime, the evidence ledger, the
+receipt, and deep metrics. A fresh syntax failure interrupts the remaining
+pre-decided actions in the same model response. Every model-visible payload
+must name concrete evidence (paths, symbols, commands, diagnostics); generic
+prose stays private.
+
+Provider-free proof is gated by `scripts/central_feature_census.py` and must
+print all of:
+`ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
+`ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
+`ALL_17_CONSUMER_PATHS_PROVEN`. Receipts are schema v3. The 89-task run
+remains blocked until the ten-task treatment smoke and repeated matched trials
+pass. See `AGENTS.md` for the executable contract.
 
 ## What this is
 An agent harness — the code that wraps an LLM and turns it into something that does work (loop, tools, context management, system prompt). This one is single-purpose: a coding agent. Built to score on benchmarks while staying tiny enough to read end-to-end.

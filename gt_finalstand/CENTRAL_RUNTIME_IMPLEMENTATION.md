@@ -424,11 +424,12 @@ censoring. Model calls have a 120-second request limit and the model loop has a
 
 Ordinary feature guidance is now a transient next-decision payload: it is
 prepared after a verified tool observation, sent in exactly the next model
-request, and not retained in durable conversation history. Receipt-v2 records
+request, and not retained in durable conversation history. Receipt-v3 records
 the evidence action and delivery call. The provider-free census therefore
-checks both event chronology and the model decision window, emitting
-`ALL_17_TIMING_VALID` and `ALL_GUIDANCE_ON_TIME` in addition to
-`ALL_17_DELIVERABLE`.
+checks event chronology, the model decision window, and the full consumer
+funnel, emitting `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
+`ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`, and the terminal
+`ALL_17_CONSUMER_PATHS_PROVEN`.
 
 The shared deep-metrics extractor and comparator now reject solve regressions,
 censored treatment runs, and any positive primary-resource delta on a
