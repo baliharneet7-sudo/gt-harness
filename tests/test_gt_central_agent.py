@@ -12,7 +12,11 @@ from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 from minisweagent.exceptions import FormatError
 
-from eval.gt_central_agent import MiniSweCentralAgent, MiniSweCentralShadowAgent
+from eval.gt_central_agent import (
+    MiniSweCentralAgent,
+    MiniSweCentralShadowAgent,
+    _message_context_chars,
+)
 
 
 class _Environment:
@@ -96,6 +100,17 @@ def test_shadow_and_treatment_are_both_central_gt_on_arms(tmp_path):
     assert shadow.runtime_mode == "shadow"
     assert treatment.name() == "miniswe-central"
     assert shadow.name() == "miniswe-central-shadow"
+
+
+def test_context_accounting_includes_reasoning_and_tool_calls():
+    message = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "reason",
+        "tool_calls": [{"function": {"name": "bash", "arguments": '{"command":"pytest -q"}'}}],
+    }
+
+    assert _message_context_chars(message) > len("reason")
 
 
 def test_paid_workflow_uses_external_central_agent_and_frozen_version():

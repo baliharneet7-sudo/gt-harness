@@ -52,6 +52,16 @@ from gt_engine.central_runtime import (
 from gt_engine.deep_metrics import normalized_token_cost
 
 
+def _message_context_chars(message: dict[str, Any]) -> int:
+    """Count assistant fields that are retained in the next provider request."""
+    text = str(message.get("content") or "") + str(message.get("reasoning_content") or "")
+    for key in ("tool_calls", "function_call"):
+        value = message.get(key)
+        if value:
+            text += json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return len(text)
+
+
 def _mini_config() -> dict[str, Any]:
     import yaml
 
@@ -408,7 +418,7 @@ class MiniSweCentralAgent(BaseAgent):
                     chars = len(str(item.get("content") or ""))
                     role = str(item.get("role") or "")
                     if role == "assistant":
-                        context_parts["assistant_chars"] += chars
+                        context_parts["assistant_chars"] += _message_context_chars(item)
                     elif role == "tool":
                         context_parts["tool_observation_chars"] += chars
                     elif (
@@ -440,7 +450,7 @@ class MiniSweCentralAgent(BaseAgent):
                     messages.extend(flow.messages)
                     continue
                 messages.append(message)
-                model_output_chars += len(str(message.get("content") or ""))
+                model_output_chars += _message_context_chars(message)
                 extra = message.get("extra") or {}
                 cost += float(extra.get("cost") or 0.0)
                 usage = (extra.get("response") or {}).get("usage") or {}
