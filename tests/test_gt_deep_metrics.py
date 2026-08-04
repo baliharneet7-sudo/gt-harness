@@ -92,3 +92,32 @@ def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources(
     assert compare_arms(baseline, positive)["gate_passed"] is False
     assert compare_arms(baseline, regressed)["solve_regressions"] == ["task"]
     assert compare_arms(baseline, censored)["censored_treatment"] == ["task"]
+
+
+def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
+    trajectory = tmp_path / "task_trajectory.json"
+    trajectory.write_text(
+        json.dumps({"messages": [_assistant("pytest -q", prompt=10, completion=1)]})
+    )
+    receipt = tmp_path / "central_receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "features": {},
+                "model_call_contexts": [
+                    {"stock_context_chars": 100, "runtime_advisory_chars": 0, "context_chars": 100},
+                    {
+                        "stock_context_chars": 150,
+                        "runtime_advisory_chars": 80,
+                        "context_chars": 230,
+                    },
+                ],
+            }
+        )
+    )
+
+    metrics = extract_trajectory(trajectory, task="task", receipt_path=receipt)
+
+    assert metrics["runtime_advisory_context_chars"] == 80
+    assert metrics["stock_context_chars_from_receipt"] == 250
+    assert metrics["max_context_chars_from_receipt"] == 230

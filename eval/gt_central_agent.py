@@ -341,7 +341,9 @@ class MiniSweCentralAgent(BaseAgent):
         ]
         explicit_checks = explicit_check_commands(instruction)
         snapshot = await self._sensor.scan(environment, cwd=self.cwd)
-        self._features.begin_task(instruction, revision=snapshot.revision)
+        self._features.begin_task(
+            instruction, revision=snapshot.revision, explicit_checks=explicit_checks
+        )
         calls = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -350,6 +352,7 @@ class MiniSweCentralAgent(BaseAgent):
         started = time.monotonic()
         receipts: list[dict[str, Any]] = []
         guidance_deliveries: list[dict[str, Any]] = []
+        model_call_contexts: list[dict[str, Any]] = []
         pending_guidance = ""
         pending_prepared_after_call = 0
         no_action_assistant_steps = 0
@@ -374,7 +377,9 @@ class MiniSweCentralAgent(BaseAgent):
                     break
                 calls += 1
                 query_messages = messages
+                runtime_advisory = ""
                 if pending_guidance:
+                    runtime_advisory = pending_guidance
                     query_messages = [
                         *messages,
                         {"role": "user", "content": pending_guidance},
@@ -393,8 +398,34 @@ class MiniSweCentralAgent(BaseAgent):
                         }
                     )
                     pending_guidance = ""
-                context_chars_sent += sum(
-                    len(str(item.get("content") or "")) for item in query_messages
+                context_parts = {
+                    "system_user_chars": 0,
+                    "assistant_chars": 0,
+                    "tool_observation_chars": 0,
+                    "runtime_advisory_chars": len(runtime_advisory),
+                }
+                for item in query_messages:
+                    chars = len(str(item.get("content") or ""))
+                    role = str(item.get("role") or "")
+                    if role == "assistant":
+                        context_parts["assistant_chars"] += chars
+                    elif role == "tool":
+                        context_parts["tool_observation_chars"] += chars
+                    elif (
+                        role in {"system", "user"}
+                        and str(item.get("content") or "") != runtime_advisory
+                    ):
+                        context_parts["system_user_chars"] += chars
+                context_chars = sum(context_parts.values())
+                context_chars_sent += context_chars
+                model_call_contexts.append(
+                    {
+                        "call": calls,
+                        **context_parts,
+                        "stock_context_chars": context_chars - len(runtime_advisory),
+                        "context_chars": context_chars,
+                        "next_action_relation": "",
+                    }
                 )
                 try:
                     message = await asyncio.wait_for(
@@ -421,6 +452,14 @@ class MiniSweCentralAgent(BaseAgent):
                     or 0
                 )
                 actions = tuple(extra.get("actions") or ())
+                if not actions:
+                    model_call_contexts[-1]["next_action_relation"] = "no_action"
+                elif is_submit_command(str(actions[0].get("command") or "")):
+                    model_call_contexts[-1]["next_action_relation"] = "submit"
+                elif is_check_command(str(actions[0].get("command") or "")):
+                    model_call_contexts[-1]["next_action_relation"] = "validation"
+                else:
+                    model_call_contexts[-1]["next_action_relation"] = "other"
                 submit_held = False
                 if not actions:
                     no_action_assistant_steps += 1
@@ -672,6 +711,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "features": feature_summary,
                         "interventions": receipts,
                         "guidance_deliveries": guidance_deliveries,
+                        "model_call_contexts": model_call_contexts,
                     },
                     indent=2,
                 ),

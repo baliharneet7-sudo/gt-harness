@@ -256,6 +256,7 @@ def extract_trajectory(
     if receipt_path and receipt_path.exists():
         receipt = _load_json(receipt_path)
         feature_summary = receipt.get("features") or {}
+        call_contexts = receipt.get("model_call_contexts") or []
         result.update(_receipt_ladder(receipt, action_rows))
         result.update(
             {
@@ -267,6 +268,15 @@ def extract_trajectory(
                     int(value) for value in (feature_summary.get("delivered_counts") or {}).values()
                 ),
                 "lifecycle": feature_summary.get("lifecycle") or {},
+                "runtime_advisory_context_chars": sum(
+                    int(item.get("runtime_advisory_chars") or 0) for item in call_contexts
+                ),
+                "stock_context_chars_from_receipt": sum(
+                    int(item.get("stock_context_chars") or 0) for item in call_contexts
+                ),
+                "max_context_chars_from_receipt": max(
+                    (int(item.get("context_chars") or 0) for item in call_contexts), default=0
+                ),
             }
         )
     return result

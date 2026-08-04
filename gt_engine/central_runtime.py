@@ -22,10 +22,8 @@ _MANIFEST_COMMAND = (
     "| LC_ALL=C sort | head -n 50001"
 )
 _PRIVATE_TERMS = re.compile(r"groundtruth|gt_[a-z0-9_]*", re.IGNORECASE)
-_CHECK_WORDS = re.compile(
-    r"(?:^|[;&|()\s/])(?:pytest|test|tests|check|verify|unittest|ctest|"
-    r"mvn\s+test|gradle\s+test|npm\s+test|cargo\s+test|go\s+test)(?:$|\s)",
-    re.IGNORECASE,
+_MISSING_EXECUTABLE = re.compile(
+    r"(?:command not found|not found|no such file or directory|cannot execute)", re.IGNORECASE
 )
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MODEL_ACTIONABLE_FEATURES = frozenset(
@@ -159,7 +157,12 @@ def feature_payload_valid(
         return False
     required = {
         "caller_contract": ("callers_verified",),
-        "covering_red": ("check_failed",),
+        "covering_red": (
+            "check_failed",
+            "command_class",
+            "failure_kind",
+            "attribution",
+        ),
         "def_partition": ("definitions", "references"),
         "localization": ("candidate_locations",),
         "newfile_precedent": (),
@@ -286,8 +289,103 @@ def is_submit_command(command: str) -> bool:
     return _SUBMIT_MARKER in compact
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationClassification:
+    """Provenance classification for a shell action's validation meaning."""
+
+    command_class: str
+    is_validation: bool
+    grounded: bool
+    failure_kind: str
+
+
+def _without_heredoc_bodies(command: str) -> str:
+    """Keep shell structure while removing arbitrary program/data bodies."""
+    kept: list[str] = []
+    terminator = ""
+    for line in command.splitlines():
+        if terminator:
+            if line.strip() == terminator:
+                terminator = ""
+            continue
+        kept.append(line)
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if match:
+            terminator = match.group(1)
+    return "\n".join(kept)
+
+
+def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
+    """Return top-level shell command words, excluding comments and heredocs."""
+    try:
+        lexer = shlex.shlex(_without_heredoc_bodies(command), posix=True, punctuation_chars=";|&")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        tokens = list(lexer)
+    except ValueError:
+        return ()
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= {";", "|", "&"}:
+            if segments[-1]:
+                segments.append([])
+            continue
+        segments[-1].append(token)
+    return tuple(tuple(segment) for segment in segments if segment)
+
+
+def _recognized_validation(words: tuple[str, ...]) -> bool:
+    """Recognize real validator invocations only from executable positions."""
+    if not words:
+        return False
+    index = 0
+    while index < len(words) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[index]):
+        index += 1
+    while index < len(words) and words[index] in {"env", "command", "timeout", "sudo"}:
+        index += 1
+        while index < len(words) and (words[index].startswith("-") or "=" in words[index]):
+            index += 1
+    if index >= len(words):
+        return False
+    executable = words[index].rsplit("/", 1)[-1].lower()
+    args = words[index + 1 :]
+    if executable in {"pytest", "py.test", "ctest"}:
+        return True
+    if executable in {"npm", "pnpm", "yarn", "mvn", "gradle", "cargo", "go"}:
+        return bool(args and args[0] == "test")
+    if executable in {"python", "python3", "python3.12", "python3.11"}:
+        if len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "unittest"}:
+            return True
+        script_name = args[0].rsplit("/", 1)[-1] if args else ""
+        return bool(
+            script_name
+            and re.fullmatch(r"(?:test|tests|verify)[A-Za-z0-9_.-]*\.py", script_name, re.I)
+        )
+    return executable in {"unittest", "test"}
+
+
+def classify_validation_command(
+    command: str, explicit_checks: Iterable[str] = ()
+) -> ValidationClassification:
+    """Classify validation by shell structure, never by source/comment text."""
+    normalized = normalize_command(command)
+    grounded = is_grounded_check(normalized, explicit_checks)
+    recognized = any(_recognized_validation(segment) for segment in _shell_segments(command))
+    if grounded:
+        return ValidationClassification("declared_validation", True, True, "")
+    if recognized:
+        return ValidationClassification("recognized_validation", True, False, "")
+    return ValidationClassification("exploration_or_unknown", False, False, "")
+
+
+def classify_failure_kind(returncode: int, output: str) -> str:
+    if returncode in {126, 127} or _MISSING_EXECUTABLE.search(output or ""):
+        return "environment_failure"
+    return "validation_failure"
+
+
 def is_check_command(command: str) -> bool:
-    return bool(_CHECK_WORDS.search(normalize_command(command)))
+    return classify_validation_command(command).is_validation
 
 
 def explicit_check_commands(instruction: str) -> tuple[str, ...]:
@@ -573,7 +671,7 @@ class CentralFeatureRuntime:
         self.model_visible = model_visible
         self.receipts: list[FeatureReceipt] = []
         self._seen: set[tuple[str, int, str]] = set()
-        self._failed_actions: dict[tuple[str, int, str], int] = {}
+        self._failed_actions: dict[tuple[str, str, int, str], int] = {}
         self._searched = False
         self._precedent_verified = False
         self._post_edit_checks = 0
@@ -585,6 +683,7 @@ class CentralFeatureRuntime:
         self._guidance_suppressed = 0
         self._guided_keys: set[tuple[str, str, str]] = set()
         self._prepared_guidance: dict[str, Any] | None = None
+        self._explicit_checks: tuple[str, ...] = ()
         self.max_guidance_events = max_guidance_events
         self.max_guidance_chars = max_guidance_chars
         self._action_metrics: dict[str, int] = {
@@ -703,7 +802,7 @@ class CentralFeatureRuntime:
     def _payload(feature_id: str, boundary: str, reason: str) -> dict[str, Any]:
         messages = {
             "caller_contract": "Inspect the verified callers before changing this callable.",
-            "covering_red": "A required check is failing; repair the attributable regression.",
+            "covering_red": "A validation command failed; inspect its result before changing code.",
             "def_partition": "Separate definitions from references before editing.",
             "localization": "Inspect the most relevant source locations from the search result.",
             "newfile_precedent": "Follow the verified repository precedent for the new file.",
@@ -737,9 +836,12 @@ class CentralFeatureRuntime:
             return None
         return before[:120], after[:120]
 
-    def begin_task(self, instruction: str, *, revision: str) -> None:
+    def begin_task(
+        self, instruction: str, *, revision: str, explicit_checks: Iterable[str] = ()
+    ) -> None:
         if not self.enabled:
             return
+        self._explicit_checks = tuple(explicit_checks)
         self._mark_lifecycle("task_started", action_id=0)
         if instruction.strip():
             self._mark_lifecycle("contract_captured", action_id=0)
@@ -781,7 +883,8 @@ class CentralFeatureRuntime:
             self._action_metrics["repeated_commands"] += 1
         if is_search:
             self._action_metrics["search_actions"] += 1
-        if is_check_command(normalized):
+        validation = classify_validation_command(command, self._explicit_checks)
+        if validation.is_validation:
             self._action_metrics["check_actions"] += 1
             self._mark_lifecycle("behavior_observed", action_id=action_id)
             if self._workspace_edited:
@@ -900,7 +1003,8 @@ class CentralFeatureRuntime:
                     },
                 )
 
-        if returncode != 0 and is_check_command(normalized):
+        failure_kind = classify_failure_kind(returncode, output)
+        if returncode != 0 and validation.is_validation and failure_kind == "validation_failure":
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
             self._emit(
                 "covering_red",
@@ -912,6 +1016,9 @@ class CentralFeatureRuntime:
                     "check_failed": True,
                     "returncode": returncode,
                     "phase": check_phase,
+                    "command_class": validation.command_class,
+                    "failure_kind": failure_kind,
+                    "attribution": "validation_result_unattributed",
                     "message": self._payload(
                         "covering_red", "test_result", "failed_check_or_failure_output"
                     )["message"],
@@ -924,7 +1031,7 @@ class CentralFeatureRuntime:
             failure_fingerprint = hashlib.sha256(
                 fingerprint_source.encode("utf-8", "replace")
             ).hexdigest()[:16]
-            failure_key = (failure_fingerprint, returncode, revision)
+            failure_key = (normalized, failure_fingerprint, returncode, revision)
             count = self._failed_actions.get(failure_key, 0) + 1
             self._failed_actions[failure_key] = count
             self._emit(

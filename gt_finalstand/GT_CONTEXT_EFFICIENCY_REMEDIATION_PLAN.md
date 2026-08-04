@@ -1,6 +1,7 @@
 # GT Context and Efficiency Remediation Plan
 
-Status: planned; no ten-task run is authorized from the current evidence.
+Status: implementation complete; GitHub development-canary proof pending. No
+ten-task run is authorized from the current evidence.
 
 ## Decision
 
@@ -185,13 +186,20 @@ Failure on any item keeps the 89-task run blocked.
 
 ## 4. Immediate TODOs
 
-1. Implement command/provenance classification and remove false `covering_red`
-   visibility for environment/exploration failures.
-2. Add payload and timing negative tests plus context-attribution metrics.
-3. Run lint, full central-runtime/agent/deep-metric tests, and the provider-free
-   all-17 positive/negative census.
-4. Commit and push one immutable remediation commit.
-5. Run the three-task development canary once; audit every receipt and action.
+1. Completed: structural command/provenance classification rejects heredoc and
+   comment text; missing executables and return 126/127 cannot emit
+   `covering_red`, `GT_HYPOTHESIS`, recovery, or visible feedback.
+2. Completed: valid `covering_red` receipts carry command class, failure kind,
+   and a deliberately non-causal attribution; recovery requires the same
+   normalized validation command, failure fingerprint, return code, and
+   revision.
+3. Completed: receipt-v2 records per-call stock/system/assistant/tool/advisory
+   context decomposition and next-action relation; deep metrics expose advisory,
+   stock, and maximum context totals.
+4. Completed: lint, 32 central-runtime/agent/deep-metric tests, and the
+   provider-free all-17 timing census passed.
+5. Pending: commit and push one immutable remediation commit, then run the
+   three-task development canary once and audit every receipt and action.
 6. If it passes the gates, run the untouched seven-task holdout smoke, then the
    predeclared ten-task shadow/treatment repetitions.
 7. Do not run 89 tasks until the repeated outcome-first gates pass.

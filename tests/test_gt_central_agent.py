@@ -272,6 +272,11 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert deliveries[0]["delivered_before_call"] == 2
     assert deliveries[0]["decision_window"] == "next_model_call_only"
     assert deliveries[0]["not_predictive"] is True
+    contexts = receipt["model_call_contexts"]
+    assert len(contexts) == metrics["api_calls"]
+    assert contexts[1]["runtime_advisory_chars"] == deliveries[0]["chars"]
+    assert contexts[1]["stock_context_chars"] > 0
+    assert contexts[2]["runtime_advisory_chars"] == 0
 
 
 @pytest.mark.asyncio

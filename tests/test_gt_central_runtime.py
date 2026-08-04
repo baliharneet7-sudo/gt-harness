@@ -187,11 +187,69 @@ def test_model_guidance_is_one_prioritized_advisory_per_action():
         revision="r0",
     )
     feedback = runtime.model_feedback()
-    assert "required check is failing" in feedback
+    assert "validation command failed" in feedback
     assert runtime.model_feedback() == ""
     summary = runtime.summary()
     assert summary["guidance_events"] == 1
     assert summary["guidance_chars"] == len(feedback)
+
+
+def test_covering_red_rejects_heredoc_text_and_missing_executables():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement the requested change", revision="r0")
+
+    command = "python3 - <<'EOF'\n# Test 1: exploratory probe\nprint('check')\nEOF"
+    runtime.observe_action(
+        action_id=1,
+        command=command,
+        output="bash: line 1: python3: command not found",
+        returncode=127,
+        transition=WorkspaceTransition(1, command, "r0", "r0"),
+        revision="r0",
+    )
+
+    summary = runtime.summary()
+    assert summary["delivered_counts"]["covering_red"] == 0
+    assert summary["delivered_counts"]["GT_HYPOTHESIS"] == 0
+    assert runtime.model_feedback() == ""
+
+
+def test_covering_red_records_recognized_validation_provenance():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement the requested change", revision="r0")
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 failed: assertion error",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+    )
+
+    receipt = next(
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "covering_red"
+    )
+    assert receipt["payload"]["command_class"] == "recognized_validation"
+    assert receipt["payload"]["failure_kind"] == "validation_failure"
+    assert "attributable regression" not in runtime.model_feedback()
+
+
+def test_recovery_requires_the_same_validation_command_and_failure():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement the requested change", revision="r0")
+    for action_id, command in enumerate(("pytest -q", "python -m pytest"), start=1):
+        runtime.observe_action(
+            action_id=action_id,
+            command=command,
+            output="1 failed: assertion error",
+            returncode=1,
+            transition=WorkspaceTransition(action_id, command, "r0", "r0"),
+            revision="r0",
+        )
+
+    summary = runtime.summary()
+    assert summary["delivered_counts"]["covering_red"] == 2
+    assert summary["delivered_counts"]["recovery"] == 0
 
 
 def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
