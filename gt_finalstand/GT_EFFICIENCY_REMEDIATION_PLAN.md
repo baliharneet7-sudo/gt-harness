@@ -169,3 +169,28 @@ matrix.
 
 The provider-free timing census additionally reports
 `ALL_17_TIMING_VALID`, `ALL_GUIDANCE_ON_TIME`, and `ALL_17_DELIVERABLE`.
+
+## 8. Live canary status
+
+Implementation commit `27c2652` and preflight-bound commit `eb0aaf2` were
+pushed to `inline-engine`. GitHub run `30875492432` was cancelled while still
+in provider preflight after the request exceeded the agent's 120-second budget;
+zero task jobs started. The workflow was then fixed to terminate preflight as a
+process after 150 seconds, rather than leaving an HTTP worker alive.
+
+The bounded retry, GitHub run `30875688484`, ended at that 150-second deadline
+with exit code 124. Again, dataset enumeration and all task jobs were skipped.
+This proves the preflight termination control works. It provides no benchmark,
+trajectory, feature-timing, or delta evidence because the provider returned no
+response and no task container ran.
+
+Remaining TODOs:
+
+1. When the configured provider responds inside the bounded preflight window,
+   dispatch the same three-task treatment canary once.
+2. Audit 3/3 verifier outputs, receipt-v2, transient decision windows, feature
+   payload/boundary timing, censorship, and per-task deep metrics.
+3. Only after that gate passes, run the ten-task shadow and treatment arms.
+4. Repeat each arm three times, compute task-level medians, and apply the strict
+   outcome-first Pareto gate.
+5. Keep the 89-task workflow blocked until every prior gate passes.
