@@ -9,6 +9,14 @@ whose payload is empty, stale, or attached to the wrong lifecycle boundary.
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
+
+# Support the documented direct invocation as well as ``python -m``.  In the
+# former case Python puts ``scripts/`` rather than the repository root on
+# sys.path, so the host-owned ``gt_engine`` package would otherwise be absent.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
@@ -229,6 +237,7 @@ def census() -> dict:
         bool(row.get("evidence_before_effect"))
         and bool(row.get("effect_before_next_action"))
         and bool(row.get("non_late"))
+        and not bool(row.get("predictive"))
         for row in effects
     )
     summary["all_payloads_semantically_grounded"] = bool(summary["receipts"]) and all(

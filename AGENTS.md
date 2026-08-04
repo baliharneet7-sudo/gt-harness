@@ -65,7 +65,7 @@ advisories in run `30869649342` were the documented context/token regression.
 
 ## Provider-free proof
 
-`scripts/central_feature_census.py` must print all five lines before any paid
+`python -m scripts.central_feature_census` must print all five lines before any paid
 run: `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
 `ALL_17_CONSUMER_PATHS_PROVEN`. The census cannot pass on producer receipts
@@ -73,8 +73,11 @@ alone. `scripts/central_readiness_audit.py` must print `READY`.
 
 ## Live-run gate
 
-Before any paid smoke, run focused lint/tests and the provider-free all-17
-census. Then replay archived trajectories through the policy and confirm that
+Before any paid smoke, `python scripts/central_pre_smoke_gate.py` must print
+`SMOKE_APPROVED` at the intended commit. It fails closed unless the exact paid
+workflow timeout, the direct and module census entrypoints, all 17 agent-loop
+producer/consumer effects, non-predictive/non-late timing, and submit-boundary
+consumption are proven. Then replay archived trajectories through the policy and confirm that
 the intervention is reachable only on its intended lifecycle state. A smoke is
 confirmation, never exploratory debugging. The 89-task run remains blocked
 until outcome preservation and repeated outcome-first efficiency gates pass.

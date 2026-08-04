@@ -557,6 +557,14 @@ class MiniSweCentralAgent(BaseAgent):
                                 cancelled=remaining,
                                 reason="submit_hold",
                             )
+                            # Submit-boundary receipts are produced before the
+                            # command is refused.  Consume them before leaving
+                            # this batch so their registered controller effects
+                            # are never stranded in the runtime cursor.
+                            self._features.consume_effects(
+                                action_id=actions_count - remaining,
+                                call=calls,
+                            )
                             break
                         self._features.record_submit(
                             action_id=actions_count,
@@ -666,12 +674,16 @@ class MiniSweCentralAgent(BaseAgent):
                             }
                         )
                     outputs.append(output)
-                    if submit:
-                        terminal = "Submitted"
-                        break
+                    # A submit can emit GT_CERT_DELIVERY before its shell
+                    # command executes.  Consume every action's effects
+                    # before the terminal submit exit, otherwise the final
+                    # boundary would leave registered effects un-applied.
                     effects = self._features.consume_effects(
                         action_id=actions_count, call=calls
                     )
+                    if submit:
+                        terminal = "Submitted"
+                        break
                     interrupt_effect = next(
                         (
                             effect

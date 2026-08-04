@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from gt_engine.central_runtime import (
@@ -757,9 +761,26 @@ def test_effect_timing_consumes_evidence_before_the_next_action():
         assert row["evidence_before_effect"] is True
         assert row["effect_before_next_action"] is True
         assert row["non_late"] is True
+        # The effect is applied only after the action has produced its
+        # evidence.  Same-action delivery is immediate, not predictive.
+        assert row["predictive"] is False
         assert row["predecided_actions_executed_after_evidence"] == 0
     # Full 17-ID consumer coverage is proven by the census, not one action.
     assert runtime.summary()["consumer_paths"]
+
+
+def test_documented_direct_census_entrypoint_is_executable():
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "scripts/central_feature_census.py"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ALL_17_CONSUMER_PATHS_PROVEN" in completed.stdout
 
 
 def test_batch_interrupt_stamps_cancellation_on_the_effect():

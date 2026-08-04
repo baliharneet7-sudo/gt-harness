@@ -1791,7 +1791,10 @@ class CentralFeatureRuntime:
                     0, applied - effect.evidence_action - 1
                 ),
                 late=required is not None and applied > required,
-                predictive=applied == effect.evidence_action,
+                # `consume_effects` runs after the action has returned its
+                # evidence.  Applying at that same action is immediate; a
+                # predictive effect would have to precede its evidence.
+                predictive=applied < effect.evidence_action,
             )
             self._effects[self._effect_cursor - len(fresh) + offset] = updated
             consumed.append(updated)

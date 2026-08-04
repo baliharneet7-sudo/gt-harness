@@ -128,9 +128,9 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "enable_submit_readiness=false" in workflow
 
 
-def test_central_canary_keeps_provider_timeout_below_loop_budget():
+def test_paid_engine_workflow_keeps_provider_timeout_below_loop_budget():
     workflow = (
-        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_central.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
 
     assert "--ak model_timeout_sec=300" in workflow
@@ -313,6 +313,93 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert contexts[1]["stock_context_chars"] > 0
     assert contexts[3]["runtime_advisory_chars"] == deliveries[1]["chars"]
     assert contexts[4]["runtime_advisory_chars"] == 0
+
+
+@pytest.mark.asyncio
+async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effects(tmp_path):
+    """Strict release proof: real agent lifecycle, not runtime-only fixtures."""
+
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+    class AllFeatureEnvironment(_Environment):
+        def __init__(self):
+            super().__init__()
+            self.state = "empty"
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                rows = {
+                    "empty": "",
+                    "s1": "f\t4\t1.0\t1.0\tapp.py\t\n",
+                    "s2": "f\t5\t2.0\t2.0\tapp.py\t\n",
+                    "s3": "f\t6\t3.0\t3.0\tapp.py\t\n",
+                }
+                return ExecResult(stdout=rows[self.state], return_code=0)
+            if command.startswith("sha256sum"):
+                return ExecResult(stdout=("a" * 64) + "  app.py\n", return_code=0)
+            if command.startswith("rg "):
+                return ExecResult(
+                    stdout=(
+                        "app.py:10:def f(x)\n"
+                        "tests/test_app.py:20:caller references f; existing registry pattern\n"
+                    ),
+                    return_code=0,
+                )
+            if command.startswith("sed -i"):
+                self.state = "s1"
+                return ExecResult(return_code=0)
+            if command == "write update-1":
+                self.state = "s2"
+                return ExecResult(return_code=0)
+            if command == "write update-2":
+                self.state = "s3"
+                return ExecResult(return_code=0)
+            if "py_compile" in command:
+                if self.state == "s1":
+                    return ExecResult(stderr="SyntaxError: invalid syntax\n", return_code=1)
+                return ExecResult(return_code=0)
+            if command == "pytest -q":
+                return ExecResult(stdout="1 failed: assertion error\n", return_code=1)
+            if command == submit:
+                return ExecResult(stdout=submit + "\n", return_code=0)
+            raise AssertionError(f"unexpected command: {command}")
+
+    model = _ScriptedModel(
+        [
+            "rg -n 'f|caller' .",
+            "sed -i 's/def f(x)/def f(x, y)/' app.py",
+            "write update-1",
+            "write update-2",
+            "pytest -q",
+            "pytest -q",
+            submit,
+            submit,
+        ]
+    )
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Fix f, then run `pytest -q` before submitting.",
+        AllFeatureEnvironment(),
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    features = receipt["features"]
+    assert set(features["consumer_paths"]) == set(features["feature_ids"])
+    assert {row["feature_id"] for row in features["receipts"]} == set(features["feature_ids"])
+    assert {row["feature_id"] for row in features["effects"]} == set(features["feature_ids"])
+    assert all(row["evidence_before_effect"] for row in features["effects"])
+    assert all(row["effect_before_next_action"] for row in features["effects"])
+    assert all(row["non_late"] and not row["predictive"] for row in features["effects"])
+    assert all(
+        row["not_predictive"] and row["delivered_before_call"] == row["prepared_after_call"] + 1
+        for row in receipt["guidance_deliveries"]
+    )
 
 
 @pytest.mark.asyncio

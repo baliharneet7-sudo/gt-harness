@@ -37,13 +37,18 @@ pre-decided actions in the same model response. Every model-visible payload
 must name concrete evidence (paths, symbols, commands, diagnostics); generic
 prose stays private.
 
-Provider-free proof is gated by `scripts/central_feature_census.py` and must
+Provider-free proof is gated by `python -m scripts.central_feature_census` and must
 print all of:
 `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
 `ALL_17_CONSUMER_PATHS_PROVEN`. Receipts are schema v3. The 89-task run
 remains blocked until the ten-task treatment smoke and repeated matched trials
 pass. See `AGENTS.md` for the executable contract.
+
+Before a paid smoke, run `python scripts/central_pre_smoke_gate.py`. Only its
+`SMOKE_APPROVED` terminal line authorizes dispatch: it verifies both census
+entrypoints, the exact paid workflow, and a deterministic all-17 run through
+the real `MiniSweCentralAgent` lifecycle, including terminal submit effects.
 
 ## What this is
 An agent harness — the code that wraps an LLM and turns it into something that does work (loop, tools, context management, system prompt). This one is single-purpose: a coding agent. Built to score on benchmarks while staying tiny enough to read end-to-end.
