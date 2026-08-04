@@ -220,3 +220,13 @@ boundary defect. The workflow now uses `model_timeout_sec=300`, still below the
 900-second model-loop deadline, and a unit assertion pins both bounds. The next
 three-task canary must be run from that commit. This run blocks the ten-task and
 89-task stages.
+
+## 10. Context and payload remediation
+
+The corrected three-task canary `30877236786` removed censorship and solved
+3/3, but it exposed a false-positive `covering_red` payload: a heredoc Python
+experiment containing `Test 1` was detected as a test and its `python3: command
+not found` result (127) was called an attributable regression. This is a
+general command-classification/provenance defect and blocks the ten-task run.
+The detailed, non-overfitting remediation and experimental protocol is in
+`gt_finalstand/GT_CONTEXT_EFFICIENCY_REMEDIATION_PLAN.md`.
