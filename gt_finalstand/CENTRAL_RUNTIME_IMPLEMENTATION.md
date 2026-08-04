@@ -168,12 +168,13 @@ After the feature census and payload contract passed, all17 treatment smoke
 run `30864114805` was dispatched from commit `b67d213` on the same ten-task
 panel. The workflow was cancelled only after
 `schemelike-metacircular-eval` remained inside Harbor for roughly 30 minutes;
-its partial receipt was retained, but it produced no completed trial. The
-merge returned 9 trials, 8 solved, and one agent timeout (`gpt2`), with the
-scheme task missing from the graded set. Against the frozen 9/10 baseline this
-is still 8/10 planned (minus one task): eight unchanged solves, `gpt2`
-unchanged failed, and `schemelike` censored by timeout. `write-compressor`
-recovered to a solve in this run.
+its partial receipt was retained, but cancellation prevented a completed
+trial/verifier result. The partial central receipt shows 90 model calls, 90
+actions, `Submitted`, and 1,507 seconds elapsed, so it is censored rather than
+counted as solved. The merge returned 9 trials, 8 solved, and one agent timeout
+(`gpt2`). Against the frozen 9/10 baseline this is still 8/10 planned (minus
+one task): eight unchanged solves, `gpt2` unchanged failed, and `schemelike`
+is ungraded. `write-compressor` recovered to a solve in this run.
 
 Every returned or partial task receipt reported `feature_count=17`,
 `enabled=true`, a healthy sensor, and zero invalid payloads under
