@@ -288,4 +288,85 @@ or against the complete 17-feature treatment.
 7. Integrate only candidates that improve solve, tokens, and actions.
 8. Run five full 89-task GT-on repetitions and apply the frozen Pareto gate.
 
+### Follow-up all17 smoke with normalized token and step telemetry
+
+Workflow run `30869649342` was dispatched through GitHub Actions at commit
+`65d7ae7` with `feature=all17`, ten planned tasks, parallelism five, and the
+same DeepSeek model configuration as the preceding smoke. The schemelike job
+was cancelled after approximately 30 minutes because it remained in the known
+long-tail loop; the workflow's `always()` merge completed and preserved its
+partial artifact. No local Docker run was used.
+
+The returned result was 8/9 solved (88.9% of graded; 8/10 planned). The nine
+returned task receipts all report `feature_count=17`, `enabled=true`, and a
+healthy workspace sensor. For every returned receipt,
+`total_tokens == input_tokens + output_tokens`; this is now an enforced receipt
+invariant rather than a value reconstructed from trajectory text. Aggregate
+returned telemetry is 12,403,295 tokens, 278 API calls, 297 actions, 278
+assistant steps, 601 trajectory messages, and 94 bounded guidance events. The
+aggregate is not a ten-task efficiency claim because schemelike is absent and
+gpt2 did not solve.
+
+| task | result | GT-on tokens | frozen GT-off tokens | delta | calls | actions | assistant steps | trajectory messages | guidance events |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| break-filter-js-from-html | solved | 811,746 | 166,564 | +645,182 (+387.3%) | 32 | 34 | 32 | 69 | 6 |
+| cobol-modernization | solved | 1,890,972 | 1,437,605 | +453,367 (+31.5%) | 53 | 56 | 53 | 112 | 9 |
+| fix-code-vulnerability | solved | 352,480 | 451,819 | -99,339 (-22.0%) | 28 | 28 | 28 | 59 | 10 |
+| gpt2-codegolf | failed (reward 0) | 2,922,575 | 8,784,582 | -5,862,007 (-66.7%); invalid efficiency comparison because outcome differs | 37 | 37 | 37 | 76 | 15 |
+| headless-terminal | solved | 542,160 | 4,921,513 | -4,379,353 (-89.0%) | 28 | 28 | 28 | 59 | 10 |
+| llm-inference-batching-scheduler | solved | 3,472,089 | 3,000,980 | +471,109 (+15.7%) | 46 | 47 | 46 | 96 | 22 |
+| modernize-scientific-stack | solved | 62,745 | 40,243 | +22,502 (+55.9%) | 9 | 16 | 9 | 28 | 5 |
+| portfolio-optimization | solved | 437,916 | 435,035 | +2,881 (+0.7%) | 24 | 28 | 24 | 55 | 6 |
+| schemelike-metacircular-eval | censored; no verifier | — | 8,489,839 | — | — | — | — | — | — |
+| write-compressor | solved | 1,910,612 | 953,933 | +956,679 (+100.3%) | 21 | 23 | 21 | 47 | 11 |
+
+The frozen per-task values above are the ten-task `per_task_tokens.json`
+reference used in the earlier audit (sum 28,682,113). They are the comparison
+source, not a new baseline run. The eight unchanged solved tasks total
+9,480,720 GT-on tokens versus 11,407,692 frozen GT-off tokens (-1,926,972,
+-16.9%) and 241 calls versus 261 (-20, -7.7%). This is descriptive only: the
+model is stochastic, the run has one failed task and one censored task, and the
+task-level deltas range from -22.0% to +387.3%. It does not prove a release-level
+efficiency gain.
+
+#### Payload and timing audit
+
+For each of the nine returned tasks, every receipt marked `DELIVERED` had a
+non-empty boundary, `fresh=true`, `model_visible=true`, and a non-null payload;
+there were zero invalid delivered receipts. The live trigger union was 11 of 17
+IDs. The six IDs with zero task-triggered deliveries were
+`caller_contract`, `recovery`, `submit_refusal`, `GT_CHANGE_SURFACE`,
+`GT_HYPOTHESIS`, and `GT_SS_SUBMIT_RED`. They remain enabled and forcing-tested;
+their absence is explained by missing exact task events, not by a disabled
+runtime. `GT_CERT_DELIVERY` is the infrastructure submit receipt and fired on
+all returned tasks. No model-visible trajectory contained a `GT_*` private
+feature name. Occurrences of `site-packages` were ordinary task source content,
+the known discoverable-harness-source limitation, not injected GT text.
+
+#### Steps interpretation and next gates
+
+The new fields distinguish API calls, assistant steps, tool actions, and total
+trajectory messages. `assistant_steps == api_calls` for all nine returned
+receipts; actions can exceed steps because one model turn can issue multiple
+tool actions. Guidance was capped to at most one prioritized advisory per
+action, and the observed 94 events were never greater than the 297 actions.
+
+Next steps are:
+
+1. Fix the schemelike long-tail/termination path and rerun the same ten-task
+   all17 smoke until all ten have verifier results; do not use the censored
+   receipt for efficiency claims.
+2. Run matched repeated GT-off and GT-on trials with the same model, seed or
+   trial policy, and timeout budget. Compare solved outcome first, then tokens,
+   assistant steps, actions, and wall time per solved task.
+3. Add event-fixture smoke cases for the six absent triggers so each feature's
+   payload, boundary, freshness, and visibility are proven without fabricating
+   unrelated live-task events.
+4. Profile the high-cost regressions (`break-filter`, `write-compressor`,
+   `cobol`, and `llm-inference`) and the 22-guidance llm task. Keep the bounded
+   advisory policy only if matched trials show no solve regression and a stable
+   token/step benefit.
+5. Repeat the ten-task gate across multiple runs before any 89-task workflow;
+   the current evidence is not a clean non-regression gate.
+
 No superiority or efficiency claim is made until those paid GT-on stages pass.
