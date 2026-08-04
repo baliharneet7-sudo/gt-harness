@@ -414,3 +414,49 @@ The code and provider-free integration contract are verified. The user-facing
 claim “GT makes Mini-SWE more efficient while preserving outcomes” is not yet
 verified and must not be made until a fresh paid GT-on run passes the frozen
 baseline gates above.
+
+## 13. Fresh paid smoke result — run 30942313482
+
+The approved GitHub workflow ran on commit `cf89bf7` with `arm=treatment`,
+`feature=all17`, and the ten-task smoke set. The workflow and merge jobs
+completed successfully. The verifier solved 9/10 tasks, matching the frozen
+GT-off solve count of 9/10; no baseline task was rerun.
+
+The strict outcome/efficiency gate remains **FAIL**:
+
+- censored treatment tasks: `llm-inference-batching-scheduler` and
+  `schemelike-metacircular-eval` (`WallTimeExceeded`);
+- solve regressions: none;
+- strict per-task Pareto failures: `break-filter-js-from-html`,
+  `cobol-modernization`, `modernize-scientific-stack`,
+  `portfolio-optimization`, and `write-compressor`;
+- aggregate total-token delta: `-14,793,375`;
+- aggregate uncached-input delta: `-142,664`;
+- aggregate context-character delta: `-20,579,668`;
+- aggregate action delta: `-129`.
+
+Those aggregate reductions do not pass the gate because five mutually solved
+tasks still regress on at least one primary resource, and two tasks are
+censored. The model-visible payload stream was small and grounded, but this
+run does not prove that the payloads caused the resource reductions.
+
+Live receipt audit:
+
+- all ten tasks reported all 17 feature IDs enabled;
+- triggered feature sets ranged from 4 to 12 per task, depending on the real
+  lifecycle events present;
+- every produced feature had a corresponding effect application and changed
+  controller state;
+- 0 ungrounded model-visible payloads;
+- 0 late payloads;
+- 0 predictive payloads;
+- 0 submit holds;
+- 0 batch interruptions;
+- 0 interrupted actions;
+- 0 artifact-driven validation-debt triggers in replay;
+- archived replay of this new run: `REPLAY_OK` for all ten tasks.
+
+This is the expected distinction: “all 17 work” means all 17 are implemented
+and fire when their evidence exists, not that every task fabricates every event.
+The live run confirms correct delivery for triggered features, but it rejects
+the stronger claim that GT is already a reliable efficiency win.
