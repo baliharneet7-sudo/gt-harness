@@ -122,7 +122,7 @@ experiment. Lower resource use caused by failure never passes.
 ## 5. Termination and receipt integrity
 
 The workflow now fixes the budgets at 100 assistant calls, 900 seconds for the
-model loop, 120 seconds per model request, and the existing per-command limit.
+model loop, 300 seconds per model request, and the existing per-command limit.
 Step, cost, wall, and request limits receive distinct exit statuses. The agent
 always writes a receipt-v2 partial trajectory with `censored=true` and a reason.
 This directly addresses the schemelike long-tail problem without mislabelling a
@@ -186,11 +186,37 @@ response and no task container ran.
 
 Remaining TODOs:
 
-1. When the configured provider responds inside the bounded preflight window,
-   dispatch the same three-task treatment canary once.
-2. Audit 3/3 verifier outputs, receipt-v2, transient decision windows, feature
-   payload/boundary timing, censorship, and per-task deep metrics.
-3. Only after that gate passes, run the ten-task shadow and treatment arms.
-4. Repeat each arm three times, compute task-level medians, and apply the strict
+1. Re-run the same three-task treatment canary with the corrected 300-second
+   per-request bound.
+2. Require all three results to be uncensored before interpreting a delta.
+3. Audit receipt-v2, transient decision windows, feature payload/boundary timing,
+   and per-task deep metrics.
+4. Only after that gate passes, run the ten-task shadow and treatment arms.
+5. Repeat each arm three times, compute task-level medians, and apply the strict
    outcome-first Pareto gate.
-5. Keep the 89-task workflow blocked until every prior gate passes.
+6. Keep the 89-task workflow blocked until every prior gate passes.
+
+## 9. Canary 30876371075 audit and correction
+
+GitHub run `30876371075` completed its three-task treatment canary. The
+central runtime was healthy and enabled all 17 features in each task. Its live
+timing proof is valid: the only model-visible advisory, `covering_red` in
+`llm-inference-batching-scheduler`, was derived from action 15 after model call
+14 and inserted only before model call 15. It was not predictive, late, or
+persisted into later calls. No private receipt became model-visible.
+
+The run is not an efficiency pass. `break-filter-js-from-html` solved but used
+211,289 tokens (+14.09%), 20 actions (+25.00%), and 15 assistant steps
+(+25.00%) versus the frozen GT-off result. It carried zero model-visible GT
+guidance, so this single temperature-1.0 sample is outcome variance rather than
+evidence that a late GT payload caused the regression.
+`llm-inference-batching-scheduler` solved with 1,795,038 tokens (-42.06%), 38
+actions (-9.52%), and 37 assistant steps (-9.76%). `write-compressor` was
+censored after its second model request exceeded the workflow's 120-second
+per-request bound; it cannot be compared against its GT-off baseline.
+
+The canary exposed a harness configuration defect, not a central-runtime
+boundary defect. The workflow now uses `model_timeout_sec=300`, still below the
+900-second model-loop deadline, and a unit assertion pins both bounds. The next
+three-task canary must be run from that commit. This run blocks the ten-task and
+89-task stages.

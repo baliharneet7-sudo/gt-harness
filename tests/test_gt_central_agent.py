@@ -113,6 +113,15 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "enable_submit_readiness=false" in workflow
 
 
+def test_central_canary_keeps_provider_timeout_below_loop_budget():
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "--ak model_timeout_sec=300" in workflow
+    assert "--ak model_loop_timeout_sec=900" in workflow
+
+
 @pytest.mark.asyncio
 async def test_model_shell_receives_no_host_credentials_or_private_env(tmp_path):
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")

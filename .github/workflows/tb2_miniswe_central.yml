@@ -277,7 +277,12 @@ jobs:
           esac
           FEATURE_ARGS+=(
             --ak step_limit=100
-            --ak model_timeout_sec=120
+            # A live provider request exceeded 120 s after one successful
+            # model turn (run 30876371075, write-compressor).  Keep this
+            # per-request bound below the 900 s loop budget, but leave room
+            # for a healthy slow response so it is not censored as a harness
+            # failure.
+            --ak model_timeout_sec=300
             --ak model_loop_timeout_sec=900
           )
           JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
