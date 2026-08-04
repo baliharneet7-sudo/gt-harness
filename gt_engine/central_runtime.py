@@ -1911,9 +1911,11 @@ class CentralFeatureRuntime:
                     )).origin
                     == ChangeOrigin.MODEL_AUTHORED
                     and candidate.validation_relevant
+                    and path.lower().endswith(tuple(_SOURCE_CAPTURE_SUFFIXES))
                 )
             }
             precedent_path = ""
+            precedent_created_path = ""
             for created_path in transition.created:
                 # Precedent is guidance for a model-authored source file only.
                 # Workspace sensors also report caches, build products, generated
@@ -1926,6 +1928,8 @@ class CentralFeatureRuntime:
                     created_classification is None
                     or created_classification.origin != ChangeOrigin.MODEL_AUTHORED
                     or not created_classification.validation_relevant
+                    or created_classification.kind != "f"
+                    or not created_path.lower().endswith(tuple(_SOURCE_CAPTURE_SUFFIXES))
                 ):
                     continue
                 parent = created_path.rsplit("/", 1)[0] if "/" in created_path else ""
@@ -1938,9 +1942,10 @@ class CentralFeatureRuntime:
                     and (not suffix or path.lower().endswith(suffix.lower()))
                 )
                 if candidates:
+                    precedent_created_path = created_path
                     precedent_path = candidates[0]
                     break
-            if precedent_path:
+            if precedent_path and precedent_created_path:
                 self._precedent_verified = True
                 self._precedent_path = precedent_path
                 self.record_producer_event(
@@ -1957,11 +1962,11 @@ class CentralFeatureRuntime:
                     source_revision=source_rev,
                     reason="new_file_with_concrete_sibling_precedent",
                     payload={
-                        "created_files": list(transition.created),
+                        "created_files": [precedent_created_path],
                         "precedent_verified": True,
                         "precedent_path": precedent_path,
                         "message": (
-                            f"New source file {transition.created[0]} has repository "
+                            f"New source file {precedent_created_path} has repository "
                             f"precedent {precedent_path}."
                         ),
                     },

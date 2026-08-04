@@ -257,6 +257,33 @@ def test_newfile_precedent_ignores_derived_and_cache_artifacts():
     _assert_quiet(runtime, "newfile_precedent")
 
 
+def test_newfile_precedent_payload_names_only_the_source_trigger():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1, command="write files", output="", returncode=0,
+        transition=_transition(
+            1,
+            "write files",
+            WR0,
+            SR1,
+            created=("__pycache__", "bottle_new.py"),
+            before_contents={"bottle.py": "class Bottle:\n    pass\n"},
+            after_contents={
+                "bottle.py": "class Bottle:\n    pass\n",
+                "bottle_new.py": "class NewBottle:\n    pass\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    row = _feature_rows(runtime.summary(), "newfile_precedent")[0]
+    assert row["payload"]["created_files"] == ["bottle_new.py"]
+    assert "__pycache__" not in row["payload"]["message"]
+
+
 def test_covering_red_records_grounded_failure_and_must_precede_next_action():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Run `pytest -q`.", revision=WR0, source_revision=SR0)
