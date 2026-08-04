@@ -343,6 +343,7 @@ jobs:
         with:
           name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-${{ matrix.task }}
           path: results/terminal-bench/
+          retention-days: 90
           if-no-files-found: warn
 
   merge:
