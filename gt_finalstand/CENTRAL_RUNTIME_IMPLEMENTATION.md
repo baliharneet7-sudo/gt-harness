@@ -369,4 +369,43 @@ Next steps are:
 5. Repeat the ten-task gate across multiple runs before any 89-task workflow;
    the current evidence is not a clean non-regression gate.
 
+### Root cause of the current step/token regressions
+
+The main GT-specific overhead is not the private receipt bookkeeping; it is
+model-visible feedback. `_run_lint()` records a `syntax_result` even when lint
+passes (`decision="PASS"`), and `model_feedback()` currently considers every
+visible receipt regardless of decision. Consequently a successful lint emits
+the repair advisory “Repair the syntax or compiler failure on the edited file.”
+The follow-up smoke contained 23 PASS syntax receipts, and all 23 were exposed
+as model guidance; two additional syntax guidance events came from actual
+failures. This is an unconditional false intervention.
+
+The same path exposes non-actionable or repetitive evidence: 20
+`newfile_precedent`, 14 `covering_red`, 9 `def_partition`, 8 localization, 8
+obligations, and 8 infrastructure `GT_CERT_DELIVERY` guidance events. In total
+there were 94 guidance events (11,341 characters). The runtime bounds this to
+one advisory per action, but that still appends guidance to the next model
+context on every selected action. Since the full conversation is resent on
+each API call, repeated guidance has a cumulative input-token cost and can
+change the model's search/edit path. This explains why GT-on is more expensive
+on break-filter, cobol, llm-inference, modernize, and write-compressor even
+though private receipts themselves add no model tokens.
+
+There is also trigger-noise risk: `_FAILURE` treats common words such as
+`error`, `failed`, and `red` in command output as failure evidence, while
+`_PRECEDENT` treats `existing`, `pattern`, and `registry` as precedent evidence.
+Those broad predicates can create additional advisories that are technically
+well-formed but not useful to the task. The current data therefore supports a
+specific diagnosis: GT is over-intervening, not that the 17-feature wiring is
+missing.
+
+The corrective ablation is now clear: (1) keep all receipts host-private;
+(2) make `model_feedback()` select only actionable `DELIVERED` failures or
+explicit submit holds, never `PASS`, `GT_CERT_DELIVERY`, or repeated facts;
+(3) coalesce each advisory by feature and workspace revision; and (4) rerun the
+same ten tasks with telemetry. A valid improvement requires fewer assistant
+steps/actions and fewer tokens per solved task, with no solve regression. Until
+that ablation passes repeated matched trials, the current GT-on treatment should
+not be called efficient.
+
 No superiority or efficiency claim is made until those paid GT-on stages pass.
