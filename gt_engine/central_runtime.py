@@ -1338,6 +1338,31 @@ class CentralFeatureRuntime:
                     check: ("stale" if state == "passed" else state)
                     for check, state in self._declared_check_states.items()
                 }
+            # GT_CHANGE_SURFACE reports every classified change, labeled by
+            # origin; derived artifacts are surfaced as facts, never as source.
+            self._emit(
+                "GT_CHANGE_SURFACE",
+                boundary="edit_result",
+                action_id=action_id,
+                revision=revision,
+                source_revision=source_rev,
+                reason="workspace_revision_changed",
+                payload={
+                    "owner_feature": "newfile_precedent",
+                    "created": list(transition.created),
+                    "modified": list(transition.modified),
+                    "deleted": list(transition.deleted),
+                    "source_relevant": list(source_relevant),
+                    "origins": {
+                        origin.value: sum(
+                            item.origin == origin for item in classified.values()
+                        )
+                        for origin in ChangeOrigin
+                    },
+                    "message": "Workspace change observed: "
+                    + ", ".join(list(source_relevant)[:4] or list(transition.changed_paths)[:4]),
+                },
+            )
             if source_relevant:
                 self._workspace_edited = True
                 self._unvalidated_material_edits += 1
@@ -1357,29 +1382,6 @@ class CentralFeatureRuntime:
                 self._mark_lifecycle("workspace_edited", action_id=action_id)
                 self._mark_lifecycle("change_surface_certified", action_id=action_id)
                 changed = list(source_relevant)
-                surface_message = "Workspace change observed: " + ", ".join(changed[:4])
-                self._emit(
-                    "GT_CHANGE_SURFACE",
-                    boundary="edit_result",
-                    action_id=action_id,
-                    revision=revision,
-                    source_revision=source_rev,
-                    reason="workspace_revision_changed",
-                    payload={
-                        "owner_feature": "newfile_precedent",
-                        "created": list(transition.created),
-                        "modified": list(transition.modified),
-                        "deleted": list(transition.deleted),
-                        "source_relevant": changed,
-                        "origins": {
-                            origin.value: sum(
-                                item.origin == origin for item in classified.values()
-                            )
-                            for origin in ChangeOrigin
-                        },
-                        "message": surface_message,
-                    },
-                )
                 self._emit(
                     "GT_PATCH_DELTA",
                     boundary="edit_result",
@@ -1390,7 +1392,7 @@ class CentralFeatureRuntime:
                     payload={
                         "owner_feature": "signature_delta",
                         "changed_paths": changed,
-                        "message": surface_message,
+                        "message": "Workspace change observed: " + ", ".join(changed[:4]),
                     },
                 )
                 if (
