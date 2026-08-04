@@ -28,6 +28,9 @@ _CHECK_WORDS = re.compile(
     re.IGNORECASE,
 )
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+_MODEL_ACTIONABLE_FEATURES = frozenset(
+    {"covering_red", "recovery", "signature_delta", "submit_refusal", "syntax_result"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +130,7 @@ CENTRAL_FEATURE_BOUNDARIES = {
     "submit_refusal": "submit",
     "syntax_result": "edit_result",
     "GT_CERT_DELIVERY": "submit",
-    "GT_CHANGE_SURFACE": "search_result",
+    "GT_CHANGE_SURFACE": "edit_result",
     "GT_EDIT_CHECK": "edit_result",
     "GT_HYPOTHESIS": "test_result",
     "GT_LOC_RESLOT": "search_result",
@@ -306,6 +309,7 @@ class EvidenceLedger:
 
     max_holds: int = 1
     checks: dict[str, CheckEvidence] = field(default_factory=dict)
+    outcomes: dict[str, CheckEvidence] = field(default_factory=dict)
     _holds: dict[tuple[str, tuple[str, ...]], int] = field(default_factory=dict)
 
     def record_check(
@@ -317,6 +321,7 @@ class EvidenceLedger:
         grounded: bool,
     ) -> None:
         key = normalize_command(command)
+        self.outcomes[key] = CheckEvidence(key, returncode, revision, grounded)
         if returncode == 0:
             self.checks.pop(key, None)
             return
@@ -349,6 +354,19 @@ class EvidenceLedger:
             reason="fresh grounded check is failing",
         )
 
+    def readiness_evidence(self, revision: str) -> tuple[CheckEvidence, ...]:
+        """Return recognized checks whose results belong to the current revision."""
+        return tuple(
+            sorted(
+                (
+                    item
+                    for item in self.outcomes.values()
+                    if item.grounded and item.revision == revision
+                ),
+                key=lambda item: item.command,
+            )
+        )
+
 
 def render_runtime_feedback(detail: str, *, limit: int = 320) -> str:
     """Render concise model feedback without exposing private implementation names."""
@@ -359,6 +377,16 @@ def render_runtime_feedback(detail: str, *, limit: int = 320) -> str:
     if len(cleaned) > available:
         cleaned = cleaned[: max(0, available - 3)].rstrip() + "..."
     return (prefix + cleaned + suffix)[:limit]
+
+
+def render_runtime_advisory(detail: str, *, limit: int = 160) -> str:
+    """Render ordinary evidence without falsely implying a submit boundary."""
+    cleaned = _PRIVATE_TERMS.sub("runtime", " ".join(detail.split()))
+    prefix = "Runtime evidence: "
+    available = max(0, limit - len(prefix))
+    if len(cleaned) > available:
+        cleaned = cleaned[: max(0, available - 3)].rstrip() + "..."
+    return (prefix + cleaned)[:limit]
 
 
 class WorkspaceSensor:
@@ -533,17 +561,69 @@ class CentralFeatureRuntime:
     _FAILURE = re.compile(r"\b(?:fail(?:ed|ure)?|error|exception|traceback|red)\b", re.I)
     _PRECEDENT = re.compile(r"\b(?:precedent|sibling|registry|existing|pattern)\b", re.I)
 
-    def __init__(self, *, enabled: bool = True, model_visible: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        model_visible: bool = False,
+        max_guidance_events: int = 4,
+        max_guidance_chars: int = 640,
+    ) -> None:
         self.enabled = enabled
         self.model_visible = model_visible
         self.receipts: list[FeatureReceipt] = []
         self._seen: set[tuple[str, int, str]] = set()
-        self._failed_actions: dict[tuple[str, int], int] = {}
+        self._failed_actions: dict[tuple[str, int, str], int] = {}
         self._searched = False
+        self._precedent_verified = False
+        self._post_edit_checks = 0
         self._feedback_cursor = 0
         self._guidance_events = 0
         self._guidance_chars = 0
         self._guidance_features: list[str] = []
+        self._guidance_candidates = 0
+        self._guidance_suppressed = 0
+        self._guided_keys: set[tuple[str, str, str]] = set()
+        self._prepared_guidance: dict[str, Any] | None = None
+        self.max_guidance_events = max_guidance_events
+        self.max_guidance_chars = max_guidance_chars
+        self._action_metrics: dict[str, int] = {
+            "observed_actions": 0,
+            "successful_actions": 0,
+            "failed_actions": 0,
+            "search_actions": 0,
+            "check_actions": 0,
+            "workspace_change_actions": 0,
+            "no_change_actions": 0,
+            "repeated_commands": 0,
+            "created_paths": 0,
+            "modified_paths": 0,
+            "deleted_paths": 0,
+            "command_chars": 0,
+            "observation_chars": 0,
+            "lint_checks": 0,
+            "lint_passes": 0,
+            "lint_failures": 0,
+            "submit_attempts": 0,
+            "submit_holds": 0,
+        }
+        self._command_counts: dict[str, int] = {}
+        self._lifecycle: dict[str, dict[str, Any]] = {}
+        self._workspace_edited = False
+
+    def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
+        item = self._lifecycle.setdefault(
+            phase,
+            {
+                "first_action": action_id,
+                "last_action": action_id,
+                "status": status,
+                "observations": 0,
+            },
+        )
+        item["last_action"] = action_id
+        item["status"] = status
+        item["observations"] += 1
 
     @staticmethod
     def _spec(feature_id: str) -> dict[str, str]:
@@ -587,7 +667,11 @@ class CentralFeatureRuntime:
                 reason=reason,
                 payload=candidate_payload,
                 fresh=True,
-                model_visible=self.model_visible,
+                model_visible=(
+                    self.model_visible
+                    and decision == "DELIVERED"
+                    and feature_id in _MODEL_ACTIONABLE_FEATURES
+                ),
             )
         )
         # CAP_OWNER delivery is a separate auditable row, not an alias that
@@ -597,7 +681,11 @@ class CentralFeatureRuntime:
                 # Delivery is emitted at the submit boundary with its own
                 # sensor/refusal payload, not as a submit-refusal alias.
                 continue
-            if owner == feature_id:
+            if owner == feature_id and cap_id not in {
+                "GT_CHANGE_SURFACE",
+                "GT_HYPOTHESIS",
+                "GT_PATCH_DELTA",
+            }:
                 self._emit(
                     cap_id,
                     boundary=boundary,
@@ -633,10 +721,28 @@ class CentralFeatureRuntime:
             "reason": reason,
         }
 
+    @classmethod
+    def _explicit_signature_replacement(cls, command: str) -> tuple[str, str] | None:
+        """Return deterministic before/after fragments from an explicit substitution."""
+        if not re.search(r"\bsed\s+-i\b", command, re.I):
+            return None
+        match = re.search(r"s(?P<sep>[/#|])(?P<before>.*?)(?P=sep)(?P<after>.*?)(?P=sep)", command)
+        if not match:
+            return None
+        before = match.group("before")
+        after = match.group("after")
+        if before == after or not cls._SIGNATURE.search(f"{before}("):
+            return None
+        if not cls._SIGNATURE.search(f"{after}("):
+            return None
+        return before[:120], after[:120]
+
     def begin_task(self, instruction: str, *, revision: str) -> None:
         if not self.enabled:
             return
+        self._mark_lifecycle("task_started", action_id=0)
         if instruction.strip():
+            self._mark_lifecycle("contract_captured", action_id=0)
             self._emit(
                 "obligations",
                 boundary="task_start",
@@ -664,10 +770,73 @@ class CentralFeatureRuntime:
         if not self.enabled:
             return
         normalized = normalize_command(command)
-        text = f"{normalized} {output or ''}"
         is_search = bool(self._SEARCH.search(normalized))
+        self._action_metrics["observed_actions"] += 1
+        self._action_metrics["successful_actions" if returncode == 0 else "failed_actions"] += 1
+        self._action_metrics["command_chars"] += len(command)
+        self._action_metrics["observation_chars"] += len(output or "")
+        command_count = self._command_counts.get(normalized, 0) + 1
+        self._command_counts[normalized] = command_count
+        if command_count > 1:
+            self._action_metrics["repeated_commands"] += 1
+        if is_search:
+            self._action_metrics["search_actions"] += 1
+        if is_check_command(normalized):
+            self._action_metrics["check_actions"] += 1
+            self._mark_lifecycle("behavior_observed", action_id=action_id)
+            if self._workspace_edited:
+                self._post_edit_checks += 1
+                phase = (
+                    "focused_check_validated"
+                    if self._post_edit_checks == 1
+                    else "regression_validated"
+                )
+                self._mark_lifecycle(
+                    phase,
+                    action_id=action_id,
+                    status="passed" if returncode == 0 else "failed",
+                )
+        if transition.changed_paths:
+            self._workspace_edited = True
+            self._action_metrics["workspace_change_actions"] += 1
+            self._action_metrics["created_paths"] += len(transition.created)
+            self._action_metrics["modified_paths"] += len(transition.modified)
+            self._action_metrics["deleted_paths"] += len(transition.deleted)
+            self._mark_lifecycle("workspace_edited", action_id=action_id)
+            self._mark_lifecycle("change_surface_certified", action_id=action_id)
+            changed = list(transition.changed_paths)
+            surface_message = "Workspace change observed: " + ", ".join(changed[:4])
+            self._emit(
+                "GT_CHANGE_SURFACE",
+                boundary="edit_result",
+                action_id=action_id,
+                revision=revision,
+                reason="workspace_revision_changed",
+                payload={
+                    "owner_feature": "newfile_precedent",
+                    "created": list(transition.created),
+                    "modified": list(transition.modified),
+                    "deleted": list(transition.deleted),
+                    "message": surface_message,
+                },
+            )
+            self._emit(
+                "GT_PATCH_DELTA",
+                boundary="edit_result",
+                action_id=action_id,
+                revision=revision,
+                reason="non_empty_patch_surface",
+                payload={
+                    "owner_feature": "signature_delta",
+                    "changed_paths": changed,
+                    "message": surface_message,
+                },
+            )
+        else:
+            self._action_metrics["no_change_actions"] += 1
         if is_search and output.strip():
             self._searched = True
+            self._mark_lifecycle("location_anchored", action_id=action_id)
             self._emit(
                 "localization",
                 boundary="search_result",
@@ -697,6 +866,7 @@ class CentralFeatureRuntime:
                     },
                 )
             if self._CALLSITE.search(output):
+                self._mark_lifecycle("impact_captured", action_id=action_id)
                 self._emit(
                     "caller_contract",
                     boundary="search_result",
@@ -713,6 +883,7 @@ class CentralFeatureRuntime:
                     },
                 )
             if self._PRECEDENT.search(output):
+                self._precedent_verified = True
                 self._emit(
                     "newfile_precedent",
                     boundary="search_result",
@@ -729,7 +900,8 @@ class CentralFeatureRuntime:
                     },
                 )
 
-        if returncode != 0 and (is_check_command(normalized) or self._FAILURE.search(output)):
+        if returncode != 0 and is_check_command(normalized):
+            check_phase = "post_edit" if self._workspace_edited else "reproduction"
             self._emit(
                 "covering_red",
                 boundary="test_result",
@@ -739,14 +911,35 @@ class CentralFeatureRuntime:
                 payload={
                     "check_failed": True,
                     "returncode": returncode,
+                    "phase": check_phase,
                     "message": self._payload(
                         "covering_red", "test_result", "failed_check_or_failure_output"
                     )["message"],
                 },
             )
-            failure_key = (normalized, returncode)
+            failure_signature = " ".join(
+                line.strip() for line in (output or "").splitlines() if self._FAILURE.search(line)
+            )[:240]
+            fingerprint_source = f"{returncode}\0{failure_signature.lower()}"
+            failure_fingerprint = hashlib.sha256(
+                fingerprint_source.encode("utf-8", "replace")
+            ).hexdigest()[:16]
+            failure_key = (failure_fingerprint, returncode, revision)
             count = self._failed_actions.get(failure_key, 0) + 1
             self._failed_actions[failure_key] = count
+            self._emit(
+                "GT_HYPOTHESIS",
+                boundary="test_result",
+                action_id=action_id,
+                revision=revision,
+                reason="deterministic_failure_state_transition",
+                payload={
+                    "owner_feature": "recovery",
+                    "failure_fingerprint": failure_fingerprint,
+                    "repeat_count": count,
+                    "message": "A deterministic validation failure state was recorded.",
+                },
+            )
             if count >= 2:
                 self._emit(
                     "recovery",
@@ -756,32 +949,33 @@ class CentralFeatureRuntime:
                     reason="same_failure_repeated",
                     payload={
                         "repeat_count": count,
+                        "failure_fingerprint": failure_fingerprint,
                         "message": self._payload(
                             "recovery", "test_result", "same_failure_repeated"
                         )["message"],
                     },
                 )
 
-        if transition.created and (self._searched or self._PRECEDENT.search(text)):
+        if transition.created and self._precedent_verified:
             self._emit(
                 "newfile_precedent",
                 boundary="edit_result",
                 action_id=action_id,
                 revision=revision,
-                reason="new_file_after_search_or_precedent",
+                reason="new_file_after_verified_precedent",
                 payload={
                     "created_files": len(transition.created),
                     "message": self._payload(
-                        "newfile_precedent", "edit_result", "new_file_after_search_or_precedent"
+                        "newfile_precedent",
+                        "edit_result",
+                        "new_file_after_verified_precedent",
                     )["message"],
                 },
             )
 
-        if (
-            transition.changed_paths
-            and self._EDIT.search(normalized)
-            and self._SIGNATURE.search(text)
-        ):
+        signature_replacement = self._explicit_signature_replacement(normalized)
+        if transition.changed_paths and signature_replacement:
+            before_signature, after_signature = signature_replacement
             self._emit(
                 "signature_delta",
                 boundary="edit_result",
@@ -791,6 +985,11 @@ class CentralFeatureRuntime:
                 payload={
                     "changed_paths": list(transition.changed_paths),
                     "signature_edit": True,
+                    "before_signature": before_signature,
+                    "after_signature": after_signature,
+                    "signature_fingerprint": hashlib.sha256(
+                        f"{before_signature}\0{after_signature}".encode("utf-8", "replace")
+                    ).hexdigest()[:16],
                     "message": self._payload(
                         "signature_delta", "edit_result", "signature-shaped edit on changed path"
                     )["message"],
@@ -804,7 +1003,24 @@ class CentralFeatureRuntime:
         revision: str,
         failed: bool,
         reason: str,
+        path: str = "",
+        command: str = "",
+        returncode: int | None = None,
+        diagnostic: str = "",
     ) -> None:
+        self._action_metrics["lint_checks"] += 1
+        self._action_metrics["lint_failures" if failed else "lint_passes"] += 1
+        self._mark_lifecycle(
+            "static_validated",
+            action_id=action_id,
+            status="failed" if failed else "passed",
+        )
+        message = self._payload("syntax_result", "edit_result", reason)["message"]
+        if failed and path:
+            concise = " ".join(diagnostic.split())[:120]
+            message = f"Repair the syntax failure in {path}"
+            if concise:
+                message += f": {concise}"
         self._emit(
             "syntax_result",
             boundary="edit_result",
@@ -815,7 +1031,10 @@ class CentralFeatureRuntime:
             payload={
                 "ok": not failed,
                 "fresh": True,
-                "message": self._payload("syntax_result", "edit_result", reason)["message"],
+                "path": path,
+                "command": command,
+                "returncode": returncode,
+                "message": message,
             },
         )
 
@@ -826,7 +1045,15 @@ class CentralFeatureRuntime:
         revision: str,
         refused: bool,
         sensor_healthy: bool,
+        check_count: int = 0,
+        passing_checks: int = 0,
+        failing_checks: int = 0,
     ) -> None:
+        self._action_metrics["submit_attempts"] += 1
+        if refused:
+            self._action_metrics["submit_holds"] += 1
+        elif sensor_healthy and passing_checks > 0:
+            self._mark_lifecycle("submit_ready", action_id=action_id, status="passed")
         if refused:
             self._emit(
                 "submit_refusal",
@@ -852,7 +1079,21 @@ class CentralFeatureRuntime:
             payload={
                 "sensor_healthy": sensor_healthy,
                 "refused": refused,
-                "message": "Submission readiness was evaluated at the current workspace revision.",
+                "check_count": check_count,
+                "passing_checks": passing_checks,
+                "failing_checks": failing_checks,
+                "readiness": (
+                    "blocked"
+                    if refused
+                    else "validated"
+                    if sensor_healthy and passing_checks > 0 and failing_checks == 0
+                    else "unverified"
+                ),
+                "message": (
+                    "Submission readiness has current passing check evidence."
+                    if sensor_healthy and passing_checks > 0 and failing_checks == 0
+                    else "Submission readiness was evaluated without claiming validation."
+                ),
             },
         )
 
@@ -867,6 +1108,14 @@ class CentralFeatureRuntime:
             "guidance_events": self._guidance_events,
             "guidance_chars": self._guidance_chars,
             "guidance_features": list(self._guidance_features),
+            "guidance_candidates": self._guidance_candidates,
+            "guidance_suppressed": self._guidance_suppressed,
+            "guidance_by_feature": {
+                feature_id: self._guidance_features.count(feature_id)
+                for feature_id in dict.fromkeys(self._guidance_features)
+            },
+            "action_metrics": dict(self._action_metrics),
+            "lifecycle": dict(self._lifecycle),
             "delivered_counts": by_feature,
             "receipts": [
                 {
@@ -885,14 +1134,55 @@ class CentralFeatureRuntime:
             ],
         }
 
-    def model_feedback(self, *, limit: int = 320) -> str:
-        """Return one bounded, highest-priority advisory for this action."""
-        visible = [
-            item
-            for item in self.receipts[self._feedback_cursor :]
-            if item.model_visible and item.payload.get("message")
-        ]
+    def _record_guidance(self, metadata: dict[str, Any]) -> None:
+        feedback = str(metadata["feedback"])
+        feature_id = str(metadata["feature_id"])
+        self._guidance_events += 1
+        self._guidance_chars += len(feedback)
+        self._guidance_features.append(feature_id)
+
+    def prepared_guidance(self) -> dict[str, Any] | None:
+        return dict(self._prepared_guidance) if self._prepared_guidance else None
+
+    def confirm_prepared_guidance(self) -> dict[str, Any] | None:
+        """Count a deferred advisory only when it reaches a model request."""
+        if self._prepared_guidance is None:
+            return None
+        metadata = self._prepared_guidance
+        self._prepared_guidance = None
+        self._record_guidance(metadata)
+        return dict(metadata)
+
+    def discard_model_feedback(self) -> None:
+        """Consume candidates superseded by a direct submit-hold observation."""
+        fresh_receipts = self.receipts[self._feedback_cursor :]
         self._feedback_cursor = len(self.receipts)
+        for item in fresh_receipts:
+            if item.model_visible and item.payload.get("message"):
+                self._guidance_candidates += 1
+            self._guidance_suppressed += 1
+
+    def model_feedback(self, *, limit: int = 160, deferred: bool = False) -> str:
+        """Return one bounded, highest-priority advisory for this action."""
+        fresh_receipts = self.receipts[self._feedback_cursor :]
+        self._feedback_cursor = len(self.receipts)
+        visible: list[FeatureReceipt] = []
+        for item in fresh_receipts:
+            if not item.model_visible or not item.payload.get("message"):
+                self._guidance_suppressed += 1
+                continue
+            self._guidance_candidates += 1
+            evidence_fingerprint = hashlib.sha256(
+                repr(sorted(item.payload.items())).encode("utf-8", "replace")
+            ).hexdigest()[:16]
+            key = (item.feature_id, item.revision, evidence_fingerprint)
+            # The feature and revision are the operative evidence boundary.
+            # Payload wording or action IDs must not re-inject the same fact.
+            revision_key = (item.feature_id, item.revision, "")
+            if key in self._guided_keys or revision_key in self._guided_keys:
+                self._guidance_suppressed += 1
+                continue
+            visible.append(item)
         if not visible:
             return ""
         priority = {
@@ -901,18 +1191,31 @@ class CentralFeatureRuntime:
             "syntax_result": 2,
             "covering_red": 3,
             "signature_delta": 4,
-            "caller_contract": 5,
-            "newfile_precedent": 6,
-            "def_partition": 7,
-            "localization": 8,
-            "obligations": 9,
         }
         selected = min(
             enumerate(visible),
             key=lambda item: (priority.get(item[1].feature_id, 10), item[0]),
         )[1]
-        feedback = render_runtime_feedback(str(selected.payload["message"]), limit=limit)
-        self._guidance_events += 1
-        self._guidance_chars += len(feedback)
-        self._guidance_features.append(selected.feature_id)
+        remaining_chars = self.max_guidance_chars - self._guidance_chars
+        if self._guidance_events >= self.max_guidance_events or remaining_chars <= 0:
+            self._guidance_suppressed += len(visible)
+            return ""
+        feedback = render_runtime_advisory(
+            str(selected.payload["message"]), limit=min(limit, remaining_chars)
+        )
+        if not feedback:
+            self._guidance_suppressed += len(visible)
+            return ""
+        self._guidance_suppressed += max(0, len(visible) - 1)
+        self._guided_keys.add((selected.feature_id, selected.revision, ""))
+        metadata = {
+            "feature_id": selected.feature_id,
+            "evidence_action": selected.action_id,
+            "revision": selected.revision,
+            "feedback": feedback,
+        }
+        if deferred:
+            self._prepared_guidance = metadata
+        else:
+            self._record_guidance(metadata)
         return feedback

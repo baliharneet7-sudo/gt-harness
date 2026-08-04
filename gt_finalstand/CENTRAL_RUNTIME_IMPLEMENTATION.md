@@ -409,3 +409,30 @@ that ablation passes repeated matched trials, the current GT-on treatment should
 not be called efficient.
 
 No superiority or efficiency claim is made until those paid GT-on stages pass.
+
+## Efficiency remediation implementation
+
+The remediation is now implemented in the worktree and specified in
+`gt_finalstand/GT_EFFICIENCY_REMEDIATION_PLAN.md`. Successful lint and private
+lifecycle receipts cannot enter model context; repeated guidance is coalesced
+by feature/revision; guidance is limited to four events and 640 characters per
+task; and the duplicate direct-lint injection is removed. Receipt-v2 adds
+cache-normalized token accounting, action/check/change/failure counters,
+lifecycle positions, guidance candidate/suppression counts, and explicit
+censoring. Model calls have a 120-second request limit and the model loop has a
+900-second wall limit while retaining the 100-step cap.
+
+Ordinary feature guidance is now a transient next-decision payload: it is
+prepared after a verified tool observation, sent in exactly the next model
+request, and not retained in durable conversation history. Receipt-v2 records
+the evidence action and delivery call. The provider-free census therefore
+checks both event chronology and the model decision window, emitting
+`ALL_17_TIMING_VALID` and `ALL_GUIDANCE_ON_TIME` in addition to
+`ALL_17_DELIVERABLE`.
+
+The shared deep-metrics extractor and comparator now reject solve regressions,
+censored treatment runs, and any positive primary-resource delta on a
+comparable solved task. Provider-free tests and the forced all-17 producer
+census pass. This is implementation proof, not efficiency proof; the next gate
+is the three-task GitHub treatment canary, followed by repeated ten-task shadow
+and treatment runs. The 89-task workflow remains blocked.

@@ -272,6 +272,11 @@ jobs:
             all17|integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak enable_all_features=true) ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
           esac
+          FEATURE_ARGS+=(
+            --ak step_limit=100
+            --ak model_timeout_sec=120
+            --ak model_loop_timeout_sec=900
+          )
           JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -343,6 +348,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -362,8 +370,16 @@ jobs:
           import json, os
           from pathlib import Path
 
+          from gt_engine.deep_metrics import extract_trajectory
+
           expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
           trials, missing, per_task, receipt_metrics = [], [], [], []
+          deep_tasks = {}
+
+          def solved(t):
+              rewards = (t.get("verifier_result") or {}).get("rewards") or {}
+              vals = [v for v in rewards.values() if isinstance(v, (int, float))]
+              return bool(vals) and all(v >= 1 for v in vals)
 
           for task_dir in sorted(Path("tasks").glob("*")):
               task_name = task_dir.name.split("-task-", 1)[-1]
@@ -386,10 +402,29 @@ jobs:
                       "trajectory_messages": metrics.get("trajectory_messages"),
                       "guidance_events": metrics.get("guidance_events"),
                       "guidance_chars": metrics.get("guidance_chars"),
+                      "guidance_candidates": metrics.get("guidance_candidates"),
+                      "guidance_suppressed": metrics.get("guidance_suppressed"),
+                      "uncached_input_tokens": metrics.get("uncached_input_tokens"),
+                      "cache_hit_rate": metrics.get("prompt_cache_hit_rate"),
+                      "successful_actions": metrics.get("successful_actions"),
+                      "failed_actions": metrics.get("failed_actions"),
+                      "check_actions": metrics.get("check_actions"),
+                      "workspace_change_actions": metrics.get("workspace_change_actions"),
+                      "repeated_commands": metrics.get("repeated_commands"),
+                      "censored": metrics.get("censored"),
+                      "censored_reason": metrics.get("censored_reason"),
                   })
               results = list(task_dir.rglob("result.json"))
               if not results:
                   missing.append(task_dir.name)
+                  trajectories = list(task_dir.rglob("miniswe_trajectory.json"))
+                  if trajectories:
+                      deep_tasks[task_name] = extract_trajectory(
+                          trajectories[0],
+                          task=task_name,
+                          reward=None,
+                          receipt_path=receipt_paths[0] if receipt_paths else None,
+                      )
                   continue
               got = []
               for rp in results:
@@ -402,11 +437,15 @@ jobs:
                   got.append(r)
               trials.extend(got)
               per_task.append((task_dir.name, len(got)))
-
-          def solved(t):
-              rewards = (t.get("verifier_result") or {}).get("rewards") or {}
-              vals = [v for v in rewards.values() if isinstance(v, (int, float))]
-              return bool(vals) and all(v >= 1 for v in vals)
+              trajectories = list(task_dir.rglob("miniswe_trajectory.json"))
+              if trajectories:
+                  reward = 1 if got and any(solved(item) for item in got) else 0 if got else None
+                  deep_tasks[task_name] = extract_trajectory(
+                      trajectories[0],
+                      task=task_name,
+                      reward=reward,
+                      receipt_path=receipt_paths[0] if receipt_paths else None,
+                  )
 
           graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
           errored = [t for t in trials if t.get("exception_info")]
@@ -443,15 +482,18 @@ jobs:
 
           out += [
               "", "## Central runtime metrics", "",
-              "| task | total tokens | calls | actions | assistant steps | trajectory messages | guidance events |",
-              "|---|---:|---:|---:|---:|---:|---:|",
+              "| task | total tokens | uncached input | calls | actions | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | censored |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
           ]
           for row in sorted(receipt_metrics, key=lambda x: x["task"]):
               out.append(
                   f"| {row['task']} | {row['total_tokens'] or '-'} | "
-                  f"{row['api_calls'] or '-'} | {row['actions'] or '-'} | "
-                  f"{row['assistant_steps'] or '-'} | {row['trajectory_messages'] or '-'} | "
-                  f"{row['guidance_events'] or 0} |"
+                  f"{row['uncached_input_tokens'] or '-'} | {row['api_calls'] or '-'} | "
+                  f"{row['actions'] or '-'} | {row['check_actions'] or 0} | "
+                  f"{row['workspace_change_actions'] or 0} | {row['failed_actions'] or 0} | "
+                  f"{row['repeated_commands'] or 0} | {row['guidance_events'] or 0}/"
+                  f"{row['guidance_candidates'] or 0}/{row['guidance_suppressed'] or 0} | "
+                  f"{row['censored'] or False} |"
               )
 
           Path("merged.json").write_text(json.dumps({
@@ -463,6 +505,12 @@ jobs:
               "n_solved": n_solved,
               "trial_results": trials,
               "receipt_metrics": receipt_metrics,
+          }, indent=2), encoding="utf-8")
+          Path("deep_metrics_${{ inputs.arm }}.json").write_text(json.dumps({
+              "schema": "central-deep-metrics-v1",
+              "arm": "${{ inputs.arm }}",
+              "run_id": "${{ github.run_id }}",
+              "tasks": deep_tasks,
           }, indent=2), encoding="utf-8")
 
           body = "\n".join(out) + "\n"
@@ -480,4 +528,5 @@ jobs:
           path: |
             merged.json
             SUMMARY.md
+            deep_metrics_*.json
           if-no-files-found: warn

@@ -49,6 +49,7 @@ from gt_engine.central_runtime import (
     lint_commands,
     render_runtime_feedback,
 )
+from gt_engine.deep_metrics import normalized_token_cost
 
 
 def _mini_config() -> dict[str, Any]:
@@ -72,6 +73,8 @@ class MiniSweCentralAgent(BaseAgent):
         temperature: float = 1.0,
         step_limit: int = 100,
         command_timeout_sec: int = 30,
+        model_timeout_sec: int = 120,
+        model_loop_timeout_sec: int = 900,
         cost_limit: float = 3.0,
         max_submit_holds: int = 1,
         enable_lint: bool = True,
@@ -86,6 +89,8 @@ class MiniSweCentralAgent(BaseAgent):
         self.temperature = temperature
         self.step_limit = step_limit
         self.command_timeout_sec = command_timeout_sec
+        self.model_timeout_sec = model_timeout_sec
+        self.model_loop_timeout_sec = model_loop_timeout_sec
         self.cost_limit = cost_limit
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
@@ -174,8 +179,12 @@ class MiniSweCentralAgent(BaseAgent):
                     revision=revision,
                     failed=True,
                     reason="changed_file_syntax_failure",
+                    path=path,
+                    command=command,
+                    returncode=result.return_code,
+                    diagnostic=raw,
                 )
-                return render_runtime_feedback(detail)
+                return detail
             self._ledger.record_check(
                 f"syntax:{path}", returncode=0, revision=revision, grounded=True
             )
@@ -184,6 +193,9 @@ class MiniSweCentralAgent(BaseAgent):
                 revision=revision,
                 failed=False,
                 reason="changed_file_syntax_pass",
+                path=path,
+                command=command,
+                returncode=0,
             )
         return ""
 
@@ -337,16 +349,67 @@ class MiniSweCentralAgent(BaseAgent):
         terminal = ""
         started = time.monotonic()
         receipts: list[dict[str, Any]] = []
+        guidance_deliveries: list[dict[str, Any]] = []
+        pending_guidance = ""
+        pending_prepared_after_call = 0
+        no_action_assistant_steps = 0
+        context_chars_sent = 0
+        model_output_chars = 0
+        censored_reason = ""
 
         try:
-            while calls < self.step_limit and not terminal and cost < self.cost_limit:
+            while not terminal:
+                elapsed = time.monotonic() - started
+                if calls >= self.step_limit:
+                    terminal = "StepLimitExceeded"
+                    censored_reason = "assistant_step_limit"
+                    break
+                if cost >= self.cost_limit:
+                    terminal = "CostLimitExceeded"
+                    censored_reason = "cost_limit"
+                    break
+                if elapsed >= self.model_loop_timeout_sec:
+                    terminal = "WallTimeExceeded"
+                    censored_reason = "model_loop_wall_time"
+                    break
                 calls += 1
+                query_messages = messages
+                if pending_guidance:
+                    query_messages = [
+                        *messages,
+                        {"role": "user", "content": pending_guidance},
+                    ]
+                    metadata = self._features.confirm_prepared_guidance() or {}
+                    guidance_deliveries.append(
+                        {
+                            "feature_id": metadata.get("feature_id"),
+                            "evidence_action": metadata.get("evidence_action"),
+                            "revision": metadata.get("revision"),
+                            "prepared_after_call": pending_prepared_after_call,
+                            "delivered_before_call": calls,
+                            "decision_window": "next_model_call_only",
+                            "not_predictive": calls == pending_prepared_after_call + 1,
+                            "chars": len(pending_guidance),
+                        }
+                    )
+                    pending_guidance = ""
+                context_chars_sent += sum(
+                    len(str(item.get("content") or "")) for item in query_messages
+                )
                 try:
-                    message = await asyncio.to_thread(model.query, messages)
+                    message = await asyncio.wait_for(
+                        asyncio.to_thread(model.query, query_messages),
+                        timeout=self.model_timeout_sec,
+                    )
+                except TimeoutError:
+                    terminal = "ModelTimeout"
+                    censored_reason = "model_request_timeout"
+                    break
                 except InterruptAgentFlow as flow:
                     messages.extend(flow.messages)
                     continue
                 messages.append(message)
+                model_output_chars += len(str(message.get("content") or ""))
                 extra = message.get("extra") or {}
                 cost += float(extra.get("cost") or 0.0)
                 usage = (extra.get("response") or {}).get("usage") or {}
@@ -358,6 +421,9 @@ class MiniSweCentralAgent(BaseAgent):
                     or 0
                 )
                 actions = tuple(extra.get("actions") or ())
+                submit_held = False
+                if not actions:
+                    no_action_assistant_steps += 1
                 outputs: list[dict[str, Any]] = []
 
                 for action in actions:
@@ -368,6 +434,16 @@ class MiniSweCentralAgent(BaseAgent):
                         decision = self._ledger.submit_decision(
                             snapshot.revision, sensor_healthy=snapshot.healthy
                         )
+                        readiness_evidence = self._ledger.readiness_evidence(snapshot.revision)
+                        readiness_kwargs = {
+                            "check_count": len(readiness_evidence),
+                            "passing_checks": sum(
+                                item.returncode == 0 for item in readiness_evidence
+                            ),
+                            "failing_checks": sum(
+                                item.returncode != 0 for item in readiness_evidence
+                            ),
+                        }
                         if (
                             self.runtime_mode == "treatment"
                             and decision.decision == InterventionDecision.HOLD_ONCE
@@ -377,6 +453,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 revision=snapshot.revision,
                                 refused=True,
                                 sensor_healthy=snapshot.healthy,
+                                **readiness_kwargs,
                             )
                             detail = "A fresh required check is still failing: " + ", ".join(
                                 decision.blockers
@@ -396,12 +473,14 @@ class MiniSweCentralAgent(BaseAgent):
                                     "revision": snapshot.revision,
                                 }
                             )
+                            submit_held = True
                             continue
                         self._features.record_submit(
                             action_id=actions_count,
                             revision=snapshot.revision,
                             refused=False,
                             sensor_healthy=snapshot.healthy,
+                            **readiness_kwargs,
                         )
                         receipts.append(
                             {
@@ -485,20 +564,20 @@ class MiniSweCentralAgent(BaseAgent):
                                 "paths": list(changed_files),
                             }
                         )
-                    feature_feedback = self._features.model_feedback()
-                    if feature_feedback and self.runtime_mode == "treatment":
-                        output["output"] = feature_feedback + "\n" + output["output"]
-                    if lint_feedback and self.runtime_mode == "treatment":
-                        output["output"] = lint_feedback + "\n" + output["output"]
                     outputs.append(output)
                     if submit:
                         terminal = "Submitted"
                         break
 
+                if submit_held:
+                    self._features.discard_model_feedback()
+                elif not terminal:
+                    feature_feedback = self._features.model_feedback(deferred=True)
+                    if feature_feedback and self.runtime_mode == "treatment":
+                        pending_guidance = feature_feedback
+                        pending_prepared_after_call = calls
                 messages.extend(model.format_observation_messages(message, outputs, variables))
 
-            if not terminal:
-                terminal = "LimitsExceeded"
         except Exception as exc:
             terminal = type(exc).__name__
             messages.append(
@@ -519,6 +598,53 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                 )
             self.logs_dir.mkdir(parents=True, exist_ok=True)
+            # Very fast provider-free tests can complete inside one Windows
+            # monotonic clock tick.  Preserve the truthful lower bound that
+            # work occurred instead of serializing an impossible zero duration.
+            elapsed_seconds = max(time.monotonic() - started, 1e-6)
+            assistant_steps = sum(1 for message in messages if message.get("role") == "assistant")
+            feature_summary = self._features.summary()
+            action_metrics = feature_summary["action_metrics"]
+            total_tokens = input_tokens + output_tokens
+            uncached_input_tokens = max(0, input_tokens - cache_tokens)
+            normalized_cost = normalized_token_cost(
+                uncached_input_tokens, cache_tokens, output_tokens
+            )
+            deep_metrics = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_tokens": cache_tokens,
+                "uncached_input_tokens": uncached_input_tokens,
+                "total_tokens": total_tokens,
+                "prompt_cache_hit_rate": (
+                    round(cache_tokens / input_tokens, 6) if input_tokens else 0.0
+                ),
+                "provider_cost_usd": cost,
+                "normalized_cost_usd": normalized_cost,
+                "normalized_pricing": "deepseek-v4-flash-frozen-2026",
+                "api_calls": calls,
+                "actions": actions_count,
+                "assistant_steps": assistant_steps,
+                "trajectory_messages": len(messages),
+                "tokens_per_call": round(total_tokens / calls, 6) if calls else 0.0,
+                "tokens_per_assistant_step": (
+                    round(total_tokens / assistant_steps, 6) if assistant_steps else 0.0
+                ),
+                "actions_per_assistant_step": (
+                    round(actions_count / assistant_steps, 6) if assistant_steps else 0.0
+                ),
+                "elapsed_seconds": elapsed_seconds,
+                "context_chars_sent": context_chars_sent,
+                "model_output_chars": model_output_chars,
+                "no_action_assistant_steps": no_action_assistant_steps,
+                "censored": bool(censored_reason),
+                "censored_reason": censored_reason,
+                "guidance_events": feature_summary["guidance_events"],
+                "guidance_chars": feature_summary["guidance_chars"],
+                "guidance_candidates": feature_summary["guidance_candidates"],
+                "guidance_suppressed": feature_summary["guidance_suppressed"],
+                **action_metrics,
+            }
             trajectory = {
                 "info": {
                     "model_stats": {"instance_cost": cost, "api_calls": calls},
@@ -535,29 +661,17 @@ class MiniSweCentralAgent(BaseAgent):
             (self.logs_dir / "central_receipt.json").write_text(
                 json.dumps(
                     {
-                        "schema": "central-runtime-receipt-v1",
+                        "schema": "central-runtime-receipt-v2",
                         "mode": self.runtime_mode,
                         "calls": calls,
                         "actions": actions_count,
-                        "elapsed_seconds": time.monotonic() - started,
+                        "elapsed_seconds": elapsed_seconds,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
-                        "metrics": {
-                            "input_tokens": input_tokens,
-                            "output_tokens": output_tokens,
-                            "cache_tokens": cache_tokens,
-                            "total_tokens": input_tokens + output_tokens,
-                            "api_calls": calls,
-                            "actions": actions_count,
-                            "assistant_steps": sum(
-                                1 for message in messages if message.get("role") == "assistant"
-                            ),
-                            "trajectory_messages": len(messages),
-                            "guidance_events": self._features.summary()["guidance_events"],
-                            "guidance_chars": self._features.summary()["guidance_chars"],
-                        },
-                        "features": self._features.summary(),
+                        "metrics": deep_metrics,
+                        "features": feature_summary,
                         "interventions": receipts,
+                        "guidance_deliveries": guidance_deliveries,
                     },
                     indent=2,
                 ),
@@ -582,13 +696,15 @@ class MiniSweCentralAgent(BaseAgent):
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cache_tokens": cache_tokens,
-                "total_tokens": input_tokens + output_tokens,
-                "assistant_steps": sum(
-                    1 for message in messages if message.get("role") == "assistant"
-                ),
+                "total_tokens": total_tokens,
+                "assistant_steps": assistant_steps,
                 "trajectory_messages": len(messages),
-                "guidance_events": self._features.summary()["guidance_events"],
+                "guidance_events": feature_summary["guidance_events"],
+                "guidance_candidates": feature_summary["guidance_candidates"],
+                "guidance_suppressed": feature_summary["guidance_suppressed"],
                 "exit_status": terminal,
+                "censored": bool(censored_reason),
+                "censored_reason": censored_reason,
                 "workspace_sensor_healthy": snapshot.healthy,
             }
 

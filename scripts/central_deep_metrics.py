@@ -1,0 +1,99 @@
+"""Extract shared deep metrics and compare central-runtime experiment arms."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from gt_engine.deep_metrics import compare_arms, extract_trajectory, render_delta_markdown
+
+
+def _rewards(path: str) -> dict[str, int | float]:
+    if not path:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "tasks" in payload:
+        payload = payload["tasks"]
+    return {
+        str(task): (value.get("reward") if isinstance(value, dict) else value)
+        for task, value in payload.items()
+    }
+
+
+def _find_receipt(root: Path | None, task: str) -> Path | None:
+    if root is None:
+        return None
+    candidates = [root / f"{task}_central_receipt.json", root / task / "central_receipt.json"]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    matches = [path for path in root.rglob("central_receipt.json") if task in str(path)]
+    return matches[0] if matches else None
+
+
+def _load_arm(path: str) -> dict:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    return payload.get("tasks") or payload
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    extract = sub.add_parser("extract")
+    extract.add_argument("--name", required=True)
+    extract.add_argument("--input", required=True)
+    extract.add_argument("--receipts", default="")
+    extract.add_argument("--rewards", default="")
+    extract.add_argument("--tasks", default="")
+    extract.add_argument("--output", required=True)
+    compare = sub.add_parser("compare")
+    compare.add_argument("--baseline", required=True)
+    compare.add_argument("--shadow", required=True)
+    compare.add_argument("--treatment", required=True)
+    compare.add_argument("--output-dir", required=True)
+    args = parser.parse_args()
+
+    if args.command == "extract":
+        root = Path(args.input)
+        receipt_root = Path(args.receipts) if args.receipts else None
+        rewards = _rewards(args.rewards)
+        requested = {item.strip() for item in args.tasks.split(",") if item.strip()}
+        tasks = {}
+        for path in sorted(root.glob("*_trajectory.json")):
+            task = path.name.removesuffix("_trajectory.json")
+            if requested and task not in requested:
+                continue
+            tasks[task] = extract_trajectory(
+                path,
+                task=task,
+                reward=rewards.get(task),
+                receipt_path=_find_receipt(receipt_root, task),
+            )
+        output = {"schema": "central-deep-metrics-v1", "arm": args.name, "tasks": tasks}
+        Path(args.output).write_text(json.dumps(output, indent=2), encoding="utf-8")
+        return 0 if tasks else 2
+
+    baseline = _load_arm(args.baseline)
+    shadow = _load_arm(args.shadow)
+    treatment = _load_arm(args.treatment)
+    comparisons = {
+        "baseline_to_shadow": compare_arms(baseline, shadow),
+        "shadow_to_treatment": compare_arms(shadow, treatment),
+        "baseline_to_treatment": compare_arms(baseline, treatment),
+    }
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "deep_delta.json").write_text(
+        json.dumps({"schema": "central-deep-delta-v1", **comparisons}, indent=2),
+        encoding="utf-8",
+    )
+    markdown = "\n".join(
+        render_delta_markdown(name, comparison) for name, comparison in comparisons.items()
+    )
+    (output_dir / "DEEP_DELTA.md").write_text(markdown, encoding="utf-8")
+    return 0 if comparisons["baseline_to_treatment"]["gate_passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

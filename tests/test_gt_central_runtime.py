@@ -15,6 +15,7 @@ from gt_engine.central_runtime import (
     parse_manifest,
     render_runtime_feedback,
 )
+from scripts.central_feature_census import census
 
 
 def _snapshot(revision: str, **entries: FileState) -> WorkspaceSnapshot:
@@ -154,7 +155,14 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     assert set(summary["feature_ids"]) == set(CENTRAL_FEATURE_IDS)
     assert all(summary["delivered_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
     assert all(item["fresh"] for item in summary["receipts"])
-    assert all(item["model_visible"] for item in summary["receipts"])
+    visible = {item["feature_id"] for item in summary["receipts"] if item["model_visible"]}
+    assert visible == {
+        "covering_red",
+        "recovery",
+        "signature_delta",
+        "submit_refusal",
+        "syntax_result",
+    }
     assert all(item["payload"].get("message") for item in summary["receipts"])
     by_feature = {item["feature_id"]: item for item in summary["receipts"]}
     assert by_feature["obligations"]["boundary"] == "task_start"
@@ -169,22 +177,146 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
 def test_model_guidance_is_one_prioritized_advisory_per_action():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement the requested change", revision="r0")
-    first_feedback = runtime.model_feedback()
-    assert first_feedback
+    assert runtime.model_feedback() == ""
     runtime.observe_action(
         action_id=1,
-        command="rg -n 'Bottle' .",
-        output="bottle.py:10:class Bottle\ntests/test_bottle.py:20:references Bottle",
-        returncode=0,
-        transition=WorkspaceTransition(1, "search", "r0", "r0"),
+        command="pytest -q",
+        output="1 failed: assertion error",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
         revision="r0",
     )
     feedback = runtime.model_feedback()
-    assert "Inspect the verified callers" in feedback
+    assert "required check is failing" in feedback
     assert runtime.model_feedback() == ""
     summary = runtime.summary()
-    assert summary["guidance_events"] == 2
-    assert summary["guidance_chars"] == len(first_feedback) + len(feedback)
+    assert summary["guidance_events"] == 1
+    assert summary["guidance_chars"] == len(feedback)
+
+
+def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement the requested change", revision="r0")
+
+    # Obligations are already present in the task prompt and must stay receipt-only.
+    assert runtime.model_feedback() == ""
+
+    # A passing syntax check must never tell the model to repair syntax.
+    runtime.record_syntax(
+        action_id=1,
+        revision="r1",
+        failed=False,
+        reason="changed_file_syntax_pass",
+    )
+    assert runtime.model_feedback() == ""
+
+    runtime.record_syntax(
+        action_id=2,
+        revision="r2",
+        failed=True,
+        reason="changed_file_syntax_failure",
+    )
+    assert "Repair the syntax" in runtime.model_feedback()
+
+    # Repeating the same advisory at the same workspace revision adds context
+    # without adding evidence, so it must be coalesced.
+    runtime.record_syntax(
+        action_id=3,
+        revision="r2",
+        failed=True,
+        reason="changed_file_syntax_failure",
+    )
+    assert runtime.model_feedback() == ""
+
+    summary = runtime.summary()
+    assert summary["guidance_events"] == 1
+    assert summary["guidance_candidates"] == 2
+    assert summary["guidance_suppressed"] >= 3
+    assert summary["guidance_by_feature"] == {"syntax_result": 1}
+
+
+def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Fix it", revision="r0")
+    unchanged = WorkspaceTransition(1, "echo error", "r0", "r0")
+    runtime.observe_action(
+        action_id=1,
+        command="echo error",
+        output="error is ordinary text",
+        returncode=1,
+        transition=unchanged,
+        revision="r0",
+    )
+    assert runtime.summary()["delivered_counts"]["covering_red"] == 0
+    assert runtime.summary()["delivered_counts"]["GT_HYPOTHESIS"] == 0
+
+    changed = WorkspaceTransition(2, "write", "r0", "r1", modified=("app.py",))
+    runtime.observe_action(
+        action_id=2,
+        command="write",
+        output="",
+        returncode=0,
+        transition=changed,
+        revision="r1",
+    )
+    summary = runtime.summary()
+    assert summary["delivered_counts"]["GT_CHANGE_SURFACE"] == 1
+    assert summary["delivered_counts"]["GT_PATCH_DELTA"] == 1
+    assert not next(row for row in summary["receipts"] if row["feature_id"] == "GT_CHANGE_SURFACE")[
+        "model_visible"
+    ]
+
+    runtime.observe_action(
+        action_id=3,
+        command="pytest -q",
+        output="1 failed: assertion error",
+        returncode=1,
+        transition=WorkspaceTransition(3, "pytest -q", "r1", "r1"),
+        revision="r1",
+    )
+    summary = runtime.summary()
+    assert summary["delivered_counts"]["covering_red"] == 1
+    assert summary["delivered_counts"]["GT_HYPOTHESIS"] == 1
+
+
+def test_signature_delta_requires_explicit_before_after_evidence():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.observe_action(
+        action_id=1,
+        command="tee app.py <<'EOF'\ndef f(x): pass\nEOF",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(1, "write", "r0", "r1", created=("app.py",)),
+        revision="r1",
+    )
+    assert runtime.summary()["delivered_counts"]["signature_delta"] == 0
+
+    runtime.observe_action(
+        action_id=2,
+        command="sed -i 's/def f(/def f(x, /' app.py",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(2, "edit", "r1", "r2", modified=("app.py",)),
+        revision="r2",
+    )
+    receipt = next(
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "signature_delta"
+    )
+    assert receipt["payload"]["before_signature"] != receipt["payload"]["after_signature"]
+
+
+def test_all_seventeen_census_proves_payload_visibility_and_timing():
+    result = census()
+
+    assert result["all_17_deliverable"] is True
+    assert result["all_17_timing_valid"] is True
+    assert result["all_guidance_on_time"] is True
+    assert set(result["timing_audit"]) == {*CENTRAL_FEATURE_IDS, "_global"}
+    assert all(row["valid"] for row in result["timing_audit"].values())
+    assert all(
+        row["not_predictive"] and row["not_late"] and row["delivered_before_next_decision"]
+        for row in result["decision_window_audit"]
+    )
 
 
 @pytest.mark.asyncio

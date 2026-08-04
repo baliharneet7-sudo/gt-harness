@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ class _ScriptedModel:
     def __init__(self, commands):
         self.commands = iter(commands)
         self.observed: list[str] = []
+        self.observed_history: list[list[str]] = []
 
     def format_message(self, **kwargs):
         return kwargs
@@ -47,6 +49,7 @@ class _ScriptedModel:
 
     def query(self, messages):
         self.observed = [str(item.get("content") or "") for item in messages]
+        self.observed_history.append(self.observed)
         command = next(self.commands)
         return {
             "role": "assistant",
@@ -211,7 +214,18 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     await agent.run("Fix it, then run `pytest -q`.", environment, context)
 
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
-    assert "Runtime check: app.py has a fresh syntax error" in trajectory
+    assert not any("Runtime evidence:" in item for item in model.observed_history[0])
+    assert any(
+        "Runtime evidence: Repair the syntax failure in app.py" in item
+        for item in model.observed_history[1]
+    )
+    assert not any(
+        "Runtime evidence: Repair the syntax failure in app.py" in item
+        for history in model.observed_history[2:]
+        for item in history
+    )
+    # The durable trajectory stays clean; timing proof lives in receipt-v2.
+    assert "Runtime evidence:" not in trajectory
     assert "groundtruth" not in trajectory.lower()
     assert "gt_" not in trajectory.lower()
     assert context.metadata["exit_status"] == "Submitted"
@@ -227,6 +241,28 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert metrics["actions"] == context.metadata["actions"]
     assert metrics["assistant_steps"] == context.metadata["assistant_steps"]
     assert metrics["trajectory_messages"] >= metrics["assistant_steps"]
+    assert metrics["uncached_input_tokens"] == 40
+    assert metrics["prompt_cache_hit_rate"] == 0.0
+    assert metrics["normalized_cost_usd"] > 0
+    assert metrics["tokens_per_call"] == 12.0
+    assert metrics["tokens_per_assistant_step"] == 12.0
+    assert metrics["actions_per_assistant_step"] == 1.0
+    assert metrics["elapsed_seconds"] > 0
+    assert metrics["successful_actions"] == 4
+    assert metrics["failed_actions"] == 0
+    assert metrics["check_actions"] == 1
+    assert metrics["workspace_change_actions"] == 2
+    assert metrics["lint_passes"] == 1
+    assert metrics["lint_failures"] == 1
+    assert metrics["guidance_candidates"] >= metrics["guidance_events"]
+    assert metrics["guidance_suppressed"] >= 1
+    deliveries = receipt["guidance_deliveries"]
+    assert len(deliveries) == 1
+    assert deliveries[0]["feature_id"] == "syntax_result"
+    assert deliveries[0]["evidence_action"] == 1
+    assert deliveries[0]["delivered_before_call"] == 2
+    assert deliveries[0]["decision_window"] == "next_model_call_only"
+    assert deliveries[0]["not_predictive"] is True
 
 
 @pytest.mark.asyncio
@@ -293,3 +329,28 @@ async def test_format_error_is_returned_to_model_instead_of_aborting(tmp_path):
     assert model.queries == 2
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
     assert "Use the bash tool correctly" in trajectory
+
+
+@pytest.mark.asyncio
+async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
+    class SlowModel(_ScriptedModel):
+        def query(self, messages):
+            time.sleep(0.05)
+            return super().query(messages)
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        model_timeout_sec=0.001,
+    )
+    agent._model_factory = lambda: SlowModel(["echo never-executed"])
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["schema"] == "central-runtime-receipt-v2"
+    assert receipt["metrics"]["censored"] is True
+    assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
+    assert receipt["metrics"]["actions"] == 0
+    assert context.metadata["exit_status"] == "ModelTimeout"

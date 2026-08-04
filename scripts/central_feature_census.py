@@ -14,11 +14,112 @@ from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     WorkspaceTransition,
+    feature_payload_valid,
 )
+
+EXPECTED_TIMING = {
+    "obligations": ("task_start", (0,)),
+    "localization": ("search_result", (1,)),
+    "GT_LOC_RESLOT": ("search_result", (1,)),
+    "def_partition": ("search_result", (1,)),
+    "caller_contract": ("search_result", (1,)),
+    "newfile_precedent": (("search_result", "edit_result"), (1, 2)),
+    "GT_CHANGE_SURFACE": ("edit_result", (2,)),
+    "GT_PATCH_DELTA": ("edit_result", (2,)),
+    "signature_delta": ("edit_result", (2,)),
+    "syntax_result": ("edit_result", (2,)),
+    "GT_EDIT_CHECK": ("edit_result", (2,)),
+    "covering_red": ("test_result", (3, 4)),
+    "GT_HYPOTHESIS": ("test_result", (3, 4)),
+    "recovery": ("test_result", (4,)),
+    "submit_refusal": ("submit", (5,)),
+    "GT_SS_SUBMIT_RED": ("submit", (5,)),
+    "GT_CERT_DELIVERY": ("submit", (5,)),
+}
+
+
+def audit_timing(summary: dict) -> dict:
+    """Judge payload, boundary, chronology, and visibility for every feature."""
+    receipts = summary["receipts"]
+    audit = {}
+    for feature_id in CENTRAL_FEATURE_IDS:
+        rows = [row for row in receipts if row["feature_id"] == feature_id]
+        expected_boundary, expected_actions = EXPECTED_TIMING[feature_id]
+        boundaries = (
+            set(expected_boundary) if isinstance(expected_boundary, tuple) else {expected_boundary}
+        )
+        actual_actions = tuple(row["action"] for row in rows)
+        payloads_valid = all(
+            feature_payload_valid(
+                feature_id,
+                row["payload"],
+                boundary=row["boundary"],
+                revision=row["revision"],
+                fresh=row["fresh"],
+            )
+            for row in rows
+        )
+        boundaries_valid = bool(rows) and all(row["boundary"] in boundaries for row in rows)
+        actions_valid = actual_actions == expected_actions
+        visibility_valid = all(
+            row["model_visible"]
+            == (
+                row["decision"] == "DELIVERED"
+                and feature_id
+                in {
+                    "covering_red",
+                    "recovery",
+                    "signature_delta",
+                    "submit_refusal",
+                    "syntax_result",
+                }
+            )
+            for row in rows
+        )
+        audit[feature_id] = {
+            "valid": payloads_valid and boundaries_valid and actions_valid and visibility_valid,
+            "expected_boundary": expected_boundary,
+            "actual_boundaries": [row["boundary"] for row in rows],
+            "expected_actions": list(expected_actions),
+            "actual_actions": list(actual_actions),
+            "payloads_valid": payloads_valid,
+            "visibility_valid": visibility_valid,
+        }
+    audit["_global"] = {
+        "receipt_action_order_valid": [row["action"] for row in receipts]
+        == sorted(row["action"] for row in receipts),
+        "recovery_after_repeat": min(
+            row["action"] for row in receipts if row["feature_id"] == "recovery"
+        )
+        > min(row["action"] for row in receipts if row["feature_id"] == "covering_red"),
+        "submit_is_terminal_boundary": max(row["action"] for row in receipts) == 5,
+    }
+    audit["_global"]["valid"] = all(audit["_global"].values())
+    return audit
 
 
 def census() -> dict:
     runtime = CentralFeatureRuntime(model_visible=True)
+    decision_windows = []
+
+    def deliver_next(after_action: int) -> None:
+        feedback = runtime.model_feedback(deferred=True)
+        if not feedback:
+            return
+        metadata = runtime.confirm_prepared_guidance() or {}
+        evidence_action = int(metadata.get("evidence_action") or 0)
+        decision_windows.append(
+            {
+                "feature_id": metadata.get("feature_id"),
+                "evidence_action": evidence_action,
+                "prepared_after_action": after_action,
+                "delivered_before_next_decision": True,
+                "not_predictive": evidence_action <= after_action,
+                "not_late": evidence_action == after_action,
+                "chars": len(feedback),
+            }
+        )
+
     runtime.begin_task("Implement the requested change", revision="r0")
     runtime.observe_action(
         action_id=1,
@@ -31,6 +132,7 @@ def census() -> dict:
         transition=WorkspaceTransition(1, "search", "r0", "r0"),
         revision="r0",
     )
+    deliver_next(1)
     runtime.observe_action(
         action_id=2,
         command="sed -i 's/def f(/def f(x:/' app.py",
@@ -46,6 +148,17 @@ def census() -> dict:
         ),
         revision="r1",
     )
+    runtime.record_syntax(
+        action_id=2,
+        revision="r1",
+        failed=True,
+        reason="fixture_syntax_failure",
+        path="app.py",
+        command="python3 -m py_compile app.py",
+        returncode=1,
+        diagnostic="SyntaxError: invalid syntax",
+    )
+    deliver_next(2)
     for action_id in (3, 4):
         runtime.observe_action(
             action_id=action_id,
@@ -55,17 +168,39 @@ def census() -> dict:
             transition=WorkspaceTransition(action_id, "test", "r1", "r1"),
             revision="r1",
         )
-    runtime.record_syntax(action_id=2, revision="r1", failed=True, reason="fixture_syntax_failure")
+        deliver_next(action_id)
     runtime.record_submit(action_id=5, revision="r1", refused=True, sensor_healthy=True)
+    deliver_next(5)
     summary = runtime.summary()
+    summary["timing_audit"] = audit_timing(summary)
+    summary["all_17_timing_valid"] = all(row["valid"] for row in summary["timing_audit"].values())
+    summary["decision_window_audit"] = decision_windows
+    summary["all_guidance_on_time"] = all(
+        row["delivered_before_next_decision"] and row["not_predictive"] and row["not_late"]
+        for row in decision_windows
+    )
     summary["all_17_deliverable"] = (
         summary["feature_count"] == 17
         and set(summary["feature_ids"]) == set(CENTRAL_FEATURE_IDS)
         and all(summary["delivered_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
+        and all(row["fresh"] and row["payload"].get("message") for row in summary["receipts"])
         and all(
-            row["fresh"] and row["payload"].get("message") and row["model_visible"]
+            row["model_visible"]
+            == (
+                row["decision"] == "DELIVERED"
+                and row["feature_id"]
+                in {
+                    "covering_red",
+                    "recovery",
+                    "signature_delta",
+                    "submit_refusal",
+                    "syntax_result",
+                }
+            )
             for row in summary["receipts"]
         )
+        and summary["all_17_timing_valid"]
+        and summary["all_guidance_on_time"]
     )
     return summary
 
@@ -73,6 +208,8 @@ def census() -> dict:
 def main() -> int:
     result = census()
     print(json.dumps(result, indent=2, sort_keys=True))
+    print("ALL_17_TIMING_VALID" if result["all_17_timing_valid"] else "TIMING_INVALID")
+    print("ALL_GUIDANCE_ON_TIME" if result["all_guidance_on_time"] else "GUIDANCE_MISTIMED")
     print("ALL_17_DELIVERABLE" if result["all_17_deliverable"] else "NOT_READY")
     return 0 if result["all_17_deliverable"] else 1
 
