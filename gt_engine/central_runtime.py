@@ -25,6 +25,7 @@ _PRIVATE_TERMS = re.compile(r"groundtruth|gt_[a-z0-9_]*", re.IGNORECASE)
 _MISSING_EXECUTABLE = re.compile(
     r"(?:command not found|not found|no such file or directory|cannot execute)", re.IGNORECASE
 )
+_FAILURE_LINE = re.compile(r"\b(?:fail(?:ed|ure)?|error|exception|traceback|red)\b", re.I)
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MODEL_ACTIONABLE_FEATURES = frozenset(
     {"covering_red", "recovery", "signature_delta", "submit_refusal", "syntax_result"}
@@ -32,6 +33,24 @@ _MODEL_ACTIONABLE_FEATURES = frozenset(
 _NON_MATERIAL_PATH_PARTS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".git", ".hg", ".svn"}
 )
+_DERIVED_SUFFIXES = frozenset(
+    {
+        ".o", ".so", ".a", ".pyc", ".pyo", ".pyd", ".class", ".exe", ".dll",
+        ".lib", ".obj", ".elf", ".out", ".bin", ".log", ".dylib", ".jar",
+        ".whl", ".tar", ".gz", ".zip",
+    }
+)
+_DERIVED_PATH_PARTS = frozenset(
+    {
+        "__pycache__", ".pytest_cache", ".mypy_cache", ".hypothesis",
+        ".ruff_cache", ".git", ".hg", ".svn", "node_modules", ".venv", "venv",
+        "build", "dist", "target", ".tox", "eggs",
+    }
+)
+_BACKGROUND_ARTIFACT_NAMES = frozenset(
+    {"benchmark_out.txt", "callback-test.txt", "a.out", "data.comp"}
+)
+_DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +88,119 @@ class WorkspaceTransition:
         return tuple(sorted((*self.created, *self.modified, *self.deleted)))
 
 
+class ChangeOrigin(StrEnum):
+    """Why a path changed.  Only MODEL_AUTHORED advances source revision."""
+
+    MODEL_AUTHORED = "model_authored"
+    VALIDATOR_DERIVED = "validator_derived"
+    BACKGROUND_DERIVED = "background_derived"
+    TASK_DELIVERABLE = "task_deliverable"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ClassifiedChange:
+    path: str
+    kind: str
+    origin: ChangeOrigin
+    validation_relevant: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionState:
+    """Workspace revision (raw audit) versus validation-relevant source state."""
+
+    workspace_revision: str
+    source_revision: str
+    source_epoch: int = 0
+
+
+def classify_change(
+    path: str,
+    *,
+    kind: str = "f",
+    task_deliverables: Iterable[str] = (),
+) -> ClassifiedChange:
+    """Classify one changed path against the source-revision model.
+
+    Directories, caches, compiled objects, binaries, build products, logs,
+    benchmark output, and background-process writes never advance source
+    revision.  Task deliverables are tracked separately and satisfy
+    obligations without pretending to be source edits.
+    """
+    if path in set(task_deliverables):
+        return ClassifiedChange(path, kind, ChangeOrigin.TASK_DELIVERABLE, False)
+    parts = path.replace("\\", "/").split("/")
+    if kind != "f" or any(part in _DERIVED_PATH_PARTS for part in parts):
+        return ClassifiedChange(path, kind, ChangeOrigin.BACKGROUND_DERIVED, False)
+    lower = path.lower()
+    if any(lower.endswith(suffix) for suffix in _DERIVED_SUFFIXES):
+        return ClassifiedChange(path, kind, ChangeOrigin.VALIDATOR_DERIVED, False)
+    if any(name in path for name in _BACKGROUND_ARTIFACT_NAMES):
+        return ClassifiedChange(path, kind, ChangeOrigin.BACKGROUND_DERIVED, False)
+    return ClassifiedChange(path, kind, ChangeOrigin.MODEL_AUTHORED, True)
+
+
+def source_revision_of(
+    snapshot: WorkspaceSnapshot,
+    task_deliverables: Iterable[str] = (),
+) -> str:
+    """Hash only validation-relevant regular source files, never artifacts."""
+    deliverables = set(task_deliverables)
+    digest = hashlib.sha256()
+    for path, item in sorted(snapshot.entries.items()):
+        if item.kind != "f":
+            continue
+        if not classify_change(
+            path, kind=item.kind, task_deliverables=deliverables
+        ).validation_relevant:
+            continue
+        digest.update(path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(
+            "\t".join(
+                (
+                    item.kind,
+                    str(item.size),
+                    item.mtime,
+                    item.ctime,
+                    item.link_target,
+                    item.digest,
+                )
+            ).encode("utf-8", "surrogateescape")
+        )
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
+    """Return paths the task contract explicitly names as required output."""
+    found: list[str] = []
+    for line in instruction.splitlines():
+        if not re.search(
+            r"\b(?:output|report|result|write|create|save|produce|generate|deliverable)\b",
+            line,
+            re.I,
+        ):
+            continue
+        for token in re.findall(r"`([^`\r\n]+)`", line):
+            path = token.strip()
+            if (
+                path.lower().endswith(_DELIVERABLE_SUFFIXES)
+                and not is_submit_command(path)
+            ):
+                found.append(path)
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9_.-])([\w./-]+\.(?:jsonl?|csv|txt|md|out|comp))\b",
+            line,
+            re.I,
+        ):
+            path = match.group(1)
+            if path not in found:
+                found.append(path)
+    return tuple(dict.fromkeys(found))
+
+
 class InterventionDecision(StrEnum):
     PASS = "PASS"
     ADVISE = "ADVISE"
@@ -89,6 +221,9 @@ class CheckEvidence:
     returncode: int
     revision: str
     grounded: bool
+    command_class: str = ""
+    failure_kind: str = ""
+    source_revision: str = ""
 
 
 # The historical direct inventory is 10 FACT identities plus 7 CAP_OWNER
@@ -315,15 +450,6 @@ def normalize_command(command: str) -> str:
     return " ".join(command.strip().split())
 
 
-def _is_material_path(path: str) -> bool:
-    """Exclude interpreter and test-cache artifacts from engine edit state."""
-    parts = path.replace("\\", "/").split("/")
-    return not (
-        any(part in _NON_MATERIAL_PATH_PARTS for part in parts)
-        or path.endswith((".pyc", ".pyo"))
-    )
-
-
 def is_submit_command(command: str) -> bool:
     compact = re.sub(r"[\s'\"\\+]", "", command)
     return _SUBMIT_MARKER in compact
@@ -331,12 +457,51 @@ def is_submit_command(command: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ValidationClassification:
-    """Provenance classification for a shell action's validation meaning."""
+    """Single immutable classification of one shell action's validation meaning.
+
+    The agent classifies each executed action exactly once and shares this
+    object with the feature runtime, the evidence ledger, the receipt writer,
+    and the metrics extractor so no component ever reparses the command.
+    """
 
     command_class: str
     is_validation: bool
     grounded: bool
     failure_kind: str
+    command: str = ""
+    normalized_command: str = ""
+    declared_check_id: str | None = None
+    result_code: int | None = None
+    source_revision: str = ""
+    workspace_revision: str = ""
+    diagnostic_fingerprint: str = ""
+
+    def with_result(
+        self,
+        *,
+        result_code: int,
+        output: str,
+        source_revision: str,
+        workspace_revision: str,
+    ) -> ValidationClassification:
+        """Return a copy carrying execution outcome and revision bindings."""
+        failure_kind = classify_failure_kind(result_code, output)
+        failure_signature = " ".join(
+            line.strip()
+            for line in (output or "").splitlines()
+            if _FAILURE_LINE.search(line)
+        )[:240]
+        fingerprint = hashlib.sha256(
+            f"{result_code}\0{failure_signature.lower()}".encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        return replace(
+            self,
+            failure_kind=failure_kind,
+            result_code=result_code,
+            source_revision=source_revision,
+            workspace_revision=workspace_revision,
+            diagnostic_fingerprint=fingerprint,
+        )
 
 
 def _without_heredoc_bodies(command: str) -> str:
@@ -428,10 +593,59 @@ def classify_validation_command(
     grounded = is_grounded_check(normalized, explicit_checks)
     recognized = any(_recognized_validation(segment) for segment in _shell_segments(command))
     if grounded:
-        return ValidationClassification("declared_validation", True, True, "")
-    if recognized:
-        return ValidationClassification("recognized_validation", True, False, "")
-    return ValidationClassification("exploration_or_unknown", False, False, "")
+        command_class = "declared_validation"
+    elif recognized:
+        command_class = "recognized_validation"
+    else:
+        command_class = "exploration_or_unknown"
+    return ValidationClassification(
+        command_class=command_class,
+        is_validation=grounded or recognized,
+        grounded=grounded,
+        failure_kind="",
+        command=command,
+        normalized_command=normalized,
+        declared_check_id=_declared_check_id(normalized, explicit_checks),
+    )
+
+
+def _declared_check_id(normalized: str, explicit_checks: Iterable[str]) -> str | None:
+    for check in explicit_checks:
+        if check == normalized or check in normalized:
+            return check
+    return None
+
+
+def select_declared_check(
+    explicit_checks: Iterable[str],
+    states: dict[str, str],
+) -> str | None:
+    """Pick the highest-priority declared check that is not freshly passing.
+
+    Never blindly selects ``explicit_checks[0]``.  Task verifiers and focused
+    behavioral checks outrank generic build steps.  A check whose state is
+    ``passed`` is satisfied at the current source revision and skipped; a
+    ``stale`` check (source changed after its pass) is a candidate again.
+    """
+    ordered = list(dict.fromkeys(explicit_checks))
+    if not ordered:
+        return None
+
+    def priority(check: str) -> int:
+        lower = check.lower()
+        if "verify" in lower or "/test" in lower:
+            return 0
+        if "pytest" in lower or "unittest" in lower or "test" in lower:
+            return 1
+        if "build" in lower or "compile" in lower or "setup.py" in lower:
+            return 2
+        return 3
+
+    ranked = sorted(enumerate(ordered), key=lambda pair: (priority(pair[1]), pair[0]))
+    for _, check in ranked:
+        if states.get(check) != "passed":
+            return check
+    return None
 
 
 def classify_failure_kind(returncode: int, output: str) -> str:
@@ -500,13 +714,31 @@ class EvidenceLedger:
         returncode: int,
         revision: str,
         grounded: bool,
+        classification: ValidationClassification | None = None,
     ) -> None:
         key = normalize_command(command)
-        self.outcomes[key] = CheckEvidence(key, returncode, revision, grounded)
+        evidence = CheckEvidence(
+            command=key,
+            returncode=returncode,
+            revision=revision,
+            grounded=grounded,
+            command_class=(
+                classification.command_class if classification else "unknown"
+            ),
+            failure_kind=(
+                classification.failure_kind
+                if classification and classification.is_validation
+                else ""
+            ),
+            source_revision=(
+                classification.source_revision if classification else revision
+            ),
+        )
+        self.outcomes[key] = evidence
         if returncode == 0:
             self.checks.pop(key, None)
             return
-        self.checks[key] = CheckEvidence(key, returncode, revision, grounded)
+        self.checks[key] = evidence
 
     def submit_decision(self, revision: str, *, sensor_healthy: bool = True) -> SubmitDecision:
         if not sensor_healthy:
@@ -713,6 +945,8 @@ class FeatureReceipt:
     payload: dict[str, Any]
     fresh: bool
     model_visible: bool
+    source_revision: str = ""
+    source_epoch: int = 0
 
 
 class CentralFeatureRuntime:
@@ -796,6 +1030,10 @@ class CentralFeatureRuntime:
         self._validation_debt_notified = False
         self._consumer_paths: dict[str, list[str]] = {}
         self._effects: list[dict[str, Any]] = []
+        self._task_deliverables: set[str] = set()
+        self._source_epoch = 0
+        self._declared_check_states: dict[str, str] = {}
+        self._validation_log: list[dict[str, Any]] = []
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -825,6 +1063,8 @@ class CentralFeatureRuntime:
         decision: str = "DELIVERED",
         reason: str,
         payload: dict[str, Any] | None = None,
+        source_revision: str | None = None,
+        source_epoch: int | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -854,6 +1094,10 @@ class CentralFeatureRuntime:
                 payload=candidate_payload,
                 fresh=True,
                 model_visible=self._is_model_actionable(feature_id, decision, candidate_payload),
+                source_revision=source_revision if source_revision is not None else revision,
+                source_epoch=(
+                    source_epoch if source_epoch is not None else self._source_epoch
+                ),
             )
         )
         # CAP_OWNER delivery is a separate auditable row, not an alias that
@@ -879,6 +1123,8 @@ class CentralFeatureRuntime:
                         "owner_feature": feature_id,
                         "message": self._payload(feature_id, boundary, reason)["message"],
                     },
+                    source_revision=source_revision,
+                    source_epoch=source_epoch,
                 )
 
     @staticmethod
@@ -920,11 +1166,18 @@ class CentralFeatureRuntime:
         return before[:120], after[:120]
 
     def begin_task(
-        self, instruction: str, *, revision: str, explicit_checks: Iterable[str] = ()
+        self,
+        instruction: str,
+        *,
+        revision: str,
+        source_revision: str | None = None,
+        explicit_checks: Iterable[str] = (),
+        task_deliverables: Iterable[str] = (),
     ) -> None:
         if not self.enabled:
             return
         self._explicit_checks = tuple(explicit_checks)
+        self._task_deliverables = set(task_deliverables)
         self._mark_lifecycle("task_started", action_id=0)
         if instruction.strip():
             self._mark_lifecycle("contract_captured", action_id=0)
@@ -933,6 +1186,7 @@ class CentralFeatureRuntime:
                 boundary="task_start",
                 action_id=0,
                 revision=revision,
+                source_revision=source_revision,
                 reason="non_empty_task_instruction",
                 payload={
                     "requirements_present": True,
@@ -961,10 +1215,17 @@ class CentralFeatureRuntime:
         returncode: int,
         transition: WorkspaceTransition,
         revision: str,
+        source_revision: str | None = None,
+        snapshot: WorkspaceSnapshot | None = None,
+        validation: ValidationClassification | None = None,
     ) -> None:
         if not self.enabled:
             return
         normalized = normalize_command(command)
+        source_rev = source_revision if source_revision is not None else revision
+        classification = validation or classify_validation_command(
+            command, self._explicit_checks
+        )
         is_search = bool(self._SEARCH.search(normalized))
         self._action_metrics["observed_actions"] += 1
         self._action_metrics["successful_actions" if returncode == 0 else "failed_actions"] += 1
@@ -976,8 +1237,22 @@ class CentralFeatureRuntime:
             self._action_metrics["repeated_commands"] += 1
         if is_search:
             self._action_metrics["search_actions"] += 1
-        validation = classify_validation_command(command, self._explicit_checks)
-        if validation.is_validation:
+        self._validation_log.append(
+            {
+                "action": action_id,
+                "command": classification.normalized_command,
+                "command_class": classification.command_class,
+                "is_validation": classification.is_validation,
+                "grounded": classification.grounded,
+                "declared_check_id": classification.declared_check_id,
+                "failure_kind": classification.failure_kind,
+                "result_code": classification.result_code,
+                "source_revision": source_rev,
+                "workspace_revision": revision,
+                "diagnostic_fingerprint": classification.diagnostic_fingerprint,
+            }
+        )
+        if classification.is_validation:
             self._action_metrics["check_actions"] += 1
             self._mark_lifecycle("behavior_observed", action_id=action_id)
             if self._workspace_edited:
@@ -992,44 +1267,79 @@ class CentralFeatureRuntime:
                     action_id=action_id,
                     status="passed" if returncode == 0 else "failed",
                 )
+            if classification.declared_check_id:
+                self._declared_check_states[classification.declared_check_id] = (
+                    "passed" if returncode == 0 else "failed"
+                )
             if returncode == 0:
                 self._unvalidated_material_edits = 0
                 self._validation_debt_notified = False
+
+        classified: dict[str, ClassifiedChange] = {}
+        for path in transition.changed_paths:
+            kind = "f"
+            if snapshot is not None:
+                state = snapshot.entries.get(path)
+                if state is not None:
+                    kind = state.kind
+            classified[path] = classify_change(
+                path, kind=kind, task_deliverables=self._task_deliverables
+            )
+        source_relevant = tuple(
+            item.path for item in classified.values() if item.validation_relevant
+        )
+        model_authored = tuple(
+            item.path
+            for item in classified.values()
+            if item.origin == ChangeOrigin.MODEL_AUTHORED
+        )
         if transition.changed_paths:
-            material_paths = tuple(
-                path for path in transition.changed_paths if _is_material_path(path)
-            )
-            material_created = tuple(
-                path for path in transition.created if _is_material_path(path)
-            )
-            material_modified = tuple(
-                path for path in transition.modified if _is_material_path(path)
-            )
-            material_deleted = tuple(
-                path for path in transition.deleted if _is_material_path(path)
-            )
-            if material_paths:
+            if model_authored:
+                # Any authored source change makes prior check results stale.
+                self._source_epoch += 1
+                self._declared_check_states = {
+                    check: ("stale" if state == "passed" else state)
+                    for check, state in self._declared_check_states.items()
+                }
+            if source_relevant:
                 self._workspace_edited = True
                 self._unvalidated_material_edits += 1
                 self._action_metrics["workspace_change_actions"] += 1
-                self._action_metrics["created_paths"] += len(material_created)
-                self._action_metrics["modified_paths"] += len(material_modified)
-                self._action_metrics["deleted_paths"] += len(material_deleted)
+                self._action_metrics["created_paths"] += sum(
+                    item.path in transition.created for item in classified.values()
+                    if item.validation_relevant
+                )
+                self._action_metrics["modified_paths"] += sum(
+                    item.path in transition.modified for item in classified.values()
+                    if item.validation_relevant
+                )
+                self._action_metrics["deleted_paths"] += sum(
+                    item.path in transition.deleted for item in classified.values()
+                    if item.validation_relevant
+                )
                 self._mark_lifecycle("workspace_edited", action_id=action_id)
                 self._mark_lifecycle("change_surface_certified", action_id=action_id)
-                changed = list(material_paths)
+                changed = list(source_relevant)
                 surface_message = "Workspace change observed: " + ", ".join(changed[:4])
                 self._emit(
                     "GT_CHANGE_SURFACE",
                     boundary="edit_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="workspace_revision_changed",
                     payload={
                         "owner_feature": "newfile_precedent",
-                        "created": list(material_created),
-                        "modified": list(material_modified),
-                        "deleted": list(material_deleted),
+                        "created": list(transition.created),
+                        "modified": list(transition.modified),
+                        "deleted": list(transition.deleted),
+                        "source_relevant": changed,
+                        "origins": {
+                            origin.value: sum(
+                                item.origin == origin for item in classified.values()
+                            )
+                            for origin in ChangeOrigin
+                        },
                         "message": surface_message,
                     },
                 )
@@ -1038,6 +1348,7 @@ class CentralFeatureRuntime:
                     boundary="edit_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="non_empty_patch_surface",
                     payload={
                         "owner_feature": "signature_delta",
@@ -1050,26 +1361,31 @@ class CentralFeatureRuntime:
                     and self._unvalidated_material_edits >= 3
                     and not self._validation_debt_notified
                 ):
-                    declared_check = self._explicit_checks[0][:120]
-                    self._emit(
-                        "GT_EDIT_CHECK",
-                        boundary="edit_result",
-                        action_id=action_id,
-                        revision=revision,
-                        reason="multiple_material_edits_without_validation",
-                        payload={
-                            "owner_feature": "syntax_result",
-                            "intervention": "validation_debt",
-                            "material_edit_count": self._unvalidated_material_edits,
-                            "declared_check": declared_check,
-                            "changed_paths": changed[:4],
-                            "message": (
-                                "Three source revisions have no completed behavioral validation. "
-                                f"Run the declared check before another edit: {declared_check}"
-                            ),
-                        },
+                    declared_check = select_declared_check(
+                        self._explicit_checks, self._declared_check_states
                     )
-                    self._validation_debt_notified = True
+                    if declared_check:
+                        self._emit(
+                            "GT_EDIT_CHECK",
+                            boundary="edit_result",
+                            action_id=action_id,
+                            revision=revision,
+                            source_revision=source_rev,
+                            reason="multiple_material_edits_without_validation",
+                            payload={
+                                "owner_feature": "syntax_result",
+                                "intervention": "validation_debt",
+                                "material_edit_count": self._unvalidated_material_edits,
+                                "declared_check": declared_check[:120],
+                                "changed_paths": changed[:4],
+                                "message": (
+                                    "Three source revisions have no completed behavioral "
+                                    "validation. Run the declared check before another edit: "
+                                    f"{declared_check[:120]}"
+                                ),
+                            },
+                        )
+                        self._validation_debt_notified = True
             else:
                 self._action_metrics["no_change_actions"] += 1
         else:
@@ -1082,6 +1398,7 @@ class CentralFeatureRuntime:
                 boundary="search_result",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_rev,
                 reason="non_empty_search_result",
                 payload={
                     "candidate_locations": True,
@@ -1096,6 +1413,7 @@ class CentralFeatureRuntime:
                     boundary="search_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="definitions_and_references_present",
                     payload={
                         "definitions": True,
@@ -1112,6 +1430,7 @@ class CentralFeatureRuntime:
                     boundary="search_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="verified_caller_language_in_search_result",
                     payload={
                         "callers_verified": True,
@@ -1129,6 +1448,7 @@ class CentralFeatureRuntime:
                     boundary="search_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="precedent_marker_in_search_result",
                     payload={
                         "precedent_verified": True,
@@ -1141,19 +1461,24 @@ class CentralFeatureRuntime:
                 )
 
         failure_kind = classify_failure_kind(returncode, output)
-        if returncode != 0 and validation.is_validation and failure_kind == "validation_failure":
+        if (
+            returncode != 0
+            and classification.is_validation
+            and failure_kind == "validation_failure"
+        ):
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
             self._emit(
                 "covering_red",
                 boundary="test_result",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_rev,
                 reason="failed_check_or_failure_output",
                 payload={
                     "check_failed": True,
                     "returncode": returncode,
                     "phase": check_phase,
-                    "command_class": validation.command_class,
+                    "command_class": classification.command_class,
                     "failure_kind": failure_kind,
                     "attribution": "validation_result_unattributed",
                     "message": self._payload(
@@ -1161,14 +1486,8 @@ class CentralFeatureRuntime:
                     )["message"],
                 },
             )
-            failure_signature = " ".join(
-                line.strip() for line in (output or "").splitlines() if self._FAILURE.search(line)
-            )[:240]
-            fingerprint_source = f"{returncode}\0{failure_signature.lower()}"
-            failure_fingerprint = hashlib.sha256(
-                fingerprint_source.encode("utf-8", "replace")
-            ).hexdigest()[:16]
-            failure_key = (normalized, failure_fingerprint, returncode, revision)
+            failure_fingerprint = classification.diagnostic_fingerprint
+            failure_key = (normalized, failure_fingerprint, returncode, source_rev)
             count = self._failed_actions.get(failure_key, 0) + 1
             self._failed_actions[failure_key] = count
             self._emit(
@@ -1176,6 +1495,7 @@ class CentralFeatureRuntime:
                 boundary="test_result",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_rev,
                 reason="deterministic_failure_state_transition",
                 payload={
                     "owner_feature": "recovery",
@@ -1190,6 +1510,7 @@ class CentralFeatureRuntime:
                     boundary="test_result",
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_rev,
                     reason="same_failure_repeated",
                     payload={
                         "repeat_count": count,
@@ -1206,6 +1527,7 @@ class CentralFeatureRuntime:
                 boundary="edit_result",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_rev,
                 reason="new_file_after_verified_precedent",
                 payload={
                     "created_files": len(transition.created),
@@ -1225,6 +1547,7 @@ class CentralFeatureRuntime:
                 boundary="edit_result",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_rev,
                 reason="signature-shaped edit on changed path",
                 payload={
                     "changed_paths": list(transition.changed_paths),
@@ -1251,6 +1574,7 @@ class CentralFeatureRuntime:
         command: str = "",
         returncode: int | None = None,
         diagnostic: str = "",
+        source_revision: str | None = None,
     ) -> None:
         self._action_metrics["lint_checks"] += 1
         self._action_metrics["lint_failures" if failed else "lint_passes"] += 1
@@ -1270,6 +1594,7 @@ class CentralFeatureRuntime:
             boundary="edit_result",
             action_id=action_id,
             revision=revision,
+            source_revision=source_revision,
             decision="DELIVERED" if failed else "PASS",
             reason=reason,
             payload={
@@ -1292,6 +1617,7 @@ class CentralFeatureRuntime:
         check_count: int = 0,
         passing_checks: int = 0,
         failing_checks: int = 0,
+        source_revision: str | None = None,
     ) -> None:
         self._action_metrics["submit_attempts"] += 1
         if refused:
@@ -1304,6 +1630,7 @@ class CentralFeatureRuntime:
                 boundary="submit",
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_revision,
                 reason="fresh_grounded_failure",
                 payload={
                     "refused": True,
@@ -1313,13 +1640,14 @@ class CentralFeatureRuntime:
                     ],
                 },
             )
-        self._emit(
-            "GT_CERT_DELIVERY",
-            boundary="submit",
-            action_id=action_id,
-            revision=revision,
-            decision="DELIVERED" if sensor_healthy else "PASS",
-            reason="submission_readiness_receipt",
+            self._emit(
+                "GT_CERT_DELIVERY",
+                boundary="submit",
+                action_id=action_id,
+                revision=revision,
+                source_revision=source_revision,
+                decision="DELIVERED" if sensor_healthy else "PASS",
+                reason="submission_readiness_receipt",
             payload={
                 "sensor_healthy": sensor_healthy,
                 "refused": refused,
@@ -1363,6 +1691,9 @@ class CentralFeatureRuntime:
             "produced_counts": by_feature,
             "consumer_paths": dict(self._consumer_paths),
             "effects": list(self._effects),
+            "source_epoch": self._source_epoch,
+            "validation_log": list(self._validation_log),
+            "declared_check_states": dict(self._declared_check_states),
             "receipts": [
                 {
                     "feature_id": item.feature_id,
@@ -1375,6 +1706,8 @@ class CentralFeatureRuntime:
                     "payload": item.payload,
                     "fresh": item.fresh,
                     "model_visible": item.model_visible,
+                    "source_revision": item.source_revision,
+                    "source_epoch": item.source_epoch,
                 }
                 for item in self.receipts
             ],

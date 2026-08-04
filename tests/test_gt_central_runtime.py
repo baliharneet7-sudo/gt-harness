@@ -5,17 +5,22 @@ import pytest
 from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
+    ChangeOrigin,
     EvidenceLedger,
     FileState,
     InterventionDecision,
     WorkspaceSensor,
     WorkspaceSnapshot,
     WorkspaceTransition,
+    classify_change,
     classify_validation_command,
     diff_snapshots,
     explicit_check_commands,
     parse_manifest,
     render_runtime_feedback,
+    select_declared_check,
+    source_revision_of,
+    task_deliverable_paths,
 )
 from scripts.central_feature_census import census
 
@@ -545,3 +550,183 @@ async def test_malformed_manifest_fails_open_without_inventing_deletions():
     transition = diff_snapshots(previous, snapshot, action_id=2, command="pwd")
     assert snapshot.healthy is False
     assert transition.changed_paths == ()
+
+
+def test_task_deliverable_paths_extracts_contract_outputs():
+    instruction = (
+        "Run `pytest -q` to validate. Write your final report to `report.jsonl` "
+        "as a JSON list of findings."
+    )
+
+    assert "report.jsonl" in task_deliverable_paths(instruction)
+    assert task_deliverable_paths("just fix the bug") == ()
+
+
+def test_classify_change_never_advances_source_for_artifacts():
+    for path, kind in (
+        ("benchmark_out.txt", "f"),
+        ("callback-test.txt", "f"),
+        ("a.out", "f"),
+        ("data.comp", "f"),
+        ("build/x.o", "f"),
+        ("app.so", "f"),
+        ("logs/run.log", "f"),
+        ("__pycache__/x.pyc", "f"),
+        ("build", "d"),
+    ):
+        change = classify_change(path, kind=kind)
+        assert change.validation_relevant is False, path
+        assert change.origin != ChangeOrigin.MODEL_AUTHORED, path
+
+    assert classify_change("app.py", kind="f").validation_relevant is True
+    assert classify_change("eval.scm", kind="f").validation_relevant is True
+
+
+def test_report_jsonl_is_a_deliverable_not_source():
+    change = classify_change("report.jsonl", kind="f", task_deliverables={"report.jsonl"})
+
+    assert change.origin == ChangeOrigin.TASK_DELIVERABLE
+    assert change.validation_relevant is False
+
+
+def test_source_revision_ignores_artifact_changes_but_not_source_edits():
+    base = parse_manifest("f\t10\t1.0\t1.0\tapp.py\t\nf\t5\t1.0\t1.0\tbenchmark_out.txt\t\n")
+    artifact_only = parse_manifest(
+        "f\t10\t1.0\t1.0\tapp.py\t\nf\t99\t2.0\t2.0\tbenchmark_out.txt\t\n"
+    )
+    source_edit = parse_manifest("f\t11\t2.0\t2.0\tapp.py\t\nf\t5\t1.0\t1.0\tbenchmark_out.txt\t\n")
+
+    assert source_revision_of(artifact_only) == source_revision_of(base)
+    assert source_revision_of(source_edit) != source_revision_of(base)
+
+
+def test_validation_debt_does_not_fire_on_artifact_only_changes():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Update it, then run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+        task_deliverables={"report.jsonl"},
+    )
+    for action_id, path in ((1, "benchmark_out.txt"), (2, "report.jsonl"), (3, "build/x.o")):
+        runtime.observe_action(
+            action_id=action_id,
+            command=f"write {path}",
+            output="",
+            returncode=0,
+            transition=WorkspaceTransition(
+                action_id, "write", "r0", f"r{action_id}", modified=(path,)
+            ),
+            revision=f"r{action_id}",
+        )
+
+    assert runtime.model_feedback() == ""
+    assert runtime.summary()["source_epoch"] == 0
+    assert runtime.summary()["action_metrics"]["workspace_change_actions"] == 0
+
+
+def test_validation_debt_selects_highest_priority_declared_check():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Build then verify: run `python3 setup.py build_ext --inplace` and "
+        "`python3 /app/verify_solution.py`.",
+        revision="r0",
+        explicit_checks=(
+            "python3 setup.py build_ext --inplace",
+            "python3 /app/verify_solution.py",
+        ),
+    )
+    for action_id in (1, 2, 3):
+        runtime.observe_action(
+            action_id=action_id,
+            command=f"write app.py {action_id}",
+            output="",
+            returncode=0,
+            transition=WorkspaceTransition(
+                action_id, "write", "r0", f"r{action_id}", modified=("app.py",)
+            ),
+            revision=f"r{action_id}",
+        )
+
+    feedback = runtime.model_feedback()
+    assert "/app/verify_solution.py" in feedback
+
+
+def test_select_declared_check_skips_freshly_passing_checks():
+    checks = ("build", "verify")
+    assert select_declared_check(checks, {"verify": "passed"}) == "build"
+    assert select_declared_check(checks, {"build": "passed", "verify": "passed"}) is None
+    assert select_declared_check(checks, {"verify": "stale"}) == "verify"
+
+
+def test_ledger_records_declared_validation_bound_to_source_revision():
+    ledger = EvidenceLedger(max_holds=1)
+    source_r = "source-v1"
+    classification = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+        result_code=1,
+        output="1 failed: assert error",
+        source_revision=source_r,
+        workspace_revision="workspace-v9",
+    )
+    ledger.record_check(
+        "pytest -q",
+        returncode=1,
+        revision=source_r,
+        grounded=True,
+        classification=classification,
+    )
+
+    readiness = ledger.readiness_evidence(source_r)
+    assert len(readiness) == 1
+    assert readiness[0].command_class == "declared_validation"
+    assert readiness[0].failure_kind == "validation_failure"
+    assert ledger.submit_decision(source_r).decision == InterventionDecision.HOLD_ONCE
+
+
+def test_fresh_passing_declared_check_yields_positive_certificate_counts():
+    ledger = EvidenceLedger(max_holds=1)
+    source_r = "source-v1"
+    classification = classify_validation_command("pytest -q", ("pytest -q",))
+    ledger.record_check(
+        "pytest -q",
+        returncode=0,
+        revision=source_r,
+        grounded=True,
+        classification=classification,
+    )
+
+    evidence = ledger.readiness_evidence(source_r)
+    assert len(evidence) == 1
+    assert evidence[0].returncode == 0
+    assert ledger.submit_decision(source_r).decision == InterventionDecision.PASS
+
+
+def test_runtime_validation_log_records_declared_checks():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+    )
+    classification = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+        result_code=0,
+        output="1 passed",
+        source_revision="r0",
+        workspace_revision="r0",
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 passed",
+        returncode=0,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+        source_revision="r0",
+        validation=classification,
+    )
+
+    log = runtime.summary()["validation_log"]
+    assert len(log) == 1
+    assert log[0]["command_class"] == "declared_validation"
+    assert log[0]["declared_check_id"] == "pytest -q"
+    assert log[0]["result_code"] == 0

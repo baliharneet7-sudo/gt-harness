@@ -399,7 +399,7 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
     await agent.run("do it", _Environment(), context)
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
-    assert receipt["schema"] == "central-runtime-receipt-v2"
+    assert receipt["schema"] == "central-runtime-receipt-v3"
     assert receipt["metrics"]["censored"] is True
     assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
     assert receipt["metrics"]["actions"] == 0

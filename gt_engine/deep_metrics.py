@@ -257,6 +257,21 @@ def extract_trajectory(
         receipt = _load_json(receipt_path)
         feature_summary = receipt.get("features") or {}
         call_contexts = receipt.get("model_call_contexts") or []
+        validation_log = feature_summary.get("validation_log") or []
+        if validation_log:
+            # Unified classification is authoritative when present; never
+            # reparse commands in a way that can disagree with the runtime.
+            result["check_actions"] = sum(
+                1 for row in validation_log if row.get("is_validation")
+            )
+            result["declared_validation_actions"] = sum(
+                1 for row in validation_log if row.get("command_class") == "declared_validation"
+            )
+            result["recognized_validation_actions"] = sum(
+                1
+                for row in validation_log
+                if row.get("command_class") == "recognized_validation"
+            )
         result.update(_receipt_ladder(receipt, action_rows))
         result.update(
             {

@@ -41,13 +41,15 @@ from gt_engine.central_runtime import (
     EvidenceLedger,
     InterventionDecision,
     WorkspaceSensor,
+    classify_validation_command,
     diff_snapshots,
     explicit_check_commands,
     is_check_command,
-    is_grounded_check,
     is_submit_command,
     lint_commands,
     render_runtime_feedback,
+    source_revision_of,
+    task_deliverable_paths,
 )
 from gt_engine.deep_metrics import normalized_token_cost
 
@@ -163,6 +165,7 @@ class MiniSweCentralAgent(BaseAgent):
         environment: BaseEnvironment,
         changed_paths: tuple[str, ...],
         revision: str,
+        source_revision: str,
         action_id: int,
     ) -> str:
         for path, command in lint_commands(changed_paths):
@@ -181,12 +184,13 @@ class MiniSweCentralAgent(BaseAgent):
                 self._ledger.record_check(
                     f"syntax:{path}",
                     returncode=result.return_code,
-                    revision=revision,
+                    revision=source_revision,
                     grounded=True,
                 )
                 self._features.record_syntax(
                     action_id=action_id,
                     revision=revision,
+                    source_revision=source_revision,
                     failed=True,
                     reason="changed_file_syntax_failure",
                     path=path,
@@ -196,11 +200,12 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 return detail
             self._ledger.record_check(
-                f"syntax:{path}", returncode=0, revision=revision, grounded=True
+                f"syntax:{path}", returncode=0, revision=source_revision, grounded=True
             )
             self._features.record_syntax(
                 action_id=action_id,
                 revision=revision,
+                source_revision=source_revision,
                 failed=False,
                 reason="changed_file_syntax_pass",
                 path=path,
@@ -350,9 +355,15 @@ class MiniSweCentralAgent(BaseAgent):
             ),
         ]
         explicit_checks = explicit_check_commands(instruction)
+        task_deliverables = task_deliverable_paths(instruction)
         snapshot = await self._sensor.scan(environment, cwd=self.cwd)
+        source_revision = source_revision_of(snapshot, task_deliverables)
         self._features.begin_task(
-            instruction, revision=snapshot.revision, explicit_checks=explicit_checks
+            instruction,
+            revision=snapshot.revision,
+            source_revision=source_revision,
+            explicit_checks=explicit_checks,
+            task_deliverables=task_deliverables,
         )
         calls = 0
         actions_count = 0
@@ -481,9 +492,9 @@ class MiniSweCentralAgent(BaseAgent):
                     submit = is_submit_command(command)
                     if submit and self.enable_submit_readiness:
                         decision = self._ledger.submit_decision(
-                            snapshot.revision, sensor_healthy=snapshot.healthy
+                            source_revision, sensor_healthy=snapshot.healthy
                         )
-                        readiness_evidence = self._ledger.readiness_evidence(snapshot.revision)
+                        readiness_evidence = self._ledger.readiness_evidence(source_revision)
                         readiness_kwargs = {
                             "check_count": len(readiness_evidence),
                             "passing_checks": sum(
@@ -499,7 +510,8 @@ class MiniSweCentralAgent(BaseAgent):
                         ):
                             self._features.record_submit(
                                 action_id=actions_count,
-                                revision=snapshot.revision,
+                                revision=source_revision,
+                                source_revision=source_revision,
                                 refused=True,
                                 sensor_healthy=snapshot.healthy,
                                 **readiness_kwargs,
@@ -519,14 +531,15 @@ class MiniSweCentralAgent(BaseAgent):
                                     "action": actions_count,
                                     "kind": "submit_readiness",
                                     "decision": "HOLD_ONCE",
-                                    "revision": snapshot.revision,
+                                    "revision": source_revision,
                                 }
                             )
                             submit_held = True
                             continue
                         self._features.record_submit(
                             action_id=actions_count,
-                            revision=snapshot.revision,
+                            revision=source_revision,
+                            source_revision=source_revision,
                             refused=False,
                             sensor_healthy=snapshot.healthy,
                             **readiness_kwargs,
@@ -541,7 +554,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     and decision.decision == InterventionDecision.HOLD_ONCE
                                     else "PASS"
                                 ),
-                                "revision": snapshot.revision,
+                                "revision": source_revision,
                             }
                         )
 
@@ -571,6 +584,15 @@ class MiniSweCentralAgent(BaseAgent):
                         command=command,
                     )
                     snapshot = after
+                    source_revision = source_revision_of(after, task_deliverables)
+                    classification = classify_validation_command(
+                        command, explicit_checks
+                    ).with_result(
+                        result_code=result.return_code,
+                        output=output["output"],
+                        source_revision=source_revision,
+                        workspace_revision=snapshot.revision,
+                    )
                     self._features.observe_action(
                         action_id=actions_count,
                         command=command,
@@ -578,14 +600,18 @@ class MiniSweCentralAgent(BaseAgent):
                         returncode=result.return_code,
                         transition=transition,
                         revision=snapshot.revision,
+                        source_revision=source_revision,
+                        snapshot=snapshot,
+                        validation=classification,
                     )
 
-                    if is_check_command(command):
+                    if classification.is_validation:
                         self._ledger.record_check(
                             command,
                             returncode=result.return_code,
-                            revision=snapshot.revision,
-                            grounded=is_grounded_check(command, explicit_checks),
+                            revision=source_revision,
+                            grounded=classification.grounded,
+                            classification=classification,
                         )
 
                     lint_feedback = ""
@@ -596,7 +622,11 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     if self.enable_lint and changed_files and snapshot.healthy:
                         lint_feedback = await self._run_lint(
-                            environment, changed_files, snapshot.revision, actions_count
+                            environment,
+                            changed_files,
+                            snapshot.revision,
+                            source_revision,
+                            actions_count,
                         )
                         receipts.append(
                             {
@@ -710,13 +740,14 @@ class MiniSweCentralAgent(BaseAgent):
             (self.logs_dir / "central_receipt.json").write_text(
                 json.dumps(
                     {
-                        "schema": "central-runtime-receipt-v2",
+                        "schema": "central-runtime-receipt-v3",
                         "mode": self.runtime_mode,
                         "calls": calls,
                         "actions": actions_count,
                         "elapsed_seconds": elapsed_seconds,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
+                        "source_revision": source_revision,
                         "metrics": deep_metrics,
                         "features": feature_summary,
                         "interventions": receipts,
