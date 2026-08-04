@@ -111,7 +111,10 @@ jobs:
         env:
           MODEL: ${{ inputs.model }}
         run: |
-          python - <<'EOF'
+          # Keep provider stalls from consuming the full 20-minute plan job.
+          # Coreutils timeout terminates the Python process; a thread timeout
+          # would leave the underlying HTTP request alive.
+          timeout --signal=TERM 150s python - <<'EOF'
           import os, sys
           import litellm
 
