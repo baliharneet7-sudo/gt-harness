@@ -1161,6 +1161,7 @@ class CentralFeatureRuntime:
         # actually exercised.
         self._effect_trace: list[dict[str, Any]] = []
         self._producer_events: list[dict[str, Any]] = []
+        self._pending_state_reads: list[dict[str, Any]] = []
         self._batch_interrupts: list[dict[str, Any]] = []
         self._task_deliverables: set[str] = set()
         self._source_epoch = 0
@@ -1593,6 +1594,11 @@ class CentralFeatureRuntime:
                         self._explicit_checks, self._declared_check_states
                     )
                     if declared_check:
+                        self.record_existing_consumer_read(
+                            feature_id="GT_CHANGE_SURFACE",
+                            action_id=action_id,
+                            purpose="material_edit_count_for_validation_debt",
+                        )
                         debt = (
                             self._unvalidated_material_edits >= 3
                             and not self._validation_debt_notified
@@ -1804,6 +1810,12 @@ class CentralFeatureRuntime:
                     "message": "A deterministic validation failure state was recorded.",
                 },
             )
+            if count >= 2:
+                self.record_existing_consumer_read(
+                    feature_id="GT_HYPOTHESIS",
+                    action_id=action_id,
+                    purpose="repeat_count_for_recovery_eligibility",
+                )
             blocker = classification.declared_check_id or classification.normalized_command[:200]
             blockers = [blocker] if blocker else []
             if (
@@ -2230,6 +2242,20 @@ class CentralFeatureRuntime:
             if event["feature_id"] == effect.feature_id
             and event["action"] == effect.evidence_action
         ]
+        pending_reads = [
+            read
+            for read in self._pending_state_reads
+            if read["feature_id"] == effect.feature_id
+            and read["evidence_action"] == effect.evidence_action
+        ]
+        self._pending_state_reads = [
+            read
+            for read in self._pending_state_reads
+            if not (
+                read["feature_id"] == effect.feature_id
+                and read["evidence_action"] == effect.evidence_action
+            )
+        ]
         self._effect_trace.append(
             {
                 "effect_id": effect.receipt_id,
@@ -2238,7 +2264,10 @@ class CentralFeatureRuntime:
                 "evidence_action": effect.evidence_action,
                 "applied_call": call,
                 "state_fields_changed": [section_name] if before != after else [],
-                "state_reads": [],
+                "state_reads": [
+                    {"action": read["action"], "purpose": read["purpose"]}
+                    for read in pending_reads
+                ],
                 "actuator_events": [
                     {
                         "kind": "producer_engine_event",
@@ -2250,7 +2279,11 @@ class CentralFeatureRuntime:
                 ],
                 "provider_delivery_ids": [],
                 "disposition": (
-                    "engine_internal_state" if producer_events else "audit_only"
+                    "existing_engine_actuation"
+                    if pending_reads
+                    else "engine_internal_state"
+                    if producer_events
+                    else "audit_only"
                 ),
                 "timing": {
                     "evidence_before_effect": (
@@ -2280,6 +2313,14 @@ class CentralFeatureRuntime:
         """Record an existing state read without changing runtime behavior."""
         row = self._trace_for_effect(feature_id)
         if row is None:
+            self._pending_state_reads.append(
+                {
+                    "feature_id": feature_id,
+                    "evidence_action": action_id,
+                    "action": action_id,
+                    "purpose": purpose,
+                }
+            )
             return
         row["state_reads"].append(
             {"action": action_id, "purpose": purpose}
