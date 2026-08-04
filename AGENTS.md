@@ -100,3 +100,26 @@ through the policy and confirm that each effect is reachable only on its
 intended lifecycle state. A smoke is confirmation, never exploratory debugging.
 The 89-task run remains blocked until outcome preservation and repeated
 outcome-first efficiency gates pass.
+
+## Final ten-task smoke (2026-08-04)
+
+The repaired treatment smoke is workflow `30954660207` on commit `e7418a7`
+(`inline-engine`). All ten jobs completed successfully. The receipt audit found
+372 effects produced and applied, with 297 `engine_internal_state`, 11
+`existing_engine_actuation`, 48 `audit_only`, and 16 `provider_payload`
+effects. There were 14 model payload deliveries, all grounded and in the first
+eligible request: 0 late and 0 predictive deliveries.
+
+The final source-precedent boundary is now strict. `newfile_precedent` may fire
+only for a regular model-authored validation-relevant source file with a
+recognized source suffix, and its payload names only that source trigger and a
+source-classified sibling. The ten-task audit found 10/10 valid precedent
+payloads and zero cache, binary, generated-output, or task-output paths. The
+previous smoke `30952995623` was rejected as evidence because it exposed the
+entire workspace-created batch in the payload; do not use it for readiness.
+
+Against the frozen GT-off baseline, the final smoke measured token delta
+`-9,135,151` (-31.26%), API-call delta `-51`, assistant-step delta `-53`, and
+action delta `-103`. These are a single matched-smoke efficiency signal, not a
+causal quality claim. The 89-task run has not been started; dispatch it only
+from this commit or a descendant after retaining the receipt audit.

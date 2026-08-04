@@ -61,6 +61,31 @@ provider-delivery IDs; `audit_only` is not trajectory influence. This tracing
 must not alter model prompts, effect routing, timing, action order, shadow
 visibility, or submit behavior.
 
+### Final ten-task correctness audit
+
+The final paid treatment smoke is workflow `30954660207` on commit `e7418a7`.
+All ten task jobs completed successfully. Every receipt had all 17 features
+enabled; 372 effects were produced and applied. The effect breakdown was 297
+engine-internal state effects, 11 existing engine-actuation effects, 48
+audit-only effects, and 16 provider-payload effects. Fourteen payloads reached
+the model; all were concrete, grounded, non-predictive, and delivered in the
+first eligible provider request. Late deliveries: 0.
+
+The source-precedent bug is fixed and tested. A `newfile_precedent` trigger must
+be a regular model-authored validation-relevant source file with a recognized
+source suffix; sibling candidates receive the same classification. The payload
+contains only the selected source trigger, not every path in the workspace
+transition. The final smoke had 10 valid precedent payloads and zero cache,
+binary, generated-output, or task-output paths. The earlier run
+`30952995623` is not valid evidence because it still exposed the whole created
+batch.
+
+Efficiency against the frozen GT-off baseline was: tokens `-9,135,151`
+(-31.26%), API calls `-51`, assistant steps `-53`, and actions `-103`. This is
+one matched smoke at temperature 1, so it is an efficiency signal rather than a
+causal model-quality claim. The 89-task run is not yet started; it is ready for
+the next gated evaluation from this commit or a descendant.
+
 ## What this is
 An agent harness — the code that wraps an LLM and turns it into something that does work (loop, tools, context management, system prompt). This one is single-purpose: a coding agent. Built to score on benchmarks while staying tiny enough to read end-to-end.
 
