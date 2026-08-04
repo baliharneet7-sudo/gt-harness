@@ -184,7 +184,10 @@ jobs:
   run:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # Backstop only. The treatment has no agent-side time censors, so the
+    # runner ceiling must clear a worst-case step_limit=100 task; a job killed
+    # here would lose its artifact and make the run unsubmittable.
+    timeout-minutes: 450
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.parallel) }}
@@ -362,19 +365,27 @@ jobs:
       - name: Merge task results
         env:
           EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
+          ARM: ${{ inputs.arm }}
+          FEATURE: ${{ inputs.feature }}
+          RUN_ID: ${{ github.run_id }}
+          REF: ${{ inputs.ref }}
+          MODEL: ${{ inputs.model }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           python - <<'EOF'
-          import json, os
+          import hashlib
+          import json
+          import os
           from pathlib import Path
 
           expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
           trials, missing, per_task = [], [], []
+          receipts_by_task = {}
 
           for task_dir in sorted(Path("tasks").glob("*")):
               results = list(task_dir.rglob("result.json"))
               if not results:
                   missing.append(task_dir.name)
-                  continue
               got = []
               for rp in results:
                   r = json.loads(rp.read_text(encoding="utf-8"))
@@ -387,6 +398,44 @@ jobs:
               trials.extend(got)
               per_task.append((task_dir.name, len(got)))
 
+              receipt_paths = list(task_dir.rglob("agent/central_receipt.json"))
+              trajectory_paths = list(task_dir.rglob("agent/miniswe_trajectory.json"))
+              if receipt_paths:
+                  rp = receipt_paths[0]
+                  rec = json.loads(rp.read_text(encoding="utf-8"))
+                  exit_status = None
+                  if trajectory_paths:
+                      try:
+                          exit_status = str(
+                              (json.loads(trajectory_paths[0].read_text(encoding="utf-8")).get("info") or {}).get(
+                                  "exit_status"
+                              )
+                              or ""
+                          )
+                      except Exception:
+                          exit_status = None
+                  certs = [
+                      x
+                      for x in (rec.get("features") or {}).get("receipts") or []
+                      if x.get("feature_id") == "GT_CERT_DELIVERY"
+                  ]
+                  receipts_by_task[task_dir.name] = {
+                      "present": True,
+                      "schema": rec.get("schema"),
+                      "sha256": hashlib.sha256(rp.read_bytes()).hexdigest(),
+                      "exit_status": exit_status,
+                      "censored": bool((rec.get("metrics") or {}).get("censored")),
+                      "censored_reason": (rec.get("metrics") or {}).get("censored_reason"),
+                      "guidance_deliveries": len(rec.get("guidance_deliveries") or []),
+                      "effects": len((rec.get("features") or {}).get("effects") or []),
+                      "produced": sum(
+                          ((rec.get("features") or {}).get("produced_counts") or {}).values()
+                      ),
+                      "certificate": (certs[-1].get("payload") if certs else None),
+                  }
+              else:
+                  receipts_by_task[task_dir.name] = {"present": False}
+
           def solved(t):
               rewards = (t.get("verifier_result") or {}).get("rewards") or {}
               vals = [v for v in rewards.values() if isinstance(v, (int, float))]
@@ -396,6 +445,25 @@ jobs:
           errored = [t for t in trials if t.get("exception_info")]
           n_solved = sum(1 for t in graded if solved(t))
           n_expected = len(expected) if expected else 0
+
+          missing_receipts = sorted(
+              name for name, info in receipts_by_task.items() if not info.get("present")
+          )
+          censored_tasks = sorted(
+              name for name, info in receipts_by_task.items() if info.get("censored")
+          )
+          graded_names = {str(t.get("task_name") or t.get("trial_name", "")).split("__")[0] for t in trials}
+
+          # Submission-ready only when every planned task returned a graded
+          # trial with a receipt and no task is missing or errored. Unsolved is
+          # a valid graded result; a missing or errored task is not.
+          submittable = (
+              bool(n_expected)
+              and len(trials) == n_expected
+              and not missing
+              and not missing_receipts
+              and n_errored == 0
+          )
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
           out.append("- arm: **${{ inputs.arm }}**")
@@ -410,6 +478,7 @@ jobs:
               f"- trials returned: **{len(trials)}**",
               f"- graded (verifier produced rewards): **{len(graded)}**",
               f"- errored (exception, not graded): **{len(errored)}**",
+              f"- **submittable: {'YES' if submittable else 'NO'}**",
           ]
           if graded:
               out.append(f"- **solved: {n_solved}/{len(graded)} "
@@ -417,23 +486,76 @@ jobs:
           if n_expected:
               out.append(f"- **solved of planned: {n_solved}/{n_expected} "
                          f"({100 * n_solved / n_expected:.1f}%)**")
-          out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
+          if missing_receipts:
+              out.append(f"- **missing receipts: {len(missing_receipts)}**")
+          if censored_tasks:
+              out.append(f"- **censored tasks: {len(censored_tasks)}**")
+          out += ["", "| task | solved | rewards / error | exit |", "|---|---|---|---|"]
           for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
               name = (t.get("task_name") or t.get("trial_name", "?")).split("__")[0]
               rewards = (t.get("verifier_result") or {}).get("rewards")
               exc = (t.get("exception_info") or {}).get("exception_type")
               mark = "yes" if rewards and solved(t) else ("no" if rewards else "-")
-              out.append(f"| {name} | {mark} | {json.dumps(rewards) if rewards else (exc or 'no reward')} |")
+              rec = receipts_by_task.get(name, {})
+              out.append(
+                  f"| {name} | {mark} | {json.dumps(rewards) if rewards else (exc or 'no reward')} "
+                  f"| {rec.get('exit_status') or '-'} |"
+              )
 
-          Path("merged.json").write_text(json.dumps({
+          merged = {
+              "schema": "tb2-central-merged-v1",
+              "run_id": os.environ.get("RUN_ID", ""),
+              "ref": os.environ.get("REF", ""),
+              "model": os.environ.get("MODEL", ""),
+              "image_tag": os.environ.get("IMAGE_TAG", ""),
+              "arm": os.environ.get("ARM", ""),
+              "feature": os.environ.get("FEATURE", ""),
               "expected_tasks": n_expected,
               "missing_tasks": missing,
               "n_trials": len(trials),
               "n_graded": len(graded),
               "n_errored": len(errored),
               "n_solved": n_solved,
+              "missing_receipts": missing_receipts,
+              "censored_tasks": censored_tasks,
+              "submittable": submittable,
               "trial_results": trials,
-          }, indent=2), encoding="utf-8")
+              "receipt_audit": receipts_by_task,
+          }
+          Path("merged.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
+          Path("submission_manifest.json").write_text(
+              json.dumps({
+                  "schema": "tb2-central-benchmark-submission-v1",
+                  "run_id": os.environ.get("RUN_ID", ""),
+                  "ref": os.environ.get("REF", ""),
+                  "model": os.environ.get("MODEL", ""),
+                  "image_tag": os.environ.get("IMAGE_TAG", ""),
+                  "arm": os.environ.get("ARM", ""),
+                  "feature": os.environ.get("FEATURE", ""),
+                  "submittable": submittable,
+                  "expected_tasks": n_expected,
+                  "trials_returned": len(trials),
+                  "graded": len(graded),
+                  "errored": len(errored),
+                  "solved": n_solved,
+                  "missing_tasks": missing,
+                  "missing_receipts": missing_receipts,
+                  "censored_tasks": censored_tasks,
+                  "per_task": {
+                      str(t.get("task_name") or t.get("trial_name", "?")).split("__")[0]: {
+                          "reward": ((t.get("verifier_result") or {}).get("rewards") or {}).get(
+                              "reward"
+                          ),
+                          "solved": solved(t),
+                          "receipt": receipts_by_task.get(
+                              str(t.get("task_name") or t.get("trial_name", "?")).split("__")[0]
+                          ),
+                      }
+                      for t in trials
+                  },
+              }, indent=2),
+              encoding="utf-8",
+          )
 
           body = "\n".join(out) + "\n"
           Path("SUMMARY.md").write_text(body, encoding="utf-8")
@@ -449,5 +571,7 @@ jobs:
           name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-MERGED
           path: |
             merged.json
+            submission_manifest.json
             SUMMARY.md
+          retention-days: 90
           if-no-files-found: warn
