@@ -264,8 +264,8 @@ def extract_trajectory(
                 "guidance_chars": int(feature_summary.get("guidance_chars") or 0),
                 "guidance_candidates": int(feature_summary.get("guidance_candidates") or 0),
                 "guidance_suppressed": int(feature_summary.get("guidance_suppressed") or 0),
-                "feature_deliveries": sum(
-                    int(value) for value in (feature_summary.get("delivered_counts") or {}).values()
+                "feature_receipts": sum(
+                    int(value) for value in (feature_summary.get("produced_counts") or {}).values()
                 ),
                 "lifecycle": feature_summary.get("lifecycle") or {},
                 "runtime_advisory_context_chars": sum(

@@ -155,7 +155,7 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     summary = runtime.summary()
     assert summary["feature_count"] == 17
     assert set(summary["feature_ids"]) == set(CENTRAL_FEATURE_IDS)
-    assert all(summary["delivered_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
+    assert all(summary["produced_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
     assert all(item["fresh"] for item in summary["receipts"])
     visible = {item["feature_id"] for item in summary["receipts"] if item["model_visible"]}
     assert visible == {
@@ -211,8 +211,8 @@ def test_covering_red_rejects_heredoc_text_and_missing_executables():
     )
 
     summary = runtime.summary()
-    assert summary["delivered_counts"]["covering_red"] == 0
-    assert summary["delivered_counts"]["GT_HYPOTHESIS"] == 0
+    assert summary["produced_counts"]["covering_red"] == 0
+    assert summary["produced_counts"]["GT_HYPOTHESIS"] == 0
     assert runtime.model_feedback() == ""
 
 
@@ -256,8 +256,8 @@ def test_recovery_requires_the_same_validation_command_and_failure():
         )
 
     summary = runtime.summary()
-    assert summary["delivered_counts"]["covering_red"] == 2
-    assert summary["delivered_counts"]["recovery"] == 0
+    assert summary["produced_counts"]["covering_red"] == 2
+    assert summary["produced_counts"]["recovery"] == 0
 
 
 def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
@@ -394,8 +394,8 @@ def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():
         transition=unchanged,
         revision="r0",
     )
-    assert runtime.summary()["delivered_counts"]["covering_red"] == 0
-    assert runtime.summary()["delivered_counts"]["GT_HYPOTHESIS"] == 0
+    assert runtime.summary()["produced_counts"]["covering_red"] == 0
+    assert runtime.summary()["produced_counts"]["GT_HYPOTHESIS"] == 0
 
     changed = WorkspaceTransition(2, "write", "r0", "r1", modified=("app.py",))
     runtime.observe_action(
@@ -407,8 +407,8 @@ def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():
         revision="r1",
     )
     summary = runtime.summary()
-    assert summary["delivered_counts"]["GT_CHANGE_SURFACE"] == 1
-    assert summary["delivered_counts"]["GT_PATCH_DELTA"] == 1
+    assert summary["produced_counts"]["GT_CHANGE_SURFACE"] == 1
+    assert summary["produced_counts"]["GT_PATCH_DELTA"] == 1
     assert not next(row for row in summary["receipts"] if row["feature_id"] == "GT_CHANGE_SURFACE")[
         "model_visible"
     ]
@@ -422,8 +422,8 @@ def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():
         revision="r1",
     )
     summary = runtime.summary()
-    assert summary["delivered_counts"]["covering_red"] == 1
-    assert summary["delivered_counts"]["GT_HYPOTHESIS"] == 1
+    assert summary["produced_counts"]["covering_red"] == 1
+    assert summary["produced_counts"]["GT_HYPOTHESIS"] == 1
 
 
 def test_signature_delta_requires_explicit_before_after_evidence():
@@ -436,7 +436,7 @@ def test_signature_delta_requires_explicit_before_after_evidence():
         transition=WorkspaceTransition(1, "write", "r0", "r1", created=("app.py",)),
         revision="r1",
     )
-    assert runtime.summary()["delivered_counts"]["signature_delta"] == 0
+    assert runtime.summary()["produced_counts"]["signature_delta"] == 0
 
     runtime.observe_action(
         action_id=2,
@@ -452,10 +452,12 @@ def test_signature_delta_requires_explicit_before_after_evidence():
     assert receipt["payload"]["before_signature"] != receipt["payload"]["after_signature"]
 
 
-def test_all_seventeen_census_proves_payload_visibility_and_timing():
+def test_all_seventeen_census_proves_producers_and_fails_consumer_proof():
     result = census()
 
-    assert result["all_17_deliverable"] is True
+    # Producer-side proof must hold: all 17 IDs produced a valid, on-boundary,
+    # fresh receipt and every guidance window was on time.
+    assert result["all_17_producers_proven"] is True
     assert result["all_17_timing_valid"] is True
     assert result["all_guidance_on_time"] is True
     assert set(result["timing_audit"]) == {*CENTRAL_FEATURE_IDS, "_global"}
@@ -464,6 +466,30 @@ def test_all_seventeen_census_proves_payload_visibility_and_timing():
         row["not_predictive"] and row["not_late"] and row["delivered_before_next_decision"]
         for row in result["decision_window_audit"]
     )
+    # Consumer, effect-timing, and grounding gates must FAIL on the current
+    # producer-only implementation.  A producer receipt is not a delivery and
+    # an empty effect set is not a timing pass.
+    assert result["all_17_consumers_proven"] is False
+    assert result["all_effects_timing_valid"] is False
+    assert result["all_payloads_semantically_grounded"] is False
+    assert result["all_17_consumer_paths_proven"] is False
+
+
+def test_signature_delta_is_eligible_but_discarded_by_one_message_selection():
+    result = census()
+
+    # signature_delta is produced at the edit boundary and is model-actionable,
+    # so it is eligible for the single delivery slot...
+    produced = [
+        row for row in result["receipts"] if row["feature_id"] == "signature_delta"
+    ]
+    assert produced
+    assert all(row["model_visible"] for row in produced)
+    # ...but the one-message arbitration picks syntax_result first, so the
+    # eligible signature_delta fact never reaches a model request.
+    delivered = {row["feature_id"] for row in result["decision_window_audit"]}
+    assert "signature_delta" not in delivered
+    assert "syntax_result" in delivered
 
 
 @pytest.mark.asyncio

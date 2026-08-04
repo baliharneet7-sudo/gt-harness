@@ -14,6 +14,7 @@ from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     WorkspaceTransition,
+    feature_payload_grounded,
     feature_payload_valid,
 )
 
@@ -27,6 +28,10 @@ EXPECTED_TIMING = {
     "GT_CHANGE_SURFACE": ("edit_result", (2,)),
     "GT_PATCH_DELTA": ("edit_result", (2,)),
     "signature_delta": ("edit_result", (2,)),
+    # Delivery of signature_delta depends on its consumer being selected, not
+    # on the producer alone; the one-message selection path currently discards
+    # it in favor of the higher-priority syntax_result.  Consumer delivery is
+    # proved by ALL_17_CONSUMERS_PROVEN, not by this producer timing row.
     "syntax_result": ("edit_result", (2,)),
     "GT_EDIT_CHECK": ("edit_result", (2,)),
     "covering_red": ("test_result", (3, 4)),
@@ -175,14 +180,14 @@ def census() -> dict:
     summary["timing_audit"] = audit_timing(summary)
     summary["all_17_timing_valid"] = all(row["valid"] for row in summary["timing_audit"].values())
     summary["decision_window_audit"] = decision_windows
-    summary["all_guidance_on_time"] = all(
+    summary["all_guidance_on_time"] = bool(decision_windows) and all(
         row["delivered_before_next_decision"] and row["not_predictive"] and row["not_late"]
         for row in decision_windows
     )
-    summary["all_17_deliverable"] = (
+    summary["all_17_producers_proven"] = (
         summary["feature_count"] == 17
         and set(summary["feature_ids"]) == set(CENTRAL_FEATURE_IDS)
-        and all(summary["delivered_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
+        and all(summary["produced_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
         and all(row["fresh"] and row["payload"].get("message") for row in summary["receipts"])
         and all(
             row["model_visible"]
@@ -202,16 +207,61 @@ def census() -> dict:
         and summary["all_17_timing_valid"]
         and summary["all_guidance_on_time"]
     )
+    consumer_paths = summary["consumer_paths"]
+    summary["all_17_consumers_proven"] = bool(consumer_paths) and set(consumer_paths) >= set(
+        CENTRAL_FEATURE_IDS
+    )
+    effects = summary["effects"]
+    # Effect timing is non-vacuous: an empty effect set is a failure, not a
+    # pass.  Full timing fields arrive with the consumer registry (Phase 3).
+    summary["all_effects_timing_valid"] = bool(effects) and all(
+        bool(row.get("evidence_before_effect"))
+        and bool(row.get("effect_before_next_action"))
+        and bool(row.get("non_late"))
+        for row in effects
+    )
+    summary["all_payloads_semantically_grounded"] = bool(summary["receipts"]) and all(
+        not row["model_visible"] or feature_payload_grounded(row["feature_id"], row["payload"])
+        for row in summary["receipts"]
+    )
+    summary["all_17_consumer_paths_proven"] = (
+        summary["all_17_producers_proven"]
+        and summary["all_17_consumers_proven"]
+        and summary["all_effects_timing_valid"]
+        and summary["all_payloads_semantically_grounded"]
+    )
     return summary
 
 
 def main() -> int:
     result = census()
     print(json.dumps(result, indent=2, sort_keys=True))
-    print("ALL_17_TIMING_VALID" if result["all_17_timing_valid"] else "TIMING_INVALID")
-    print("ALL_GUIDANCE_ON_TIME" if result["all_guidance_on_time"] else "GUIDANCE_MISTIMED")
-    print("ALL_17_DELIVERABLE" if result["all_17_deliverable"] else "NOT_READY")
-    return 0 if result["all_17_deliverable"] else 1
+    print(
+        "ALL_17_PRODUCERS_PROVEN"
+        if result["all_17_producers_proven"]
+        else "PRODUCERS_NOT_PROVEN"
+    )
+    print(
+        "ALL_17_CONSUMERS_PROVEN"
+        if result["all_17_consumers_proven"]
+        else "CONSUMERS_NOT_PROVEN"
+    )
+    print(
+        "ALL_EFFECTS_TIMING_VALID"
+        if result["all_effects_timing_valid"]
+        else "EFFECTS_TIMING_INVALID"
+    )
+    print(
+        "ALL_PAYLOADS_GROUNDED"
+        if result["all_payloads_semantically_grounded"]
+        else "PAYLOADS_NOT_GROUNDED"
+    )
+    print(
+        "ALL_17_CONSUMER_PATHS_PROVEN"
+        if result["all_17_consumer_paths_proven"]
+        else "CONSUMER_PATHS_NOT_PROVEN"
+    )
+    return 0 if result["all_17_consumer_paths_proven"] else 1
 
 
 if __name__ == "__main__":

@@ -187,6 +187,34 @@ def feature_payload_valid(
     return all(key in payload for key in required)
 
 
+# A model-visible payload is grounded only when it names concrete evidence:
+# an anchor path, a symbol, a caller, a validator command, a diagnostic, or a
+# blocker.  Generic booleans and scope reminders are never grounded and must
+# never reach the model as an advisory.  Unlisted features have no grounding
+# contract yet and therefore cannot be model-visible.
+_GROUNDING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "localization": ("anchors",),
+    "def_partition": ("definition_anchors", "reference_anchors"),
+    "caller_contract": ("callers",),
+    "newfile_precedent": ("precedent_path",),
+    "signature_delta": ("symbol", "before_signature", "after_signature"),
+    "covering_red": ("command", "diagnostic", "attribution"),
+    "recovery": ("alternate_action",),
+    "obligations": ("obligation_ids", "declared_checks"),
+    "syntax_result": ("path", "command", "returncode"),
+    "submit_refusal": ("blockers",),
+    "GT_EDIT_CHECK": ("declared_check", "changed_paths"),
+}
+
+
+def feature_payload_grounded(feature_id: str, payload: dict[str, Any]) -> bool:
+    """True only when a model-visible payload names concrete evidence."""
+    required = _GROUNDING_REQUIREMENTS.get(feature_id)
+    if required is None:
+        return False
+    return all(bool(payload.get(key)) for key in required)
+
+
 def _snapshot_revision(entries: dict[str, FileState]) -> str:
     digest = hashlib.sha256()
     for path, item in sorted(entries.items()):
@@ -766,6 +794,8 @@ class CentralFeatureRuntime:
         self._workspace_edited = False
         self._unvalidated_material_edits = 0
         self._validation_debt_notified = False
+        self._consumer_paths: dict[str, list[str]] = {}
+        self._effects: list[dict[str, Any]] = []
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -1330,7 +1360,9 @@ class CentralFeatureRuntime:
             },
             "action_metrics": dict(self._action_metrics),
             "lifecycle": dict(self._lifecycle),
-            "delivered_counts": by_feature,
+            "produced_counts": by_feature,
+            "consumer_paths": dict(self._consumer_paths),
+            "effects": list(self._effects),
             "receipts": [
                 {
                     "feature_id": item.feature_id,
