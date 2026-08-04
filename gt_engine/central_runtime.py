@@ -29,6 +29,9 @@ _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MODEL_ACTIONABLE_FEATURES = frozenset(
     {"covering_red", "recovery", "signature_delta", "submit_refusal", "syntax_result"}
 )
+_NON_MATERIAL_PATH_PARTS = frozenset(
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".git", ".hg", ".svn"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +287,15 @@ def normalize_command(command: str) -> str:
     return " ".join(command.strip().split())
 
 
+def _is_material_path(path: str) -> bool:
+    """Exclude interpreter and test-cache artifacts from engine edit state."""
+    parts = path.replace("\\", "/").split("/")
+    return not (
+        any(part in _NON_MATERIAL_PATH_PARTS for part in parts)
+        or path.endswith((".pyc", ".pyo"))
+    )
+
+
 def is_submit_command(command: str) -> bool:
     compact = re.sub(r"[\s'\"\\+]", "", command)
     return _SUBMIT_MARKER in compact
@@ -342,8 +354,24 @@ def _recognized_validation(words: tuple[str, ...]) -> bool:
     while index < len(words) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[index]):
         index += 1
     while index < len(words) and words[index] in {"env", "command", "timeout", "sudo"}:
+        wrapper = words[index]
         index += 1
         while index < len(words) and (words[index].startswith("-") or "=" in words[index]):
+            option = words[index]
+            index += 1
+            # These wrappers have a small set of detached option arguments.
+            # Consume them so their values cannot be mistaken for an executable.
+            if (
+                (wrapper == "timeout" and option in {"-k", "-s"})
+                or (wrapper == "env" and option in {"-u", "--unset"})
+                or (
+                    wrapper == "sudo"
+                    and option in {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u"}
+                )
+            ) and index < len(words):
+                index += 1
+        if wrapper == "timeout" and index < len(words):
+            # GNU/POSIX timeout syntax places a duration before the command.
             index += 1
     if index >= len(words):
         return False
@@ -389,10 +417,37 @@ def is_check_command(command: str) -> bool:
 
 
 def explicit_check_commands(instruction: str) -> tuple[str, ...]:
+    """Return explicitly named validation commands or verifier artifacts.
+
+    Benchmark instructions frequently name a verifier as ``/app/test_x.py``
+    rather than spelling out its interpreter.  The path is still grounded task
+    evidence: a later command containing it is a declared validation command.
+    """
     checks = []
-    for candidate in re.findall(r"`([^`\r\n]+)`", instruction):
-        if is_check_command(candidate) and not is_submit_command(candidate):
-            checks.append(normalize_command(candidate))
+    for line in instruction.splitlines():
+        context_declares_validation = bool(
+            re.search(r"\b(?:test|verify|check|validate|compile|build)\b", line, re.I)
+        )
+        for candidate in re.findall(r"`([^`\r\n]+)`", line):
+            if (
+                (is_check_command(candidate) or context_declares_validation)
+                and not is_submit_command(candidate)
+            ):
+                checks.append(normalize_command(candidate))
+        stripped = line.strip()
+        if (
+            context_declares_validation
+            and "|" in stripped
+            and re.match(r"(?:echo|printf)\b", stripped)
+            and re.search(r"\b(?:python|python3|node|ruby|bash)\b", stripped)
+        ):
+            checks.append(normalize_command(stripped))
+    for path in re.findall(
+        r"(?<![A-Za-z0-9_.-])(/(?:[A-Za-z0-9_.-]+/)*(?:test|tests|verify)[A-Za-z0-9_.-]*)",
+        instruction,
+        flags=re.IGNORECASE,
+    ):
+        checks.append(normalize_command(path))
     return tuple(dict.fromkeys(checks))
 
 
@@ -709,6 +764,8 @@ class CentralFeatureRuntime:
         self._command_counts: dict[str, int] = {}
         self._lifecycle: dict[str, dict[str, Any]] = {}
         self._workspace_edited = False
+        self._unvalidated_material_edits = 0
+        self._validation_debt_notified = False
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -766,11 +823,7 @@ class CentralFeatureRuntime:
                 reason=reason,
                 payload=candidate_payload,
                 fresh=True,
-                model_visible=(
-                    self.model_visible
-                    and decision == "DELIVERED"
-                    and feature_id in _MODEL_ACTIONABLE_FEATURES
-                ),
+                model_visible=self._is_model_actionable(feature_id, decision, candidate_payload),
             )
         )
         # CAP_OWNER delivery is a separate auditable row, not an alias that
@@ -859,6 +912,16 @@ class CentralFeatureRuntime:
                 },
             )
 
+    def _is_model_actionable(
+        self, feature_id: str, decision: str, payload: dict[str, Any]
+    ) -> bool:
+        """Expose only novel engine control evidence, never passive receipts."""
+        if not self.model_visible or decision != "DELIVERED":
+            return False
+        if feature_id in _MODEL_ACTIONABLE_FEATURES:
+            return True
+        return feature_id == "GT_EDIT_CHECK" and payload.get("intervention") == "validation_debt"
+
     def observe_action(
         self,
         *,
@@ -899,42 +962,86 @@ class CentralFeatureRuntime:
                     action_id=action_id,
                     status="passed" if returncode == 0 else "failed",
                 )
+            if returncode == 0:
+                self._unvalidated_material_edits = 0
+                self._validation_debt_notified = False
         if transition.changed_paths:
-            self._workspace_edited = True
-            self._action_metrics["workspace_change_actions"] += 1
-            self._action_metrics["created_paths"] += len(transition.created)
-            self._action_metrics["modified_paths"] += len(transition.modified)
-            self._action_metrics["deleted_paths"] += len(transition.deleted)
-            self._mark_lifecycle("workspace_edited", action_id=action_id)
-            self._mark_lifecycle("change_surface_certified", action_id=action_id)
-            changed = list(transition.changed_paths)
-            surface_message = "Workspace change observed: " + ", ".join(changed[:4])
-            self._emit(
-                "GT_CHANGE_SURFACE",
-                boundary="edit_result",
-                action_id=action_id,
-                revision=revision,
-                reason="workspace_revision_changed",
-                payload={
-                    "owner_feature": "newfile_precedent",
-                    "created": list(transition.created),
-                    "modified": list(transition.modified),
-                    "deleted": list(transition.deleted),
-                    "message": surface_message,
-                },
+            material_paths = tuple(
+                path for path in transition.changed_paths if _is_material_path(path)
             )
-            self._emit(
-                "GT_PATCH_DELTA",
-                boundary="edit_result",
-                action_id=action_id,
-                revision=revision,
-                reason="non_empty_patch_surface",
-                payload={
-                    "owner_feature": "signature_delta",
-                    "changed_paths": changed,
-                    "message": surface_message,
-                },
+            material_created = tuple(
+                path for path in transition.created if _is_material_path(path)
             )
+            material_modified = tuple(
+                path for path in transition.modified if _is_material_path(path)
+            )
+            material_deleted = tuple(
+                path for path in transition.deleted if _is_material_path(path)
+            )
+            if material_paths:
+                self._workspace_edited = True
+                self._unvalidated_material_edits += 1
+                self._action_metrics["workspace_change_actions"] += 1
+                self._action_metrics["created_paths"] += len(material_created)
+                self._action_metrics["modified_paths"] += len(material_modified)
+                self._action_metrics["deleted_paths"] += len(material_deleted)
+                self._mark_lifecycle("workspace_edited", action_id=action_id)
+                self._mark_lifecycle("change_surface_certified", action_id=action_id)
+                changed = list(material_paths)
+                surface_message = "Workspace change observed: " + ", ".join(changed[:4])
+                self._emit(
+                    "GT_CHANGE_SURFACE",
+                    boundary="edit_result",
+                    action_id=action_id,
+                    revision=revision,
+                    reason="workspace_revision_changed",
+                    payload={
+                        "owner_feature": "newfile_precedent",
+                        "created": list(material_created),
+                        "modified": list(material_modified),
+                        "deleted": list(material_deleted),
+                        "message": surface_message,
+                    },
+                )
+                self._emit(
+                    "GT_PATCH_DELTA",
+                    boundary="edit_result",
+                    action_id=action_id,
+                    revision=revision,
+                    reason="non_empty_patch_surface",
+                    payload={
+                        "owner_feature": "signature_delta",
+                        "changed_paths": changed,
+                        "message": surface_message,
+                    },
+                )
+                if (
+                    self._explicit_checks
+                    and self._unvalidated_material_edits >= 3
+                    and not self._validation_debt_notified
+                ):
+                    declared_check = self._explicit_checks[0][:120]
+                    self._emit(
+                        "GT_EDIT_CHECK",
+                        boundary="edit_result",
+                        action_id=action_id,
+                        revision=revision,
+                        reason="multiple_material_edits_without_validation",
+                        payload={
+                            "owner_feature": "syntax_result",
+                            "intervention": "validation_debt",
+                            "material_edit_count": self._unvalidated_material_edits,
+                            "declared_check": declared_check,
+                            "changed_paths": changed[:4],
+                            "message": (
+                                "Three source revisions have no completed behavioral validation. "
+                                f"Run the declared check before another edit: {declared_check}"
+                            ),
+                        },
+                    )
+                    self._validation_debt_notified = True
+            else:
+                self._action_metrics["no_change_actions"] += 1
         else:
             self._action_metrics["no_change_actions"] += 1
         if is_search and output.strip():

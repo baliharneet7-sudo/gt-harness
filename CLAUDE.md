@@ -13,6 +13,28 @@ verify pass, 60s bash timeout, system prompt v2 (see design doc §3.5a).
 Terminal-Bench 2.0 adapter (`eval/tb_agent.py`, Harbor) written but never run —
 first benchmark execution awaits budget approval.
 
+## GT central runtime: current behavioral truth
+
+The active benchmark path is a host-owned engine in
+`eval/gt_central_agent.py`, not the legacy installed inline runtime. It owns
+the model/action loop, observes every execution transition, and keeps GT code,
+state, credentials, and receipts outside the task container. The model never
+asks a GT tool for help.
+
+Do not equate a delivered feature receipt with a model intervention. The engine
+can observe a valid lifecycle fact privately, execute a policy decision that
+passes, or actively change the next decision via a bounded runtime payload or
+a one-time submit hold. Only the latter two are behavior-changing channels.
+
+The historical all-17 policy sent 94 generic/pass/repeated advisories and was
+inefficient. The current policy keeps those passive facts private and delivers
+only grounded failure/impact evidence. It additionally emits one `GT_EDIT_CHECK`
+validation-debt control after three material source revisions without a completed
+recognized declared check; it resets after validation and ignores cache files.
+Every delivery is transient, next-decision-only, and audit-recorded with its
+evidence action and revision. See `AGENTS.md` for the executable contract and
+`gt_finalstand/GT_EFFICIENCY_REMEDIATION_PLAN.md` for the release gates.
+
 ## What this is
 An agent harness — the code that wraps an LLM and turns it into something that does work (loop, tools, context management, system prompt). This one is single-purpose: a coding agent. Built to score on benchmarks while staying tiny enough to read end-to-end.
 

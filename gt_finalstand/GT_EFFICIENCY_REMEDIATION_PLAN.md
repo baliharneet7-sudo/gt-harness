@@ -230,3 +230,43 @@ not found` result (127) was called an attributable regression. This is a
 general command-classification/provenance defect and blocks the ten-task run.
 The detailed, non-overfitting remediation and experimental protocol is in
 `gt_finalstand/GT_CONTEXT_EFFICIENCY_REMEDIATION_PLAN.md`.
+
+## 11. Active-engine correction after smoke 30882949319
+
+The completed ten-task treatment smoke was first misread as “no GT delivery”
+because it had zero model-visible advisory deliveries. That wording was false.
+The engine generated 340 valid host-side feature receipts, ran 107 changed-file
+lint decisions, and evaluated eight submissions. All controller decisions were
+`PASS`; no fresh grounded failure required a submit hold.
+
+The correct diagnosis is narrower. Commit `27c2652` intentionally changed the
+historical generic-guidance policy to expose only five failure/impact FACTs.
+That removed the prior 94-advisory regression, but this task panel had no event
+that satisfied the remaining active triggers. Engine observation worked; its
+trajectory-shaping policy was unreachable on the successful paths.
+
+The correction is one deterministic, bounded engine control rather than a
+return to generic advice: after three **material** source revisions with no
+successful recognized behavioral validation and with an explicit task check,
+the existing `GT_EDIT_CHECK` capability emits one next-decision validation-debt
+payload. It carries the declared check and changed paths, resets after a real
+validation, ignores bytecode/test-cache artifacts, and is deduplicated/capped
+like every other intervention. This is a host-loop policy decision, not a
+model-requested sidecar call.
+
+Before the next authorized smoke, prove all of the following locally:
+
+1. the debt payload is absent for cache-only changes, missing declared checks,
+   and after a fresh successful validator;
+2. it is present exactly once after the third material unvalidated edit;
+3. it reaches only the immediately next model request and is absent thereafter;
+4. historical trajectories replay to intended trigger points without turning
+   passive localization/obligation/`PASS` receipts back into guidance; and
+5. all existing failure, submit-hold, payload-validity, and all-17 timing
+   contracts remain green.
+
+Only after that audit passes may the already-authorized GitHub smoke be
+dispatched. Its receipt review must separately report receipt counts,
+controller decisions, active interventions, timing, model use, and deep
+outcome-first deltas. A zero-intervention trajectory is valid when it remained
+correctly validated; it is not evidence that the engine was absent.

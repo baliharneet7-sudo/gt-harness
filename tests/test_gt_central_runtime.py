@@ -11,7 +11,9 @@ from gt_engine.central_runtime import (
     WorkspaceSensor,
     WorkspaceSnapshot,
     WorkspaceTransition,
+    classify_validation_command,
     diff_snapshots,
+    explicit_check_commands,
     parse_manifest,
     render_runtime_feedback,
 )
@@ -214,6 +216,12 @@ def test_covering_red_rejects_heredoc_text_and_missing_executables():
     assert runtime.model_feedback() == ""
 
 
+def test_validation_classifier_handles_timeout_without_matching_probes():
+    assert classify_validation_command("timeout 600 pytest -q").is_validation
+    classification = classify_validation_command("timeout --signal=TERM 25 python3 -c 'print(1)'")
+    assert classification.is_validation is False
+
+
 def test_covering_red_records_recognized_validation_provenance():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement the requested change", revision="r0")
@@ -291,6 +299,87 @@ def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
     assert summary["guidance_candidates"] == 2
     assert summary["guidance_suppressed"] >= 3
     assert summary["guidance_by_feature"] == {"syntax_result": 1}
+
+
+def test_validation_debt_is_grounded_once_and_resets_after_a_real_check():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Update it, then run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+    )
+    for action_id, revision in ((1, "r1"), (2, "r2"), (3, "r3")):
+        runtime.observe_action(
+            action_id=action_id,
+            command=f"write source {action_id}",
+            output="",
+            returncode=0,
+            transition=WorkspaceTransition(
+                action_id, "write", "r0", revision, modified=("app.py",)
+            ),
+            revision=revision,
+        )
+    feedback = runtime.model_feedback()
+    assert "Three source revisions" in feedback
+    assert "pytest -q" in feedback
+    receipt = next(
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "GT_EDIT_CHECK"
+    )
+    assert receipt["payload"]["intervention"] == "validation_debt"
+    assert receipt["model_visible"] is True
+
+    runtime.observe_action(
+        action_id=4,
+        command="pytest -q",
+        output="1 passed",
+        returncode=0,
+        transition=WorkspaceTransition(4, "pytest -q", "r3", "r3"),
+        revision="r3",
+    )
+    assert runtime._unvalidated_material_edits == 0
+    assert runtime._validation_debt_notified is False
+
+
+def test_cache_artifacts_do_not_count_as_material_engine_edits():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",))
+    for action_id in (1, 2):
+        runtime.observe_action(
+            action_id=action_id,
+            command="python3 -c 'pass'",
+            output="",
+            returncode=0,
+            transition=WorkspaceTransition(
+                action_id,
+                "python3 -c",
+                "r0",
+                f"r{action_id}",
+                created=("__pycache__/app.cpython-313.pyc",),
+            ),
+            revision=f"r{action_id}",
+        )
+    assert runtime.model_feedback() == ""
+    assert runtime.summary()["action_metrics"]["workspace_change_actions"] == 0
+
+
+def test_explicit_verifier_path_is_a_grounded_check_without_an_interpreter():
+    checks = explicit_check_commands("You can run /app/test_outputs.py to verify.")
+
+    assert checks == ("/app/test_outputs.py",)
+    assert classify_validation_command("python3 /app/test_outputs.py", checks).grounded
+
+
+def test_explicit_check_parser_keeps_contract_named_build_and_pipe_commands():
+    instruction = (
+        "To build, run `python3 setup.py build_ext --inplace`, then test using "
+        "`python3 benchmark.py`.\n"
+        "echo '(+ 7 8)' | python3 interp.py test/calculator.scm"
+    )
+
+    checks = explicit_check_commands(instruction)
+
+    assert checks[:2] == ("python3 setup.py build_ext --inplace", "python3 benchmark.py")
+    assert checks[2] == "echo '(+ 7 8)' | python3 interp.py test/calculator.scm"
 
 
 def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():

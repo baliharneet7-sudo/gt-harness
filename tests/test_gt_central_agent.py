@@ -201,8 +201,10 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
                     raw = ""
                 elif self.state == "bad":
                     raw = "f\t4\t2.0\t2.0\tapp.py\t\n"
-                else:
+                elif self.state == "good":
                     raw = "f\t3\t3.0\t3.0\tapp.py\t\n"
+                else:
+                    raw = "f\t5\t4.0\t4.0\tapp.py\t\n"
                 return ExecResult(stdout=raw, return_code=0)
             if command.startswith("sha256sum"):
                 return ExecResult(stdout=("a" * 64) + "  app.py\n", return_code=0)
@@ -216,6 +218,9 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
             if command == "write good":
                 self.state = "good"
                 return ExecResult(return_code=0)
+            if command == "write better":
+                self.state = "better"
+                return ExecResult(return_code=0)
             if command == "pytest -q":
                 return ExecResult(stdout="1 passed\n", return_code=0)
             if "COMPLETE_TASK" in command:
@@ -227,6 +232,7 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
         [
             "write bad",
             "write good",
+            "write better",
             "pytest -q",
             "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
         ]
@@ -248,13 +254,22 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
         for history in model.observed_history[2:]
         for item in history
     )
+    assert any(
+        "Three source revisions have no completed behavioral validation" in item
+        for item in model.observed_history[3]
+    )
+    assert not any(
+        "Three source revisions have no completed behavioral validation" in item
+        for history in model.observed_history[4:]
+        for item in history
+    )
     # The durable trajectory stays clean; timing proof lives in receipt-v2.
     assert "Runtime evidence:" not in trajectory
     assert "groundtruth" not in trajectory.lower()
     assert "gt_" not in trajectory.lower()
     assert context.metadata["exit_status"] == "Submitted"
-    assert context.n_input_tokens == 40
-    assert context.n_output_tokens == 8
+    assert context.n_input_tokens == 50
+    assert context.n_output_tokens == 10
     atif = (tmp_path / "trajectory.json").read_text(encoding="utf-8")
     assert '"schema_version": "ATIF-v1.7"' in atif
     assert '"function_name": "bash"' in atif
@@ -265,33 +280,39 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert metrics["actions"] == context.metadata["actions"]
     assert metrics["assistant_steps"] == context.metadata["assistant_steps"]
     assert metrics["trajectory_messages"] >= metrics["assistant_steps"]
-    assert metrics["uncached_input_tokens"] == 40
+    assert metrics["uncached_input_tokens"] == 50
     assert metrics["prompt_cache_hit_rate"] == 0.0
     assert metrics["normalized_cost_usd"] > 0
     assert metrics["tokens_per_call"] == 12.0
     assert metrics["tokens_per_assistant_step"] == 12.0
     assert metrics["actions_per_assistant_step"] == 1.0
     assert metrics["elapsed_seconds"] > 0
-    assert metrics["successful_actions"] == 4
+    assert metrics["successful_actions"] == 5
     assert metrics["failed_actions"] == 0
     assert metrics["check_actions"] == 1
-    assert metrics["workspace_change_actions"] == 2
-    assert metrics["lint_passes"] == 1
+    assert metrics["workspace_change_actions"] == 3
+    assert metrics["lint_passes"] == 2
     assert metrics["lint_failures"] == 1
     assert metrics["guidance_candidates"] >= metrics["guidance_events"]
     assert metrics["guidance_suppressed"] >= 1
     deliveries = receipt["guidance_deliveries"]
-    assert len(deliveries) == 1
+    assert len(deliveries) == 2
     assert deliveries[0]["feature_id"] == "syntax_result"
     assert deliveries[0]["evidence_action"] == 1
     assert deliveries[0]["delivered_before_call"] == 2
     assert deliveries[0]["decision_window"] == "next_model_call_only"
     assert deliveries[0]["not_predictive"] is True
+    assert deliveries[1]["feature_id"] == "GT_EDIT_CHECK"
+    assert deliveries[1]["evidence_action"] == 3
+    assert deliveries[1]["delivered_before_call"] == 4
+    assert deliveries[1]["decision_window"] == "next_model_call_only"
+    assert deliveries[1]["not_predictive"] is True
     contexts = receipt["model_call_contexts"]
     assert len(contexts) == metrics["api_calls"]
     assert contexts[1]["runtime_advisory_chars"] == deliveries[0]["chars"]
     assert contexts[1]["stock_context_chars"] > 0
-    assert contexts[2]["runtime_advisory_chars"] == 0
+    assert contexts[3]["runtime_advisory_chars"] == deliveries[1]["chars"]
+    assert contexts[4]["runtime_advisory_chars"] == 0
 
 
 @pytest.mark.asyncio
