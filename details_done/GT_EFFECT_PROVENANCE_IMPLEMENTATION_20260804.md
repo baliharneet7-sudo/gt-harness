@@ -49,3 +49,33 @@ returning a test failure; it must be rerun with a longer timeout before a
 release claim.
 
 No paid smoke was started by this change.
+
+## Fresh paid smoke after instrumentation
+
+- Workflow: `30947423816`
+- Commit: `fdde1c5`
+- Arm: GT-on treatment, all17
+- Verifier reward: 9/10
+- Clean submitted trajectories: 8/10
+- Censored trajectory: `schemelike-metacircular-eval` (`WallTimeExceeded`)
+- Non-solved trajectory: `gpt2-codegolf` (reward 0)
+
+The new provenance audit found 354 effects applied, 28 provider-contributing
+effects, 326 audit-only effects, and zero unknown dispositions. All 28 provider
+deliveries were first-eligible, non-late, and non-predictive. No existing
+private-state consumer read occurred in this live smoke.
+
+Against the frozen ten-task GT-off aggregate already documented in the report:
+
+| Metric | GT-on | GT-off | Delta |
+|---|---:|---:|---:|
+| total tokens | 15,122,509 | 29,223,016 | -14,100,507 |
+| API calls | 324 | 420 | -96 |
+| assistant steps | 323 | 420 | -97 |
+| actions | 359 | 483 | -124 |
+| context characters | 15,152,500 | 30,874,834 | -15,722,334 |
+
+This is an efficiency signal, not yet a causal proof that audit-only effects
+helped. The trace proves they were not provider or existing-engine actuations
+in this run; the 89-task run remains blocked pending repeated matched trials
+and a decision on missing private consumers.
