@@ -49,3 +49,26 @@ without another paid run. They are not sufficient to prove a hidden frontier
 model causal effect where no request, tool output, action policy, or state read
 was recorded. That requires a future run with the corrected trace, not a
 rerun merely to recover the role classification above.
+
+## Utility evidence from the trajectory
+
+The effects were not all inert:
+
+- 126 effect instances participated in same-action GT control chains: change
+  surface with patch/check scheduling, localization with anchor reslotting,
+  and failure coverage with hypothesis/submission-risk generation.
+- 29 feature-contributor references reached 28 actual provider requests after
+  coalescing.
+- Signature-delta guidance was followed by a command inspecting the affected
+  implementation and child code.
+- Localization guidance was followed by a task-relevant interpreter/check
+  command.
+- New-file precedent guidance was followed by subsequent task-specific test,
+  build, benchmark, and inspection commands.
+
+These are demonstrated engine/trajectory consequences, not model
+acknowledgments. The remaining effects are proven internal state and lifecycle
+operations, but the old run cannot establish whether each one changed the
+frontier model's counterfactual choice. That distinction is why the corrected
+trace is needed for the next run; another run is not needed to conclude that
+the 326 were not garbage records.
