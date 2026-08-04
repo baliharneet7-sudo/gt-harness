@@ -101,7 +101,11 @@ def test_feedback_is_concise_and_contains_no_private_runtime_identifier():
 
 def test_all_seventeen_central_features_have_real_trigger_receipts():
     runtime = CentralFeatureRuntime(model_visible=True)
-    runtime.begin_task("Implement the requested change", revision="r0")
+    runtime.begin_task(
+        "Implement the requested change and run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+    )
     runtime.observe_action(
         action_id=1,
         command="rg -n 'Bottle|caller' .",
@@ -130,6 +134,11 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
             after_revision="r1",
             created=("new_module.py",),
             modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={
+                "app.py": "def f(x, y):\n    return x + y\n",
+                "new_module.py": "def helper():\n    pass\n",
+            },
         ),
         revision="r1",
     )
@@ -159,7 +168,16 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
         ),
         revision="r1",
     )
-    runtime.record_syntax(action_id=2, revision="r1", failed=True, reason="fixture_syntax_failure")
+    runtime.record_syntax(
+        action_id=2,
+        revision="r1",
+        failed=True,
+        reason="fixture_syntax_failure",
+        path="app.py",
+        command="python3 -m py_compile app.py",
+        returncode=1,
+        diagnostic="SyntaxError",
+    )
     runtime.record_submit(action_id=5, revision="r1", refused=True, sensor_healthy=True)
 
     summary = runtime.summary()
@@ -170,6 +188,7 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     visible = {item["feature_id"] for item in summary["receipts"] if item["model_visible"]}
     assert visible == {
         "covering_red",
+        "newfile_precedent",
         "recovery",
         "signature_delta",
         "submit_refusal",
@@ -199,7 +218,7 @@ def test_model_guidance_is_one_prioritized_advisory_per_action():
         revision="r0",
     )
     feedback = runtime.model_feedback()
-    assert "validation command failed" in feedback
+    assert "Validation failed" in feedback
     assert runtime.model_feedback() == ""
     summary = runtime.summary()
     assert summary["guidance_events"] == 1
@@ -291,8 +310,12 @@ def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
         revision="r2",
         failed=True,
         reason="changed_file_syntax_failure",
+        path="app.py",
+        command="python3 -m py_compile app.py",
+        returncode=1,
+        diagnostic="SyntaxError",
     )
-    assert "Repair the syntax" in runtime.model_feedback()
+    assert "Syntax check failed" in runtime.model_feedback()
 
     # Repeating the same advisory at the same workspace revision adds context
     # without adding evidence, so it must be coalesced.
@@ -306,7 +329,7 @@ def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
 
     summary = runtime.summary()
     assert summary["guidance_events"] == 1
-    assert summary["guidance_candidates"] == 2
+    assert summary["guidance_candidates"] == 1
     assert summary["guidance_suppressed"] >= 3
     assert summary["guidance_by_feature"] == {"syntax_result": 1}
 
@@ -330,10 +353,12 @@ def test_validation_debt_is_grounded_once_and_resets_after_a_real_check():
             revision=revision,
         )
     feedback = runtime.model_feedback()
-    assert "Three source revisions" in feedback
+    assert "Unvalidated authored changes" in feedback
     assert "pytest -q" in feedback
     receipt = next(
-        row for row in runtime.summary()["receipts"] if row["feature_id"] == "GT_EDIT_CHECK"
+        row
+        for row in runtime.summary()["receipts"]
+        if row["feature_id"] == "GT_EDIT_CHECK" and row["action"] == 3
     )
     assert receipt["payload"]["intervention"] == "validation_debt"
     assert receipt["model_visible"] is True
@@ -781,9 +806,14 @@ def test_documented_direct_census_entrypoint_is_executable():
 
     assert completed.returncode == 0, completed.stderr
     assert "ALL_17_CONSUMER_PATHS_PROVEN" in completed.stdout
+    assert "ALL_17_TRIGGERS_PROVEN" in completed.stdout
+    assert "ALL_17_PAYLOADS_CONCRETE" in completed.stdout
+    assert "ALL_17_CONSUMERS_APPLIED" in completed.stdout
+    assert "ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST" in completed.stdout
+    assert "NO_ACTIONS_BLOCKED" in completed.stdout
 
 
-def test_batch_interrupt_stamps_cancellation_on_the_effect():
+def test_predecided_actions_are_audited_without_cancellation():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix it", revision="r0")
     runtime.observe_action(
@@ -795,17 +825,18 @@ def test_batch_interrupt_stamps_cancellation_on_the_effect():
         revision="r0",
     )
     effects = runtime.consume_effects(action_id=1, call=1)
-    assert any(effect.required_before_action == 1 for effect in effects)
+    assert all(effect.required_before_action is None for effect in effects)
 
-    runtime.record_batch_interrupt(action_id=1, cancelled=2, reason="covering_red")
+    runtime.record_predecided_continuation(evidence_action=1, executed=2)
 
     stamped = next(
         effect
         for effect in runtime.summary()["effects"]
         if effect["feature_id"] == "covering_red"
     )
-    assert stamped["predecided_actions_cancelled"] == 2
-    assert runtime.summary()["action_metrics"]["batch_interrupts"] == 1
+    assert stamped["predecided_actions_cancelled"] == 0
+    assert stamped["predecided_actions_executed_after_evidence"] == 2
+    assert runtime.summary()["action_metrics"]["batch_interrupts"] == 0
 
 
 def test_grounded_payloads_require_concrete_evidence():
@@ -838,6 +869,36 @@ def test_grounded_payloads_require_concrete_evidence():
     assert covering["payload"]["command"] == "pytest -q"
     assert "assert error" in covering["payload"]["diagnostic"]
     assert covering["payload"]["attribution"] == "pytest -q"
+
+
+def test_empty_failure_diagnostic_never_reaches_model_feedback():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",))
+    classification = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+        result_code=-1,
+        output="",
+        source_revision="r0",
+        workspace_revision="r0",
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="",
+        returncode=-1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+        source_revision="r0",
+        validation=classification,
+    )
+
+    covering = next(
+        row
+        for row in runtime.summary()["receipts"]
+        if row["feature_id"] == "covering_red"
+    )
+    assert covering["model_visible"] is False
+    assert feature_payload_grounded("covering_red", covering["payload"]) is False
+    assert runtime.model_feedback() == ""
 
 
 def test_localization_payload_names_concrete_anchors():

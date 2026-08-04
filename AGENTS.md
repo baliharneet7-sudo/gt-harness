@@ -12,11 +12,12 @@ Keep these states distinct in every audit:
 1. **Receipt:** a FACT or CAP payload was produced at the correct action and
    source/workspace revision. This proves observation, not trajectory influence.
 2. **Controller consumption/decision:** a registered consumer used the payload
-   to change internal state, schedule a check, or interrupt a batch. A `PASS`
-   is a real decision but does not alter the model's next action.
-3. **Intervention:** the engine holds a submission, interrupts an already-planned
-   action, or sends one bounded, grounded payload into the immediately following
-   model request. Only this can be credited with changing a trajectory.
+   to change internal state or schedule a deterministic check. A `PASS` is a
+   real decision but does not alter the model's next action.
+3. **Integrated consequence:** the engine updates operational controller state
+   and, when the model needs the result, places one bounded grounded payload in
+   the first provider request after the evidence action. GT never blocks,
+   replaces, rejects, or cancels Mini-SWE actions.
 
 Private receipts must never be mistaken for an inactive engine. Conversely,
 receipt counts must never be claimed as causal help.
@@ -46,38 +47,43 @@ anchors (paths, symbols, commands, diagnostics):
 - a concrete changed-file syntax failure;
 - a real, structurally recognized validation failure;
 - the same failure repeating at an unchanged source revision;
-- a signature delta with the affected symbol and caller impact;
-- a one-time submit hold for a fresh grounded failing check; or
-- `GT_EDIT_CHECK` validation debt: three source-revision-advancing authored
-  edits occurred without a completed recognized behavioral check, and the task
-  supplied a declared check.
+- a source-derived signature delta with affected caller evidence;
+- a concrete new-file precedent or ranked-context reslot; or
+- source-bound validation or submission-risk state naming the exact check.
 
-A fresh syntax failure interrupts the remaining pre-decided actions in the same
-model response; each cancelled action is recorded, not silently dropped.
-Generic obligations, search echoes, passing syntax checks, CAP aliases, and
-submission certificates remain private. If the engine cannot name the evidence,
-the payload stays private and records `NO_OP_WITH_REASON`.
+A fresh syntax failure is delivered before the next available model decision;
+actions already selected in the same response continue unchanged. Generic
+obligations, search echoes, passing syntax checks, and submission certificates
+remain private unless they contribute new decision-relevant evidence. CAP
+features must apply their own actuator payload rather than copy an owner message.
+If the engine cannot name the evidence, the payload stays private.
 
-Every active delivery must be receipt-audited for evidence action, revision,
-next-decision timing, non-prediction, non-lateness, one-shot deduplication, and
-causal use. Do not re-enable the historical generic guidance stream; its 94
-advisories in run `30869649342` were the documented context/token regression.
+Every active delivery must be present in the exact final provider request before
+`model.query()` begins. Evidence from action N belongs in the first call after
+action N; call N+2 is one-step-late. Audit revision, request hash, message index,
+non-prediction, deduplication, and next action. Do not re-enable the historical
+generic guidance stream; its 94 advisories in run `30869649342` were the
+documented context/token regression.
 
 ## Provider-free proof
 
-`python -m scripts.central_feature_census` must print all five lines before any paid
+`python -m scripts.central_feature_census` must print all ten lines before any paid
 run: `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
-`ALL_17_CONSUMER_PATHS_PROVEN`. The census cannot pass on producer receipts
-alone. `scripts/central_readiness_audit.py` must print `READY`.
+`ALL_17_CONSUMER_PATHS_PROVEN`, `ALL_17_TRIGGERS_PROVEN`,
+`ALL_17_PAYLOADS_CONCRETE`, `ALL_17_CONSUMERS_APPLIED`,
+`ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, and `NO_ACTIONS_BLOCKED`.
+The census cannot pass on producer receipts alone.
+`scripts/central_readiness_audit.py` must print `READY`.
 
 ## Live-run gate
 
 Before any paid smoke, `python scripts/central_pre_smoke_gate.py` must print
 `SMOKE_APPROVED` at the intended commit. It fails closed unless the exact paid
 workflow timeout, the direct and module census entrypoints, all 17 agent-loop
-producer/consumer effects, non-predictive/non-late timing, and submit-boundary
-consumption are proven. Then replay archived trajectories through the policy and confirm that
-the intervention is reachable only on its intended lifecycle state. A smoke is
-confirmation, never exploratory debugging. The 89-task run remains blocked
-until outcome preservation and repeated outcome-first efficiency gates pass.
+producer/consumer effects, non-predictive/non-late timing, and non-blocking
+submission-risk consumption are proven. Then replay archived trajectories
+through the policy and confirm that each effect is reachable only on its
+intended lifecycle state. A smoke is confirmation, never exploratory debugging.
+The 89-task run remains blocked until outcome preservation and repeated
+outcome-first efficiency gates pass.

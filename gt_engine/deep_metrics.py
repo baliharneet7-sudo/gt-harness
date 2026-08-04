@@ -17,6 +17,31 @@ PRIMARY_RESOURCES = (
     "assistant_steps",
     "normalized_cost_usd",
 )
+DIAGNOSTIC_METRICS = (
+    "input_tokens",
+    "output_tokens",
+    "uncached_input_tokens",
+    "context_chars_sent",
+    "model_output_chars",
+    "failed_actions",
+    "repeated_commands",
+    "no_action_assistant_steps",
+    "wasted_action_proxy",
+    "steps_to_first_search",
+    "steps_to_first_read",
+    "steps_to_first_edit",
+    "steps_to_first_check",
+    "steps_to_submit",
+    "gt_context_chars_added",
+    "effects_produced",
+    "effects_applied",
+    "state_mutations",
+    "payload_deliveries",
+    "timely_payload_deliveries",
+    "late_payload_deliveries",
+    "predictive_payload_deliveries",
+    "predecided_actions_after_evidence",
+)
 # Frozen DeepSeek V4 Flash experiment rates per million tokens. Provider cost
 # was configured as ignore_errors and is often zero, so this normalized metric
 # is the cross-arm comparable resource measure.
@@ -303,6 +328,7 @@ def extract_trajectory(
         result.setdefault(key, 0)
     if receipt_path and receipt_path.exists():
         receipt = _load_json(receipt_path)
+        receipt_metrics = receipt.get("metrics") or {}
         feature_summary = receipt.get("features") or {}
         call_contexts = receipt.get("model_call_contexts") or []
         validation_log = feature_summary.get("validation_log") or []
@@ -342,6 +368,24 @@ def extract_trajectory(
                 ),
             }
         )
+        for key in (
+            "gt_context_chars_added",
+            "stock_context_chars_sent",
+            "effects_produced",
+            "effects_applied",
+            "state_mutations",
+            "payload_deliveries",
+            "timely_payload_deliveries",
+            "late_payload_deliveries",
+            "predictive_payload_deliveries",
+            "first_eligible_delivery_rate",
+            "predecided_actions_after_evidence",
+            "submit_risks",
+            "submit_holds",
+            "batch_interrupts",
+            "interrupted_actions",
+        ):
+            result[key] = receipt_metrics.get(key, 0)
     return result
 
 
@@ -356,6 +400,9 @@ def compare_arms(
     pareto_failures: list[str] = []
     comparable_solved: list[str] = []
     outcomes_complete = True
+    aggregate_values: dict[str, list[float]] = {
+        metric: [] for metric in (*PRIMARY_RESOURCES, *DIAGNOSTIC_METRICS)
+    }
     for task in tasks:
         before, after = baseline[task], treatment[task]
         b_solved, a_solved = before.get("solved"), after.get("solved")
@@ -369,6 +416,18 @@ def compare_arms(
             metric: float(after.get(metric, 0) or 0) - float(before.get(metric, 0) or 0)
             for metric in PRIMARY_RESOURCES
         }
+        diagnostic_deltas: dict[str, float | None] = {}
+        for metric in DIAGNOSTIC_METRICS:
+            before_value = before.get(metric)
+            after_value = after.get(metric)
+            if before_value is None or after_value is None:
+                diagnostic_deltas[metric] = None
+                continue
+            delta = float(after_value) - float(before_value)
+            diagnostic_deltas[metric] = delta
+            aggregate_values[metric].append(delta)
+        for metric, delta in deltas.items():
+            aggregate_values[metric].append(delta)
         pareto = None
         if b_solved is True and a_solved is True:
             comparable_solved.append(task)
@@ -381,6 +440,7 @@ def compare_arms(
             "baseline_solved": b_solved,
             "treatment_solved": a_solved,
             "deltas": deltas,
+            "diagnostic_deltas": diagnostic_deltas,
             "strict_pareto": pareto,
         }
     gate_passed = (
@@ -397,6 +457,10 @@ def compare_arms(
         "solve_regressions": solve_regressions,
         "censored_treatment": censored_treatment,
         "pareto_failures": pareto_failures,
+        "aggregate_deltas": {
+            metric: sum(values) if len(values) == len(tasks) else None
+            for metric, values in aggregate_values.items()
+        },
         "gate_passed": gate_passed,
     }
 
@@ -419,5 +483,33 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
             f"| {delta['total_tokens']:+,.0f} | {delta['api_calls']:+,.0f} "
             f"| {delta['actions']:+,.0f} | {delta['assistant_steps']:+,.0f} "
             f"| ${delta['normalized_cost_usd']:+.6f} | {row['strict_pareto']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Deep behavior/context deltas",
+            "",
+            "Milestone deltas are action indices, not resource gates. "
+            "Missing paired values are `n/a`.",
+            "",
+            "| task | uncached | context chars | failed | wasted | to submit | GT chars "
+            "| timely payloads | late payloads | predictive payloads |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+
+    def value(row: dict[str, Any], metric: str) -> str:
+        item = row["diagnostic_deltas"].get(metric)
+        return "n/a" if item is None else f"{item:+,.0f}"
+
+    for task, row in comparison["tasks"].items():
+        lines.append(
+            f"| {task} | {value(row, 'uncached_input_tokens')} "
+            f"| {value(row, 'context_chars_sent')} | {value(row, 'failed_actions')} "
+            f"| {value(row, 'wasted_action_proxy')} | {value(row, 'steps_to_submit')} "
+            f"| {value(row, 'gt_context_chars_added')} "
+            f"| {value(row, 'timely_payload_deliveries')} "
+            f"| {value(row, 'late_payload_deliveries')} "
+            f"| {value(row, 'predictive_payload_deliveries')} |"
         )
     return "\n".join(lines) + "\n"

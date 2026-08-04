@@ -19,7 +19,8 @@ RELEASE_TESTS = (
     "tests/test_gt_central_runtime.py::test_documented_direct_census_entrypoint_is_executable",
     "tests/test_gt_central_agent.py::test_paid_engine_workflow_keeps_provider_timeout_below_loop_budget",
     "tests/test_gt_central_agent.py::test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effects",
-    "tests/test_gt_central_agent.py::test_grounded_failure_holds_first_submit_only",
+    "tests/test_gt_central_agent.py::test_grounded_failure_warns_before_submit_without_holding_it",
+    "tests/test_gt_central_agent.py::test_syntax_failure_does_not_interrupt_multi_action_batch",
 )
 
 

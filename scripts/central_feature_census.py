@@ -32,7 +32,7 @@ EXPECTED_TIMING = {
     "GT_LOC_RESLOT": ("search_result", (1,)),
     "def_partition": ("search_result", (1,)),
     "caller_contract": ("search_result", (1,)),
-    "newfile_precedent": (("search_result", "edit_result"), (1, 2)),
+    "newfile_precedent": ("edit_result", (2,)),
     "GT_CHANGE_SURFACE": ("edit_result", (2,)),
     "GT_PATCH_DELTA": ("edit_result", (2,)),
     "signature_delta": ("edit_result", (2,)),
@@ -45,8 +45,8 @@ EXPECTED_TIMING = {
     "covering_red": ("test_result", (3, 4)),
     "GT_HYPOTHESIS": ("test_result", (3, 4)),
     "recovery": ("test_result", (4,)),
-    "submit_refusal": ("submit", (5,)),
-    "GT_SS_SUBMIT_RED": ("submit", (5,)),
+    "submit_refusal": ("test_result", (3,)),
+    "GT_SS_SUBMIT_RED": ("test_result", (3,)),
     "GT_CERT_DELIVERY": ("submit", (5,)),
 }
 
@@ -81,6 +81,7 @@ def audit_timing(summary: dict) -> dict:
                 and feature_id
                 in {
                     "covering_red",
+                    "newfile_precedent",
                     "recovery",
                     "signature_delta",
                     "submit_refusal",
@@ -128,6 +129,7 @@ def census() -> dict:
         decision_windows.append(
             {
                 "feature_id": metadata.get("feature_id"),
+                "contributing_features": metadata.get("contributing_features", []),
                 "evidence_action": evidence_action,
                 "prepared_after_action": after_action,
                 "delivered_before_next_decision": True,
@@ -137,7 +139,11 @@ def census() -> dict:
             }
         )
 
-    runtime.begin_task("Implement the requested change", revision="r0")
+    runtime.begin_task(
+        "Implement the requested change and run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+    )
     runtime.observe_action(
         action_id=1,
         command="rg -n 'Bottle|caller' .",
@@ -162,6 +168,11 @@ def census() -> dict:
             "r1",
             created=("new_module.py",),
             modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={
+                "app.py": "def f(x, y):\n    return x + y\n",
+                "new_module.py": "def helper():\n    pass\n",
+            },
         ),
         revision="r1",
     )
@@ -189,9 +200,10 @@ def census() -> dict:
     runtime.record_submit(
         action_id=5,
         revision="r1",
-        refused=True,
+        refused=False,
         sensor_healthy=True,
-        blockers=("pytest -q",),
+        check_count=1,
+        failing_checks=1,
     )
     deliver_next(5)
     summary = runtime.summary()
@@ -215,6 +227,7 @@ def census() -> dict:
                 and row["feature_id"]
                 in {
                     "covering_red",
+                    "newfile_precedent",
                     "recovery",
                     "signature_delta",
                     "submit_refusal",
@@ -249,6 +262,27 @@ def census() -> dict:
         and summary["all_17_consumers_proven"]
         and summary["all_effects_timing_valid"]
         and summary["all_payloads_semantically_grounded"]
+        and {
+            row["feature_id"] for row in summary["effect_applications"]
+            if row["state_fields_changed"]
+        }
+        >= set(CENTRAL_FEATURE_IDS)
+        and summary["action_metrics"]["submit_holds"] == 0
+        and summary["action_metrics"]["batch_interrupts"] == 0
+    )
+    applied_features = {
+        row["feature_id"]
+        for row in summary["effect_applications"]
+        if row["state_fields_changed"]
+    }
+    summary["all_17_triggers_proven"] = summary["all_17_producers_proven"]
+    summary["all_17_payloads_concrete"] = summary["all_payloads_semantically_grounded"]
+    summary["all_17_consumers_applied"] = applied_features >= set(CENTRAL_FEATURE_IDS)
+    summary["all_visible_payloads_first_eligible"] = summary["all_guidance_on_time"]
+    summary["no_actions_blocked"] = (
+        summary["action_metrics"]["submit_holds"] == 0
+        and summary["action_metrics"]["batch_interrupts"] == 0
+        and summary["action_metrics"]["interrupted_actions"] == 0
     )
     return summary
 
@@ -281,6 +315,27 @@ def main() -> int:
         if result["all_17_consumer_paths_proven"]
         else "CONSUMER_PATHS_NOT_PROVEN"
     )
+    print(
+        "ALL_17_TRIGGERS_PROVEN"
+        if result["all_17_triggers_proven"]
+        else "TRIGGERS_NOT_PROVEN"
+    )
+    print(
+        "ALL_17_PAYLOADS_CONCRETE"
+        if result["all_17_payloads_concrete"]
+        else "PAYLOADS_NOT_CONCRETE"
+    )
+    print(
+        "ALL_17_CONSUMERS_APPLIED"
+        if result["all_17_consumers_applied"]
+        else "CONSUMERS_NOT_APPLIED"
+    )
+    print(
+        "ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST"
+        if result["all_visible_payloads_first_eligible"]
+        else "VISIBLE_PAYLOAD_TIMING_INVALID"
+    )
+    print("NO_ACTIONS_BLOCKED" if result["no_actions_blocked"] else "ACTIONS_BLOCKED")
     return 0 if result["all_17_consumer_paths_proven"] else 1
 
 

@@ -74,7 +74,9 @@ def _assert_contract(
     source_revision: str = SR1,
 ) -> None:
     summary = runtime.summary()
-    rows = _feature_rows(summary, feature_id)
+    rows = [
+        row for row in _feature_rows(summary, feature_id) if row["action"] == action
+    ]
     assert rows, f"{feature_id} produced no receipt"
     for row in rows:
         # 1. boundary and action.
@@ -203,18 +205,31 @@ def test_newfile_precedent_records_a_concrete_precedent_path():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
     runtime.observe_action(
-        action_id=1, command="rg -n 'Bottle' .", output=SEARCH_OUTPUT, returncode=0,
-        transition=_transition(1, "rg -n", WR0, WR0), revision=WR0, source_revision=SR0,
+        action_id=1, command="write bottle_new.py", output="", returncode=0,
+        transition=_transition(
+            1,
+            "write",
+            WR0,
+            SR1,
+            created=("bottle_new.py",),
+            before_contents={"bottle.py": "class Bottle:\n    pass\n"},
+            after_contents={
+                "bottle.py": "class Bottle:\n    pass\n",
+                "bottle_new.py": "class NewBottle:\n    pass\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
     )
     _consume(runtime, 1, 1)
 
     _assert_contract(
         runtime, "newfile_precedent",
-        model_visible=False, effect_kind=EffectKind.IMPACT_SET_UPDATE,
-        boundary="search_result", action=1, source_revision=SR0,
+        model_visible=True, effect_kind=EffectKind.IMPACT_SET_UPDATE,
+        boundary="edit_result", action=1, source_revision=SR1,
     )
     row = _feature_rows(runtime.summary(), "newfile_precedent")[0]
-    assert row["payload"]["precedent_path"] == "tests/test_bottle.py"
+    assert row["payload"]["precedent_path"] == "bottle.py"
 
 
 def test_covering_red_records_grounded_failure_and_must_precede_next_action():
@@ -282,7 +297,77 @@ def test_signature_delta_schedules_caller_validation_with_symbol():
     assert row["payload"]["symbol"] == "f"
 
 
-def test_syntax_result_is_a_batch_interrupt_on_failure():
+def test_signature_delta_uses_source_witness_for_non_sed_edits():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Change the API", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="apply_patch",
+        output="Done!",
+        returncode=0,
+        transition=_transition(
+            1,
+            "apply_patch",
+            WR0,
+            SR1,
+            modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={"app.py": "def f(x, y=0):\n    return x + y\n"},
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    row = _feature_rows(runtime.summary(), "signature_delta")[0]
+    assert row["payload"]["symbol"] == "f"
+    assert row["payload"]["before_signature"] == "def f(x)"
+    assert row["payload"]["after_signature"] == "def f(x, y=0)"
+
+
+def test_signature_payload_coalesces_caller_and_patch_consumers():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Change f", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="rg -n 'f' .",
+        output="app.py:1:def f(x)\ntests/test_app.py:3:assert f(1) == 1\n",
+        returncode=0,
+        transition=_transition(1, "rg", WR0, WR0),
+        revision=WR0,
+        source_revision=SR0,
+    )
+    _consume(runtime, 1, 1)
+    runtime.observe_action(
+        action_id=2,
+        command="apply_patch",
+        output="Done!",
+        returncode=0,
+        transition=_transition(
+            2,
+            "apply_patch",
+            WR0,
+            SR1,
+            modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={"app.py": "def f(x, y=0):\n    return x + y\n"},
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 2, 2)
+
+    feedback = runtime.model_feedback(deferred=True)
+    metadata = runtime.prepared_guidance() or {}
+    assert "Known callers: tests/test_app.py" in feedback
+    assert {
+        "signature_delta",
+        "caller_contract",
+        "GT_PATCH_DELTA",
+    } <= set(metadata["contributing_features"])
+
+
+def test_syntax_result_updates_validation_state_on_failure():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix syntax", revision=WR0, source_revision=SR0)
     runtime.record_syntax(
@@ -294,12 +379,12 @@ def test_syntax_result_is_a_batch_interrupt_on_failure():
 
     _assert_contract(
         runtime, "syntax_result",
-        model_visible=True, effect_kind=EffectKind.BATCH_INTERRUPT,
+        model_visible=True, effect_kind=EffectKind.SYNTAX_STATE_UPDATE,
         boundary="edit_result", action=1,
     )
 
 
-def test_submit_refusal_and_submit_red_hold_submission():
+def test_submit_refusal_and_submit_red_record_non_blocking_risk():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Finish", revision=WR0, source_revision=SR0)
     runtime.record_submit(
@@ -310,14 +395,14 @@ def test_submit_refusal_and_submit_red_hold_submission():
 
     _assert_contract(
         runtime, "submit_refusal",
-        model_visible=True, effect_kind=EffectKind.SUBMIT_HOLD,
+        model_visible=True, effect_kind=EffectKind.SUBMIT_RISK_UPDATE,
         boundary="submit", action=1,
     )
     row = _feature_rows(runtime.summary(), "submit_refusal")[0]
     assert "pytest -q" in row["payload"]["blockers"]
     _assert_contract(
         runtime, "GT_SS_SUBMIT_RED",
-        model_visible=False, effect_kind=EffectKind.SUBMIT_HOLD,
+        model_visible=False, effect_kind=EffectKind.SUBMIT_RISK_UPDATE,
         boundary="submit", action=1,
     )
 
@@ -366,7 +451,11 @@ def test_validation_debt_schedules_the_relevant_check():
         model_visible=True, effect_kind=EffectKind.VALIDATION_SCHEDULE,
         boundary="edit_result", action=3, source_revision=f"{SR1}-3",
     )
-    row = _feature_rows(runtime.summary(), "GT_EDIT_CHECK")[0]
+    row = next(
+        row
+        for row in _feature_rows(runtime.summary(), "GT_EDIT_CHECK")
+        if row["action"] == 3
+    )
     assert row["payload"]["intervention"] == "validation_debt"
     assert row["payload"]["declared_check"] == "pytest -q"
     assert "app.py" in row["payload"]["changed_paths"]
@@ -418,7 +507,17 @@ def test_all_17_positive_scenarios_cover_every_feature_id():
     runtime.observe_action(
         action_id=2, command="sed -i 's/def f(/def f(x:/' app.py", output="", returncode=0,
         transition=_transition(
-            2, "sed -i", WR0, SR1, created=("new_module.py",), modified=("app.py",)
+            2,
+            "sed -i",
+            WR0,
+            SR1,
+            created=("new_module.py",),
+            modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={
+                "app.py": "def f(x, y):\n    return x + y\n",
+                "new_module.py": "def helper():\n    pass\n",
+            },
         ),
         revision=SR1, source_revision=SR1,
     )
@@ -682,7 +781,7 @@ def test_signature_delta_plus_caller_contract_schedules_caller_validation():
     assert EffectKind.IMPACT_SET_UPDATE.value in kinds
 
 
-def test_syntax_failure_interrupts_a_multi_action_batch():
+def test_syntax_failure_updates_state_without_interrupting_a_multi_action_batch():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix syntax", revision=WR0, source_revision=SR0)
     runtime.record_syntax(
@@ -692,10 +791,15 @@ def test_syntax_failure_interrupts_a_multi_action_batch():
     )
     effects = runtime.consume_effects(action_id=1, call=1)
 
-    interrupt = next(e for e in effects if e.effect_kind == EffectKind.BATCH_INTERRUPT)
-    assert interrupt.required_before_action == 1
-    runtime.record_batch_interrupt(action_id=1, cancelled=2, reason="BATCH_INTERRUPT")
-    assert runtime.summary()["action_metrics"]["batch_interrupts"] == 1
+    syntax = next(e for e in effects if e.feature_id == "syntax_result")
+    assert syntax.required_before_action is None
+    application = next(
+        row
+        for row in runtime.summary()["effect_applications"]
+        if row["feature_id"] == "syntax_result"
+    )
+    assert "validation_results" in application["state_fields_changed"]
+    assert runtime.summary()["action_metrics"]["batch_interrupts"] == 0
 
 
 def test_validation_debt_ignores_background_artifacts_and_targets_source():
@@ -748,7 +852,7 @@ def test_covering_red_hypothesis_recovery_discriminate_after_exact_repeat():
     assert recovery.effect_action["alternate_action"]["paths"] == ["app.py"]
 
 
-def test_submit_refusal_and_certification_one_time_hold():
+def test_submit_risk_and_certification_are_non_blocking_state_updates():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Finish", revision=WR0, source_revision=SR0)
     runtime.record_submit(
@@ -757,8 +861,16 @@ def test_submit_refusal_and_certification_one_time_hold():
     )
     effects = runtime.consume_effects(action_id=1, call=1)
 
-    assert any(e.effect_kind == EffectKind.SUBMIT_HOLD for e in effects)
+    assert any(e.feature_id == "submit_refusal" for e in effects)
     assert any(e.effect_kind == EffectKind.CERTIFY_PASS for e in effects)
+    summary = runtime.summary()
+    assert summary["action_metrics"]["submit_holds"] == 0
+    risk = next(
+        row
+        for row in summary["effect_applications"]
+        if row["feature_id"] == "submit_refusal"
+    )
+    assert "submission_state" in risk["state_fields_changed"]
 
 
 def test_two_actionable_facts_from_one_action_are_both_consumed():

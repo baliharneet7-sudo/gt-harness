@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from gt_engine.deep_metrics import compare_arms, extract_trajectory
+from gt_engine.deep_metrics import compare_arms, extract_trajectory, render_delta_markdown
 
 
 def _assistant(command: str, *, prompt: int, completion: int, cached: int = 0) -> dict:
@@ -92,6 +92,57 @@ def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources(
     assert compare_arms(baseline, positive)["gate_passed"] is False
     assert compare_arms(baseline, regressed)["solve_regressions"] == ["task"]
     assert compare_arms(baseline, censored)["censored_treatment"] == ["task"]
+
+
+def test_compare_arms_reports_deep_behavior_context_and_timing_deltas():
+    baseline = {
+        "task": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+            "uncached_input_tokens": 40,
+            "context_chars_sent": 500,
+            "failed_actions": 3,
+            "wasted_action_proxy": 4,
+            "steps_to_submit": 10,
+            "gt_context_chars_added": 0,
+            "timely_payload_deliveries": 0,
+            "late_payload_deliveries": 0,
+        }
+    }
+    treatment = {
+        "task": {
+            **baseline["task"],
+            "total_tokens": 90,
+            "uncached_input_tokens": 30,
+            "context_chars_sent": 450,
+            "failed_actions": 1,
+            "wasted_action_proxy": 1,
+            "steps_to_submit": 8,
+            "gt_context_chars_added": 70,
+            "timely_payload_deliveries": 2,
+        }
+    }
+
+    comparison = compare_arms(baseline, treatment)
+    diagnostics = comparison["tasks"]["task"]["diagnostic_deltas"]
+
+    assert diagnostics["uncached_input_tokens"] == -10
+    assert diagnostics["context_chars_sent"] == -50
+    assert diagnostics["failed_actions"] == -2
+    assert diagnostics["wasted_action_proxy"] == -3
+    assert diagnostics["steps_to_submit"] == -2
+    assert diagnostics["gt_context_chars_added"] == 70
+    assert diagnostics["timely_payload_deliveries"] == 2
+    assert comparison["aggregate_deltas"]["context_chars_sent"] == -50
+    markdown = render_delta_markdown("baseline_to_treatment", comparison)
+    assert "Deep behavior/context deltas" in markdown
+    assert "uncached" in markdown
+    assert "late payloads" in markdown
 
 
 def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):

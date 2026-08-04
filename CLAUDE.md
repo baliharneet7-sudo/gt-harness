@@ -21,27 +21,32 @@ the model/action loop, observes every execution transition, and keeps GT code,
 state, credentials, and receipts outside the task container. The model never
 asks a GT tool for help.
 
-Do not equate a produced feature receipt with a model intervention. The engine
-observes a valid lifecycle fact privately, executes a controller decision that
-passes, or actively changes the next decision via a bounded runtime payload or
-a one-time submit hold. Only controller consumption or model delivery can
-change a trajectory.
+Do not equate a produced feature receipt with working integration. A triggered
+feature must apply its typed payload to operational controller state. When the
+model needs the result, the engine enriches the first provider request after the
+evidence action with one bounded grounded payload. GT never blocks submission,
+cancels a batch, replaces a command, or otherwise overrides Mini-SWE's choice.
 
 The 17 feature identities all have a registered consumer (`central_controls.py`);
 most effects are internal and cost zero prompt tokens. The source revision is
 separate from the whole-workspace revision: caches, binaries, build products,
 logs, and background output never stale validation evidence. One immutable
 validation classification is shared by the runtime, the evidence ledger, the
-receipt, and deep metrics. A fresh syntax failure interrupts the remaining
-pre-decided actions in the same model response. Every model-visible payload
-must name concrete evidence (paths, symbols, commands, diagnostics); generic
-prose stays private.
+receipt, and deep metrics. Actions already chosen in one model response execute
+unchanged. Fresh evidence is inserted before the next model query starts, never
+one reasoning step later and never before its evidence exists. Every
+model-visible payload must name concrete paths, symbols, commands, checks, or
+diagnostics; related feature payloads are coalesced to avoid context spam.
 
 Provider-free proof is gated by `python -m scripts.central_feature_census` and must
 print all of:
 `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
-`ALL_17_CONSUMER_PATHS_PROVEN`. Receipts are schema v3. The 89-task run
+`ALL_17_CONSUMER_PATHS_PROVEN`, `ALL_17_TRIGGERS_PROVEN`,
+`ALL_17_PAYLOADS_CONCRETE`, `ALL_17_CONSUMERS_APPLIED`,
+`ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, and `NO_ACTIONS_BLOCKED`.
+Receipts are schema v3 with effect-application and exact request-boundary proof.
+The 89-task run
 remains blocked until the ten-task treatment smoke and repeated matched trials
 pass. See `AGENTS.md` for the executable contract.
 

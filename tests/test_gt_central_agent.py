@@ -246,20 +246,20 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
     assert not any("Runtime evidence:" in item for item in model.observed_history[0])
     assert any(
-        "Runtime evidence: Repair the syntax failure in app.py" in item
+        "Runtime evidence: Syntax check failed for app.py" in item
         for item in model.observed_history[1]
     )
     assert not any(
-        "Runtime evidence: Repair the syntax failure in app.py" in item
+        "Runtime evidence: Syntax check failed for app.py" in item
         for history in model.observed_history[2:]
         for item in history
     )
     assert any(
-        "Three source revisions have no completed behavioral validation" in item
+        "Unvalidated authored changes in app.py; declared check: pytest -q" in item
         for item in model.observed_history[3]
     )
     assert not any(
-        "Three source revisions have no completed behavioral validation" in item
+        "Unvalidated authored changes in app.py; declared check: pytest -q" in item
         for history in model.observed_history[4:]
         for item in history
     )
@@ -300,12 +300,12 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert deliveries[0]["feature_id"] == "syntax_result"
     assert deliveries[0]["evidence_action"] == 1
     assert deliveries[0]["delivered_before_call"] == 2
-    assert deliveries[0]["decision_window"] == "next_model_call_only"
+    assert deliveries[0]["decision_window"] == "first_next_model_call"
     assert deliveries[0]["not_predictive"] is True
     assert deliveries[1]["feature_id"] == "GT_EDIT_CHECK"
     assert deliveries[1]["evidence_action"] == 3
     assert deliveries[1]["delivered_before_call"] == 4
-    assert deliveries[1]["decision_window"] == "next_model_call_only"
+    assert deliveries[1]["decision_window"] == "first_next_model_call"
     assert deliveries[1]["not_predictive"] is True
     contexts = receipt["model_call_contexts"]
     assert len(contexts) == metrics["api_calls"]
@@ -332,14 +332,27 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
                 return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
             if "-printf" in command:
                 rows = {
-                    "empty": "",
-                    "s1": "f\t4\t1.0\t1.0\tapp.py\t\n",
-                    "s2": "f\t5\t2.0\t2.0\tapp.py\t\n",
-                    "s3": "f\t6\t3.0\t3.0\tapp.py\t\n",
+                    "empty": "f\t3\t0.0\t0.0\tapp.py\t\n",
+                    "s1": (
+                        "f\t4\t1.0\t1.0\tapp.py\t\n"
+                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
+                    ),
+                    "s2": (
+                        "f\t5\t2.0\t2.0\tapp.py\t\n"
+                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
+                    ),
+                    "s3": (
+                        "f\t6\t3.0\t3.0\tapp.py\t\n"
+                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
+                    ),
                 }
                 return ExecResult(stdout=rows[self.state], return_code=0)
             if command.startswith("sha256sum"):
-                return ExecResult(stdout=("a" * 64) + "  app.py\n", return_code=0)
+                paths = [path for path in ("app.py", "new_module.py") if path in command]
+                return ExecResult(
+                    stdout="".join(("a" * 64) + f"  {path}\n" for path in paths),
+                    return_code=0,
+                )
             if command.startswith("rg "):
                 return ExecResult(
                     stdout=(
@@ -393,17 +406,32 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
     assert set(features["consumer_paths"]) == set(features["feature_ids"])
     assert {row["feature_id"] for row in features["receipts"]} == set(features["feature_ids"])
     assert {row["feature_id"] for row in features["effects"]} == set(features["feature_ids"])
+    assert {
+        row["feature_id"]
+        for row in features["effect_applications"]
+        if row["state_fields_changed"]
+    } == set(features["feature_ids"])
     assert all(row["evidence_before_effect"] for row in features["effects"])
     assert all(row["effect_before_next_action"] for row in features["effects"])
     assert all(row["non_late"] and not row["predictive"] for row in features["effects"])
     assert all(
-        row["not_predictive"] and row["delivered_before_call"] == row["prepared_after_call"] + 1
+        row["not_predictive"]
+        and row["delivered_before_model_query"]
+        and not row["one_step_late"]
+        and row["delivered_before_call"] == row["first_eligible_call"]
+        and row["request_payload_sha256"]
+        == receipt["model_call_contexts"][row["delivered_before_call"] - 1][
+            "request_payload_sha256"
+        ]
         for row in receipt["guidance_deliveries"]
     )
+    assert features["action_metrics"]["submit_holds"] == 0
+    assert features["action_metrics"]["batch_interrupts"] == 0
+    assert features["action_metrics"]["interrupted_actions"] == 0
 
 
 @pytest.mark.asyncio
-async def test_grounded_failure_holds_first_submit_only(tmp_path):
+async def test_grounded_failure_warns_before_submit_without_holding_it(tmp_path):
     class CheckEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -419,6 +447,9 @@ async def test_grounded_failure_holds_first_submit_only(tmp_path):
 
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     environment = CheckEnvironment()
+    # The spare third response keeps the RED witness finite under the old
+    # submit-hold implementation.  The repaired loop must terminate after the
+    # first submit and therefore issue only two model calls.
     model = _ScriptedModel(["pytest -q", submit, submit])
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
     agent._model_factory = lambda: model
@@ -427,8 +458,12 @@ async def test_grounded_failure_holds_first_submit_only(tmp_path):
 
     executed_submits = [command for command, _ in environment.commands if command == submit]
     assert executed_submits == [submit]
+    assert len(model.observed_history) == 2
+    assert any("pytest -q" in item for item in model.observed_history[1])
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
-    assert "Submit again to continue without another hold" in trajectory
+    assert "Submit again to continue without another hold" not in trajectory
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["submit_holds"] == 0
 
 
 @pytest.mark.asyncio
@@ -494,12 +529,13 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_syntax_failure_interrupts_multi_action_batch(tmp_path):
+async def test_syntax_failure_does_not_interrupt_multi_action_batch(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
     class MultiActionModel:
         config = type("Config", (), {"model_name": "test"})()
         queries = 0
+        observed_history: list[list[str]] = []
 
         def format_message(self, **kwargs):
             return kwargs
@@ -512,6 +548,9 @@ async def test_syntax_failure_interrupts_multi_action_batch(tmp_path):
 
         def query(self, messages):
             type(self).queries += 1
+            type(self).observed_history.append(
+                [str(item.get("content") or "") for item in messages]
+            )
             if type(self).queries == 1:
                 return {
                     "role": "assistant",
@@ -579,6 +618,8 @@ async def test_syntax_failure_interrupts_multi_action_batch(tmp_path):
             if command == "write broken":
                 self.state = "bad"
                 return ExecResult(return_code=0)
+            if command in {"echo MUST_NOT_EXECUTE", "echo ALSO_MUST_NOT_EXECUTE"}:
+                return ExecResult(stdout=command + "\n", return_code=0)
             if command == submit:
                 return ExecResult(stdout=submit + "\n", return_code=0)
             raise AssertionError(f"unexpected command: {command}")
@@ -600,21 +641,35 @@ async def test_syntax_failure_interrupts_multi_action_batch(tmp_path):
         if not command.startswith("uname")
         and "-printf" not in command
         and not command.startswith("sha256sum")
+        and not command.startswith("python3 -c")
         and "py_compile" not in command
     ]
-    assert executed == ["write broken", submit]
-    trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
-    assert "Runtime evidence: Repair the syntax failure in app.py" in trajectory
+    assert executed == [
+        "write broken",
+        "echo MUST_NOT_EXECUTE",
+        "echo ALSO_MUST_NOT_EXECUTE",
+        submit,
+    ]
+    assert not any(
+        "Syntax check failed for app.py" in item
+        for item in MultiActionModel.observed_history[0]
+    )
+    assert any(
+        "Syntax check failed for app.py" in item
+        for item in MultiActionModel.observed_history[1]
+    )
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
-    assert receipt["metrics"]["batch_interrupts"] == 1
-    assert receipt["metrics"]["interrupted_actions"] == 2
-    assert receipt["features"]["batch_interrupts"][0]["cancelled"] == 2
+    assert receipt["metrics"]["batch_interrupts"] == 0
+    assert receipt["metrics"]["interrupted_actions"] == 0
+    assert receipt["features"]["batch_interrupts"] == []
     syntax_effect = next(
         effect
         for effect in receipt["features"]["effects"]
         if effect["feature_id"] == "syntax_result"
     )
-    assert syntax_effect["predecided_actions_cancelled"] == 2
-    assert syntax_effect["predecided_actions_executed_after_evidence"] == 0
-    assert syntax_effect["effect_before_next_action"] is True
+    assert syntax_effect["predecided_actions_cancelled"] == 0
+    assert syntax_effect["predecided_actions_executed_after_evidence"] == 2
+    assert receipt["guidance_deliveries"][0]["delivered_before_call"] == 2
+    assert receipt["guidance_deliveries"][0]["first_eligible_call"] == 2
+    assert receipt["guidance_deliveries"][0]["delivered_before_model_query"] is True
     assert context.metadata["exit_status"] == "Submitted"

@@ -32,7 +32,7 @@ def _trajectory(actions, instruction="Fix it, then run `pytest -q`.") -> dict:
     return {"info": {"exit_status": "Submitted"}, "messages": messages}
 
 
-def _receipt(gt_change_surfaces=None) -> dict:
+def _receipt(gt_change_surfaces=None, syntax_results=None) -> dict:
     rows = [
         {
             "feature_id": "GT_CERT_DELIVERY",
@@ -54,6 +54,21 @@ def _receipt(gt_change_surfaces=None) -> dict:
                     "created": list(paths.get("created", ())),
                     "modified": list(paths.get("modified", ())),
                     "deleted": list(paths.get("deleted", ())),
+                },
+            }
+        )
+    for action, payload in (syntax_results or {}).items():
+        rows.append(
+            {
+                "feature_id": "syntax_result",
+                "action": action,
+                "payload": {
+                    "ok": payload.get("ok", True),
+                    "fresh": True,
+                    "path": payload.get("path", "app.py"),
+                    "command": payload.get("command", "python3 -m py_compile app.py"),
+                    "returncode": payload.get("returncode", 0),
+                    "message": "syntax result",
                 },
             }
         )
@@ -111,3 +126,32 @@ def test_replay_detects_old_certificate_loss(tmp_path):
     report = replay_task(trajectory_path, receipt_path, "task")
 
     assert "old certificate checks were lost" in " ".join(_outcomes(report))
+
+
+def test_replay_reconstructs_archived_engine_syntax_evidence(tmp_path):
+    trajectory = _trajectory([("write app.py", 0)], instruction="Just work.")
+    trajectory_path = tmp_path / "miniswe_trajectory.json"
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt_path = tmp_path / "central_receipt.json"
+    receipt = _receipt(
+        syntax_results={
+            1: {
+                "ok": True,
+                "path": "app.py",
+                "command": "python3 -m py_compile app.py",
+                "returncode": 0,
+            }
+        }
+    )
+    cert = next(
+        row for row in receipt["features"]["receipts"] if row["feature_id"] == "GT_CERT_DELIVERY"
+    )
+    cert["payload"].update(check_count=1, passing_checks=1)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = replay_task(trajectory_path, receipt_path, "task")
+
+    assert report["new"]["engine_syntax_checks_replayed"] == 1
+    assert report["new"]["ledger_checks_total"] == 1
+    assert report["new"]["certificate"]["passing_checks"] == 1
+    assert _outcomes(report) == []

@@ -1,10 +1,10 @@
 """Consumer and effect contracts for the host-owned central runtime.
 
 Every produced receipt is routed immediately to a registered consumer.  The
-consumer declares an effect kind, whether the effect may become a model-visible
-payload, and whether it must precede the next pre-decided action.  Most effects
-stay internal and cost zero prompt tokens; only rare, novel, grounded evidence
-becomes an external advisory.
+consumer declares an effect kind and whether the effect may contribute to the
+first model request after its evidence. Most effects stay internal and cost zero
+prompt tokens; related novel grounded facts are coalesced into one observation
+enrichment. Consumers never block or cancel Mini-SWE actions.
 
 This module holds the operational role for all 17 feature IDs (diagnosis
 section 7).  A feature without a registered consumer is not operational even
@@ -25,8 +25,8 @@ class EffectKind(StrEnum):
     VALIDATION_SCHEDULE = "VALIDATION_SCHEDULE"
     AUTO_VALIDATION = "AUTO_VALIDATION"
     FAILURE_STATE_TRANSITION = "FAILURE_STATE_TRANSITION"
-    BATCH_INTERRUPT = "BATCH_INTERRUPT"
-    SUBMIT_HOLD = "SUBMIT_HOLD"
+    SYNTAX_STATE_UPDATE = "SYNTAX_STATE_UPDATE"
+    SUBMIT_RISK_UPDATE = "SUBMIT_RISK_UPDATE"
     CERTIFY_PASS = "CERTIFY_PASS"
     NO_OP_WITH_REASON = "NO_OP_WITH_REASON"
 
@@ -123,7 +123,7 @@ CONSUMER_SPECS: dict[str, ConsumerSpec] = {
     "newfile_precedent": ConsumerSpec(
         "newfile_precedent",
         EffectKind.IMPACT_SET_UPDATE,
-        False,
+        True,
         False,
         "validate new-file placement and registration against a concrete precedent",
     ),
@@ -131,14 +131,14 @@ CONSUMER_SPECS: dict[str, ConsumerSpec] = {
         "covering_red",
         EffectKind.FAILURE_STATE_TRANSITION,
         True,
-        True,
-        "create grounded failure state and interrupt a bad action batch",
+        False,
+        "create grounded failure state for the next model decision",
     ),
     "recovery": ConsumerSpec(
         "recovery",
         EffectKind.FAILURE_STATE_TRANSITION,
         True,
-        True,
+        False,
         "select one discriminating alternate action after an exact repeat",
     ),
     "signature_delta": ConsumerSpec(
@@ -150,17 +150,17 @@ CONSUMER_SPECS: dict[str, ConsumerSpec] = {
     ),
     "submit_refusal": ConsumerSpec(
         "submit_refusal",
-        EffectKind.SUBMIT_HOLD,
+        EffectKind.SUBMIT_RISK_UPDATE,
         True,
-        True,
-        "block submit once on a current grounded failure",
+        False,
+        "record current grounded submission risk without blocking Mini-SWE",
     ),
     "syntax_result": ConsumerSpec(
         "syntax_result",
-        EffectKind.BATCH_INTERRUPT,
+        EffectKind.SYNTAX_STATE_UPDATE,
         True,
-        True,
-        "prevent already-planned actions after a fresh syntax failure",
+        False,
+        "record a fresh syntax result for the next model decision",
     ),
     "GT_CERT_DELIVERY": ConsumerSpec(
         "GT_CERT_DELIVERY",
@@ -193,7 +193,7 @@ CONSUMER_SPECS: dict[str, ConsumerSpec] = {
     "GT_LOC_RESLOT": ConsumerSpec(
         "GT_LOC_RESLOT",
         EffectKind.CONTEXT_RESLOT,
-        False,
+        True,
         False,
         "change the bounded context slot to ranked anchors",
     ),
@@ -206,10 +206,10 @@ CONSUMER_SPECS: dict[str, ConsumerSpec] = {
     ),
     "GT_SS_SUBMIT_RED": ConsumerSpec(
         "GT_SS_SUBMIT_RED",
-        EffectKind.SUBMIT_HOLD,
+        EffectKind.SUBMIT_RISK_UPDATE,
         False,
         False,
-        "transition submit state to blocked and record one hold",
+        "latch source-bound red submission risk without blocking Mini-SWE",
     ),
 }
 

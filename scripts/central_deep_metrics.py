@@ -37,6 +37,22 @@ def _load_arm(path: str) -> dict:
     return payload.get("tasks") or payload
 
 
+def _task_name(path: Path) -> str:
+    if path.name == "miniswe_trajectory.json" and "__" in path.parent.parent.name:
+        return path.parent.parent.name.split("__", 1)[0]
+    return path.name.removesuffix("_trajectory.json")
+
+
+def _reward_beside_trajectory(path: Path) -> int | float | None:
+    reward_path = path.parent.parent / "verifier" / "reward.txt"
+    if not reward_path.exists():
+        return None
+    try:
+        return float(reward_path.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -49,7 +65,7 @@ def main() -> int:
     extract.add_argument("--output", required=True)
     compare = sub.add_parser("compare")
     compare.add_argument("--baseline", required=True)
-    compare.add_argument("--shadow", required=True)
+    compare.add_argument("--shadow", default="")
     compare.add_argument("--treatment", required=True)
     compare.add_argument("--output-dir", required=True)
     args = parser.parse_args()
@@ -60,28 +76,34 @@ def main() -> int:
         rewards = _rewards(args.rewards)
         requested = {item.strip() for item in args.tasks.split(",") if item.strip()}
         tasks = {}
-        for path in sorted(root.glob("*_trajectory.json")):
-            task = path.name.removesuffix("_trajectory.json")
+        for path in sorted(root.rglob("*_trajectory.json")):
+            task = _task_name(path)
             if requested and task not in requested:
                 continue
+            receipt_path = _find_receipt(receipt_root, task)
+            if receipt_path is None and path.name == "miniswe_trajectory.json":
+                adjacent = path.parent / "central_receipt.json"
+                receipt_path = adjacent if adjacent.exists() else None
             tasks[task] = extract_trajectory(
                 path,
                 task=task,
-                reward=rewards.get(task),
-                receipt_path=_find_receipt(receipt_root, task),
+                reward=rewards.get(task, _reward_beside_trajectory(path)),
+                receipt_path=receipt_path,
             )
         output = {"schema": "central-deep-metrics-v1", "arm": args.name, "tasks": tasks}
         Path(args.output).write_text(json.dumps(output, indent=2), encoding="utf-8")
         return 0 if tasks else 2
 
     baseline = _load_arm(args.baseline)
-    shadow = _load_arm(args.shadow)
     treatment = _load_arm(args.treatment)
-    comparisons = {
-        "baseline_to_shadow": compare_arms(baseline, shadow),
-        "shadow_to_treatment": compare_arms(shadow, treatment),
-        "baseline_to_treatment": compare_arms(baseline, treatment),
-    }
+    comparisons = {"baseline_to_treatment": compare_arms(baseline, treatment)}
+    if args.shadow:
+        shadow = _load_arm(args.shadow)
+        comparisons = {
+            "baseline_to_shadow": compare_arms(baseline, shadow),
+            "shadow_to_treatment": compare_arms(shadow, treatment),
+            **comparisons,
+        }
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "deep_delta.json").write_text(

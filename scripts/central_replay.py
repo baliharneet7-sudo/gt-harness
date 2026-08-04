@@ -29,6 +29,8 @@ from gt_engine.central_runtime import (
     classify_change,
     classify_validation_command,
     explicit_check_commands,
+    feature_payload_grounded,
+    is_submit_command,
     task_deliverable_paths,
 )
 
@@ -89,6 +91,25 @@ def _archived_transitions(receipt: dict[str, Any]) -> dict[int, dict[str, tuple[
     return by_action
 
 
+def _archived_syntax_results(receipt: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
+    """Index deterministic host-side syntax results omitted from the trajectory.
+
+    Mini-SWE trajectories contain provider-selected actions only.  GT's lint sensor
+    runs after an authored edit and is therefore present in the central receipt but
+    absent from that action stream.  Replaying only model actions would erase real
+    certifying evidence and produce a false certificate-regression failure.
+    """
+    by_action: dict[int, list[dict[str, Any]]] = {}
+    for row in (receipt.get("features") or {}).get("receipts") or []:
+        if row.get("feature_id") != "syntax_result":
+            continue
+        payload = row.get("payload") or {}
+        if not payload.get("fresh") or not payload.get("path") or not payload.get("command"):
+            continue
+        by_action.setdefault(int(row.get("action") or 0), []).append(payload)
+    return by_action
+
+
 def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> dict[str, Any]:
     trajectory = _load_json(trajectory_path)
     receipt = _load_json(receipt_path)
@@ -97,6 +118,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     deliverables = task_deliverable_paths(instruction)
     events = _iter_events(trajectory)
     transitions = _archived_transitions(receipt)
+    syntax_results = _archived_syntax_results(receipt)
 
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task(
@@ -110,6 +132,8 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     source_revision = "replay-s0"
     source_epoch = 0
     artifact_debt_triggers: list[dict[str, str]] = []
+    simulated_deliveries: list[dict[str, Any]] = []
+    engine_syntax_checks_replayed = 0
 
     for event in events:
         action_id = event["index"]
@@ -155,6 +179,59 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
                 grounded=classification.grounded,
                 classification=classification,
             )
+        for syntax in syntax_results.get(action_id, []):
+            returncode = int(syntax.get("returncode") or 0)
+            path = str(syntax.get("path") or "")
+            command = str(syntax.get("command") or "")
+            failed = not bool(syntax.get("ok")) or returncode != 0
+            ledger.record_check(
+                f"syntax:{path}",
+                returncode=returncode,
+                revision=source_revision,
+                grounded=True,
+            )
+            runtime.record_syntax(
+                action_id=action_id,
+                revision="replay-w0",
+                source_revision=source_revision,
+                failed=failed,
+                reason=(
+                    "replayed_changed_file_syntax_failure"
+                    if failed
+                    else "replayed_changed_file_syntax_pass"
+                ),
+                path=path,
+                command=command,
+                returncode=returncode,
+                diagnostic=str(syntax.get("diagnostic") or ""),
+            )
+            engine_syntax_checks_replayed += 1
+        if is_submit_command(event["command"]):
+            readiness = ledger.readiness_evidence(source_revision)
+            runtime.record_submit(
+                action_id=action_id,
+                revision="replay-w0",
+                source_revision=source_revision,
+                refused=False,
+                sensor_healthy=True,
+                check_count=len(readiness),
+                passing_checks=sum(item.returncode == 0 for item in readiness),
+                failing_checks=sum(item.returncode != 0 for item in readiness),
+            )
+        runtime.consume_effects(action_id=action_id, call=action_id)
+        feedback = runtime.model_feedback(deferred=True)
+        if feedback:
+            metadata = runtime.confirm_prepared_guidance() or {}
+            simulated_deliveries.append(
+                {
+                    "after_action": action_id,
+                    "first_eligible_call": action_id + 1,
+                    "feature_id": metadata.get("feature_id"),
+                    "contributing_features": metadata.get("contributing_features", []),
+                    "chars": len(feedback),
+                    "feedback": feedback,
+                }
+            )
 
     summary = runtime.summary()
     for row in summary["receipts"]:
@@ -167,7 +244,6 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             if not change.validation_relevant:
                 artifact_debt_triggers.append({"path": path, "origin": change.origin.value})
 
-    runtime.model_feedback()
     readiness = ledger.readiness_evidence(source_revision)
     ledger_declared = sorted(
         {
@@ -189,6 +265,21 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     if old_produced is None:
         old_produced = Counter(row.get("feature_id") for row in old_receipts)
     old_deliveries = receipt.get("guidance_deliveries") or []
+    old_receipts_by_key = {
+        (row.get("feature_id"), int(row.get("action") or 0)): row
+        for row in old_receipts
+    }
+    old_ungrounded_deliveries = []
+    for delivery in old_deliveries:
+        key = (
+            delivery.get("feature_id"),
+            int(delivery.get("evidence_action") or 0),
+        )
+        source = old_receipts_by_key.get(key) or {}
+        if not feature_payload_grounded(str(key[0] or ""), source.get("payload") or {}):
+            old_ungrounded_deliveries.append(
+                {"feature_id": key[0], "evidence_action": key[1]}
+            )
 
     return {
         "task": task_name,
@@ -205,6 +296,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             },
             "guidance_deliveries": len(old_deliveries),
             "guidance_chars": int(old_features.get("guidance_chars") or 0),
+            "ungrounded_deliveries": old_ungrounded_deliveries,
             "certificate": (old_cert or {}).get("payload") or {},
             "exit_status": str((trajectory.get("info") or {}).get("exit_status") or ""),
         },
@@ -233,9 +325,21 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
                 "failing_checks": sum(item.returncode != 0 for item in readiness),
             },
             "ledger_checks_total": ledger_checks_total,
+            "engine_syntax_checks_replayed": engine_syntax_checks_replayed,
             "ledger_declared_checks": ledger_declared,
             "artifact_debt_triggers": artifact_debt_triggers,
             "consumer_features": sorted(summary["consumer_paths"]),
+            "applied_features": sorted(
+                {
+                    row["feature_id"]
+                    for row in summary["effect_applications"]
+                    if row["state_fields_changed"]
+                }
+            ),
+            "simulated_deliveries": simulated_deliveries,
+            "submit_holds": summary["action_metrics"]["submit_holds"],
+            "batch_interrupts": summary["action_metrics"]["batch_interrupts"],
+            "interrupted_actions": summary["action_metrics"]["interrupted_actions"],
         },
     }
 
@@ -253,8 +357,10 @@ def _outcomes(task: dict[str, Any]) -> list[str]:
     old_cert_count = int((task["old"].get("certificate") or {}).get("check_count") or 0)
     if old_cert_count > 0 and ledger_total == 0:
         failed.append("old certificate checks were lost by the repaired policy")
-    if task["new"]["guidance_events"] > int(task["old"]["guidance_deliveries"]) + 2:
-        failed.append("external guidance growth without a new grounded effect")
+    if task["new"]["submit_holds"] or task["new"]["batch_interrupts"]:
+        failed.append("repaired policy blocked or interrupted Mini-SWE")
+    if task["new"]["interrupted_actions"]:
+        failed.append("repaired policy cancelled Mini-SWE actions")
     return failed
 
 

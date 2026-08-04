@@ -9,6 +9,7 @@ whose output is never added to model context.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -47,8 +48,6 @@ from gt_engine.central_runtime import (
     is_check_command,
     is_submit_command,
     lint_commands,
-    render_runtime_advisory,
-    render_runtime_feedback,
     source_revision_of,
     task_deliverable_paths,
 )
@@ -65,6 +64,23 @@ def _message_context_chars(message: dict[str, Any]) -> int:
     return len(text)
 
 
+def _inject_runtime_evidence(
+    messages: list[dict[str, Any]], evidence: str
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Place evidence in the next normal observation without mutating history."""
+    prepared = [dict(item) for item in messages]
+    for index in range(len(prepared) - 1, -1, -1):
+        if prepared[index].get("role") != "tool":
+            continue
+        separator = "\n\n"
+        prepared[index]["content"] = (
+            str(prepared[index].get("content") or "") + separator + evidence
+        )
+        return prepared, index, len(separator) + len(evidence)
+    prepared.append({"role": "user", "content": evidence})
+    return prepared, len(prepared) - 1, len(evidence)
+
+
 def _mini_config() -> dict[str, Any]:
     import yaml
 
@@ -72,7 +88,7 @@ def _mini_config() -> dict[str, Any]:
 
 
 class MiniSweCentralAgent(BaseAgent):
-    """GT-on treatment: central state plus bounded model-visible interventions."""
+    """GT-on treatment: deterministic state plus bounded next-request evidence."""
 
     runtime_mode = "treatment"
     SUPPORTS_ATIF = True
@@ -399,44 +415,65 @@ class MiniSweCentralAgent(BaseAgent):
                     break
                 calls += 1
                 query_messages = messages
-                runtime_advisory = ""
+                runtime_enrichment_chars = 0
+                runtime_message_index: int | None = None
+                delivery_metadata: dict[str, Any] | None = None
                 if pending_guidance:
-                    runtime_advisory = pending_guidance
-                    query_messages = [
-                        *messages,
-                        {"role": "user", "content": pending_guidance},
-                    ]
-                    metadata = self._features.confirm_prepared_guidance() or {}
+                    (
+                        query_messages,
+                        runtime_message_index,
+                        runtime_enrichment_chars,
+                    ) = _inject_runtime_evidence(messages, pending_guidance)
+                    delivery_metadata = self._features.confirm_prepared_guidance() or {}
+                    pending_guidance = ""
+                request_payload_sha256 = hashlib.sha256(
+                    json.dumps(
+                        query_messages,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()
+                if delivery_metadata is not None:
+                    evidence_action = int(delivery_metadata.get("evidence_action") or 0)
                     guidance_deliveries.append(
                         {
-                            "feature_id": metadata.get("feature_id"),
-                            "evidence_action": metadata.get("evidence_action"),
-                            "revision": metadata.get("revision"),
+                            "feature_id": delivery_metadata.get("feature_id"),
+                            "contributing_features": delivery_metadata.get(
+                                "contributing_features", []
+                            ),
+                            "evidence_action": evidence_action,
+                            "evidence_actions": delivery_metadata.get("evidence_actions", []),
+                            "revision": delivery_metadata.get("revision"),
                             "prepared_after_call": pending_prepared_after_call,
+                            "first_eligible_call": pending_prepared_after_call + 1,
                             "delivered_before_call": calls,
-                            "decision_window": "next_model_call_only",
-                            "not_predictive": calls == pending_prepared_after_call + 1,
-                            "chars": len(pending_guidance),
+                            "decision_window": "first_next_model_call",
+                            "not_predictive": evidence_action <= actions_count,
+                            "one_step_late": calls != pending_prepared_after_call + 1,
+                            "delivered_before_model_query": True,
+                            "request_payload_sha256": request_payload_sha256,
+                            "message_index": runtime_message_index,
+                            "chars": runtime_enrichment_chars,
                         }
                     )
-                    pending_guidance = ""
                 context_parts = {
                     "system_user_chars": 0,
                     "assistant_chars": 0,
                     "tool_observation_chars": 0,
-                    "runtime_advisory_chars": len(runtime_advisory),
+                    "runtime_advisory_chars": runtime_enrichment_chars,
                 }
-                for item in query_messages:
+                for item_index, item in enumerate(query_messages):
                     chars = len(str(item.get("content") or ""))
                     role = str(item.get("role") or "")
                     if role == "assistant":
                         context_parts["assistant_chars"] += _message_context_chars(item)
                     elif role == "tool":
+                        if item_index == runtime_message_index:
+                            chars = max(0, chars - runtime_enrichment_chars)
                         context_parts["tool_observation_chars"] += chars
-                    elif (
-                        role in {"system", "user"}
-                        and str(item.get("content") or "") != runtime_advisory
-                    ):
+                    elif role in {"system", "user"} and item_index != runtime_message_index:
                         context_parts["system_user_chars"] += chars
                 context_chars = sum(context_parts.values())
                 context_chars_sent += context_chars
@@ -444,12 +481,19 @@ class MiniSweCentralAgent(BaseAgent):
                     {
                         "call": calls,
                         **context_parts,
-                        "stock_context_chars": context_chars - len(runtime_advisory),
+                        "stock_context_chars": context_chars - runtime_enrichment_chars,
                         "context_chars": context_chars,
+                        "request_payload_sha256": request_payload_sha256,
+                        "runtime_message_index": runtime_message_index,
+                        "query_started_at": None,
                         "next_action_relation": "",
                     }
                 )
                 try:
+                    query_started_at = time.monotonic()
+                    model_call_contexts[-1]["query_started_at"] = query_started_at
+                    if delivery_metadata is not None:
+                        guidance_deliveries[-1]["query_started_at"] = query_started_at
                     message = await asyncio.wait_for(
                         asyncio.to_thread(model.query, query_messages),
                         timeout=self.model_timeout_sec,
@@ -482,11 +526,9 @@ class MiniSweCentralAgent(BaseAgent):
                     model_call_contexts[-1]["next_action_relation"] = "validation"
                 else:
                     model_call_contexts[-1]["next_action_relation"] = "other"
-                submit_held = False
                 if not actions:
                     no_action_assistant_steps += 1
                 outputs: list[dict[str, Any]] = []
-                batch_interrupted = False
 
                 for index, action in enumerate(actions):
                     actions_count += 1
@@ -506,66 +548,6 @@ class MiniSweCentralAgent(BaseAgent):
                                 item.returncode != 0 for item in readiness_evidence
                             ),
                         }
-                        if (
-                            self.runtime_mode == "treatment"
-                            and decision.decision == InterventionDecision.HOLD_ONCE
-                        ):
-                            self._features.record_submit(
-                                action_id=actions_count,
-                                revision=source_revision,
-                                source_revision=source_revision,
-                                refused=True,
-                                sensor_healthy=snapshot.healthy,
-                                blockers=decision.blockers,
-                                **readiness_kwargs,
-                            )
-                            detail = "A fresh required check is still failing: " + ", ".join(
-                                decision.blockers
-                            )
-                            outputs.append(
-                                {
-                                    "output": render_runtime_feedback(detail),
-                                    "returncode": 2,
-                                    "exception_info": "action was not executed",
-                                }
-                            )
-                            receipts.append(
-                                {
-                                    "action": actions_count,
-                                    "kind": "submit_readiness",
-                                    "decision": "HOLD_ONCE",
-                                    "revision": source_revision,
-                                }
-                            )
-                            submit_held = True
-                            remaining = len(actions) - index - 1
-                            for _ in range(remaining):
-                                actions_count += 1
-                                self._features.record_skipped_action(action_id=actions_count)
-                                outputs.append(
-                                    {
-                                        "output": (
-                                            "Submission was held by the runtime; no "
-                                            "further actions in this batch were executed."
-                                        ),
-                                        "returncode": 2,
-                                        "exception_info": "batch interrupted before execution",
-                                    }
-                                )
-                            self._features.record_batch_interrupt(
-                                action_id=actions_count - remaining,
-                                cancelled=remaining,
-                                reason="submit_hold",
-                            )
-                            # Submit-boundary receipts are produced before the
-                            # command is refused.  Consume them before leaving
-                            # this batch so their registered controller effects
-                            # are never stranded in the runtime cursor.
-                            self._features.consume_effects(
-                                action_id=actions_count - remaining,
-                                call=calls,
-                            )
-                            break
                         self._features.record_submit(
                             action_id=actions_count,
                             revision=source_revision,
@@ -579,9 +561,8 @@ class MiniSweCentralAgent(BaseAgent):
                                 "action": actions_count,
                                 "kind": "submit_readiness",
                                 "decision": (
-                                    "SHADOW"
-                                    if self.runtime_mode == "shadow"
-                                    and decision.decision == InterventionDecision.HOLD_ONCE
+                                    "RISK"
+                                    if decision.decision == InterventionDecision.HOLD_ONCE
                                     else "PASS"
                                 ),
                                 "revision": source_revision,
@@ -681,62 +662,30 @@ class MiniSweCentralAgent(BaseAgent):
                     effects = self._features.consume_effects(
                         action_id=actions_count, call=calls
                     )
+                    if effects and not submit:
+                        later_actions = actions[index + 1 :]
+                        first_submit = next(
+                            (
+                                offset
+                                for offset, later in enumerate(later_actions)
+                                if is_submit_command(str(later.get("command") or ""))
+                            ),
+                            None,
+                        )
+                        executed_after = (
+                            len(later_actions)
+                            if first_submit is None
+                            else first_submit + 1
+                        )
+                        self._features.record_predecided_continuation(
+                            evidence_action=actions_count,
+                            executed=executed_after,
+                        )
                     if submit:
                         terminal = "Submitted"
                         break
-                    interrupt_effect = next(
-                        (
-                            effect
-                            for effect in effects
-                            if effect.required_before_action is not None
-                        ),
-                        None,
-                    )
-                    if interrupt_effect is not None:
-                        remaining = len(actions) - index - 1
-                        if remaining > 0:
-                            batch_interrupted = True
-                            evidence_action = interrupt_effect.evidence_action
-                            control = render_runtime_advisory(
-                                str(
-                                    interrupt_effect.effect_action.get("message")
-                                    or "Stop and re-decide after the runtime control."
-                                ),
-                                limit=160,
-                            )
-                            for _ in range(remaining):
-                                actions_count += 1
-                                self._features.record_skipped_action(
-                                    action_id=actions_count
-                                )
-                                outputs.append(
-                                    {
-                                        "output": control,
-                                        "returncode": 2,
-                                        "exception_info": (
-                                            "batch interrupted before execution"
-                                        ),
-                                    }
-                                )
-                            self._features.record_batch_interrupt(
-                                action_id=evidence_action,
-                                cancelled=remaining,
-                                reason=interrupt_effect.effect_kind.value,
-                            )
-                            receipts.append(
-                                {
-                                    "action": actions_count,
-                                    "kind": "batch_interrupt",
-                                    "decision": "ADVISE",
-                                    "reason": interrupt_effect.effect_kind.value,
-                                    "cancelled": remaining,
-                                }
-                            )
-                            break
 
-                if submit_held or batch_interrupted:
-                    self._features.discard_model_feedback()
-                elif not terminal:
+                if not terminal:
                     feature_feedback = self._features.model_feedback(deferred=True)
                     if feature_feedback and self.runtime_mode == "treatment":
                         pending_guidance = feature_feedback
@@ -775,6 +724,12 @@ class MiniSweCentralAgent(BaseAgent):
             normalized_cost = normalized_token_cost(
                 uncached_input_tokens, cache_tokens, output_tokens
             )
+            timely_deliveries = sum(
+                bool(row.get("delivered_before_model_query"))
+                and not bool(row.get("one_step_late"))
+                and bool(row.get("not_predictive"))
+                for row in guidance_deliveries
+            )
             deep_metrics = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -808,6 +763,37 @@ class MiniSweCentralAgent(BaseAgent):
                 "guidance_chars": feature_summary["guidance_chars"],
                 "guidance_candidates": feature_summary["guidance_candidates"],
                 "guidance_suppressed": feature_summary["guidance_suppressed"],
+                "gt_context_chars_added": sum(
+                    int(row.get("runtime_advisory_chars") or 0)
+                    for row in model_call_contexts
+                ),
+                "stock_context_chars_sent": sum(
+                    int(row.get("stock_context_chars") or 0)
+                    for row in model_call_contexts
+                ),
+                "effects_produced": len(feature_summary["effects"]),
+                "effects_applied": len(feature_summary["effect_applications"]),
+                "state_mutations": sum(
+                    bool(row.get("state_fields_changed"))
+                    for row in feature_summary["effect_applications"]
+                ),
+                "payload_deliveries": len(guidance_deliveries),
+                "timely_payload_deliveries": timely_deliveries,
+                "late_payload_deliveries": sum(
+                    bool(row.get("one_step_late")) for row in guidance_deliveries
+                ),
+                "predictive_payload_deliveries": sum(
+                    not bool(row.get("not_predictive")) for row in guidance_deliveries
+                ),
+                "first_eligible_delivery_rate": (
+                    round(timely_deliveries / len(guidance_deliveries), 6)
+                    if guidance_deliveries
+                    else 1.0
+                ),
+                "predecided_actions_after_evidence": sum(
+                    int(row.get("predecided_actions_executed_after_evidence") or 0)
+                    for row in feature_summary["effects"]
+                ),
                 **action_metrics,
             }
             trajectory = {
