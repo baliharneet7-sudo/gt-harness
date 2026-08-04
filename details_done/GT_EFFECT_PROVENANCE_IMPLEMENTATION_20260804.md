@@ -26,6 +26,9 @@ behavior, or submission behavior.
 
 `provider_payload` requires a confirmed provider request.  
 `existing_engine_actuation` requires a recorded existing consumer read.  
+`engine_internal_state` records producer-side GT control work such as source
+revision tracking, validation-debt updates, failure-state latching, lifecycle
+transitions, and trigger selection.  
 `audit_only` means the effect was applied but no downstream consumer was
 observed; it is not counted as trajectory influence.  Unknown dispositions are
 not permitted by the proof tests.

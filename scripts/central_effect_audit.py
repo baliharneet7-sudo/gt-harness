@@ -15,6 +15,7 @@ from pathlib import Path
 TERMINAL_DISPOSITIONS = {
     "provider_payload",
     "existing_engine_actuation",
+    "engine_internal_state",
     "audit_only",
     "coalesced",
     "unused",
@@ -41,6 +42,7 @@ def audit(path: Path) -> dict[str, object]:
         "existing_engine_actuation_effects": dispositions.get(
             "existing_engine_actuation", 0
         ),
+        "engine_internal_state_effects": dispositions.get("engine_internal_state", 0),
         "audit_only_effects": dispositions.get("audit_only", 0),
         "unknown_effects": unknown,
         "missing_effect_ids": missing_ids,

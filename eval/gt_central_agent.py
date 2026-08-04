@@ -800,6 +800,10 @@ class MiniSweCentralAgent(BaseAgent):
                     row.get("disposition") == "existing_engine_actuation"
                     for row in feature_summary["effect_trace"]
                 ),
+                "engine_internal_state_effects": sum(
+                    row.get("disposition") == "engine_internal_state"
+                    for row in feature_summary["effect_trace"]
+                ),
                 "audit_only_effects": sum(
                     row.get("disposition") == "audit_only"
                     for row in feature_summary["effect_trace"]

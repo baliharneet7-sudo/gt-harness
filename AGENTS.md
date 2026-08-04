@@ -27,7 +27,10 @@ deliveries without changing routing, prompt selection, timing, or action
 execution. `audit_only` means the effect was recorded but no existing
 downstream consumer was exercised; it must not be reported as trajectory
 influence. `provider_payload` and `existing_engine_actuation` require a
-recorded downstream event. Unknown dispositions fail the audit.
+recorded downstream event. `engine_internal_state` records producer-side GT
+control work (revision, validation-debt, failure, lifecycle, or trigger
+updates) and is distinct from provider delivery. Unknown dispositions fail the
+audit.
 
 Private receipts must never be mistaken for an inactive engine. Conversely,
 receipt counts must never be claimed as causal help.

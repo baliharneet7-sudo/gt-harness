@@ -1160,6 +1160,7 @@ class CentralFeatureRuntime:
         # or policy; it records whether an already-existing consumer path was
         # actually exercised.
         self._effect_trace: list[dict[str, Any]] = []
+        self._producer_events: list[dict[str, Any]] = []
         self._batch_interrupts: list[dict[str, Any]] = []
         self._task_deliverables: set[str] = set()
         self._source_epoch = 0
@@ -1356,6 +1357,12 @@ class CentralFeatureRuntime:
         self._mark_lifecycle("task_started", action_id=0)
         if instruction.strip():
             self._mark_lifecycle("contract_captured", action_id=0)
+            self.record_producer_event(
+                feature_id="obligations",
+                action_id=0,
+                kind="contract_captured",
+                detail="task requirements and declared checks entered the engine contract",
+            )
             self._emit(
                 "obligations",
                 boundary="task_start",
@@ -1547,7 +1554,22 @@ class CentralFeatureRuntime:
                 )
                 self._mark_lifecycle("workspace_edited", action_id=action_id)
                 self._mark_lifecycle("change_surface_certified", action_id=action_id)
+                self.record_producer_event(
+                    feature_id="GT_CHANGE_SURFACE",
+                    action_id=action_id,
+                    kind="source_revision_and_validation_debt",
+                    detail=(
+                        f"source_epoch={self._source_epoch}; "
+                        f"unvalidated_material_edits={self._unvalidated_material_edits}"
+                    ),
+                )
                 changed = list(source_relevant)
+                self.record_producer_event(
+                    feature_id="GT_PATCH_DELTA",
+                    action_id=action_id,
+                    kind="validation_surface_registered",
+                    detail=", ".join(changed[:8]),
+                )
                 self._emit(
                     "GT_PATCH_DELTA",
                     boundary="edit_result",
@@ -1562,6 +1584,11 @@ class CentralFeatureRuntime:
                     },
                 )
                 if self._explicit_checks:
+                    self.record_existing_consumer_read(
+                        feature_id="obligations",
+                        action_id=action_id,
+                        purpose="declared_check_selection",
+                    )
                     declared_check = select_declared_check(
                         self._explicit_checks, self._declared_check_states
                     )
@@ -1594,6 +1621,12 @@ class CentralFeatureRuntime:
                         )
                         if debt:
                             self._validation_debt_notified = True
+                        self.record_producer_event(
+                            feature_id="GT_EDIT_CHECK",
+                            action_id=action_id,
+                            kind="declared_check_selected",
+                            detail=declared_check[:120],
+                        )
             else:
                 self._action_metrics["no_change_actions"] += 1
         else:
@@ -1602,6 +1635,12 @@ class CentralFeatureRuntime:
             self._searched = True
             self._mark_lifecycle("location_anchored", action_id=action_id)
             anchors = self._search_anchors(output)
+            self.record_producer_event(
+                feature_id="localization",
+                action_id=action_id,
+                kind="location_anchored",
+                detail=f"anchors={len(anchors)}",
+            )
             self._emit(
                 "localization",
                 boundary="search_result",
@@ -1632,6 +1671,12 @@ class CentralFeatureRuntime:
                     "message": "Ranked source anchors selected for the next observation.",
                 },
             )
+            self.record_producer_event(
+                feature_id="GT_LOC_RESLOT",
+                action_id=action_id,
+                kind="ranked_anchors_computed",
+                detail=f"selected={min(4, len(anchors))}; discarded={max(0, len(anchors) - 4)}",
+            )
             definition_anchors = [
                 anchor for anchor in anchors if self._DEFINITION.search(anchor["text"])
             ]
@@ -1639,6 +1684,12 @@ class CentralFeatureRuntime:
                 anchor for anchor in anchors if not self._DEFINITION.search(anchor["text"])
             ]
             if definition_anchors:
+                self.record_producer_event(
+                    feature_id="def_partition",
+                    action_id=action_id,
+                    kind="definition_reference_partitioned",
+                    detail=f"definitions={len(definition_anchors)}; references={len(reference_anchors)}",
+                )
                 self._emit(
                     "def_partition",
                     boundary="search_result",
@@ -1659,6 +1710,12 @@ class CentralFeatureRuntime:
             callers = reference_anchors
             if definition_anchors and callers:
                 self._mark_lifecycle("impact_captured", action_id=action_id)
+                self.record_producer_event(
+                    feature_id="caller_contract",
+                    action_id=action_id,
+                    kind="caller_impact_captured",
+                    detail=f"callers={len(callers)}",
+                )
                 self._emit(
                     "caller_contract",
                     boundary="search_result",
@@ -1684,11 +1741,22 @@ class CentralFeatureRuntime:
             and failure_kind == "validation_failure"
         ):
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
+            self.record_existing_consumer_read(
+                feature_id="GT_CHANGE_SURFACE",
+                action_id=action_id,
+                purpose="failure_phase_selection",
+            )
             bounded_diagnostic = " ".join(
                 line.strip()
                 for line in (output or "").splitlines()
                 if self._FAILURE.search(line)
             )[:240]
+            self.record_producer_event(
+                feature_id="covering_red",
+                action_id=action_id,
+                kind="failure_state_keyed",
+                detail=f"phase={check_phase}; fingerprint={classification.diagnostic_fingerprint}",
+            )
             self._emit(
                 "covering_red",
                 boundary="test_result",
@@ -1716,6 +1784,12 @@ class CentralFeatureRuntime:
             failure_key = (normalized, failure_fingerprint, returncode, source_rev)
             count = self._failed_actions.get(failure_key, 0) + 1
             self._failed_actions[failure_key] = count
+            self.record_producer_event(
+                feature_id="GT_HYPOTHESIS",
+                action_id=action_id,
+                kind="failure_repeat_count_updated",
+                detail=f"repeat_count={count}",
+            )
             self._emit(
                 "GT_HYPOTHESIS",
                 boundary="test_result",
@@ -1738,6 +1812,12 @@ class CentralFeatureRuntime:
                 and source_rev not in self._submit_risk_revisions
             ):
                 self._submit_risk_revisions.add(source_rev)
+                self.record_producer_event(
+                    feature_id="GT_SS_SUBMIT_RED",
+                    action_id=action_id,
+                    kind="submit_risk_latched",
+                    detail=f"source_revision={source_rev}",
+                )
                 self._emit(
                     "GT_SS_SUBMIT_RED",
                     boundary="test_result",
@@ -1770,6 +1850,12 @@ class CentralFeatureRuntime:
                             + ", ".join(blockers[:2])
                         ),
                     },
+                )
+                self.record_producer_event(
+                    feature_id="submit_refusal",
+                    action_id=action_id,
+                    kind="submit_risk_latched",
+                    detail=f"blockers={len(blockers)}",
                 )
             if count >= 2:
                 self._emit(
@@ -1815,6 +1901,12 @@ class CentralFeatureRuntime:
             if precedent_path:
                 self._precedent_verified = True
                 self._precedent_path = precedent_path
+                self.record_producer_event(
+                    feature_id="newfile_precedent",
+                    action_id=action_id,
+                    kind="precedent_verified",
+                    detail=precedent_path,
+                )
                 self._emit(
                     "newfile_precedent",
                     boundary="edit_result",
@@ -1904,6 +1996,12 @@ class CentralFeatureRuntime:
         self._action_metrics["lint_checks"] += 1
         self._action_metrics["lint_failures" if failed else "lint_passes"] += 1
         self._action_metrics["engine_actions"] += 1
+        self.record_producer_event(
+            feature_id="syntax_result",
+            action_id=action_id,
+            kind="validation_result_recorded",
+            detail=f"failed={failed}; path={path}",
+        )
         self._mark_lifecycle(
             "static_validated",
             action_id=action_id,
@@ -1947,8 +2045,20 @@ class CentralFeatureRuntime:
         source_revision: str | None = None,
     ) -> None:
         self._action_metrics["submit_attempts"] += 1
+        self.record_producer_event(
+            feature_id="GT_CERT_DELIVERY",
+            action_id=action_id,
+            kind="submission_readiness_evaluated",
+            detail=f"healthy={sensor_healthy}; checks={check_count}",
+        )
         if refused:
             self._action_metrics["submit_risks"] += 1
+            self.record_producer_event(
+                feature_id="submit_refusal",
+                action_id=action_id,
+                kind="submit_refusal_evaluated",
+                detail=f"blockers={len(blockers)}",
+            )
         elif sensor_healthy and passing_checks > 0:
             self._mark_lifecycle("submit_ready", action_id=action_id, status="passed")
         if refused:
@@ -2033,6 +2143,24 @@ class CentralFeatureRuntime:
             spec.effect_kind.value
         )
 
+    def record_producer_event(
+        self,
+        *,
+        feature_id: str,
+        action_id: int,
+        kind: str,
+        detail: str,
+    ) -> None:
+        """Record producer-side engine work without changing runtime policy."""
+        self._producer_events.append(
+            {
+                "feature_id": feature_id,
+                "action": action_id,
+                "kind": kind,
+                "detail": detail,
+            }
+        )
+
     @staticmethod
     def _controller_state_hash(state: CentralControllerState) -> str:
         return hashlib.sha256(
@@ -2096,6 +2224,12 @@ class CentralFeatureRuntime:
                 "applied_before_call": call + 1,
             }
         )
+        producer_events = [
+            event
+            for event in self._producer_events
+            if event["feature_id"] == effect.feature_id
+            and event["action"] == effect.evidence_action
+        ]
         self._effect_trace.append(
             {
                 "effect_id": effect.receipt_id,
@@ -2105,9 +2239,19 @@ class CentralFeatureRuntime:
                 "applied_call": call,
                 "state_fields_changed": [section_name] if before != after else [],
                 "state_reads": [],
-                "actuator_events": [],
+                "actuator_events": [
+                    {
+                        "kind": "producer_engine_event",
+                        "action": event["action"],
+                        "event": event["kind"],
+                        "detail": event["detail"],
+                    }
+                    for event in producer_events
+                ],
                 "provider_delivery_ids": [],
-                "disposition": "audit_only",
+                "disposition": (
+                    "engine_internal_state" if producer_events else "audit_only"
+                ),
                 "timing": {
                     "evidence_before_effect": (
                         effect.applied_after_action is not None
@@ -2240,6 +2384,7 @@ class CentralFeatureRuntime:
             "effects": [effect.as_dict() for effect in self._effects],
             "effect_applications": list(self._effect_applications),
             "effect_trace": [dict(row) for row in self._effect_trace],
+            "producer_events": list(self._producer_events),
             "controller_state": self._controller_state.as_dict(),
             "batch_interrupts": list(self._batch_interrupts),
             "source_epoch": self._source_epoch,

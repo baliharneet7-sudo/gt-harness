@@ -39,6 +39,7 @@ DIAGNOSTIC_METRICS = (
     "effect_trace_rows",
     "provider_payload_effects",
     "existing_engine_actuation_effects",
+    "engine_internal_state_effects",
     "audit_only_effects",
     "payload_deliveries",
     "timely_payload_deliveries",
