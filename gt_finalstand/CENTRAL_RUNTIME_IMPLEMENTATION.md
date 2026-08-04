@@ -122,16 +122,17 @@ predeclared Pareto gate:
 
 The focused provider-free battery covers the host boundary, workspace
 transitions, lint feedback, pass-clears-failure semantics, bounded submission,
-shadow/treatment workflow, ATIF output, deterministic assignment, and release
-gate. The dispatch-only `central_provider_free.yml` repeats those checks with
+shadow/treatment workflow, ATIF output, deterministic assignment, release gate,
+and all17 trigger/payload contracts. The dispatch-only `central_provider_free.yml` repeats those checks with
 zero provider calls.
 
 Local receipts:
 
-- 24/24 focused central/experiment tests passed under Mini-SWE 2.3.0;
-- the same 24/24 passed in a fresh isolated Mini-SWE 2.2.8 environment;
-- the complete repository suite collected 782 tests: 779 passed and three
-  expected Windows/platform skips;
+- 61/61 targeted central/engine/experiment tests passed under Mini-SWE 2.3.0;
+- the complete repository suite was attempted after installing the missing
+  local `hypothesis` dependency but exceeded the two-minute local command
+  budget in unrelated shell-tool tests; targeted regression suites remained
+  green;
 - structural readiness reported `READY` and changed-file Ruff checks passed;
 - the central feature census reported all 17 feature payloads deliverable at
   their declared lifecycle boundaries;
