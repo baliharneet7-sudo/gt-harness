@@ -108,6 +108,7 @@ def _active_state_text(active_state: dict[str, Any], *, limit: int = 4_000) -> s
         ("last_edit", "Latest source edit"),
         ("latest_validation", "Latest validation"),
         ("unresolved_failure", "Unresolved failure"),
+        ("latest_failure", "Unresolved failure"),
         ("recent_reads", "Files already read"),
         ("declared_checks", "Declared checks"),
         ("decision", "Current decision evidence"),

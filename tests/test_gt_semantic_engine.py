@@ -145,7 +145,7 @@ def test_provider_view_compacts_old_content_but_preserves_protocol_and_active_st
                             "type": "function",
                             "function": {
                                 "name": "bash",
-                                "arguments": '{"command":"pytest -q"}',
+                                "arguments": f'{{"command":"cat file{index}.py"}}',
                             },
                         }
                     ],
@@ -153,7 +153,7 @@ def test_provider_view_compacts_old_content_but_preserves_protocol_and_active_st
                 {
                     "role": "tool",
                     "tool_call_id": f"call-{index}",
-                    "content": "failure output " + ("y" * 120),
+                    "content": f"failure output {index} " + ("y" * 120),
                 },
             ]
         )
