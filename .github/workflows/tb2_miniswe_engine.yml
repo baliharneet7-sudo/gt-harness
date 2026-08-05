@@ -81,7 +81,7 @@ jobs:
           python -m pip install --upgrade pip
           chmod +x vendor/gt-index-linux-amd64
           pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
-            "pytest==9.1.1" vendor/groundtruth_mcp-*.whl
+            "pytest==9.1.1" "pytest-asyncio==1.2.0" vendor/groundtruth_mcp-*.whl
 
       - name: Provider-free semantic readiness gate
         run: |
@@ -238,7 +238,7 @@ jobs:
           python -m pip install --upgrade pip
           chmod +x vendor/gt-index-linux-amd64
           pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
-            vendor/groundtruth_mcp-*.whl
+            "pytest-asyncio==1.2.0" vendor/groundtruth_mcp-*.whl
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |
