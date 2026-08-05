@@ -297,9 +297,16 @@ jobs:
               # Benchmark treatment: bounded by step_limit and cost_limit only.
               # No wall-time or per-call time censors so hard tasks are never
               # cut off mid-run; provider errors fail fast (no retries).
-              # Preflight remains observational in paid workflows until the
+              # Smart provider-view compaction is on (dedup + typed progress
+              # ledger); the task-start repository advisory stays OFF during
+              # isolation. Preflight remains observational (shadow) until the
               # provider-free assistive gate proves intervention semantics.
-              FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak preflight_mode=shadow)
+              FEATURE_ARGS+=(
+                --ak enable_lint=true --ak enable_submit_readiness=true
+                --ak preflight_mode=shadow
+                --ak enable_context_compaction=true
+                --ak enable_task_start_advisory=false
+              )
               ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
           esac

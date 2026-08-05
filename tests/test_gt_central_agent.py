@@ -156,7 +156,11 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
             )
 
     model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
-    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_task_start_advisory=True,
+    )
     agent._model_factory = lambda: model
 
     await agent.run(

@@ -132,6 +132,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_submit_readiness: bool = True,
         enable_all_features: bool = True,
         enable_repository_intelligence: bool = True,
+        enable_task_start_advisory: bool = False,
         enable_context_compaction: bool = True,
         context_trigger_chars: int = 120_000,
         context_target_chars: int = 60_000,
@@ -154,6 +155,7 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
         self.enable_repository_intelligence = enable_repository_intelligence
+        self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_context_compaction = enable_context_compaction
         self.context_trigger_chars = max(1_000, int(context_trigger_chars))
         self.context_target_chars = max(800, int(context_target_chars))
@@ -500,7 +502,11 @@ class MiniSweCentralAgent(BaseAgent):
         context_chars_elided = 0
         pending_reconsideration_cycle = ""
 
-        if repository_evidence.available and self.runtime_mode == "treatment":
+        if (
+            repository_evidence.available
+            and self.runtime_mode == "treatment"
+            and self.enable_task_start_advisory
+        ):
             pending_guidance = self._features.model_feedback(deferred=True, for_call=1)
 
         try:
@@ -523,6 +529,7 @@ class MiniSweCentralAgent(BaseAgent):
                     break
                 calls += 1
                 active_state = {
+                    **self._features.progress_ledger(),
                     "obligations": list(explicit_checks) or sorted(task_deliverables),
                     "project_checks": list(repository_evidence.project_checks),
                     "source_revision": source_revision,

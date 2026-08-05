@@ -1209,6 +1209,10 @@ class CentralFeatureRuntime:
         self._validation_log: list[dict[str, Any]] = []
         self._recent_source_paths: tuple[str, ...] = ()
         self._precedent_path = ""
+        self._last_edit: dict[str, Any] | None = None
+        self._latest_validation: dict[str, Any] | None = None
+        self._latest_failure: dict[str, Any] | None = None
+        self._recent_reads: list[str] = []
         self._submit_risk_revisions: set[str] = set()
         self._current_source_revision = ""
         self._decisions = SemanticDecisionEngine(max_frame_chars=320)
@@ -2039,6 +2043,11 @@ class CentralFeatureRuntime:
         )
         if classification.is_validation:
             self._action_metrics["check_actions"] += 1
+            self._latest_validation = {
+                "command": classification.normalized_command,
+                "returncode": returncode,
+                "source_revision": source_rev,
+            }
             self._mark_lifecycle("behavior_observed", action_id=action_id)
             if self._workspace_edited:
                 self._post_edit_checks += 1
@@ -2100,6 +2109,11 @@ class CentralFeatureRuntime:
                 # Any authored source change makes prior check results stale.
                 self._source_epoch += 1
                 self._recent_source_paths = tuple(model_authored)
+                self._last_edit = {
+                    "command": normalized,
+                    "paths": list(source_relevant),
+                    "source_revision": source_rev,
+                }
                 self._declared_check_states = {
                     check: ("stale" if state == "passed" else state)
                     for check, state in self._declared_check_states.items()
@@ -2234,6 +2248,11 @@ class CentralFeatureRuntime:
             self._searched = True
             self._mark_lifecycle("location_anchored", action_id=action_id)
             anchors = self._search_anchors(output)
+            for anchor in anchors:
+                path = str(anchor.get("path") or "")
+                if path and path not in self._recent_reads:
+                    self._recent_reads.append(path)
+            self._recent_reads = self._recent_reads[-12:]
             self.record_producer_event(
                 feature_id="localization",
                 action_id=action_id,
@@ -2351,6 +2370,12 @@ class CentralFeatureRuntime:
             bounded_diagnostic = " ".join(
                 line.strip() for line in (output or "").splitlines() if self._FAILURE.search(line)
             )[:240]
+            self._latest_failure = {
+                "command": classification.normalized_command,
+                "fingerprint": classification.diagnostic_fingerprint,
+                "diagnostic": bounded_diagnostic,
+                "source_revision": source_rev,
+            }
             self.record_producer_event(
                 feature_id="covering_red",
                 action_id=action_id,
@@ -2783,8 +2808,12 @@ class CentralFeatureRuntime:
                 receipt.action_id if spec.required_before_next_action else None
             ),
             model_visible=bool(spec.model_visible and receipt.model_visible),
-            delivery_status=("candidate" if spec.model_visible and receipt.model_visible else "private"),
-            delivery_reason="" if spec.model_visible and receipt.model_visible else "private_consumer",
+            delivery_status=(
+                "candidate" if spec.model_visible and receipt.model_visible else "private"
+            ),
+            delivery_reason=(
+                "" if spec.model_visible and receipt.model_visible else "private_consumer"
+            ),
             evidence_action=receipt.action_id,
         )
         self._effects.append(effect)
@@ -3098,6 +3127,26 @@ class CentralFeatureRuntime:
         for index, effect in enumerate(self._effects):
             if effect.evidence_action == action_id and effect.required_before_action is not None:
                 self._effects[index] = replace(effect, predecided_actions_cancelled=cancelled)
+
+    def progress_ledger(self) -> dict[str, Any]:
+        """Bounded deterministic state summary for compacted provider views.
+
+        Carries forward what the model actually did so compaction does not erase
+        working memory: the latest source edit, the latest validation result,
+        the unresolved failure, distinct read/search targets, and changed paths.
+        """
+        declared = {
+            check: state for check, state in self._declared_check_states.items()
+        }
+        return {
+            "last_edit": self._last_edit,
+            "latest_validation": self._latest_validation,
+            "unresolved_failure": self._latest_failure,
+            "recent_reads": list(self._recent_reads),
+            "changed_paths": list(self._recent_source_paths),
+            "declared_checks": declared or list(self._explicit_checks),
+            "source_revision": self._current_source_revision,
+        }
 
     def summary(self) -> dict[str, Any]:
         by_feature = {feature_id: 0 for feature_id in CENTRAL_FEATURE_IDS}
