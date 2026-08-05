@@ -137,3 +137,29 @@ Tracked in user-level memory:
   - **Exception:** when executing a written and approved implementation plan from `docs/superpowers/plans/`, per-task commits specified in the plan are pre-authorized. Commit messages and staged-file lists must follow the plan exactly.
 - Brainstorm → design doc → user approval → writing-plans → implementation. No code before design approval.
 - Karpathy aesthetic: small, readable, end-to-end legible. If a file passes ~500 lines without a damn good reason, the design is wrong.
+
+## GT coverage and engine-accounting rule
+
+Keep these claims separate in every report:
+
+1. The provider-free census proves all 17 producer/consumer paths.
+2. A paid trajectory fires a feature only if its receipt set contains that
+   feature ID.
+3. A feature is consumed when its effect is applied and has a recorded
+   downstream disposition.
+4. A feature is model-delivered only when its grounded effect ID appears in a
+   confirmed guidance delivery.
+
+The ten-task smoke `30976148466` naturally fired 15/17 features; `recovery`
+and `signature_delta` were absent because their exact triggers did not occur.
+It produced 361 effects; 36 were model-visible payloads. Never describe that
+as “GT produced only 36.”
+
+Private effects are not automatically useless. Read the effect trace and
+separate `engine_internal_state`, `existing_engine_actuation`,
+`provider_payload`, `audit_only`, and `unread_private_state`. Producer-side
+deterministic engine work counts as engine activity even when it does not emit
+model text. Usefulness requires a downstream state read, decision-frame
+contribution, validation/batch action, or provider delivery. The detailed
+archived comparison is in
+`GT_SMOKE_30976148466_BASELINE_COMPARISON.md`.

@@ -4,6 +4,23 @@ Status: superseded by the implemented provider-free receipt in
 `GT_PRE_ACTION_IMPLEMENTATION_RECEIPT_20260805.md`. No paid assistive smoke is
 authorized by this document.
 
+## Coverage interpretation rule
+
+The 17-feature inventory is a lifecycle contract, not a promise that every
+random task trajectory triggers every feature. A provider-free census uses
+forced fixtures to prove all 17 producer and consumer paths. A paid smoke must
+be audited separately for the feature IDs actually present in its receipts.
+In run `30976148466`, 15/17 fired naturally; `recovery` and `signature_delta`
+were absent because their exact events did not occur.
+
+Effect counts and model-delivery counts are also different. That smoke applied
+361 effects and delivered 36 model-visible effects. The remaining effects were
+engine work or audit state, not missing payloads. Accounting must use the
+effect-trace dispositions `provider_payload`, `existing_engine_actuation`,
+`engine_internal_state`, `audit_only`, and `unread_private_state`; it must not
+call all non-provider effects inert. Model delivery proves host injection, not
+model comprehension or causal efficiency.
+
 ## 1. Current-state call graph and confirmed gaps
 
 ```text

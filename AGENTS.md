@@ -139,6 +139,35 @@ intended lifecycle state. A smoke is confirmation, never exploratory debugging.
 The 89-task run remains blocked until outcome preservation and repeated
 outcome-first efficiency gates pass.
 
+## Permanent coverage and accounting rule (2026-08-05)
+
+Never write “all 17 features worked” when referring to one stochastic paid
+trajectory without checking feature IDs in its receipts. The statements are
+different:
+
+- **17 paths proven:** provider-free census and forced-trigger tests exercised
+  every producer and consumer path.
+- **17 features fired:** the paid receipt set contains at least one receipt for
+  every feature ID.
+- **17 features consumed:** every produced effect has an applied engine
+  effect and an explicit downstream disposition.
+- **17 features delivered to the model:** every feature produced a grounded
+  model-visible payload and a confirmed provider delivery. This is not the
+  normal requirement; many features are correctly engine-private.
+
+In smoke `30976148466`, 15/17 feature IDs fired naturally; `recovery` and
+`signature_delta` did not because their exact triggers were absent. The run
+still had 361 applied effects, not 36. The 36 count was only model-visible
+provider payload effects.
+
+Never equate private with unused. The effect trace must distinguish
+`provider_payload`, `existing_engine_actuation`, `engine_internal_state`,
+`audit_only`, and `unread_private_state`. `engine_internal_state` proves
+deterministic GT work even when no model text was emitted; only an explicit
+downstream read, decision-frame contribution, or provider delivery proves
+that the work influenced a later decision. The summary must never relabel
+producer-side engine work as inert solely because it was not model-visible.
+
 ## Final ten-task smoke (2026-08-04)
 
 The repaired treatment smoke is workflow `30954660207` on commit `e7418a7`

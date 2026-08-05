@@ -14,6 +14,22 @@ and receipts stay outside the task container.
 This is an isolation change, not a reduction in integration. Every model action
 still crosses the central runtime before and after `BaseEnvironment.exec`.
 
+## Latest smoke comparison and coverage correction
+
+The archived ten-task smoke `30976148466` (GT-on shadow, commit `951e136`) is
+compared with the frozen GT-off baseline in
+`GT_SMOKE_30976148466_BASELINE_COMPARISON.md`. It was 4/10 solved versus 9/10
+baseline, with 694 versus 420 calls and 698 versus 483 actions. Its reported
+4.71M tokens versus 28.68M baseline tokens is censored/descriptive because six
+GT-on tasks reached the step limit and five baseline solves were lost; it is
+not an efficiency win.
+
+Do not confuse the 17-path census with natural paid coverage. The smoke fired
+15/17 feature IDs; `recovery` and `signature_delta` had no receipts. It still
+applied 361 effects; only 36 were model-visible provider payloads. The effect
+trace and summary now distinguish deterministic `engine_internal_state` work
+from actual provider delivery and from genuinely unread private state.
+
 ## Why Round 11 was inefficient
 
 - The selected ten tasks stayed at 9/10 while calls rose 420 to 650, actions
