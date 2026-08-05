@@ -88,6 +88,11 @@ def audit_timing(summary: dict) -> dict:
                     "syntax_result",
                 }
             )
+            or (
+                not row["model_visible"]
+                and row.get("delivery_status") == "suppressed"
+                and row.get("delivery_reason") == "semantic_duplicate"
+            )
             for row in rows
         )
         audit[feature_id] = {
@@ -233,6 +238,11 @@ def census() -> dict:
                     "submit_refusal",
                     "syntax_result",
                 }
+            )
+            or (
+                not row["model_visible"]
+                and row.get("delivery_status") == "suppressed"
+                and row.get("delivery_reason") == "semantic_duplicate"
             )
             for row in summary["receipts"]
         )

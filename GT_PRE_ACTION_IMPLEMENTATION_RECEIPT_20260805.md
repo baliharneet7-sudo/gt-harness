@@ -17,6 +17,40 @@ silently alter a paid run before a separate intervention gate is authorized.
 This is pre-execution interception, not prediction. GT receives only what the
 model already selected plus current host-owned state.
 
+## Paid smoke audit and delivery-accounting repair (2026-08-05)
+
+The authorized ten-task GitHub smoke completed all ten task jobs on commit
+`3f69c1f`; the workflow merge step initially failed because it referenced an
+undefined `n_errored` variable. That workflow defect was corrected and pushed
+as `ff308b6`. The existing task artifacts were audited locally, so no paid
+rerun was spent merely to recompute the merge.
+
+The smoke exercised 739 model actions with preflight in `SHADOW` mode. Every
+action received a deterministic preflight receipt, all 739 applied as `PASS`,
+and preflight p95 was below 0.02 ms per task (maximum observed 0.037 ms).
+The run produced 304 effects; 21 had confirmed provider payload delivery, 9
+were consumed by existing engine reads, 1 entered a prepared decision frame,
+and 273 changed only private controller state. Twenty model guidance
+deliveries were timely (20/20 before the first eligible model request; no late
+or predictive delivery).
+
+The first receipt audit found a real correctness defect: a repeated grounded
+`covering_red` effect was marked `model_visible=true` although semantic
+deduplication correctly omitted it from the delivery. The runtime now marks
+such effects and receipts `delivery_status=suppressed` with
+`delivery_reason=semantic_duplicate`, prevents a suppressed receipt from
+being selected as the source for a later delivery, and marks actually linked
+effects/receipts `delivery_status=delivered`. A regression test covers the
+exact repeated-failure trajectory. The all-17 census and 143 relevant
+provider-free tests pass after this repair.
+
+This smoke remains descriptive, not an efficiency claim: the workflow used
+`preflight_mode=shadow`, so preflight did not change execution or batch
+reasoning. The six censored tasks and mixed solve outcomes cannot prove an
+assistive GT-on win. A future paid assistive run is gated on this accounting
+repair and must separately report intervention, stale-batch prevention, and
+matched GT-off deltas.
+
 ## Current call graph
 
 ```text

@@ -1067,6 +1067,8 @@ class FeatureReceipt:
     payload: dict[str, Any]
     fresh: bool
     model_visible: bool
+    delivery_status: str = "pending"
+    delivery_reason: str = ""
     source_revision: str = ""
     source_epoch: int = 0
 
@@ -1301,6 +1303,45 @@ class CentralFeatureRuntime:
         self._route_effect(self.receipts[-1])
         self._register_decision_claim(self.receipts[-1])
 
+    def _suppress_receipt_delivery(self, receipt: FeatureReceipt, *, reason: str) -> None:
+        """Mark a grounded duplicate as private instead of orphaning it.
+
+        Semantic deduplication is intentional: repeating the same failure at
+        an unchanged source revision must not create a second model sentence.
+        The old implementation left the receipt/effect marked
+        ``model_visible`` even when the existing claim was already exposed,
+        making delivery accounting report a payload that never reached the
+        model.  Keep the engine effect and its audit trail, but make the
+        suppression explicit and machine-auditable.
+        """
+        if not reason:
+            reason = "semantic_duplicate"
+        for index in range(len(self.receipts) - 1, -1, -1):
+            current = self.receipts[index]
+            if current is receipt or (
+                current.feature_id == receipt.feature_id
+                and current.action_id == receipt.action_id
+                and current.revision == receipt.revision
+            ):
+                self.receipts[index] = replace(
+                    current,
+                    model_visible=False,
+                    delivery_status="suppressed",
+                    delivery_reason=reason,
+                )
+                for effect_index, effect in enumerate(self._effects):
+                    if (
+                        effect.feature_id == current.feature_id
+                        and effect.evidence_action == current.action_id
+                    ):
+                        self._effects[effect_index] = replace(
+                            effect,
+                            model_visible=False,
+                            delivery_status="suppressed",
+                            delivery_reason=reason,
+                        )
+                return
+
     @staticmethod
     def _payload(feature_id: str, boundary: str, reason: str) -> dict[str, Any]:
         messages = {
@@ -1484,6 +1525,13 @@ class CentralFeatureRuntime:
         if not fact or not anchors:
             return
         claim_kind, need_kind = mapping
+        existing_claim = self._decisions.find_claim(
+            feature_id=receipt.feature_id,
+            kind=claim_kind,
+            fact=fact,
+            anchors=anchors,
+            source_revision=receipt.source_revision,
+        )
         claim = self._decisions.upsert_claim(
             feature_id=receipt.feature_id,
             kind=claim_kind,
@@ -1494,6 +1542,9 @@ class CentralFeatureRuntime:
             workspace_revision=receipt.revision,
         )
         if claim is None:
+            return
+        if existing_claim is not None and existing_claim.active:
+            self._suppress_receipt_delivery(receipt, reason="semantic_duplicate")
             return
         self._claim_receipts[claim.claim_id] = (
             receipt.feature_id,
@@ -2732,6 +2783,8 @@ class CentralFeatureRuntime:
                 receipt.action_id if spec.required_before_next_action else None
             ),
             model_visible=bool(spec.model_visible and receipt.model_visible),
+            delivery_status=("candidate" if spec.model_visible and receipt.model_visible else "private"),
+            delivery_reason="" if spec.model_visible and receipt.model_visible else "private_consumer",
             evidence_action=receipt.action_id,
         )
         self._effects.append(effect)
@@ -2920,6 +2973,26 @@ class CentralFeatureRuntime:
             row["provider_delivery_ids"].append(delivery_id)
             row["actuator_events"].append({"kind": "provider_payload", "delivery_id": delivery_id})
             row["disposition"] = "provider_payload"
+            for index, effect in enumerate(self._effects):
+                if effect.receipt_id != row["effect_id"]:
+                    continue
+                self._effects[index] = replace(
+                    effect,
+                    delivery_status="delivered",
+                    delivery_reason="provider_payload",
+                )
+                for receipt_index, receipt in enumerate(self.receipts):
+                    if (
+                        receipt.feature_id == effect.feature_id
+                        and receipt.action_id == effect.evidence_action
+                    ):
+                        self.receipts[receipt_index] = replace(
+                            receipt,
+                            delivery_status="delivered",
+                            delivery_reason="provider_payload",
+                        )
+                        break
+                break
 
     def consume_effects(self, *, action_id: int, call: int) -> list[FeatureEffect]:
         """Return effects produced since the last consume, with timing bound."""
@@ -3070,6 +3143,8 @@ class CentralFeatureRuntime:
                     "payload": item.payload,
                     "fresh": item.fresh,
                     "model_visible": item.model_visible,
+                    "delivery_status": item.delivery_status,
+                    "delivery_reason": item.delivery_reason,
                     "source_revision": item.source_revision,
                     "source_epoch": item.source_epoch,
                 }
@@ -3229,6 +3304,7 @@ class CentralFeatureRuntime:
                     for item in reversed(self.receipts)
                     if item.feature_id == claim.feature_id
                     and item.source_revision == claim.source_revision
+                    and item.model_visible
                     and self._render_feature_fact(item) == claim.fact
                 ),
                 None,

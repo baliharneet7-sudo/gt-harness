@@ -42,6 +42,8 @@ class FeatureEffect:
     required_before_action: int | None
     model_visible: bool
     evidence_action: int
+    delivery_status: str = "pending"
+    delivery_reason: str = ""
     evidence_call: int = 0
     applied_after_action: int | None = None
     delivered_before_call: int | None = None
@@ -60,6 +62,8 @@ class FeatureEffect:
             "effect_kind": self.effect_kind.value,
             "effect_action": self.effect_action,
             "model_visible": self.model_visible,
+            "delivery_status": self.delivery_status,
+            "delivery_reason": self.delivery_reason,
             "evidence_action": self.evidence_action,
             "evidence_call": self.evidence_call,
             "applied_after_action": applied,

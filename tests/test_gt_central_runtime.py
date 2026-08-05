@@ -901,6 +901,57 @@ def test_empty_failure_diagnostic_never_reaches_model_feedback():
     assert runtime.model_feedback() == ""
 
 
+def test_repeated_grounded_failure_is_explicitly_suppressed_not_orphaned():
+    """Semantic deduplication must agree with model-visible delivery accounting."""
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",))
+    for action_id in (1, 2):
+        classification = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+            result_code=1,
+            output="1 failed: assert error",
+            source_revision="r0",
+            workspace_revision="r0",
+        )
+        runtime.observe_action(
+            action_id=action_id,
+            command="pytest -q",
+            output="1 failed: assert error",
+            returncode=1,
+            transition=WorkspaceTransition(action_id, "pytest -q", "r0", "r0"),
+            revision="r0",
+            source_revision="r0",
+            validation=classification,
+        )
+        runtime.consume_effects(action_id=action_id, call=action_id)
+        runtime.model_feedback(for_call=action_id)
+
+    summary = runtime.summary()
+    duplicate = [
+        row
+        for row in summary["effects"]
+        if row["feature_id"] == "covering_red" and row["evidence_action"] == 2
+    ][0]
+    assert duplicate["model_visible"] is False
+    assert duplicate["delivery_status"] == "suppressed"
+    assert duplicate["delivery_reason"] == "semantic_duplicate"
+    delivered_ids = {
+        trace["effect_id"]
+        for trace in summary["effect_trace"]
+        if trace["provider_delivery_ids"]
+    }
+    assert duplicate["receipt_id"] not in delivered_ids
+    # The recovery effect is a legitimate next decision candidate and may be
+    # pending until the following model turn; only the semantic duplicate is
+    # required to be explicitly private rather than a visible orphan.
+    assert duplicate["delivery_status"] == "suppressed"
+    delivered = next(
+        row
+        for row in summary["effects"]
+        if row["feature_id"] == "covering_red" and row["evidence_action"] == 1
+    )
+    assert delivered["delivery_status"] == "delivered"
+
+
 def test_localization_payload_names_concrete_anchors():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Find Bottle", revision="r0")

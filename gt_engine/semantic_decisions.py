@@ -166,6 +166,32 @@ class SemanticDecisionEngine:
         self._claims[claim_id] = claim
         return claim
 
+    def find_claim(
+        self,
+        *,
+        feature_id: str,
+        kind: SemanticClaimKind,
+        fact: str,
+        anchors: tuple[str, ...],
+        source_revision: str,
+    ) -> SemanticClaim | None:
+        """Return the existing claim for canonical evidence, if any.
+
+        This is deliberately the same canonicalization used by
+        :meth:`upsert_claim`; callers use it to distinguish a new fact from a
+        repeated fact so delivery accounting can mark the latter explicitly
+        suppressed rather than claiming it was model-visible.
+        """
+        cleaned_fact = " ".join(str(fact or "").split())
+        cleaned_anchors = tuple(
+            dict.fromkeys(" ".join(str(anchor or "").split()) for anchor in anchors if anchor)
+        )
+        if not feature_id or not cleaned_fact or not cleaned_anchors or not source_revision:
+            return None
+        digest = self._digest(cleaned_fact, cleaned_anchors)
+        claim_id = "claim-" + self._digest(feature_id, kind.value, source_revision, digest)
+        return self._claims.get(claim_id)
+
     def open_need(
         self,
         *,
