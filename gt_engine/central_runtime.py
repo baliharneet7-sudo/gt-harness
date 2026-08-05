@@ -3049,8 +3049,16 @@ class CentralFeatureRuntime:
                 outcome = "pending_decision_claim"
             elif linked_claim_ids:
                 outcome = "expired_unconsumed_claim"
+            elif trace.get("disposition") == "engine_internal_state":
+                # A producer event proves that the effect performed
+                # deterministic engine work even when no provider payload was
+                # emitted.  It is not equivalent to an unused receipt.
+                outcome = "engine_internal_state"
             elif trace["state_fields_changed"]:
-                outcome = "inert_private_state"
+                # State changed, but this receipt has no recorded producer or
+                # downstream read. Keep this category explicit rather than
+                # claiming that every private state mutation was useful.
+                outcome = "unread_private_state"
             else:
                 outcome = "audit_only"
             rows.append(

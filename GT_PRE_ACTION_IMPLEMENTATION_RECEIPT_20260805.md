@@ -74,6 +74,18 @@ alter commands or batch reasoning. The result is therefore a correctness,
 timing, and accounting proof for the integration—not evidence of a solve-rate
 or efficiency gain over GT-off.
 
+### Engine-work accounting correction
+
+The original summary wording called all non-provider effects "private" and
+could be read as saying they were inert. That was too coarse. The effect trace
+distinguishes 274 `engine_internal_state` effects, 7 existing-engine-actuation
+effects, 36 provider-payload effects, and 44 audit-only effects in this smoke.
+The summary now uses `engine_internal_state` for deterministic producer work,
+`existing_engine_actuation` for recorded downstream reads, and reserves
+`unread_private_state` for a state mutation with no producer event or recorded
+read. This matches the engine model: lack of model text is not evidence of
+lack of engine work.
+
 ## Current call graph
 
 ```text

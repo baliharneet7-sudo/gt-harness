@@ -183,7 +183,7 @@ def test_provider_view_compacts_old_content_but_preserves_protocol_and_active_st
     )
 
 
-def test_effect_accountability_does_not_call_unread_private_state_useful():
+def test_effect_accountability_counts_engine_state_work_separately_from_unread_state():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix greet", revision="r0", source_revision="s0")
     runtime.consume_effects(action_id=0, call=0)
@@ -193,4 +193,4 @@ def test_effect_accountability_does_not_call_unread_private_state_useful():
         row for row in summary["effect_accountability"] if row["feature_id"] == "obligations"
     )
 
-    assert obligation["outcome"] == "inert_private_state"
+    assert obligation["outcome"] == "engine_internal_state"
