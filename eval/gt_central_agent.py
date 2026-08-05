@@ -14,6 +14,7 @@ import json
 import os
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -39,9 +40,11 @@ from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from gt_engine.central_runtime import (
     CentralFeatureRuntime,
+    ChangeOrigin,
     EvidenceLedger,
     InterventionDecision,
     WorkspaceSensor,
+    classify_change,
     classify_validation_command,
     diff_snapshots,
     explicit_check_commands,
@@ -51,7 +54,18 @@ from gt_engine.central_runtime import (
     source_revision_of,
     task_deliverable_paths,
 )
+from gt_engine.checkpoint_ledger import ShadowCheckpointLedger
 from gt_engine.deep_metrics import normalized_token_cost
+from gt_engine.preflight import (
+    PREFLIGHT_FEATURE_PLACEMENT,
+    ActionDisposition,
+    ActionOperation,
+    PreflightMode,
+    adapt_proposed_action,
+    pass_decision,
+)
+from gt_engine.provider_view import build_provider_view
+from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -62,6 +76,14 @@ def _message_context_chars(message: dict[str, Any]) -> int:
         if value:
             text += json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return len(text)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * percentile + 0.5)))
+    return round(ordered[index], 6)
 
 
 def _inject_runtime_evidence(
@@ -109,6 +131,13 @@ class MiniSweCentralAgent(BaseAgent):
         enable_lint: bool = True,
         enable_submit_readiness: bool = True,
         enable_all_features: bool = True,
+        enable_repository_intelligence: bool = True,
+        enable_context_compaction: bool = True,
+        context_trigger_chars: int = 120_000,
+        context_target_chars: int = 60_000,
+        preflight_mode: str | PreflightMode = PreflightMode.OFF,
+        enable_preflight: bool | None = None,
+        preflight_timeout_sec: float = 0.1,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, model_name, **kwargs)
@@ -124,7 +153,22 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
+        self.enable_repository_intelligence = enable_repository_intelligence
+        self.enable_context_compaction = enable_context_compaction
+        self.context_trigger_chars = max(1_000, int(context_trigger_chars))
+        self.context_target_chars = max(800, int(context_target_chars))
+        parsed_preflight_mode = PreflightMode.parse(preflight_mode)
+        if enable_preflight is not None:
+            legacy_mode = PreflightMode.ASSISTIVE_SAFE if enable_preflight else PreflightMode.OFF
+            if parsed_preflight_mode not in {PreflightMode.OFF, legacy_mode}:
+                raise ValueError("enable_preflight conflicts with explicit preflight_mode")
+            parsed_preflight_mode = legacy_mode
+        self.preflight_mode = parsed_preflight_mode
+        # Compatibility for external receipt consumers; dispatch uses the enum.
+        self.enable_preflight = parsed_preflight_mode is not PreflightMode.OFF
+        self.preflight_timeout_sec = max(0.001, float(preflight_timeout_sec))
         self._ledger = EvidenceLedger(max_holds=max_submit_holds)
+        self._checkpoints = ShadowCheckpointLedger()
         self._sensor = WorkspaceSensor()
         self._features = CentralFeatureRuntime(
             enabled=enable_all_features,
@@ -174,6 +218,46 @@ class MiniSweCentralAgent(BaseAgent):
             values = values[0].split("\t")
         values += [""] * (4 - len(values))
         return dict(zip(("system", "release", "version", "machine"), values[:4], strict=True))
+
+    async def _start_repository_session(
+        self,
+        environment: BaseEnvironment,
+        instruction: str,
+        *,
+        source_revision: str,
+    ) -> tuple[RepositoryEvidence, RepositorySession | None]:
+        """Mirror, index, and rank the repository on the host before call one."""
+        if not self.enable_repository_intelligence or not hasattr(
+            environment, "download_dir_with_exclusions"
+        ):
+            return RepositoryEvidence(status="environment_transfer_unavailable"), None
+        session = RepositorySession.temporary(instruction=instruction)
+        try:
+            await asyncio.wait_for(
+                environment.download_dir_with_exclusions(
+                    source_dir=self.cwd,
+                    target_dir=str(session.root),
+                    exclude=[
+                        ".git",
+                        ".gt",
+                        "node_modules",
+                        "__pycache__",
+                        ".pytest_cache",
+                        "target",
+                        "dist",
+                        "build",
+                    ],
+                ),
+                timeout=20,
+            )
+            evidence = await asyncio.wait_for(
+                asyncio.to_thread(session.refresh, source_revision=source_revision),
+                timeout=15,
+            )
+            return evidence, session
+        except Exception as exc:
+            session.close()
+            return RepositoryEvidence(status=f"error:{type(exc).__name__}"), None
 
     @staticmethod
     def _render(template: str, variables: dict[str, Any]) -> str:
@@ -384,6 +468,19 @@ class MiniSweCentralAgent(BaseAgent):
             explicit_checks=explicit_checks,
             task_deliverables=task_deliverables,
         )
+        repository_evidence, repository_session = await self._start_repository_session(
+            environment,
+            instruction,
+            source_revision=source_revision,
+        )
+        if repository_evidence.available:
+            self._features.register_structural_evidence(
+                source_revision=source_revision,
+                anchors=repository_evidence.anchors,
+                callers=repository_evidence.callers,
+                graph_revision=repository_evidence.graph_revision,
+            )
+            self._features.consume_effects(action_id=0, call=0)
         calls = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -399,6 +496,12 @@ class MiniSweCentralAgent(BaseAgent):
         context_chars_sent = 0
         model_output_chars = 0
         censored_reason = ""
+        context_compactions = 0
+        context_chars_elided = 0
+        pending_reconsideration_cycle = ""
+
+        if repository_evidence.available and self.runtime_mode == "treatment":
+            pending_guidance = self._features.model_feedback(deferred=True, for_call=1)
 
         try:
             while not terminal:
@@ -419,7 +522,31 @@ class MiniSweCentralAgent(BaseAgent):
                     censored_reason = "model_loop_wall_time"
                     break
                 calls += 1
-                query_messages = messages
+                active_state = {
+                    "obligations": list(explicit_checks) or sorted(task_deliverables),
+                    "project_checks": list(repository_evidence.project_checks),
+                    "source_revision": source_revision,
+                    "workspace_revision": snapshot.revision,
+                }
+                if self.enable_context_compaction:
+                    query_messages, provider_view_metrics = build_provider_view(
+                        messages,
+                        active_state=active_state,
+                        trigger_chars=self.context_trigger_chars,
+                        target_chars=self.context_target_chars,
+                        keep_recent_turns=2,
+                    )
+                else:
+                    query_messages, provider_view_metrics = build_provider_view(
+                        messages,
+                        active_state=active_state,
+                        trigger_chars=10**18,
+                        target_chars=10**18,
+                        keep_recent_turns=2,
+                    )
+                if provider_view_metrics.compacted:
+                    context_compactions += 1
+                    context_chars_elided += provider_view_metrics.elided_chars
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
@@ -428,7 +555,7 @@ class MiniSweCentralAgent(BaseAgent):
                         query_messages,
                         runtime_message_index,
                         runtime_enrichment_chars,
-                    ) = _inject_runtime_evidence(messages, pending_guidance)
+                    ) = _inject_runtime_evidence(query_messages, pending_guidance)
                     delivery_metadata = self._features.confirm_prepared_guidance() or {}
                     pending_guidance = ""
                 request_payload_sha256 = hashlib.sha256(
@@ -450,6 +577,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "contributing_features": delivery_metadata.get(
                                 "contributing_features", []
                             ),
+                            "claim_ids": delivery_metadata.get("claim_ids", []),
+                            "claim_anchors": delivery_metadata.get("claim_anchors", []),
+                            "decision_need_id": delivery_metadata.get("decision_need_id"),
+                            "decision_need_kind": delivery_metadata.get("decision_need_kind"),
+                            "decision_frame_id": delivery_metadata.get("decision_frame_id"),
                             "evidence_action": evidence_action,
                             "evidence_actions": delivery_metadata.get("evidence_actions", []),
                             "revision": delivery_metadata.get("revision"),
@@ -492,6 +624,10 @@ class MiniSweCentralAgent(BaseAgent):
                         "context_chars": context_chars,
                         "request_payload_sha256": request_payload_sha256,
                         "runtime_message_index": runtime_message_index,
+                        "provider_view_compacted": provider_view_metrics.compacted,
+                        "provider_view_input_chars": provider_view_metrics.input_chars,
+                        "provider_view_output_chars": provider_view_metrics.output_chars,
+                        "provider_view_elided_chars": provider_view_metrics.elided_chars,
                         "query_started_at": None,
                         "next_action_relation": "",
                     }
@@ -525,21 +661,175 @@ class MiniSweCentralAgent(BaseAgent):
                     or 0
                 )
                 actions = tuple(extra.get("actions") or ())
+                action_classifications = tuple(
+                    classify_validation_command(str(action.get("command") or ""), explicit_checks)
+                    for action in actions
+                )
+                proposed_actions = tuple(
+                    adapt_proposed_action(
+                        action,
+                        source_revision=source_revision,
+                        workspace_revision=snapshot.revision,
+                        model_call=calls,
+                        batch_index=index,
+                        batch_size=len(actions),
+                        validation=action_classifications[index],
+                    )
+                    for index, action in enumerate(actions)
+                )
+                if pending_reconsideration_cycle:
+                    self._features.record_reconsideration(
+                        cycle_id=pending_reconsideration_cycle,
+                        next_command=str((actions[0] if actions else {}).get("command") or ""),
+                        next_model_call=calls,
+                    )
+                    pending_reconsideration_cycle = ""
                 if not actions:
                     model_call_contexts[-1]["next_action_relation"] = "no_action"
-                elif is_submit_command(str(actions[0].get("command") or "")):
+                elif proposed_actions[0].operation == ActionOperation.SUBMIT:
                     model_call_contexts[-1]["next_action_relation"] = "submit"
-                elif is_check_command(str(actions[0].get("command") or "")):
+                elif proposed_actions[0].operation == ActionOperation.VALIDATE:
                     model_call_contexts[-1]["next_action_relation"] = "validation"
                 else:
                     model_call_contexts[-1]["next_action_relation"] = "other"
+                if delivery_metadata is not None:
+                    first_command = str((actions[0] if actions else {}).get("command") or "")
+                    anchors = tuple(delivery_metadata.get("claim_anchors") or ())
+                    anchor_followed = bool(first_command) and any(
+                        str(anchor).split(":", 1)[0] in first_command
+                        or str(anchor).rsplit(":", 1)[-1] in first_command
+                        for anchor in anchors
+                        if anchor
+                    )
+                    if not first_command:
+                        behavioral_relation = "no_action"
+                    elif anchor_followed:
+                        behavioral_relation = "anchor_followed"
+                    elif is_check_command(first_command):
+                        behavioral_relation = "validation_action"
+                    elif is_submit_command(first_command):
+                        behavioral_relation = "submit_action"
+                    else:
+                        behavioral_relation = "other_action"
+                    guidance_deliveries[-1].update(
+                        {
+                            "next_command": first_command,
+                            "behavioral_relation": behavioral_relation,
+                            "anchor_followed": anchor_followed,
+                        }
+                    )
                 if not actions:
                     no_action_assistant_steps += 1
                 outputs: list[dict[str, Any]] = []
 
-                for index, action in enumerate(actions):
+                for index, (_action, proposed, classification) in enumerate(
+                    zip(actions, proposed_actions, action_classifications, strict=True)
+                ):
                     actions_count += 1
-                    command = str(action.get("command") or "")
+                    command = proposed.raw_command
+                    preflight = pass_decision(proposed, "preflight_disabled")
+                    applied_disposition = ActionDisposition.PASS
+                    applied_reasons: tuple[str, ...] = ("preflight_disabled",)
+                    if self.preflight_mode is not PreflightMode.OFF:
+                        preflight_started = time.perf_counter()
+                        try:
+                            preflight = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    self._features.preflight_action,
+                                    proposed,
+                                    snapshot,
+                                    revision=snapshot.revision,
+                                    source_revision=source_revision,
+                                    ledger=self._ledger,
+                                ),
+                                timeout=self.preflight_timeout_sec,
+                            )
+                        except TimeoutError:
+                            preflight = pass_decision(proposed, "preflight_timeout")
+                        except Exception as exc:
+                            preflight = pass_decision(
+                                proposed, f"preflight_exception:{type(exc).__name__}"
+                            )
+                        if preflight.latency_ms <= 0:
+                            preflight = replace(
+                                preflight,
+                                latency_ms=(time.perf_counter() - preflight_started) * 1000,
+                            )
+                        applied_disposition = preflight.disposition
+                        applied_reasons = preflight.reason_codes
+                        if self.preflight_mode is PreflightMode.SHADOW:
+                            applied_disposition = ActionDisposition.PASS
+                            applied_reasons = (*applied_reasons, "shadow_observe_only")
+                        elif preflight.source_revision not in {"", source_revision}:
+                            applied_disposition = ActionDisposition.PASS
+                            applied_reasons = (
+                                *applied_reasons,
+                                "dispatch_revision_mismatch",
+                            )
+                        elif preflight.disposition == ActionDisposition.REWRITE:
+                            applied_disposition = ActionDisposition.PASS
+                            applied_reasons = (*applied_reasons, "rewrite_disabled")
+                        elif preflight.disposition == ActionDisposition.SUPPRESS:
+                            applied_disposition = ActionDisposition.PASS
+                            applied_reasons = (
+                                *applied_reasons,
+                                "suppress_host_policy_only",
+                            )
+                        elif preflight.disposition in {
+                            ActionDisposition.AUGMENT,
+                            ActionDisposition.RETURN_TO_MODEL,
+                        }:
+                            admitted, admission_reason = (
+                                self._features.admit_preflight_intervention(proposed, preflight)
+                            )
+                            if not admitted:
+                                applied_disposition = ActionDisposition.PASS
+                                applied_reasons = (
+                                    *applied_reasons,
+                                    admission_reason,
+                                )
+                        self._features.record_preflight_cycle(
+                            proposed,
+                            preflight,
+                            mode=self.preflight_mode,
+                            applied_disposition=applied_disposition,
+                            applied_reason_codes=applied_reasons,
+                            dispatch_command=command,
+                            revision=snapshot.revision,
+                            source_revision=source_revision,
+                        )
+                    if applied_disposition == ActionDisposition.RETURN_TO_MODEL:
+                        pending_reconsideration_cycle = proposed.cycle_id
+                        outputs.append(
+                            {
+                                "output": "Pre-execution check: " + " ".join(preflight.evidence),
+                                "returncode": 2,
+                                "exception_info": "",
+                            }
+                        )
+                        cancelled = len(actions) - index - 1
+                        for cancelled_proposal in proposed_actions[index + 1 :]:
+                            self._features.record_cancelled_proposal(
+                                cancelled_proposal,
+                                mode=self.preflight_mode,
+                                reason="preflight_return_to_model",
+                            )
+                        outputs.extend(
+                            {
+                                "output": "Cancelled: earlier action requires fresh reasoning.",
+                                "returncode": 2,
+                                "exception_info": "",
+                            }
+                            for _ in range(cancelled)
+                        )
+                        self._features.record_skipped_action(action_id=actions_count)
+                        if cancelled:
+                            self._features.record_batch_interrupt(
+                                action_id=actions_count,
+                                cancelled=cancelled,
+                                reason="preflight_return_to_model",
+                            )
+                        break
                     submit = is_submit_command(command)
                     if submit and self.enable_submit_readiness:
                         decision = self._ledger.submit_decision(
@@ -594,6 +884,10 @@ class MiniSweCentralAgent(BaseAgent):
                         "returncode": result.return_code,
                         "exception_info": "",
                     }
+                    if applied_disposition == ActionDisposition.AUGMENT and preflight.evidence:
+                        output["output"] += "\n\nPre-execution check: " + " ".join(
+                            preflight.evidence
+                        )
                     after = await self._sensor.scan(environment, cwd=self.cwd, previous=snapshot)
                     transition = diff_snapshots(
                         snapshot,
@@ -603,9 +897,68 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     snapshot = after
                     source_revision = source_revision_of(after, task_deliverables)
-                    classification = classify_validation_command(
-                        command, explicit_checks
-                    ).with_result(
+                    classified_transition = tuple(
+                        classify_change(
+                            path,
+                            kind=(after.entries[path].kind if path in after.entries else "f"),
+                            task_deliverables=task_deliverables,
+                        )
+                        for path in transition.changed_paths
+                    )
+                    material_workspace_change = any(
+                        item.origin
+                        in {
+                            ChangeOrigin.MODEL_AUTHORED,
+                            ChangeOrigin.TASK_DELIVERABLE,
+                            ChangeOrigin.UNKNOWN,
+                        }
+                        for item in classified_transition
+                    ) or (
+                        proposed.mutates_workspace and bool(transition.changed_paths)
+                    )
+                    if (
+                        repository_session is not None
+                        and source_revision != proposed.source_revision
+                    ):
+                        source_paths = tuple(
+                            item.path for item in classified_transition if item.validation_relevant
+                        )
+                        mirror_advanced = repository_session.apply_transition(
+                            transition,
+                            source_revision=source_revision,
+                            changed_paths=source_paths,
+                        )
+                        if mirror_advanced:
+                            try:
+                                repository_evidence = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        repository_session.refresh,
+                                        source_revision=source_revision,
+                                    ),
+                                    timeout=5,
+                                )
+                            except TimeoutError:
+                                repository_session.invalidate(
+                                    source_revision=source_revision,
+                                    status="refresh_timeout",
+                                )
+                                repository_evidence = repository_session.evidence
+                            if repository_evidence.available:
+                                self._features.refresh_structural_evidence(
+                                    source_revision=source_revision,
+                                    anchors=repository_evidence.anchors,
+                                    callers=repository_evidence.callers,
+                                    graph_revision=repository_evidence.graph_revision,
+                                )
+                        else:
+                            repository_evidence = repository_session.evidence
+                            self._features.refresh_structural_evidence(
+                                source_revision=source_revision,
+                                anchors=(),
+                                callers=(),
+                                graph_revision="",
+                            )
+                    classification = classification.with_result(
                         result_code=result.return_code,
                         output=output["output"],
                         source_revision=source_revision,
@@ -622,6 +975,15 @@ class MiniSweCentralAgent(BaseAgent):
                         snapshot=snapshot,
                         validation=classification,
                     )
+                    if self.preflight_mode is not PreflightMode.OFF:
+                        self._features.record_action_postflight(
+                            proposed,
+                            action_ordinal=actions_count,
+                            command=command,
+                            returncode=result.return_code,
+                            workspace_revision=snapshot.revision,
+                            source_revision=source_revision,
+                        )
 
                     if classification.is_validation:
                         self._ledger.record_check(
@@ -661,13 +1023,34 @@ class MiniSweCentralAgent(BaseAgent):
                                 "paths": list(changed_files),
                             }
                         )
+                    current_checks = self._ledger.readiness_evidence(source_revision)
+                    self._checkpoints.observe(
+                        source_revision=source_revision,
+                        workspace_revision=snapshot.revision,
+                        changed_paths=changed_files,
+                        passing_checks=(
+                            item.command for item in current_checks if item.returncode == 0
+                        ),
+                        failing_checks=(
+                            item.command for item in current_checks if item.returncode != 0
+                        ),
+                        action_id=actions_count,
+                    )
                     outputs.append(output)
                     # A submit can emit GT_CERT_DELIVERY before its shell
                     # command executes.  Consume every action's effects
                     # before the terminal submit exit, otherwise the final
                     # boundary would leave registered effects un-applied.
-                    effects = self._features.consume_effects(
-                        action_id=actions_count, call=calls
+                    effects = self._features.consume_effects(action_id=actions_count, call=calls)
+                    stale_batch_barrier = (
+                        self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                        and index + 1 < len(actions)
+                        and (
+                            proposed.operation
+                            in {ActionOperation.VALIDATE, ActionOperation.SUBMIT}
+                            or material_workspace_change
+                            or source_revision != proposed.source_revision
+                        )
                     )
                     if effects and not submit:
                         later_actions = actions[index + 1 :]
@@ -680,16 +1063,60 @@ class MiniSweCentralAgent(BaseAgent):
                             None,
                         )
                         executed_after = (
-                            len(later_actions)
-                            if first_submit is None
-                            else first_submit + 1
+                            0
+                            if stale_batch_barrier
+                            else (len(later_actions) if first_submit is None else first_submit + 1)
                         )
                         self._features.record_predecided_continuation(
                             evidence_action=actions_count,
                             executed=executed_after,
                         )
                     if submit:
+                        cancelled = len(actions) - index - 1
+                        if cancelled:
+                            if self.preflight_mode is not PreflightMode.OFF:
+                                for cancelled_proposal in proposed_actions[index + 1 :]:
+                                    self._features.record_cancelled_proposal(
+                                        cancelled_proposal,
+                                        mode=self.preflight_mode,
+                                        reason="terminal_submit",
+                                    )
+                            outputs.extend(
+                                {
+                                    "output": "Cancelled: task already submitted.",
+                                    "returncode": 2,
+                                    "exception_info": "",
+                                }
+                                for _ in range(cancelled)
+                            )
+                            self._features.record_batch_interrupt(
+                                action_id=actions_count,
+                                cancelled=cancelled,
+                                reason="terminal_submit",
+                            )
                         terminal = "Submitted"
+                        break
+                    if stale_batch_barrier:
+                        cancelled = len(actions) - index - 1
+                        for cancelled_proposal in proposed_actions[index + 1 :]:
+                            self._features.record_cancelled_proposal(
+                                cancelled_proposal,
+                                mode=self.preflight_mode,
+                                reason="stale_batch_barrier",
+                            )
+                        outputs.extend(
+                            {
+                                "output": "Cancelled: prior action changed the decision boundary.",
+                                "returncode": 2,
+                                "exception_info": "",
+                            }
+                            for _ in range(cancelled)
+                        )
+                        self._features.record_batch_interrupt(
+                            action_id=actions_count,
+                            cancelled=cancelled,
+                            reason="stale_batch_barrier",
+                        )
                         break
 
                 if not terminal:
@@ -725,7 +1152,29 @@ class MiniSweCentralAgent(BaseAgent):
             elapsed_seconds = max(time.monotonic() - started, 1e-6)
             assistant_steps = sum(1 for message in messages if message.get("role") == "assistant")
             feature_summary = self._features.summary()
+            preflight_rows = feature_summary["preflight_receipts"]
+            action_cycles = feature_summary["action_cycles"]
+            preflight_latencies = [
+                float(row["decision"].get("latency_ms") or 0.0) for row in preflight_rows
+            ]
+            parser_confidences = [
+                float(row["proposed"].get("parser_confidence") or 0.0) for row in preflight_rows
+            ]
+            seen_preflight_evidence: set[tuple[str, str, tuple[str, ...]]] = set()
+            duplicate_preflight_evidence = 0
+            for row in preflight_rows:
+                evidence_key = (
+                    str(row.get("source_revision") or ""),
+                    str(row["proposed"].get("operation") or ""),
+                    tuple(row["decision"].get("evidence") or ()),
+                )
+                if not evidence_key[2]:
+                    continue
+                if evidence_key in seen_preflight_evidence:
+                    duplicate_preflight_evidence += 1
+                seen_preflight_evidence.add(evidence_key)
             action_metrics = feature_summary["action_metrics"]
+            accountability_counts = feature_summary["effect_accountability_counts"]
             total_tokens = input_tokens + output_tokens
             uncached_input_tokens = max(0, input_tokens - cache_tokens)
             normalized_cost = normalized_token_cost(
@@ -762,6 +1211,67 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "elapsed_seconds": elapsed_seconds,
                 "context_chars_sent": context_chars_sent,
+                "context_compactions": context_compactions,
+                "context_chars_elided": context_chars_elided,
+                "preflight_mode": self.preflight_mode.value,
+                "preflight_calls": len(preflight_rows),
+                "preflight_candidate_dispositions": {
+                    disposition: sum(
+                        row["decision"]["disposition"] == disposition for row in preflight_rows
+                    )
+                    for disposition in sorted(
+                        {row["decision"]["disposition"] for row in preflight_rows}
+                    )
+                },
+                "preflight_applied_dispositions": {
+                    disposition: sum(
+                        row["applied_disposition"] == disposition for row in preflight_rows
+                    )
+                    for disposition in sorted(
+                        {row["applied_disposition"] for row in preflight_rows}
+                    )
+                },
+                "preflight_operation_distribution": {
+                    operation: sum(
+                        row["proposed"]["operation"] == operation for row in preflight_rows
+                    )
+                    for operation in sorted(
+                        {row["proposed"]["operation"] for row in preflight_rows}
+                    )
+                },
+                "preflight_latency_ms": {
+                    "p50": _percentile(preflight_latencies, 0.50),
+                    "p95": _percentile(preflight_latencies, 0.95),
+                    "p99": _percentile(preflight_latencies, 0.99),
+                    "max": round(max(preflight_latencies), 6) if preflight_latencies else 0.0,
+                },
+                "preflight_parser_confidence": {
+                    "mean": round(sum(parser_confidences) / len(parser_confidences), 6)
+                    if parser_confidences
+                    else 0.0,
+                    "min": round(min(parser_confidences), 6) if parser_confidences else 0.0,
+                },
+                "preflight_material_evidence": sum(
+                    bool(row["decision"].get("evidence"))
+                    and row["decision"]["disposition"] != "pass"
+                    for row in preflight_rows
+                ),
+                "preflight_commands_returned_to_model": sum(
+                    row["applied_disposition"] == "return_to_model" for row in preflight_rows
+                ),
+                "preflight_commands_changed_after_return": sum(
+                    bool(row.get("reconsideration", {}).get("command_changed"))
+                    for row in action_cycles
+                ),
+                "preflight_duplicate_evidence": duplicate_preflight_evidence,
+                "preflight_false_interventions": None,
+                "preflight_false_intervention_status": "requires_outcome_oracle",
+                "postflight_only_feature_count": sum(
+                    placement.postflight_only for placement in PREFLIGHT_FEATURE_PLACEMENT.values()
+                ),
+                "stale_batched_actions_prevented": sum(
+                    int(row.get("cancelled") or 0) for row in feature_summary["batch_interrupts"]
+                ),
                 "model_output_chars": model_output_chars,
                 "no_action_assistant_steps": no_action_assistant_steps,
                 "censored": bool(censored_reason),
@@ -771,12 +1281,10 @@ class MiniSweCentralAgent(BaseAgent):
                 "guidance_candidates": feature_summary["guidance_candidates"],
                 "guidance_suppressed": feature_summary["guidance_suppressed"],
                 "gt_context_chars_added": sum(
-                    int(row.get("runtime_advisory_chars") or 0)
-                    for row in model_call_contexts
+                    int(row.get("runtime_advisory_chars") or 0) for row in model_call_contexts
                 ),
                 "stock_context_chars_sent": sum(
-                    int(row.get("stock_context_chars") or 0)
-                    for row in model_call_contexts
+                    int(row.get("stock_context_chars") or 0) for row in model_call_contexts
                 ),
                 "effects_produced": len(feature_summary["effects"]),
                 "effects_applied": len(feature_summary["effect_applications"]),
@@ -791,10 +1299,7 @@ class MiniSweCentralAgent(BaseAgent):
                         for row in feature_summary["effect_trace"]
                     )
                     for disposition in sorted(
-                        {
-                            row.get("disposition")
-                            for row in feature_summary["effect_trace"]
-                        }
+                        {row.get("disposition") for row in feature_summary["effect_trace"]}
                     )
                 },
                 "provider_payload_effects": sum(
@@ -812,6 +1317,14 @@ class MiniSweCentralAgent(BaseAgent):
                 "audit_only_effects": sum(
                     row.get("disposition") == "audit_only"
                     for row in feature_summary["effect_trace"]
+                ),
+                "effect_accountability": accountability_counts,
+                "inert_private_state_effects": accountability_counts.get("inert_private_state", 0),
+                "pending_decision_claim_effects": accountability_counts.get(
+                    "pending_decision_claim", 0
+                ),
+                "prepared_decision_frame_effects": accountability_counts.get(
+                    "prepared_decision_frame", 0
                 ),
                 "payload_deliveries": len(guidance_deliveries),
                 "timely_payload_deliveries": timely_deliveries,
@@ -850,12 +1363,18 @@ class MiniSweCentralAgent(BaseAgent):
                     {
                         "schema": "central-runtime-receipt-v3",
                         "mode": self.runtime_mode,
+                        "preflight_mode": self.preflight_mode.value,
                         "calls": calls,
                         "actions": actions_count,
                         "elapsed_seconds": elapsed_seconds,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
                         "source_revision": source_revision,
+                        "repository_evidence": repository_evidence.as_dict(),
+                        "repository_session": (
+                            repository_session.summary() if repository_session is not None else None
+                        ),
+                        "checkpoint_ledger": self._checkpoints.summary(),
                         "metrics": deep_metrics,
                         "features": feature_summary,
                         "interventions": receipts,
@@ -896,6 +1415,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "censored_reason": censored_reason,
                 "workspace_sensor_healthy": snapshot.healthy,
             }
+            if repository_session is not None:
+                repository_session.close()
 
 
 class MiniSweCentralShadowAgent(MiniSweCentralAgent):

@@ -23,6 +23,22 @@ from gt_engine.central_controls import (
     FeatureEffect,
     consumer_spec_for,
 )
+from gt_engine.preflight import (
+    ActionCycleReceipt,
+    ActionDisposition,
+    ActionOperation,
+    EvidenceGrade,
+    PreflightDecision,
+    PreflightMode,
+    ProposedAction,
+    pass_decision,
+    shell_segments,
+)
+from gt_engine.semantic_decisions import (
+    DecisionNeedKind,
+    SemanticClaimKind,
+    SemanticDecisionEngine,
+)
 
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
@@ -37,8 +53,12 @@ _FAILURE_LINE = re.compile(r"\b(?:fail(?:ed|ure)?|error|exception|traceback|red)
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MODEL_ACTIONABLE_FEATURES = frozenset(
     {
-        "covering_red", "newfile_precedent", "recovery", "signature_delta",
-        "submit_refusal", "syntax_result",
+        "covering_red",
+        "newfile_precedent",
+        "recovery",
+        "signature_delta",
+        "submit_refusal",
+        "syntax_result",
     }
 )
 _NON_MATERIAL_PATH_PARTS = frozenset(
@@ -46,16 +66,47 @@ _NON_MATERIAL_PATH_PARTS = frozenset(
 )
 _DERIVED_SUFFIXES = frozenset(
     {
-        ".o", ".so", ".a", ".pyc", ".pyo", ".pyd", ".class", ".exe", ".dll",
-        ".lib", ".obj", ".elf", ".out", ".bin", ".log", ".dylib", ".jar",
-        ".whl", ".tar", ".gz", ".zip",
+        ".o",
+        ".so",
+        ".a",
+        ".pyc",
+        ".pyo",
+        ".pyd",
+        ".class",
+        ".exe",
+        ".dll",
+        ".lib",
+        ".obj",
+        ".elf",
+        ".out",
+        ".bin",
+        ".log",
+        ".dylib",
+        ".jar",
+        ".whl",
+        ".tar",
+        ".gz",
+        ".zip",
     }
 )
 _DERIVED_PATH_PARTS = frozenset(
     {
-        "__pycache__", ".pytest_cache", ".mypy_cache", ".hypothesis",
-        ".ruff_cache", ".git", ".hg", ".svn", "node_modules", ".venv", "venv",
-        "build", "dist", "target", ".tox", "eggs",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".hypothesis",
+        ".ruff_cache",
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        ".venv",
+        "venv",
+        "build",
+        "dist",
+        "target",
+        ".tox",
+        "eggs",
     }
 )
 _BACKGROUND_ARTIFACT_NAMES = frozenset(
@@ -64,9 +115,31 @@ _BACKGROUND_ARTIFACT_NAMES = frozenset(
 _DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
 _SOURCE_CAPTURE_SUFFIXES = frozenset(
     {
-        ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java",
-        ".go", ".rs", ".rb", ".php", ".c", ".h", ".cc", ".cpp", ".hpp",
-        ".cs", ".sh", ".bash", ".cob", ".cbl", ".scm", ".ss", ".rkt",
+        ".py",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".java",
+        ".go",
+        ".rs",
+        ".rb",
+        ".php",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".hpp",
+        ".cs",
+        ".sh",
+        ".bash",
+        ".cob",
+        ".cbl",
+        ".scm",
+        ".ss",
+        ".rkt",
     }
 )
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
@@ -207,10 +280,7 @@ def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
             continue
         for token in re.findall(r"`([^`\r\n]+)`", line):
             path = token.strip()
-            if (
-                path.lower().endswith(_DELIVERABLE_SUFFIXES)
-                and not is_submit_command(path)
-            ):
+            if path.lower().endswith(_DELIVERABLE_SUFFIXES) and not is_submit_command(path):
                 found.append(path)
         for match in re.finditer(
             r"(?<![A-Za-z0-9_.-])([\w./-]+\.(?:jsonl?|csv|txt|md|out|comp))\b",
@@ -277,10 +347,10 @@ CENTRAL_CAP_OWNERS = {
     item["id"]: item["owner"] for item in CENTRAL_FEATURES if item["kind"] == "CAP"
 }
 CENTRAL_FEATURE_BOUNDARIES = {
-    "caller_contract": ("file_view", "search_result", "edit_result"),
+    "caller_contract": ("task_start", "file_view", "search_result", "edit_result"),
     "covering_red": "test_result",
-    "def_partition": "search_result",
-    "localization": "search_result",
+    "def_partition": ("task_start", "search_result"),
+    "localization": ("task_start", "search_result"),
     "newfile_precedent": ("search_result", "edit_result"),
     "obligations": "task_start",
     "recovery": "test_result",
@@ -291,7 +361,7 @@ CENTRAL_FEATURE_BOUNDARIES = {
     "GT_CHANGE_SURFACE": "edit_result",
     "GT_EDIT_CHECK": "edit_result",
     "GT_HYPOTHESIS": "test_result",
-    "GT_LOC_RESLOT": "search_result",
+    "GT_LOC_RESLOT": ("task_start", "search_result"),
     "GT_PATCH_DELTA": "edit_result",
     "GT_SS_SUBMIT_RED": ("test_result", "submit"),
 }
@@ -455,9 +525,11 @@ def diff_snapshots(
     before_paths = set(before.entries)
     after_paths = set(after.entries)
     shared = before_paths & after_paths
-    changed_paths = (after_paths - before_paths) | (before_paths - after_paths) | {
-        path for path in shared if before.entries[path] != after.entries[path]
-    }
+    changed_paths = (
+        (after_paths - before_paths)
+        | (before_paths - after_paths)
+        | {path for path in shared if before.entries[path] != after.entries[path]}
+    )
     return WorkspaceTransition(
         action_id=action_id,
         command=command,
@@ -523,9 +595,7 @@ class ValidationClassification:
         """Return a copy carrying execution outcome and revision bindings."""
         failure_kind = classify_failure_kind(result_code, output)
         failure_signature = " ".join(
-            line.strip()
-            for line in (output or "").splitlines()
-            if _FAILURE_LINE.search(line)
+            line.strip() for line in (output or "").splitlines() if _FAILURE_LINE.search(line)
         )[:240]
         fingerprint = hashlib.sha256(
             f"{result_code}\0{failure_signature.lower()}".encode("utf-8", "replace")
@@ -540,39 +610,9 @@ class ValidationClassification:
         )
 
 
-def _without_heredoc_bodies(command: str) -> str:
-    """Keep shell structure while removing arbitrary program/data bodies."""
-    kept: list[str] = []
-    terminator = ""
-    for line in command.splitlines():
-        if terminator:
-            if line.strip() == terminator:
-                terminator = ""
-            continue
-        kept.append(line)
-        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
-        if match:
-            terminator = match.group(1)
-    return "\n".join(kept)
-
-
 def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
-    """Return top-level shell command words, excluding comments and heredocs."""
-    try:
-        lexer = shlex.shlex(_without_heredoc_bodies(command), posix=True, punctuation_chars=";|&")
-        lexer.whitespace_split = True
-        lexer.commenters = "#"
-        tokens = list(lexer)
-    except ValueError:
-        return ()
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token and set(token) <= {";", "|", "&"}:
-            if segments[-1]:
-                segments.append([])
-            continue
-        segments[-1].append(token)
-    return tuple(tuple(segment) for segment in segments if segment)
+    """Compatibility wrapper around the proposal adapter's single parser."""
+    return shell_segments(command)
 
 
 def _recognized_validation(words: tuple[str, ...]) -> bool:
@@ -594,8 +634,7 @@ def _recognized_validation(words: tuple[str, ...]) -> bool:
                 (wrapper == "timeout" and option in {"-k", "-s"})
                 or (wrapper == "env" and option in {"-u", "--unset"})
                 or (
-                    wrapper == "sudo"
-                    and option in {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u"}
+                    wrapper == "sudo" and option in {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u"}
                 )
             ) and index < len(words):
                 index += 1
@@ -708,9 +747,8 @@ def explicit_check_commands(instruction: str) -> tuple[str, ...]:
         )
         for candidate in re.findall(r"`([^`\r\n]+)`", line):
             if (
-                (is_check_command(candidate) or context_declares_validation)
-                and not is_submit_command(candidate)
-            ):
+                is_check_command(candidate) or context_declares_validation
+            ) and not is_submit_command(candidate):
                 checks.append(normalize_command(candidate))
         stripped = line.strip()
         if (
@@ -758,17 +796,13 @@ class EvidenceLedger:
             returncode=returncode,
             revision=revision,
             grounded=grounded,
-            command_class=(
-                classification.command_class if classification else "unknown"
-            ),
+            command_class=(classification.command_class if classification else "unknown"),
             failure_kind=(
                 classification.failure_kind
                 if classification and classification.is_validation
                 else ""
             ),
-            source_revision=(
-                classification.source_revision if classification else revision
-            ),
+            source_revision=(classification.source_revision if classification else revision),
         )
         self.outcomes[key] = evidence
         if returncode == 0:
@@ -973,8 +1007,11 @@ class WorkspaceSensor:
                 "print(json.dumps({p:base64.b64encode(pathlib.Path(p).read_bytes()).decode()"
                 " for p in sys.argv[1:]}))"
             )
-            command = "python3 -c " + shlex.quote(script) + " " + " ".join(
-                shlex.quote(path) for path in capture_paths
+            command = (
+                "python3 -c "
+                + shlex.quote(script)
+                + " "
+                + " ".join(shlex.quote(path) for path in capture_paths)
             )
             try:
                 captured = await environment.exec(command, cwd=cwd, env={}, timeout_sec=10)
@@ -1112,6 +1149,7 @@ class CentralFeatureRuntime:
         self._precedent_verified = False
         self._post_edit_checks = 0
         self._feedback_cursor = 0
+        self._feedback_calls = 0
         self._guidance_events = 0
         self._guidance_chars = 0
         self._guidance_features: list[str] = []
@@ -1170,6 +1208,13 @@ class CentralFeatureRuntime:
         self._recent_source_paths: tuple[str, ...] = ()
         self._precedent_path = ""
         self._submit_risk_revisions: set[str] = set()
+        self._current_source_revision = ""
+        self._decisions = SemanticDecisionEngine(max_frame_chars=320)
+        self._claim_receipts: dict[str, tuple[str, int]] = {}
+        self._preflight_receipts: list[dict[str, Any]] = []
+        self._action_cycles: dict[str, ActionCycleReceipt] = {}
+        self._structural_evidence: dict[str, Any] = {}
+        self._preflight_intervention_keys: set[str] = set()
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -1250,12 +1295,11 @@ class CentralFeatureRuntime:
                 fresh=True,
                 model_visible=self._is_model_actionable(feature_id, decision, candidate_payload),
                 source_revision=source_revision if source_revision is not None else revision,
-                source_epoch=(
-                    source_epoch if source_epoch is not None else self._source_epoch
-                ),
+                source_epoch=(source_epoch if source_epoch is not None else self._source_epoch),
             )
         )
         self._route_effect(self.receipts[-1])
+        self._register_decision_claim(self.receipts[-1])
 
     @staticmethod
     def _payload(feature_id: str, boundary: str, reason: str) -> dict[str, Any]:
@@ -1322,9 +1366,7 @@ class CentralFeatureRuntime:
         return signatures
 
     @classmethod
-    def _semantic_signature_deltas(
-        cls, transition: WorkspaceTransition
-    ) -> list[dict[str, str]]:
+    def _semantic_signature_deltas(cls, transition: WorkspaceTransition) -> list[dict[str, str]]:
         deltas: list[dict[str, str]] = []
         for path in sorted(set(transition.before_contents) & set(transition.after_contents)):
             before = cls._source_signatures(path, transition.before_contents[path])
@@ -1342,6 +1384,506 @@ class CentralFeatureRuntime:
                 )
         return deltas
 
+    @staticmethod
+    def _decision_mapping(
+        feature_id: str,
+    ) -> tuple[SemanticClaimKind, DecisionNeedKind] | None:
+        return {
+            "syntax_result": (
+                SemanticClaimKind.FAILURE,
+                DecisionNeedKind.REPAIR_FAILURE,
+            ),
+            "covering_red": (
+                SemanticClaimKind.FAILURE,
+                DecisionNeedKind.REPAIR_FAILURE,
+            ),
+            "recovery": (
+                SemanticClaimKind.RECOVERY,
+                DecisionNeedKind.RECOVER_FAILURE,
+            ),
+            "signature_delta": (
+                SemanticClaimKind.IMPACT,
+                DecisionNeedKind.REPAIR_IMPACT,
+            ),
+            "newfile_precedent": (
+                SemanticClaimKind.IMPACT,
+                DecisionNeedKind.REPAIR_IMPACT,
+            ),
+            "GT_EDIT_CHECK": (
+                SemanticClaimKind.VALIDATION,
+                DecisionNeedKind.VALIDATE_CHANGE,
+            ),
+            "GT_LOC_RESLOT": (
+                SemanticClaimKind.LOCALIZATION,
+                DecisionNeedKind.LOCALIZE_TASK,
+            ),
+            "submit_refusal": (
+                SemanticClaimKind.SUBMISSION,
+                DecisionNeedKind.SUBMIT_SAFELY,
+            ),
+        }.get(feature_id)
+
+    @staticmethod
+    def _claim_anchors(receipt: FeatureReceipt) -> tuple[str, ...]:
+        payload = receipt.payload
+        feature_id = receipt.feature_id
+        anchors: list[str] = []
+        if feature_id == "syntax_result":
+            path = str(payload.get("path") or "")
+            if path:
+                anchors.append(path)
+        elif feature_id == "covering_red":
+            anchors.extend(
+                str(payload.get(key) or "") for key in ("command", "attribution", "diagnostic")
+            )
+        elif feature_id == "recovery":
+            alternate = payload.get("alternate_action") or {}
+            anchors.extend(str(path) for path in alternate.get("paths") or ())
+            anchors.append(str(alternate.get("discriminator") or ""))
+        elif feature_id == "signature_delta":
+            anchors.extend(str(path) for path in payload.get("changed_paths") or ())
+            symbol = str(payload.get("symbol") or "")
+            if symbol:
+                anchors.append(symbol)
+            anchors.extend(str(item.get("path") or "") for item in payload.get("callers") or ())
+        elif feature_id == "newfile_precedent":
+            anchors.extend(str(path) for path in payload.get("created_files") or ())
+            anchors.append(str(payload.get("precedent_path") or ""))
+        elif feature_id == "GT_EDIT_CHECK":
+            anchors.extend(str(path) for path in payload.get("changed_paths") or ())
+            anchors.append(str(payload.get("declared_check") or ""))
+        elif feature_id == "GT_LOC_RESLOT":
+            for item in payload.get("selected_anchors") or ():
+                path = str(item.get("path") or "")
+                line = int(item.get("line") or 0)
+                anchors.append(f"{path}:{line}" if line else path)
+        elif feature_id == "submit_refusal":
+            anchors.extend(str(item) for item in payload.get("blockers") or ())
+        return tuple(dict.fromkeys(item for item in anchors if item))
+
+    def _register_decision_claim(self, receipt: FeatureReceipt) -> None:
+        mapping = self._decision_mapping(receipt.feature_id)
+        if (
+            mapping is None
+            or not receipt.model_visible
+            or not feature_payload_grounded(receipt.feature_id, receipt.payload)
+        ):
+            return
+        if receipt.feature_id == "submit_refusal" and any(
+            item.feature_id == "covering_red"
+            and item.action_id == receipt.action_id
+            and item.source_revision == receipt.source_revision
+            for item in self.receipts
+        ):
+            # The failure sentence already carries the actionable information.
+            # Submission state remains an effect contributor, not duplicate
+            # provider context.
+            return
+        fact = self._render_feature_fact(receipt)
+        anchors = self._claim_anchors(receipt)
+        if not fact or not anchors:
+            return
+        claim_kind, need_kind = mapping
+        claim = self._decisions.upsert_claim(
+            feature_id=receipt.feature_id,
+            kind=claim_kind,
+            fact=fact,
+            anchors=anchors,
+            source_revision=receipt.source_revision,
+            evidence_action=receipt.action_id,
+            workspace_revision=receipt.revision,
+        )
+        if claim is None:
+            return
+        self._claim_receipts[claim.claim_id] = (
+            receipt.feature_id,
+            receipt.action_id,
+        )
+        self._decisions.open_need(
+            kind=need_kind,
+            source_revision=receipt.source_revision,
+            created_after_action=receipt.action_id,
+            required_claim_kinds=(claim_kind,),
+            anchors=anchors,
+        )
+
+    def register_structural_evidence(
+        self,
+        *,
+        source_revision: str,
+        anchors: Iterable[dict[str, Any]],
+        callers: Iterable[dict[str, Any]] = (),
+        graph_revision: str,
+    ) -> None:
+        """Register source-backed task-start localization and impact evidence."""
+        if not self.enabled or not source_revision or not graph_revision:
+            return
+        selected: list[dict[str, Any]] = []
+        for item in anchors:
+            path = str(item.get("path") or "").replace("\\", "/")
+            line = int(item.get("line") or 0)
+            symbol = str(item.get("symbol") or "")
+            if not path or line < 0:
+                continue
+            selected.append({"path": path, "line": line, "symbol": symbol})
+            if len(selected) >= 4:
+                break
+        references: list[dict[str, Any]] = []
+        for item in callers:
+            path = str(item.get("path") or "").replace("\\", "/")
+            line = int(item.get("line") or 0)
+            symbol = str(item.get("symbol") or "")
+            if not path:
+                continue
+            references.append({"path": path, "line": line, "symbol": symbol})
+            if len(references) >= 8:
+                break
+        if not selected:
+            return
+        self._structural_evidence = {
+            "source_revision": source_revision,
+            "graph_revision": graph_revision,
+            "anchors": selected,
+            "callers": references,
+            "fresh": True,
+        }
+        self._current_source_revision = source_revision
+        workspace_revision = self._controller_state.workspace_revision or source_revision
+        self._emit(
+            "localization",
+            boundary="task_start",
+            action_id=0,
+            revision=workspace_revision,
+            source_revision=source_revision,
+            reason="source_backed_task_localization",
+            payload={
+                "candidate_locations": len(selected),
+                "anchors": selected,
+                "graph_revision": graph_revision,
+                "message": self._payload(
+                    "localization", "task_start", "source_backed_task_localization"
+                )["message"],
+            },
+        )
+        self._emit(
+            "GT_LOC_RESLOT",
+            boundary="task_start",
+            action_id=0,
+            revision=workspace_revision,
+            source_revision=source_revision,
+            reason="source_backed_ranked_anchors",
+            payload={
+                "owner_feature": "localization",
+                "selected_anchors": selected,
+                "discarded_anchor_count": 0,
+                "graph_revision": graph_revision,
+                "message": self._payload(
+                    "localization", "task_start", "source_backed_ranked_anchors"
+                )["message"],
+            },
+        )
+        if references:
+            self._emit(
+                "def_partition",
+                boundary="task_start",
+                action_id=0,
+                revision=workspace_revision,
+                source_revision=source_revision,
+                reason="graph_definition_reference_partition",
+                payload={
+                    "definitions": True,
+                    "references": True,
+                    "definition_anchors": selected,
+                    "reference_anchors": references,
+                    "graph_revision": graph_revision,
+                    "message": self._payload(
+                        "def_partition", "task_start", "graph_definition_reference_partition"
+                    )["message"],
+                },
+            )
+            self._emit(
+                "caller_contract",
+                boundary="task_start",
+                action_id=0,
+                revision=workspace_revision,
+                source_revision=source_revision,
+                reason="graph_verified_callers",
+                payload={
+                    "callers_verified": True,
+                    "callers": references,
+                    "graph_revision": graph_revision,
+                    "message": self._payload(
+                        "caller_contract", "task_start", "graph_verified_callers"
+                    )["message"],
+                },
+            )
+
+    def refresh_structural_evidence(
+        self,
+        *,
+        source_revision: str,
+        anchors: Iterable[dict[str, Any]],
+        callers: Iterable[dict[str, Any]] = (),
+        graph_revision: str,
+    ) -> None:
+        """Replace the preflight graph view without replaying task-start effects."""
+        selected = tuple(dict(item) for item in anchors if item.get("path"))[:4]
+        references = tuple(dict(item) for item in callers if item.get("path"))[:8]
+        if not source_revision or not graph_revision or not selected:
+            self._structural_evidence = {
+                "source_revision": source_revision,
+                "graph_revision": graph_revision,
+                "anchors": [],
+                "callers": [],
+                "fresh": False,
+            }
+            return
+        self._structural_evidence = {
+            "source_revision": source_revision,
+            "graph_revision": graph_revision,
+            "anchors": [dict(item) for item in selected],
+            "callers": [dict(item) for item in references],
+            "fresh": True,
+        }
+
+    def preflight_action(
+        self,
+        proposed: ProposedAction,
+        snapshot: WorkspaceSnapshot,
+        *,
+        revision: str,
+        source_revision: str,
+        ledger: EvidenceLedger | None = None,
+    ) -> PreflightDecision:
+        """Inspect one model-selected action before host execution.
+
+        This function is intentionally state-only and correct-or-quiet.  It
+        never calls a model or indexer and defaults to literal PASS.
+        """
+        started = time.perf_counter()
+        decision = pass_decision(proposed)
+        try:
+            if proposed.source_revision != source_revision:
+                decision = pass_decision(proposed, "source_revision_mismatch")
+            elif not snapshot.healthy:
+                decision = pass_decision(proposed, "workspace_sensor_degraded")
+            elif proposed.operation == ActionOperation.SUBMIT and ledger is not None:
+                blockers = tuple(
+                    item.command
+                    for item in ledger.readiness_evidence(source_revision)
+                    if item.returncode != 0
+                )
+                if blockers:
+                    for feature_id in (
+                        "obligations",
+                        "submit_refusal",
+                        "GT_SS_SUBMIT_RED",
+                        "GT_CERT_DELIVERY",
+                    ):
+                        if self._trace_for_effect(feature_id) is not None:
+                            self.record_existing_consumer_read(
+                                feature_id=feature_id,
+                                action_id=proposed.model_call,
+                                purpose=f"preflight_submit:{proposed.cycle_id}",
+                            )
+                    decision = PreflightDecision(
+                        ActionDisposition.RETURN_TO_MODEL,
+                        proposed.raw_command,
+                        evidence=(
+                            "Current source revision has failing required checks: "
+                            + ", ".join(blockers),
+                        ),
+                        reason_codes=("proven_submit_blocker",),
+                        confidence=1.0,
+                        source_revision=source_revision,
+                    )
+            elif proposed.operation == ActionOperation.EDIT and proposed.targets:
+                missing = tuple(
+                    target.path
+                    for target in proposed.targets
+                    if target.path not in snapshot.entries
+                )
+                if missing and proposed.parser_confidence >= 0.9:
+                    decision = PreflightDecision(
+                        ActionDisposition.RETURN_TO_MODEL,
+                        proposed.raw_command,
+                        evidence=(
+                            "Proposed edit targets are absent from the current workspace: "
+                            + ", ".join(missing),
+                        ),
+                        reason_codes=("edit_target_absent",),
+                        confidence=1.0,
+                        source_revision=source_revision,
+                    )
+            elif (
+                proposed.operation == ActionOperation.CREATE
+                and proposed.target_must_be_absent
+                and proposed.targets
+            ):
+                existing = tuple(
+                    target.path for target in proposed.targets if target.path in snapshot.entries
+                )
+                if existing:
+                    decision = PreflightDecision(
+                        ActionDisposition.RETURN_TO_MODEL,
+                        proposed.raw_command,
+                        evidence=("Proposed new path already exists: " + ", ".join(existing),),
+                        reason_codes=("create_target_exists",),
+                        confidence=1.0,
+                        source_revision=source_revision,
+                    )
+        except Exception:
+            decision = pass_decision(proposed, "preflight_exception")
+        decision = replace(
+            decision,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        return decision
+
+    def admit_preflight_intervention(
+        self,
+        proposed: ProposedAction,
+        decision: PreflightDecision,
+    ) -> tuple[bool, str]:
+        """Enforce the material-evidence gate and adjacent-call deduplication."""
+        if decision.disposition not in {
+            ActionDisposition.AUGMENT,
+            ActionDisposition.RETURN_TO_MODEL,
+        }:
+            return False, "disposition_not_assistive"
+        evidence = tuple(" ".join(item.split()) for item in decision.evidence if item.strip())
+        if not evidence:
+            return False, "missing_evidence"
+        if sum(len(item) for item in evidence) > 640:
+            return False, "evidence_budget_exceeded"
+        if decision.evidence_grade == EvidenceGrade.HEURISTIC:
+            return False, "heuristic_evidence"
+        required_confidence = (
+            1.0 if decision.disposition == ActionDisposition.RETURN_TO_MODEL else 0.9
+        )
+        if decision.confidence < required_confidence:
+            return False, "confidence_below_threshold"
+        if decision.source_revision not in {"", proposed.source_revision}:
+            return False, "source_revision_mismatch"
+        evidence_identity = decision.evidence_ids or (
+            hashlib.sha256(
+                "\0".join(
+                    (
+                        proposed.source_revision,
+                        proposed.operation.value,
+                        *decision.reason_codes,
+                        *evidence,
+                    )
+                ).encode("utf-8", "replace")
+            ).hexdigest()[:20],
+        )
+        key = "\0".join(evidence_identity)
+        if key in self._preflight_intervention_keys:
+            return False, "duplicate_evidence"
+        self._preflight_intervention_keys.add(key)
+        return True, "admitted"
+
+    def record_preflight_cycle(
+        self,
+        proposed: ProposedAction,
+        candidate: PreflightDecision,
+        *,
+        mode: PreflightMode,
+        applied_disposition: ActionDisposition,
+        applied_reason_codes: Iterable[str],
+        dispatch_command: str,
+        revision: str,
+        source_revision: str,
+    ) -> None:
+        """Record the host policy decision, including degraded PASS results."""
+        reasons = tuple(dict.fromkeys(str(item) for item in applied_reason_codes if item))
+        cycle = ActionCycleReceipt(
+            proposed=proposed,
+            mode=mode,
+            candidate_decision=candidate,
+            applied_disposition=applied_disposition,
+            applied_reason_codes=reasons,
+            dispatch_command=dispatch_command,
+        )
+        self._action_cycles[proposed.cycle_id] = cycle
+        self._preflight_receipts.append(
+            {
+                "cycle_id": proposed.cycle_id,
+                "proposed": proposed.as_dict(),
+                "decision": candidate.as_dict(),
+                "mode": mode.value,
+                "applied_disposition": applied_disposition.value,
+                "applied_reason_codes": list(reasons),
+                "revision": revision,
+                "source_revision": source_revision,
+            }
+        )
+
+    def record_action_postflight(
+        self,
+        proposed: ProposedAction,
+        *,
+        action_ordinal: int,
+        command: str,
+        returncode: int,
+        workspace_revision: str,
+        source_revision: str,
+    ) -> None:
+        """Join actual execution and postflight revision to its proposal."""
+        cycle = self._action_cycles.get(proposed.cycle_id)
+        if cycle is None:
+            return
+        cycle.executed = True
+        cycle.postflight = {
+            "action_ordinal": max(0, int(action_ordinal)),
+            "command": command,
+            "returncode": int(returncode),
+            "workspace_revision": workspace_revision,
+            "source_revision": source_revision,
+        }
+
+    def record_cancelled_proposal(
+        self,
+        proposed: ProposedAction,
+        *,
+        mode: PreflightMode,
+        reason: str,
+    ) -> None:
+        """Receipt a model-selected batch suffix that never reached preflight."""
+        decision = pass_decision(proposed, "cancelled_before_preflight")
+        cycle = ActionCycleReceipt(
+            proposed=proposed,
+            mode=mode,
+            candidate_decision=decision,
+            applied_disposition=ActionDisposition.PASS,
+            applied_reason_codes=(reason,),
+            dispatch_command=proposed.raw_command,
+            executed=False,
+            postflight={
+                "status": "cancelled_before_dispatch",
+                "reason": reason,
+            },
+        )
+        self._action_cycles[proposed.cycle_id] = cycle
+
+    def record_reconsideration(
+        self,
+        *,
+        cycle_id: str,
+        next_command: str,
+        next_model_call: int,
+    ) -> None:
+        cycle = self._action_cycles.get(cycle_id)
+        if cycle is None:
+            return
+        normalized_next = normalize_command(next_command)
+        normalized_original = normalize_command(cycle.proposed.raw_command)
+        cycle.reconsideration = {
+            "next_model_call": max(1, int(next_model_call)),
+            "next_command": next_command,
+            "command_changed": normalized_next != normalized_original,
+        }
+
     def begin_task(
         self,
         instruction: str,
@@ -1353,6 +1895,7 @@ class CentralFeatureRuntime:
     ) -> None:
         if not self.enabled:
             return
+        self._current_source_revision = source_revision if source_revision is not None else revision
         self._explicit_checks = tuple(explicit_checks)
         self._task_deliverables = set(task_deliverables)
         self._mark_lifecycle("task_started", action_id=0)
@@ -1383,17 +1926,16 @@ class CentralFeatureRuntime:
                 },
             )
 
-    def _is_model_actionable(
-        self, feature_id: str, decision: str, payload: dict[str, Any]
-    ) -> bool:
+    def _is_model_actionable(self, feature_id: str, decision: str, payload: dict[str, Any]) -> bool:
         """Expose only novel engine control evidence, never passive receipts."""
         if not self.model_visible or decision != "DELIVERED":
             return False
-        actionable = feature_id in _MODEL_ACTIONABLE_FEATURES or (
-            feature_id == "GT_EDIT_CHECK" and payload.get("intervention") == "validation_debt"
-        ) or (
-            feature_id == "GT_LOC_RESLOT"
-            and int(payload.get("discarded_anchor_count") or 0) > 0
+        actionable = (
+            feature_id in _MODEL_ACTIONABLE_FEATURES
+            or (feature_id == "GT_EDIT_CHECK" and payload.get("intervention") == "validation_debt")
+            # Ordinary search/localization receipts are engine-private.  Only
+            # source-backed task-start graph evidence belongs in call one.
+            or (feature_id == "GT_LOC_RESLOT" and bool(payload.get("graph_revision")))
         )
         return actionable and feature_payload_grounded(feature_id, payload)
 
@@ -1414,9 +1956,10 @@ class CentralFeatureRuntime:
             return
         normalized = normalize_command(command)
         source_rev = source_revision if source_revision is not None else revision
-        classification = validation or classify_validation_command(
-            command, self._explicit_checks
-        )
+        if self._current_source_revision and source_rev != self._current_source_revision:
+            self._decisions.invalidate_other_revisions(source_rev)
+        self._current_source_revision = source_rev
+        classification = validation or classify_validation_command(command, self._explicit_checks)
         is_search = bool(self._SEARCH.search(normalized))
         self._action_metrics["observed_actions"] += 1
         self._action_metrics["successful_actions" if returncode == 0 else "failed_actions"] += 1
@@ -1499,9 +2042,7 @@ class CentralFeatureRuntime:
             item.path for item in classified.values() if item.validation_relevant
         )
         model_authored = tuple(
-            item.path
-            for item in classified.values()
-            if item.origin == ChangeOrigin.MODEL_AUTHORED
+            item.path for item in classified.values() if item.origin == ChangeOrigin.MODEL_AUTHORED
         )
         if transition.changed_paths:
             if model_authored:
@@ -1528,9 +2069,7 @@ class CentralFeatureRuntime:
                     "deleted": list(transition.deleted),
                     "source_relevant": list(source_relevant),
                     "origins": {
-                        origin.value: sum(
-                            item.origin == origin for item in classified.values()
-                        )
+                        origin.value: sum(item.origin == origin for item in classified.values())
                         for origin in ChangeOrigin
                     },
                     "message": "Workspace change observed: "
@@ -1542,15 +2081,18 @@ class CentralFeatureRuntime:
                 self._unvalidated_material_edits += 1
                 self._action_metrics["workspace_change_actions"] += 1
                 self._action_metrics["created_paths"] += sum(
-                    item.path in transition.created for item in classified.values()
+                    item.path in transition.created
+                    for item in classified.values()
                     if item.validation_relevant
                 )
                 self._action_metrics["modified_paths"] += sum(
-                    item.path in transition.modified for item in classified.values()
+                    item.path in transition.modified
+                    for item in classified.values()
                     if item.validation_relevant
                 )
                 self._action_metrics["deleted_paths"] += sum(
-                    item.path in transition.deleted for item in classified.values()
+                    item.path in transition.deleted
+                    for item in classified.values()
                     if item.validation_relevant
                 )
                 self._mark_lifecycle("workspace_edited", action_id=action_id)
@@ -1694,7 +2236,10 @@ class CentralFeatureRuntime:
                     feature_id="def_partition",
                     action_id=action_id,
                     kind="definition_reference_partitioned",
-                    detail=f"definitions={len(definition_anchors)}; references={len(reference_anchors)}",
+                    detail=(
+                        f"definitions={len(definition_anchors)}; "
+                        f"references={len(reference_anchors)}"
+                    ),
                 )
                 self._emit(
                     "def_partition",
@@ -1753,9 +2298,7 @@ class CentralFeatureRuntime:
                 purpose="failure_phase_selection",
             )
             bounded_diagnostic = " ".join(
-                line.strip()
-                for line in (output or "").splitlines()
-                if self._FAILURE.search(line)
+                line.strip() for line in (output or "").splitlines() if self._FAILURE.search(line)
             )[:240]
             self.record_producer_event(
                 feature_id="covering_red",
@@ -1818,11 +2361,7 @@ class CentralFeatureRuntime:
                 )
             blocker = classification.declared_check_id or classification.normalized_command[:200]
             blockers = [blocker] if blocker else []
-            if (
-                blockers
-                and bounded_diagnostic
-                and source_rev not in self._submit_risk_revisions
-            ):
+            if blockers and bounded_diagnostic and source_rev not in self._submit_risk_revisions:
                 self._submit_risk_revisions.add(source_rev)
                 self.record_producer_event(
                     feature_id="GT_SS_SUBMIT_RED",
@@ -1900,15 +2439,17 @@ class CentralFeatureRuntime:
                 path
                 for path in available_paths
                 if (
-                    (candidate := classify_change(
-                        path,
-                        kind=(
-                            snapshot.entries[path].kind
-                            if snapshot is not None and path in snapshot.entries
-                            else "f"
-                        ),
-                        task_deliverables=self._task_deliverables,
-                    )).origin
+                    (
+                        candidate := classify_change(
+                            path,
+                            kind=(
+                                snapshot.entries[path].kind
+                                if snapshot is not None and path in snapshot.entries
+                                else "f"
+                            ),
+                            task_deliverables=self._task_deliverables,
+                        )
+                    ).origin
                     == ChangeOrigin.MODEL_AUTHORED
                     and candidate.validation_relevant
                     and path.lower().endswith(tuple(_SOURCE_CAPTURE_SUFFIXES))
@@ -2040,6 +2581,10 @@ class CentralFeatureRuntime:
         diagnostic: str = "",
         source_revision: str | None = None,
     ) -> None:
+        source_rev = source_revision if source_revision is not None else revision
+        if self._current_source_revision and source_rev != self._current_source_revision:
+            self._decisions.invalidate_other_revisions(source_rev)
+        self._current_source_revision = source_rev
         self._action_metrics["lint_checks"] += 1
         self._action_metrics["lint_failures" if failed else "lint_passes"] += 1
         self._action_metrics["engine_actions"] += 1
@@ -2065,7 +2610,7 @@ class CentralFeatureRuntime:
             boundary="edit_result",
             action_id=action_id,
             revision=revision,
-            source_revision=source_revision,
+            source_revision=source_rev,
             decision="DELIVERED" if failed else "PASS",
             reason=reason,
             payload={
@@ -2091,6 +2636,10 @@ class CentralFeatureRuntime:
         blockers: tuple[str, ...] = (),
         source_revision: str | None = None,
     ) -> None:
+        source_rev = source_revision if source_revision is not None else revision
+        if self._current_source_revision and source_rev != self._current_source_revision:
+            self._decisions.invalidate_other_revisions(source_rev)
+        self._current_source_revision = source_rev
         self._action_metrics["submit_attempts"] += 1
         self.record_producer_event(
             feature_id="GT_CERT_DELIVERY",
@@ -2114,7 +2663,7 @@ class CentralFeatureRuntime:
                 boundary="submit",
                 action_id=action_id,
                 revision=revision,
-                source_revision=source_revision,
+                source_revision=source_rev,
                 reason="fresh_grounded_failure",
                 payload={
                     "submission_risk": True,
@@ -2131,7 +2680,7 @@ class CentralFeatureRuntime:
                 boundary="submit",
                 action_id=action_id,
                 revision=revision,
-                source_revision=source_revision,
+                source_revision=source_rev,
                 reason="fresh_grounded_failure",
                 payload={
                     "owner_feature": "submit_refusal",
@@ -2145,7 +2694,7 @@ class CentralFeatureRuntime:
             boundary="submit",
             action_id=action_id,
             revision=revision,
-            source_revision=source_revision,
+            source_revision=source_rev,
             decision="DELIVERED" if sensor_healthy else "PASS",
             reason="submission_readiness_receipt",
             payload={
@@ -2186,9 +2735,7 @@ class CentralFeatureRuntime:
             evidence_action=receipt.action_id,
         )
         self._effects.append(effect)
-        self._consumer_paths.setdefault(receipt.feature_id, []).append(
-            spec.effect_kind.value
-        )
+        self._consumer_paths.setdefault(receipt.feature_id, []).append(spec.effect_kind.value)
 
     def record_producer_event(
         self,
@@ -2210,9 +2757,7 @@ class CentralFeatureRuntime:
 
     @staticmethod
     def _controller_state_hash(state: CentralControllerState) -> str:
-        return hashlib.sha256(
-            repr(state.as_dict()).encode("utf-8", "replace")
-        ).hexdigest()
+        return hashlib.sha256(repr(state.as_dict()).encode("utf-8", "replace")).hexdigest()
 
     def _apply_effect(self, effect: FeatureEffect, *, call: int) -> None:
         """Reduce one consumed feature payload into authoritative controller state."""
@@ -2246,8 +2791,11 @@ class CentralFeatureRuntime:
             "applied_before_call": call + 1,
         }
         receipt = next(
-            (item for item in reversed(self.receipts) if item.feature_id == effect.feature_id
-             and item.action_id == effect.evidence_action),
+            (
+                item
+                for item in reversed(self.receipts)
+                if item.feature_id == effect.feature_id and item.action_id == effect.evidence_action
+            ),
             None,
         )
         if receipt is not None:
@@ -2300,8 +2848,7 @@ class CentralFeatureRuntime:
                 "applied_call": call,
                 "state_fields_changed": [section_name] if before != after else [],
                 "state_reads": [
-                    {"action": read["action"], "purpose": read["purpose"]}
-                    for read in pending_reads
+                    {"action": read["action"], "purpose": read["purpose"]} for read in pending_reads
                 ],
                 "actuator_events": [
                     {
@@ -2357,27 +2904,21 @@ class CentralFeatureRuntime:
                 }
             )
             return
-        row["state_reads"].append(
-            {"action": action_id, "purpose": purpose}
-        )
+        row["state_reads"].append({"action": action_id, "purpose": purpose})
         if row["disposition"] == "audit_only":
             row["disposition"] = "existing_engine_actuation"
         row["actuator_events"].append(
             {"kind": "existing_consumer_read", "action": action_id, "purpose": purpose}
         )
 
-    def record_provider_delivery(
-        self, *, effect_ids: Iterable[str], delivery_id: str
-    ) -> None:
+    def record_provider_delivery(self, *, effect_ids: Iterable[str], delivery_id: str) -> None:
         """Link a confirmed provider delivery to its contributing effects."""
         ids = set(effect_ids)
         for row in self._effect_trace:
             if row["effect_id"] not in ids:
                 continue
             row["provider_delivery_ids"].append(delivery_id)
-            row["actuator_events"].append(
-                {"kind": "provider_payload", "delivery_id": delivery_id}
-            )
+            row["actuator_events"].append({"kind": "provider_payload", "delivery_id": delivery_id})
             row["disposition"] = "provider_payload"
 
     def consume_effects(self, *, action_id: int, call: int) -> list[FeatureEffect]:
@@ -2406,6 +2947,52 @@ class CentralFeatureRuntime:
             consumed.append(updated)
         return consumed
 
+    def _effect_accountability(self) -> list[dict[str, Any]]:
+        """Classify effects by an observed downstream consumer.
+
+        Mutating private state is not evidence of usefulness.  The categories
+        deliberately separate confirmed provider delivery, an existing engine
+        read, a prepared decision frame, a still-pending claim, and inert state.
+        """
+        decision_summary = self._decisions.summary()
+        claims = {row["claim_id"]: row for row in decision_summary["claims"]}
+        framed_claims = {
+            claim_id for frame in decision_summary["frames"] for claim_id in frame["claim_ids"]
+        }
+        rows: list[dict[str, Any]] = []
+        for trace in self._effect_trace:
+            linked_claim_ids = [
+                claim_id
+                for claim_id, receipt_key in self._claim_receipts.items()
+                if receipt_key == (trace["feature_id"], trace["evidence_action"])
+            ]
+            if trace["provider_delivery_ids"]:
+                outcome = "provider_payload"
+            elif trace["state_reads"]:
+                outcome = "existing_engine_actuation"
+            elif any(claim_id in framed_claims for claim_id in linked_claim_ids):
+                outcome = "prepared_decision_frame"
+            elif any(claims[claim_id]["active"] for claim_id in linked_claim_ids):
+                outcome = "pending_decision_claim"
+            elif linked_claim_ids:
+                outcome = "expired_unconsumed_claim"
+            elif trace["state_fields_changed"]:
+                outcome = "inert_private_state"
+            else:
+                outcome = "audit_only"
+            rows.append(
+                {
+                    "effect_id": trace["effect_id"],
+                    "feature_id": trace["feature_id"],
+                    "evidence_action": trace["evidence_action"],
+                    "outcome": outcome,
+                    "claim_ids": linked_claim_ids,
+                    "provider_delivery_ids": list(trace["provider_delivery_ids"]),
+                    "state_read_count": len(trace["state_reads"]),
+                }
+            )
+        return rows
+
     def record_skipped_action(self, *, action_id: int) -> None:
         """Count one pre-decided action cancelled by an immediate control."""
         self._action_metrics["interrupted_actions"] += 1
@@ -2428,18 +3015,14 @@ class CentralFeatureRuntime:
             {"evidence_action": action_id, "cancelled": cancelled, "reason": reason}
         )
         for index, effect in enumerate(self._effects):
-            if (
-                effect.evidence_action == action_id
-                and effect.required_before_action is not None
-            ):
-                self._effects[index] = replace(
-                    effect, predecided_actions_cancelled=cancelled
-                )
+            if effect.evidence_action == action_id and effect.required_before_action is not None:
+                self._effects[index] = replace(effect, predecided_actions_cancelled=cancelled)
 
     def summary(self) -> dict[str, Any]:
         by_feature = {feature_id: 0 for feature_id in CENTRAL_FEATURE_IDS}
         for receipt in self.receipts:
             by_feature[receipt.feature_id] += 1
+        accountability = self._effect_accountability()
         return {
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
@@ -2460,12 +3043,21 @@ class CentralFeatureRuntime:
             "effects": [effect.as_dict() for effect in self._effects],
             "effect_applications": list(self._effect_applications),
             "effect_trace": [dict(row) for row in self._effect_trace],
+            "effect_accountability": accountability,
+            "effect_accountability_counts": {
+                outcome: sum(row["outcome"] == outcome for row in accountability)
+                for outcome in sorted({row["outcome"] for row in accountability})
+            },
             "producer_events": list(self._producer_events),
             "controller_state": self._controller_state.as_dict(),
             "batch_interrupts": list(self._batch_interrupts),
             "source_epoch": self._source_epoch,
             "validation_log": list(self._validation_log),
             "declared_check_states": dict(self._declared_check_states),
+            "semantic_decisions": self._decisions.summary(),
+            "structural_evidence": dict(self._structural_evidence),
+            "preflight_receipts": list(self._preflight_receipts),
+            "action_cycles": [cycle.as_dict() for cycle in self._action_cycles.values()],
             "receipts": [
                 {
                     "feature_id": item.feature_id,
@@ -2563,9 +3155,7 @@ class CentralFeatureRuntime:
             )
         if feature_id == "GT_LOC_RESLOT":
             anchors = payload.get("selected_anchors") or ()
-            rendered = ", ".join(
-                f"{item.get('path')}:{item.get('line')}" for item in anchors
-            )
+            rendered = ", ".join(f"{item.get('path')}:{item.get('line')}" for item in anchors)
             return f"Highest-ranked source anchors: {rendered}."
         if feature_id == "submit_refusal":
             return (
@@ -2581,87 +3171,91 @@ class CentralFeatureRuntime:
             )
         return ""
 
-    def model_feedback(self, *, limit: int = 320, deferred: bool = False) -> str:
-        """Return one bounded, highest-priority advisory for this action."""
+    def model_feedback(
+        self,
+        *,
+        limit: int = 320,
+        deferred: bool = False,
+        for_call: int | None = None,
+    ) -> str:
+        """Materialize one persistent claim for a current decision need.
+
+        Fresh receipts are counted for the audit funnel, but eligibility comes
+        from the persistent semantic store.  A valid lower-priority fact is no
+        longer destroyed merely because another feature won the previous
+        provider slot.
+        """
         fresh_receipts = self.receipts[self._feedback_cursor :]
         self._feedback_cursor = len(self.receipts)
-        visible: list[FeatureReceipt] = []
         for item in fresh_receipts:
             if (
-                not item.model_visible
-                or not item.payload.get("message")
-                or not feature_payload_grounded(item.feature_id, item.payload)
+                item.model_visible
+                and item.payload.get("message")
+                and feature_payload_grounded(item.feature_id, item.payload)
+                and self._render_feature_fact(item)
             ):
+                self._guidance_candidates += 1
+            else:
                 self._guidance_suppressed += 1
-                continue
-            self._guidance_candidates += 1
-            evidence_fingerprint = hashlib.sha256(
-                repr(sorted(item.payload.items())).encode("utf-8", "replace")
-            ).hexdigest()[:16]
-            key = (item.feature_id, item.revision, evidence_fingerprint)
-            # The feature and revision are the operative evidence boundary.
-            # Payload wording or action IDs must not re-inject the same fact.
-            revision_key = (item.feature_id, item.revision, "")
-            if key in self._guided_keys or revision_key in self._guided_keys:
-                self._guidance_suppressed += 1
-                continue
-            visible.append(item)
-        if not visible:
+
+        if for_call is None:
+            next_evidence_call = 1 + max(
+                (item.action_id for item in self.receipts),
+                default=0,
+            )
+            call = max(self._feedback_calls + 1, next_evidence_call)
+            self._feedback_calls = call
+        else:
+            call = max(1, int(for_call))
+            self._feedback_calls = max(self._feedback_calls, call)
+        source_revision = self._current_source_revision
+        if not source_revision:
             return ""
-        priority = {
-            "syntax_result": 0,
-            "covering_red": 0,
-            "recovery": 1,
-            "signature_delta": 2,
-            "newfile_precedent": 2,
-            "GT_EDIT_CHECK": 3,
-            "GT_LOC_RESLOT": 4,
-            "submit_refusal": 4,
-        }
-        ordered = sorted(
-            enumerate(visible),
-            key=lambda item: (priority.get(item[1].feature_id, 10), item[0]),
+        frame = self._decisions.materialize(
+            call=call,
+            source_revision=source_revision,
         )
+        if frame is None:
+            return ""
+
         selected_items: list[FeatureReceipt] = []
-        facts: list[str] = []
-        for _, item in ordered:
-            fact = self._render_feature_fact(item)
-            if not fact:
-                self._guidance_suppressed += 1
+        for claim_id in frame.claim_ids:
+            claim = self._decisions.claim(claim_id)
+            if claim is None:
                 continue
-            candidate = " ".join([*facts, fact])
-            if facts and len(render_runtime_advisory(candidate, limit=limit)) >= limit:
-                self._guidance_suppressed += 1
-                continue
-            selected_items.append(item)
-            facts.append(fact)
-            if len(facts) >= 3:
-                break
+            selected = next(
+                (
+                    item
+                    for item in reversed(self.receipts)
+                    if item.feature_id == claim.feature_id
+                    and item.source_revision == claim.source_revision
+                    and self._render_feature_fact(item) == claim.fact
+                ),
+                None,
+            )
+            if selected is not None:
+                selected_items.append(selected)
+        if not selected_items:
+            self._guidance_suppressed += 1
+            return ""
+
+        # A source-bound submit risk generated from the same failing check is
+        # a private contributor to the failure frame, not a duplicate sentence.
         covering_actions = {
             item.action_id for item in selected_items if item.feature_id == "covering_red"
         }
-        for item in visible:
+        for item in self.receipts:
             if (
                 item.feature_id == "submit_refusal"
                 and item.action_id in covering_actions
                 and item not in selected_items
             ):
-                # The failure fact already carries the source-bound submission
-                # risk.  Credit the actuator as a contributor without adding a
-                # second sentence to the model context.
                 selected_items.append(item)
-        if not selected_items:
-            return ""
-        feedback = render_runtime_advisory(
-            " ".join(facts), limit=limit
-        )
+
+        feedback = render_runtime_advisory(frame.text, limit=limit)
         if not feedback:
             self._guidance_suppressed += len(selected_items)
             return ""
-        selected_set = {id(item) for item in selected_items}
-        self._guidance_suppressed += sum(id(item) not in selected_set for item in visible)
-        for item in selected_items:
-            self._guided_keys.add((item.feature_id, item.revision, ""))
         selected = selected_items[0]
         contributing_features: list[str] = []
         for item in selected_items:
@@ -2671,21 +3265,38 @@ class CentralFeatureRuntime:
             ]:
                 if feature_id not in contributing_features:
                     contributing_features.append(feature_id)
+            self._guided_keys.add((item.feature_id, item.revision, ""))
+
+        effect_ids = [
+            row["effect_id"]
+            for row in self._effect_trace
+            if any(
+                row["feature_id"] == item.feature_id and row["evidence_action"] == item.action_id
+                for item in selected_items
+            )
+        ]
         metadata = {
             "feature_id": selected.feature_id,
             "contributing_features": contributing_features,
-            "effect_ids": [
-                row["effect_id"]
-                for row in self._effect_trace
-                if any(
-                    row["feature_id"] == item.feature_id
-                    and row["evidence_action"] == item.action_id
-                    for item in selected_items
+            "effect_ids": effect_ids,
+            "claim_ids": list(frame.claim_ids),
+            "claim_anchors": list(
+                dict.fromkeys(
+                    anchor
+                    for claim_id in frame.claim_ids
+                    for claim in [self._decisions.claim(claim_id)]
+                    if claim is not None
+                    for anchor in claim.anchors
                 )
-            ],
-            "evidence_action": selected.action_id,
-            "evidence_actions": [item.action_id for item in selected_items],
+            ),
+            "decision_need_id": frame.need_id,
+            "decision_need_kind": frame.need_kind.value,
+            "decision_frame_id": frame.frame_id,
+            "evidence_action": min(frame.evidence_actions),
+            "evidence_actions": list(frame.evidence_actions),
             "revision": selected.revision,
+            "source_revision": frame.source_revision,
+            "materialized_for_call": frame.materialized_for_call,
             "feedback": feedback,
         }
         if deferred:

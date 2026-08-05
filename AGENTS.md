@@ -16,8 +16,44 @@ Keep these states distinct in every audit:
    real decision but does not alter the model's next action.
 3. **Integrated consequence:** the engine updates operational controller state
    and, when the model needs the result, places one bounded grounded payload in
-   the first provider request after the evidence action. GT never blocks,
-   replaces, rejects, or cancels Mini-SWE actions.
+   the first provider request after the evidence action. Under the separately
+   gated `ASSISTIVE_SAFE` preflight mode, a mechanically proven contradiction
+   may return the selected action to the model before execution. GT never
+   rewrites a command or silently suppresses one.
+
+## Pre-action interface (2026-08-05)
+
+The central agent normalizes every Bash tool call into one typed
+`ProposedAction` after model selection and before `environment.exec`. The same
+shell segmentation and immutable validation classification are reused by
+preflight and postflight. The host applies exactly one mode:
+
+- `OFF`: the historical postflight loop; no preflight evaluation or receipts.
+- `SHADOW`: evaluate and receipt every proposal, but execute the original
+  command and preserve batch behavior.
+- `ASSISTIVE_SAFE`: allow only `PASS`, bounded `AUGMENT`, or grounded
+  `RETURN_TO_MODEL`. `REWRITE` and feature-driven `SUPPRESS` are rejected to
+  `PASS`. Timeout, exception, ambiguity, low confidence, heuristic evidence,
+  stale evidence, or duplicate evidence also degrade to recorded `PASS`.
+
+Read/search batches may continue. In assistive mode a known mutation,
+validation, submit, material workspace change, or source-revision
+change prevents a pre-decided suffix from executing on stale reasoning. An
+`OTHER` action does not split a batch merely because parsing abstained; it
+splits only when postflight proves a material change. A generic exploratory
+nonzero exit is recorded but is not by itself worth another model call. Each proposal receives
+an `ActionCycleReceipt` joining candidate decision, applied disposition,
+dispatch, postflight result/revisions, and the next command after a return.
+
+The five evidence-correct postflight-only features remain
+`GT_CHANGE_SURFACE`, `signature_delta`, `GT_PATCH_DELTA`, `syntax_result`, and
+`covering_red`. The other twelve have explicit two-sided lifecycle placement,
+but preflight may use them only when their required evidence already exists.
+No feature is moved earlier merely to increase trigger counts.
+
+The paid workflow is deliberately `preflight_mode=shadow`. Do not change it to
+`assistive_safe` until provider-free gates and a separately authorized matched
+smoke approve intervention behavior.
 
 ## Effect provenance (2026-08-04)
 
@@ -64,8 +100,9 @@ anchors (paths, symbols, commands, diagnostics):
 - a concrete new-file precedent or ranked-context reslot; or
 - source-bound validation or submission-risk state naming the exact check.
 
-A fresh syntax failure is delivered before the next available model decision;
-actions already selected in the same response continue unchanged. Generic
+A fresh syntax failure is delivered before the next available model decision.
+In OFF/SHADOW, actions already selected in the same response continue
+unchanged; ASSISTIVE_SAFE uses the hybrid stale-batch barrier. Generic
 obligations, search echoes, passing syntax checks, and submission certificates
 remain private unless they contribute new decision-relevant evidence. CAP
 features must apply their own actuator payload rather than copy an owner message.
@@ -87,7 +124,8 @@ run: `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_17_PAYLOADS_CONCRETE`, `ALL_17_CONSUMERS_APPLIED`,
 `ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, and `NO_ACTIONS_BLOCKED`.
 The census cannot pass on producer receipts alone.
-`scripts/central_readiness_audit.py` must print `READY`.
+`scripts/central_readiness_audit.py` must print `READY`. The workflow's
+provider-free suite must also include `tests/test_gt_preflight.py`.
 
 ## Live-run gate
 

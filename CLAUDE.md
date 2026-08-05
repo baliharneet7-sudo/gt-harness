@@ -24,16 +24,18 @@ asks a GT tool for help.
 Do not equate a produced feature receipt with working integration. A triggered
 feature must apply its typed payload to operational controller state. When the
 model needs the result, the engine enriches the first provider request after the
-evidence action with one bounded grounded payload. GT never blocks submission,
-cancels a batch, replaces a command, or otherwise overrides Mini-SWE's choice.
+evidence action with one bounded grounded payload. The pre-action boundary can
+return a mechanically contradicted selected action for fresh model reasoning
+only in `ASSISTIVE_SAFE`; it never rewrites or silently suppresses commands.
 
 The 17 feature identities all have a registered consumer (`central_controls.py`);
 most effects are internal and cost zero prompt tokens. The source revision is
 separate from the whole-workspace revision: caches, binaries, build products,
 logs, and background output never stale validation evidence. One immutable
 validation classification is shared by the runtime, the evidence ledger, the
-receipt, and deep metrics. Actions already chosen in one model response execute
-unchanged. Fresh evidence is inserted before the next model query starts, never
+receipt, and deep metrics. OFF and SHADOW preserve chosen batches unchanged;
+ASSISTIVE_SAFE permits read/search batches but breaks stale state-changing
+suffixes. Fresh evidence is inserted before the next model query starts, never
 one reasoning step later and never before its evidence exists. Every
 model-visible payload must name concrete paths, symbols, commands, checks, or
 diagnostics; related feature payloads are coalesced to avoid context spam.
@@ -60,6 +62,19 @@ downstream influence. It records existing consumer reads and confirmed
 provider-delivery IDs; `audit_only` is not trajectory influence. This tracing
 must not alter model prompts, effect routing, timing, action order, shadow
 visibility, or submit behavior.
+
+### Pre-action implementation state
+
+Every selected Bash action is classified once and adapted to a typed
+`ProposedAction` before host execution. `ActionCycleReceipt` joins proposal,
+candidate preflight decision, applied policy, actual dispatch, postflight, and
+reconsideration. Modes are `OFF`, `SHADOW`, and `ASSISTIVE_SAFE`; the paid
+workflow is pinned to SHADOW. Timeout and parser failures fail open to the
+original command with a receipt. Production rewrite and feature-driven
+suppression are disabled. Five features remain strictly postflight-only;
+twelve have evidence-gated two-sided placement. See
+`GT_PRE_ACTION_IMPLEMENTATION_RECEIPT_20260805.md` for proof and remaining
+benchmark gates.
 
 ### Final ten-task correctness audit
 

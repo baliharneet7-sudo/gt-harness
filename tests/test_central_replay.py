@@ -121,11 +121,13 @@ def test_replay_detects_old_certificate_loss(tmp_path):
         row for row in receipt["features"]["receipts"] if row["feature_id"] == "GT_CERT_DELIVERY"
     )
     cert["payload"]["check_count"] = 3
+    cert["payload"]["checks"] = ["pytest -q"]
+    receipt["features"]["validation_log"] = [{"command": "pytest -q", "grounded": True}]
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
     report = replay_task(trajectory_path, receipt_path, "task")
 
-    assert "old certificate checks were lost" in " ".join(_outcomes(report))
+    assert "old grounded certificate checks were lost" in " ".join(_outcomes(report))
 
 
 def test_replay_reconstructs_archived_engine_syntax_evidence(tmp_path):
@@ -155,3 +157,21 @@ def test_replay_reconstructs_archived_engine_syntax_evidence(tmp_path):
     assert report["new"]["ledger_checks_total"] == 1
     assert report["new"]["certificate"]["passing_checks"] == 1
     assert _outcomes(report) == []
+
+
+def test_replay_shadow_preflight_returns_only_provable_submit_blocker(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    trajectory = _trajectory([("pytest -q", 1), (submit, 0)])
+    trajectory_path = tmp_path / "miniswe_trajectory.json"
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt_path = tmp_path / "central_receipt.json"
+    receipt_path.write_text(json.dumps(_receipt()), encoding="utf-8")
+
+    report = replay_task(trajectory_path, receipt_path, "task")
+
+    shadow = report["new"]["preflight_shadow"]
+    assert shadow["operation_distribution"] == {"submit": 1, "validate": 1}
+    assert len(shadow["material_candidates"]) == 1
+    assert shadow["material_candidates"][0]["disposition"] == "return_to_model"
+    assert "pytest -q" in shadow["material_candidates"][0]["evidence"][0]
+    assert shadow["file_policy_status"] == "abstained_without_preexecution_snapshot"

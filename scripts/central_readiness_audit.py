@@ -24,6 +24,7 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from eval.gt_central_agent import MiniSweCentralAgent
+from gt_engine.preflight import PreflightMode
 from scripts.central_feature_census import census as central_feature_census
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,12 @@ def audit() -> dict[str, bool]:
         "setup_has_no_upload": "upload_" not in setup_source,
         "stock_litellm_model": type(model) is LitellmModel,
         "stock_bash_tool_only": BASH_TOOL["function"]["name"] == "bash",
+        "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
+        "paid_preflight_is_shadow_only": (
+            "--ak preflight_mode=shadow" in workflow
+            and "--ak enable_preflight=true" not in workflow
+        ),
+        "provider_free_gate_covers_preflight": "tests/test_gt_preflight.py" in workflow,
         "task_exec_env_is_empty": "env={}," in source,
         "treatment_workflow_central": (
             'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow

@@ -49,6 +49,7 @@ class GraphEvidence:
     surface: str
     file_path: str
     symbol: str
+    line: int
     claim: str
     confidence: float
     revision: str
@@ -155,6 +156,7 @@ def rank_graph_evidence(
             surface=fact.surface,
             file_path=fact.file_path,
             symbol=fact.symbol,
+            line=fact.line,
             claim=f"{fact.kind}: {fact.value}"[:500],
             confidence=fact.confidence,
             revision=fact.revision,

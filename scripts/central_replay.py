@@ -25,6 +25,7 @@ from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     EvidenceLedger,
+    WorkspaceSnapshot,
     WorkspaceTransition,
     classify_change,
     classify_validation_command,
@@ -33,6 +34,7 @@ from gt_engine.central_runtime import (
     is_submit_command,
     task_deliverable_paths,
 )
+from gt_engine.preflight import ActionDisposition, adapt_proposed_action
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -55,10 +57,13 @@ def _iter_events(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
     cursors: dict[str, int] = {}
     events: list[dict[str, Any]] = []
     index = 0
+    model_call = 0
     for message in trajectory.get("messages") or []:
         if message.get("role") != "assistant":
             continue
-        for action in (message.get("extra") or {}).get("actions") or []:
+        model_call += 1
+        actions = tuple((message.get("extra") or {}).get("actions") or ())
+        for batch_index, action in enumerate(actions):
             index += 1
             command = str(action.get("command") or "")
             tool_id = str(action.get("tool_call_id") or "")
@@ -72,7 +77,16 @@ def _iter_events(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
                 returncode = -1
             output = str(extra.get("raw_output") or (tool_message or {}).get("content") or "")
             events.append(
-                {"index": index, "command": command, "returncode": returncode, "output": output}
+                {
+                    "index": index,
+                    "command": command,
+                    "tool_call_id": tool_id,
+                    "model_call": model_call,
+                    "batch_index": batch_index,
+                    "batch_size": len(actions),
+                    "returncode": returncode,
+                    "output": output,
+                }
             )
     return events
 
@@ -134,9 +148,55 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     artifact_debt_triggers: list[dict[str, str]] = []
     simulated_deliveries: list[dict[str, Any]] = []
     engine_syntax_checks_replayed = 0
+    preflight_operations: Counter[str] = Counter()
+    preflight_candidates: list[dict[str, Any]] = []
+    shadow_barrier_calls: set[int] = set()
+    shadow_suffix_actions_prevented = 0
+    shadow_barriers: list[dict[str, Any]] = []
 
     for event in events:
         action_id = event["index"]
+        pre_classification = classify_validation_command(event["command"], checks)
+        proposed = adapt_proposed_action(
+            {
+                "command": event["command"],
+                "tool_call_id": event["tool_call_id"],
+            },
+            source_revision=source_revision,
+            workspace_revision="replay-w0",
+            model_call=event["model_call"],
+            batch_index=event["batch_index"],
+            batch_size=event["batch_size"],
+            validation=pre_classification,
+        )
+        preflight_operations[proposed.operation.value] += 1
+        # Archived receipts do not contain a complete pre-execution manifest.
+        # File-existence policy must therefore abstain. Submit policy can be
+        # replayed because its grounded ledger and source revision are complete.
+        snapshot_available = proposed.operation.value == "submit"
+        preflight = runtime.preflight_action(
+            proposed,
+            WorkspaceSnapshot(
+                "replay-w0",
+                {},
+                snapshot_available,
+                "" if snapshot_available else "archived_snapshot_unavailable",
+            ),
+            revision="replay-w0",
+            source_revision=source_revision,
+            ledger=ledger,
+        )
+        if preflight.disposition != ActionDisposition.PASS:
+            preflight_candidates.append(
+                {
+                    "action": action_id,
+                    "operation": proposed.operation.value,
+                    "disposition": preflight.disposition.value,
+                    "reason_codes": list(preflight.reason_codes),
+                    "evidence": list(preflight.evidence),
+                    "source_revision": source_revision,
+                }
+            )
         change = transitions.get(action_id)
         transition = WorkspaceTransition(
             action_id,
@@ -155,7 +215,38 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
         if authored:
             source_epoch += 1
             source_revision = f"replay-s{source_epoch}"
-        classification = classify_validation_command(event["command"], checks).with_result(
+        known_barrier_operation = proposed.operation.value in {"validate", "submit"}
+        observed_mutating_change = proposed.mutates_workspace and bool(
+            transition.changed_paths
+        )
+        has_suffix = event["batch_index"] + 1 < event["batch_size"]
+        if (
+            has_suffix
+            and event["model_call"] not in shadow_barrier_calls
+            and (known_barrier_operation or bool(authored) or observed_mutating_change)
+        ):
+            shadow_barrier_calls.add(event["model_call"])
+            suffix_count = event["batch_size"] - event["batch_index"] - 1
+            shadow_suffix_actions_prevented += suffix_count
+            reasons = []
+            if known_barrier_operation:
+                reasons.append(f"operation:{proposed.operation.value}")
+            if authored:
+                reasons.append("authored_workspace_change")
+            if observed_mutating_change:
+                reasons.append("observed_mutating_change")
+            shadow_barriers.append(
+                {
+                    "action": action_id,
+                    "model_call": event["model_call"],
+                    "batch_index": event["batch_index"],
+                    "batch_size": event["batch_size"],
+                    "suffix_actions_prevented": suffix_count,
+                    "reason_codes": reasons,
+                    "command_preview": " ".join(event["command"].split())[:240],
+                }
+            )
+        classification = pre_classification.with_result(
             result_code=event["returncode"],
             output=event["output"],
             source_revision=source_revision,
@@ -252,22 +343,33 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             if item.grounded and item.command_class == "declared_validation"
         }
     )
-    ledger_checks_total = sum(
-        1 for item in ledger.outcomes.values() if item.grounded
-    )
+    ledger_checks_total = sum(1 for item in ledger.outcomes.values() if item.grounded)
 
     old_features = receipt.get("features") or {}
     old_receipts = old_features.get("receipts") or []
     old_cert = next(
         (row for row in old_receipts if row.get("feature_id") == "GT_CERT_DELIVERY"), None
     )
+    old_cert_payload = (old_cert or {}).get("payload") or {}
+    old_cert_checks = tuple(str(item) for item in old_cert_payload.get("checks") or ())
+    old_grounded_certificate_checks = sorted(
+        {
+            str(row.get("command") or "")
+            for row in old_features.get("validation_log") or ()
+            if row.get("grounded")
+            and any(
+                str(row.get("command") or "").startswith(check)
+                or check.startswith(str(row.get("command") or ""))
+                for check in old_cert_checks
+            )
+        }
+    )
     old_produced = old_features.get("produced_counts")
     if old_produced is None:
         old_produced = Counter(row.get("feature_id") for row in old_receipts)
     old_deliveries = receipt.get("guidance_deliveries") or []
     old_receipts_by_key = {
-        (row.get("feature_id"), int(row.get("action") or 0)): row
-        for row in old_receipts
+        (row.get("feature_id"), int(row.get("action") or 0)): row for row in old_receipts
     }
     old_ungrounded_deliveries = []
     for delivery in old_deliveries:
@@ -277,9 +379,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
         )
         source = old_receipts_by_key.get(key) or {}
         if not feature_payload_grounded(str(key[0] or ""), source.get("payload") or {}):
-            old_ungrounded_deliveries.append(
-                {"feature_id": key[0], "evidence_action": key[1]}
-            )
+            old_ungrounded_deliveries.append({"feature_id": key[0], "evidence_action": key[1]})
 
     return {
         "task": task_name,
@@ -297,7 +397,8 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             "guidance_deliveries": len(old_deliveries),
             "guidance_chars": int(old_features.get("guidance_chars") or 0),
             "ungrounded_deliveries": old_ungrounded_deliveries,
-            "certificate": (old_cert or {}).get("payload") or {},
+            "certificate": old_cert_payload,
+            "grounded_certificate_checks": old_grounded_certificate_checks,
             "exit_status": str((trajectory.get("info") or {}).get("exit_status") or ""),
         },
         "new": {
@@ -340,6 +441,14 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             "submit_holds": summary["action_metrics"]["submit_holds"],
             "batch_interrupts": summary["action_metrics"]["batch_interrupts"],
             "interrupted_actions": summary["action_metrics"]["interrupted_actions"],
+            "preflight_shadow": {
+                "operation_distribution": dict(sorted(preflight_operations.items())),
+                "material_candidates": preflight_candidates,
+                "file_policy_status": "abstained_without_preexecution_snapshot",
+                "barrier_calls": len(shadow_barrier_calls),
+                "suffix_actions_prevented": shadow_suffix_actions_prevented,
+                "barriers": shadow_barriers,
+            },
         },
     }
 
@@ -347,16 +456,14 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
 def _outcomes(task: dict[str, Any]) -> list[str]:
     failed: list[str] = []
     if task["new"]["artifact_debt_triggers"]:
-        failed.append(
-            f"artifact-driven validation debt: {task['new']['artifact_debt_triggers']}"
-        )
+        failed.append(f"artifact-driven validation debt: {task['new']['artifact_debt_triggers']}")
     new_declared = int(task["new"]["validation_declared"])
     ledger_total = int(task["new"]["ledger_checks_total"])
     if new_declared > 0 and ledger_total == 0:
         failed.append("runtime classified declared validations but the ledger recorded none")
-    old_cert_count = int((task["old"].get("certificate") or {}).get("check_count") or 0)
-    if old_cert_count > 0 and ledger_total == 0:
-        failed.append("old certificate checks were lost by the repaired policy")
+    old_grounded_cert_count = len(task["old"].get("grounded_certificate_checks") or ())
+    if old_grounded_cert_count > 0 and ledger_total == 0:
+        failed.append("old grounded certificate checks were lost by the repaired policy")
     if task["new"]["submit_holds"] or task["new"]["batch_interrupts"]:
         failed.append("repaired policy blocked or interrupted Mini-SWE")
     if task["new"]["interrupted_actions"]:
@@ -372,12 +479,16 @@ def main(argv: list[str] | None = None) -> int:
 
     tasks: dict[str, dict[str, Any]] = {}
     issues: list[str] = []
-    for trajectory_path in sorted(args.run_dir.rglob("agent/miniswe_trajectory.json")):
+    for trajectory_path in sorted(args.run_dir.rglob("miniswe_trajectory.json")):
         receipt_path = trajectory_path.parent / "central_receipt.json"
         if not receipt_path.exists():
             issues.append(f"{trajectory_path}: missing central_receipt.json")
             continue
-        task_name = trajectory_path.parent.parent.parent.name.split("__")[0]
+        task_name = (
+            trajectory_path.parent.parent.parent.name.split("__")[0]
+            if trajectory_path.parent.name == "agent"
+            else trajectory_path.parent.name
+        )
         tasks[task_name] = replay_task(trajectory_path, receipt_path, task_name)
 
     report = {"version": "gt.central_replay.v1", "task_count": len(tasks), "tasks": tasks}

@@ -17,6 +17,11 @@ from eval.gt_central_agent import (
     MiniSweCentralShadowAgent,
     _message_context_chars,
 )
+from gt_engine.preflight import (
+    ActionDisposition,
+    PreflightDecision,
+    PreflightMode,
+)
 
 
 class _Environment:
@@ -75,6 +80,562 @@ class _ScriptedModel:
         return [{"role": "tool", "content": outputs[0]["output"]}]
 
 
+class _BatchModel(_ScriptedModel):
+    def __init__(self, batches):
+        self.batches = iter(batches)
+        self.observed = []
+        self.observed_history = []
+
+    def query(self, messages):
+        self.observed = [str(item.get("content") or "") for item in messages]
+        self.observed_history.append(self.observed)
+        commands = next(self.batches)
+        return {
+            "role": "assistant",
+            "content": "act",
+            "extra": {
+                "actions": [
+                    {"command": command, "tool_call_id": f"call-{index}"}
+                    for index, command in enumerate(commands, 1)
+                ],
+                "response": {"usage": {}},
+                "cost": 0.0,
+            },
+        }
+
+    def format_observation_messages(self, message, outputs, template_vars=None):
+        actions = message["extra"]["actions"]
+        assert len(outputs) == len(actions)
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": action["tool_call_id"],
+                "content": output["output"],
+            }
+            for action, output in zip(actions, outputs, strict=True)
+        ]
+
+
+class _ObservedMutationEnvironment(_Environment):
+    def __init__(self, mutation_command: str, manifest_after: str):
+        super().__init__()
+        self.mutation_command = mutation_command
+        self.manifest_after = manifest_after
+        self.changed = False
+
+    async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+        self.commands.append((command, env))
+        if command.startswith("uname "):
+            return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+        if "-printf" in command:
+            return ExecResult(
+                stdout=self.manifest_after if self.changed else "", return_code=0
+            )
+        if command.startswith("sha256sum"):
+            paths = [word for word in command.split() if word.endswith(".py")]
+            return ExecResult(
+                stdout="".join(("a" * 64) + f"  {path}\n" for path in paths),
+                return_code=0,
+            )
+        if command.startswith("python3 -c"):
+            return ExecResult(stdout='{"app.py":"eCA9IDEK"}\n', return_code=0)
+        if command == self.mutation_command:
+            self.changed = True
+        return ExecResult(return_code=0)
+
+
+@pytest.mark.asyncio
+async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname='demo'\n")
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Change greet so it returns an uppercase greeting.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    assert len(model.observed_history) == 1
+    assert any("src/greeter.py" in item for item in model.observed_history[0])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    evidence = receipt["repository_evidence"]
+    assert evidence["available"] is True
+    delivery = receipt["guidance_deliveries"][0]
+    assert delivery["evidence_action"] == 0
+    assert delivery["delivered_before_call"] == 1
+    assert delivery["one_step_late"] is False
+    assert delivery["not_predictive"] is True
+
+
+@pytest.mark.asyncio
+async def test_preflight_spy_runs_before_selected_command_executes(tmp_path):
+    events = []
+
+    class OrderedEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if command == "cat src/app.py":
+                events.append("exec")
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    model = _ScriptedModel(["cat src/app.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test", enable_preflight=True)
+    agent._model_factory = lambda: model
+    original = agent._features.preflight_action
+
+    def ordered_preflight(*args, **kwargs):
+        events.append("preflight")
+        return original(*args, **kwargs)
+
+    agent._features.preflight_action = ordered_preflight
+    await agent.run("Read app.py.", OrderedEnvironment(), AgentContext())
+
+    assert events[:2] == ["preflight", "exec"]
+
+
+@pytest.mark.asyncio
+async def test_material_edit_preflight_returns_then_revised_edit_executes(tmp_path):
+    class RevisionEnvironment(_Environment):
+        def __init__(self):
+            super().__init__()
+            self.edited = False
+            self.executed_edits = []
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                size = 4 if self.edited else 3
+                stamp = "2.0" if self.edited else "1.0"
+                return ExecResult(stdout=f"f\t{size}\t{stamp}\t{stamp}\tapp.py\t\n", return_code=0)
+            if command.startswith("sha256sum"):
+                return ExecResult(
+                    stdout=("b" if self.edited else "a") * 64 + "  app.py\n",
+                    return_code=0,
+                )
+            if command.startswith("python3 -c"):
+                return ExecResult(stdout='{"app.py":"eCA9IDEK"}\n', return_code=0)
+            if command.startswith("sed -i"):
+                self.executed_edits.append(command)
+                self.edited = True
+                return ExecResult(stdout="", return_code=0)
+            if "COMPLETE_TASK" in command:
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
+            return ExecResult(stdout="", return_code=0)
+
+    environment = RevisionEnvironment()
+    first = "sed -i 's/x/y/' app.py"
+    revised = "sed -i 's/x/z/' app.py"
+    model = _ScriptedModel([first, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_preflight=True,
+        enable_lint=False,
+    )
+    agent._model_factory = lambda: model
+    real_preflight = agent._features.preflight_action
+    returned = False
+
+    def material_once(proposed, *args, **kwargs):
+        nonlocal returned
+        if not returned and proposed.raw_command == first:
+            returned = True
+            return PreflightDecision(
+                ActionDisposition.RETURN_TO_MODEL,
+                proposed.raw_command,
+                evidence=("Exact target has a material coupled-file risk.",),
+                reason_codes=("material_edit_risk",),
+                confidence=1.0,
+                source_revision=proposed.source_revision,
+            )
+        return real_preflight(proposed, *args, **kwargs)
+
+    agent._features.preflight_action = material_once
+    await agent.run("Change app.py.", environment, AgentContext())
+
+    assert environment.executed_edits == [revised]
+    assert any("material coupled-file risk" in item for item in model.observed_history[1])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["features"]["action_metrics"]["workspace_change_actions"] == 1
+
+
+@pytest.mark.asyncio
+async def test_real_missing_edit_producer_returns_before_exec_then_revised_edit_runs(tmp_path):
+    class ExistingFileEnvironment(_Environment):
+        def __init__(self):
+            super().__init__()
+            self.executed_edits: list[str] = []
+            self.edited = False
+
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            Path(target_dir, "app.py").write_text("x = 1\n")
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                size = 6
+                stamp = "2.0" if self.edited else "1.0"
+                return ExecResult(
+                    stdout=f"f\t{size}\t{stamp}\t{stamp}\tapp.py\t\n",
+                    return_code=0,
+                )
+            if command.startswith("sha256sum"):
+                digest = "b" if self.edited else "a"
+                return ExecResult(stdout=(digest * 64) + "  app.py\n", return_code=0)
+            if command.startswith("python3 -c"):
+                encoded = "eCA9IDIK" if self.edited else "eCA9IDEK"
+                return ExecResult(stdout=f'{{"app.py":"{encoded}"}}\n', return_code=0)
+            if command.startswith("sed -i"):
+                self.executed_edits.append(command)
+                self.edited = True
+                return ExecResult(return_code=0)
+            if "COMPLETE_TASK" in command:
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
+            return ExecResult(return_code=0)
+
+    first = "sed -i 's/x/y/' missing.py"
+    revised = "sed -i 's/x/y/' app.py"
+    model = _ScriptedModel([first, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    environment = ExistingFileEnvironment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+        enable_lint=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Edit app.py.", environment, AgentContext())
+
+    assert environment.executed_edits == [revised]
+    assert any("missing.py" in item for item in model.observed_history[1])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    cycles = receipt["features"]["action_cycles"]
+    first_cycle = next(row for row in cycles if row["proposed"]["raw_command"] == first)
+    assert first_cycle["applied_disposition"] == "return_to_model"
+    assert first_cycle["executed"] is False
+    revised_cycle = next(row for row in cycles if row["proposed"]["raw_command"] == revised)
+    assert revised_cycle["executed"] is True
+    assert revised_cycle["postflight"]["source_revision"]
+    session = receipt["repository_session"]
+    assert session["fresh"] is True
+    assert len(session["refresh_log"]) == 2
+    assert session["source_revision"] == receipt["source_revision"]
+    assert receipt["metrics"]["preflight_commands_returned_to_model"] == 1
+    assert receipt["metrics"]["preflight_commands_changed_after_return"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_records_material_candidate_but_executes_original(tmp_path):
+    model = _ScriptedModel(
+        [
+            "sed -i 's/x/y/' missing.py",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.SHADOW,
+        enable_lint=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Edit a file.", environment, AgentContext())
+
+    assert any(command.startswith("sed -i") for command, _ in environment.commands)
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    cycle = next(
+        row
+        for row in receipt["features"]["action_cycles"]
+        if row["proposed"]["raw_command"].startswith("sed -i")
+    )
+    assert cycle["candidate_decision"]["disposition"] == "return_to_model"
+    assert cycle["applied_disposition"] == "pass"
+    assert cycle["executed"] is True
+
+
+@pytest.mark.asyncio
+async def test_off_and_shadow_dispatch_identical_model_commands(tmp_path):
+    commands = ["cat app.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    off_model = _ScriptedModel(commands)
+    shadow_model = _ScriptedModel(commands)
+    off_environment = _Environment()
+    shadow_environment = _Environment()
+    off = MiniSweCentralAgent(
+        logs_dir=tmp_path / "off",
+        model_name="test",
+        preflight_mode=PreflightMode.OFF,
+    )
+    shadow = MiniSweCentralAgent(
+        logs_dir=tmp_path / "shadow",
+        model_name="test",
+        preflight_mode=PreflightMode.SHADOW,
+    )
+    off._model_factory = lambda: off_model
+    shadow._model_factory = lambda: shadow_model
+
+    await off.run("Read app.py.", off_environment, AgentContext())
+    await shadow.run("Read app.py.", shadow_environment, AgentContext())
+
+    off_selected = [
+        command
+        for command, _ in off_environment.commands
+        if "-printf" not in command and not command.startswith("uname ")
+    ]
+    shadow_selected = [
+        command
+        for command, _ in shadow_environment.commands
+        if "-printf" not in command and not command.startswith("uname ")
+    ]
+    assert shadow_selected == off_selected
+    off_receipt = json.loads((tmp_path / "off" / "central_receipt.json").read_text())
+    shadow_receipt = json.loads((tmp_path / "shadow" / "central_receipt.json").read_text())
+    assert off_receipt["features"]["action_cycles"] == []
+    assert len(shadow_receipt["features"]["action_cycles"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_preflight_timeout_is_recorded_and_fails_open(tmp_path):
+    model = _ScriptedModel(["cat app.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+        preflight_timeout_sec=0.001,
+    )
+    agent._model_factory = lambda: model
+
+    def slow_preflight(*args, **kwargs):
+        time.sleep(0.03)
+        raise AssertionError("result should be ignored after timeout")
+
+    agent._features.preflight_action = slow_preflight
+    await agent.run("Read app.py.", environment, AgentContext())
+
+    assert any(command == "cat app.py" for command, _ in environment.commands)
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    cycle = next(
+        row
+        for row in receipt["features"]["action_cycles"]
+        if row["proposed"]["raw_command"] == "cat app.py"
+    )
+    assert "preflight_timeout" in cycle["candidate_decision"]["reason_codes"]
+    assert cycle["applied_disposition"] == "pass"
+    assert cycle["executed"] is True
+
+
+@pytest.mark.asyncio
+async def test_rewrite_is_never_dispatched_in_assistive_safe_mode(tmp_path):
+    original = "cat app.py"
+    rewritten = "rm app.py"
+    model = _ScriptedModel([original, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+    real_preflight = agent._features.preflight_action
+
+    def unsafe_rewrite(proposed, *args, **kwargs):
+        if proposed.raw_command != original:
+            return real_preflight(proposed, *args, **kwargs)
+        return PreflightDecision(
+            ActionDisposition.REWRITE,
+            rewritten,
+            evidence=("claimed equivalent",),
+            reason_codes=("rewrite_candidate",),
+            confidence=1.0,
+            source_revision=proposed.source_revision,
+        )
+
+    agent._features.preflight_action = unsafe_rewrite
+    await agent.run("Read app.py.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert original in commands
+    assert rewritten not in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    cycle = next(
+        row
+        for row in receipt["features"]["action_cycles"]
+        if row["proposed"]["raw_command"] == original
+    )
+    assert "rewrite_disabled" in cycle["applied_reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_assistive_safe_keeps_read_only_batch_and_pairs_every_output(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([["cat a.py", "rg -n x src"], [submit]])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the files.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert "cat a.py" in commands
+    assert "rg -n x src" in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["stale_batched_actions_prevented"] == 0
+
+
+@pytest.mark.asyncio
+async def test_successful_unknown_without_material_change_does_not_split_batch(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([["pwd", "cat a.py"], [submit]])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the workspace.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert "pwd" in commands
+    assert "cat a.py" in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["stale_batched_actions_prevented"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unclassified_exploration_failure_alone_does_not_split_batch(tmp_path):
+    class ExplorationEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "ls missing":
+                return ExecResult(stderr="not found\n", return_code=1)
+            return ExecResult(return_code=0)
+
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([["ls missing", "cat a.py"], [submit]])
+    environment = ExplorationEnvironment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the workspace.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert "ls missing" in commands
+    assert "cat a.py" in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["stale_batched_actions_prevented"] == 0
+
+
+@pytest.mark.asyncio
+async def test_assistive_safe_breaks_mutating_batch_before_stale_second_action(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([["touch app.py", "rm app.py"], [submit]])
+    environment = _ObservedMutationEnvironment(
+        "touch app.py", "f\t6\t2.0\t2.0\tapp.py\t\n"
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+        enable_lint=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Create app.py.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert "touch app.py" in commands
+    assert "rm app.py" not in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["stale_batched_actions_prevented"] == 1
+    assert receipt["features"]["batch_interrupts"][0]["reason"] == "stale_batch_barrier"
+    cancelled = next(
+        row
+        for row in receipt["features"]["action_cycles"]
+        if row["proposed"]["raw_command"] == "rm app.py"
+    )
+    assert cancelled["executed"] is False
+    assert cancelled["postflight"]["status"] == "cancelled_before_dispatch"
+
+
+@pytest.mark.asyncio
+async def test_compound_mutating_action_breaks_batch_after_observed_directory_change(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([["mkdir -p work && echo made", "cat work/result"], [submit]])
+    environment = _ObservedMutationEnvironment(
+        "mkdir -p work && echo made", "d\t0\t2.0\t2.0\twork\t\n"
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Create the work directory.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert "mkdir -p work && echo made" in commands
+    assert "cat work/result" not in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["stale_batched_actions_prevented"] == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_submit_pairs_and_cancels_predecided_suffix(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _BatchModel([[submit, "rm app.py"]])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        preflight_mode=PreflightMode.ASSISTIVE_SAFE,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Finish the task.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert submit in commands
+    assert "rm app.py" not in commands
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    cancelled = next(
+        row
+        for row in receipt["features"]["action_cycles"]
+        if row["proposed"]["raw_command"] == "rm app.py"
+    )
+    assert cancelled["postflight"]["reason"] == "terminal_submit"
+
+
 def test_central_agent_is_host_owned_not_installed():
     assert issubclass(MiniSweCentralAgent, BaseAgent)
     assert not issubclass(MiniSweCentralAgent, BaseInstalledAgent)
@@ -126,6 +687,8 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "MiniSweCentralShadowAgent" in workflow
     assert "enable_lint=false" in workflow
     assert "enable_submit_readiness=false" in workflow
+    assert "preflight_mode=shadow" in workflow
+    assert "enable_preflight=true" not in workflow
 
 
 def test_paid_engine_workflow_has_no_time_censors():
@@ -336,18 +899,9 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
             if "-printf" in command:
                 rows = {
                     "empty": "f\t3\t0.0\t0.0\tapp.py\t\n",
-                    "s1": (
-                        "f\t4\t1.0\t1.0\tapp.py\t\n"
-                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
-                    ),
-                    "s2": (
-                        "f\t5\t2.0\t2.0\tapp.py\t\n"
-                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
-                    ),
-                    "s3": (
-                        "f\t6\t3.0\t3.0\tapp.py\t\n"
-                        "f\t3\t1.0\t1.0\tnew_module.py\t\n"
-                    ),
+                    "s1": ("f\t4\t1.0\t1.0\tapp.py\t\nf\t3\t1.0\t1.0\tnew_module.py\t\n"),
+                    "s2": ("f\t5\t2.0\t2.0\tapp.py\t\nf\t3\t1.0\t1.0\tnew_module.py\t\n"),
+                    "s3": ("f\t6\t3.0\t3.0\tapp.py\t\nf\t3\t1.0\t1.0\tnew_module.py\t\n"),
                 }
                 return ExecResult(stdout=rows[self.state], return_code=0)
             if command.startswith("sha256sum"):
@@ -410,9 +964,7 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
     assert {row["feature_id"] for row in features["receipts"]} == set(features["feature_ids"])
     assert {row["feature_id"] for row in features["effects"]} == set(features["feature_ids"])
     assert {
-        row["feature_id"]
-        for row in features["effect_applications"]
-        if row["state_fields_changed"]
+        row["feature_id"] for row in features["effect_applications"] if row["state_fields_changed"]
     } == set(features["feature_ids"])
     assert all(row["evidence_before_effect"] for row in features["effects"])
     assert all(row["effect_before_next_action"] for row in features["effects"])
@@ -591,9 +1143,7 @@ async def test_syntax_failure_does_not_interrupt_multi_action_batch(tmp_path):
             }
 
         def format_observation_messages(self, message, outputs, template_vars=None):
-            return [
-                {"role": "tool", "content": outputs[i]["output"]} for i in range(len(outputs))
-            ]
+            return [{"role": "tool", "content": outputs[i]["output"]} for i in range(len(outputs))]
 
     class InterruptEnvironment(_Environment):
         def __init__(self):
@@ -654,12 +1204,10 @@ async def test_syntax_failure_does_not_interrupt_multi_action_batch(tmp_path):
         submit,
     ]
     assert not any(
-        "Syntax check failed for app.py" in item
-        for item in MultiActionModel.observed_history[0]
+        "Syntax check failed for app.py" in item for item in MultiActionModel.observed_history[0]
     )
     assert any(
-        "Syntax check failed for app.py" in item
-        for item in MultiActionModel.observed_history[1]
+        "Syntax check failed for app.py" in item for item in MultiActionModel.observed_history[1]
     )
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
     assert receipt["metrics"]["batch_interrupts"] == 0
