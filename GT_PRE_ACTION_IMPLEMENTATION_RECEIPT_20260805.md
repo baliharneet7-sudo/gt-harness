@@ -51,6 +51,29 @@ assistive GT-on win. A future paid assistive run is gated on this accounting
 repair and must separately report intervention, stale-batch prevention, and
 matched GT-off deltas.
 
+### Fresh smoke result after the repair (run `30976148466`)
+
+The fresh ten-task workflow completed successfully, including the merged
+artifact, on commit `951e136`. The receipt audit found:
+
+| Invariant | Observed |
+|---|---:|
+| Actions / preflight calls | 698 / 698 |
+| Preflight dispositions | 698 `PASS` (shadow mode) |
+| Effects | 361 |
+| Model-visible effects | 36 |
+| Model-visible effects linked to a delivery | 36/36 |
+| Orphan model-visible effects | 0 |
+| Guidance deliveries | 34 (coalesced 36 effects) |
+| Timely, non-predictive deliveries | 34/34 |
+| Preflight latency p50 / p95 / p99 / max | 0.0077 / 0.0113 / 0.0213 / 0.0252 ms |
+
+The task result was 4/10 solved; six tasks reached the assistant-step limit.
+Because this workflow deliberately runs preflight in `shadow`, it did not
+alter commands or batch reasoning. The result is therefore a correctness,
+timing, and accounting proof for the integration—not evidence of a solve-rate
+or efficiency gain over GT-off.
+
 ## Current call graph
 
 ```text
