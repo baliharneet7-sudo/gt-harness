@@ -486,7 +486,7 @@ jobs:
               and len(trials) == n_expected
               and not missing
               and not missing_receipts
-              and n_errored == 0
+              and not errored
           )
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
