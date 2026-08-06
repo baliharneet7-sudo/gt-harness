@@ -108,6 +108,11 @@ _CENSORED_HARBOR_EXCEPTIONS = {
     "TaskTimeoutError",
     "TimeoutError",
     "CancelledError",
+    # Provider rejected the request because the assembled conversation
+    # exceeded the model context window.  This is an outer-run censor, not a
+    # verifier failure and must not be counted as an unsolved task or a clean
+    # solve in outcome-preservation gates.
+    "ContextWindowExceededError",
 }
 
 

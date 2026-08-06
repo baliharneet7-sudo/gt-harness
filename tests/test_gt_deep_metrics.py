@@ -94,6 +94,31 @@ def test_extract_trajectory_includes_outer_harbor_timeout_and_wall_time(tmp_path
     assert metrics["trial_wall_time_seconds"] == 1020.0
 
 
+def test_context_window_provider_exception_is_censored(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "ContextWindowExceededError"},
+                "messages": [_assistant("sed -n '1,20p' src/main.py", prompt=10, completion=1)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {
+        "task_name": "task",
+        "exception_info": {"exception_type": "ContextWindowExceededError"},
+    }
+
+    metrics = extract_trajectory(path, task="task", reward=1, harbor_result=harbor_result)
+
+    assert metrics["official_solved"] is True
+    assert metrics["censored"] is True
+    assert metrics["censored_reason"] == "ContextWindowExceededError"
+    assert metrics["uncensored_resolved"] is False
+    assert metrics["solved"] is False
+
+
 def test_rewarded_clean_step_exhaustion_is_salvaged_resolved_not_censored(tmp_path):
     path = tmp_path / "task_trajectory.json"
     path.write_text(
