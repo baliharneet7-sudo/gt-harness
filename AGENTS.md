@@ -187,6 +187,41 @@ delivery. The paid workflow is explicitly ACTIVE + SHADOW preflight + no
 compaction. A disabled task-start advisory is resolved at action zero and may
 not leak into call two. `newfile_precedent` is one-shot per task.
 
+## Post-smoke semantic hardening (workflow 31068690296)
+
+Paid workflow `31068690296` on `b0c7760` is diagnostic evidence, not an
+approved treatment. Outcomes matched the frozen ten-task baseline at 9/10 and
+aggregate resources fell, but the correctness/efficiency gate failed: six
+solved tasks had a positive resource dimension, `write-compressor` newly hit
+Harbor's 900-second outer timeout, and only four of six provider payloads were
+semantically valid. Do not cite this run as proof that GT improves outcomes.
+
+The two invalid visible payloads exposed permanent classification rules:
+
+- serialized/model/data artifacts such as `.pkl`, `.npy`, `.npz`, `.pt`,
+  `.parquet`, `.h5`, `.onnx`, and `.wasm` are derived artifacts. They cannot
+  advance source revision, increase validation debt, or appear as authored
+  source in a provider payload;
+- `newfile_precedent` requires a non-empty sibling and deterministically ranks
+  semantically related stems. An empty package marker such as `__init__.py` is
+  not a concrete precedent when a related implementation exists, and the
+  feature abstains when it is the only candidate.
+
+Replay also exposed an engine-private path mismatch: task deliverables named as
+`/app/path` must canonicalize to the sensor's relative `path`. A required
+`/app/report.jsonl` is a deliverable, never source revision. Finally, replay
+requires a certificate only for an attributable terminal declared validator;
+an un-attributable pipeline is validation intent, not a lost certificate.
+
+The run produced and applied 405 effects and naturally fired 12/17 feature IDs.
+The five absent IDs (`covering_red`, `GT_HYPOTHESIS`, `recovery`,
+`GT_SS_SUBMIT_RED`, and `submit_refusal`) lacked their exact grounded failure
+triggers. Provider-free proof still covers all 17 paths. All 372 provider calls
+were exactly hashed; SHADOW preflight made 397/397 PASS decisions; context
+transformation, batch interruption, late delivery, and predictive delivery
+were all zero. The 89-task run remains blocked, and another paid smoke requires
+separate authorization after the repaired commit passes the exact gate.
+
 ## Provider-free proof
 
 `python -m scripts.central_feature_census` must print all required lines before any paid

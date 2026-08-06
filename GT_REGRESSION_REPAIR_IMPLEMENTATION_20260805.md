@@ -90,7 +90,22 @@ success and are outside the paid `tb2_miniswe_engine.yml` path.
 
 ## Remaining gate
 
-The pre-smoke gate must run on the exact clean commit after it is pushed because
-it verifies local HEAD equals `origin/inline-engine`. Only then dispatch the
-authorized 10-task GitHub workflow and compare every task plus aggregate metrics
-against the frozen local GT-off baseline. Do not start 89 tasks.
+After the post-smoke semantic repairs are pushed, rerun the provider-free suite,
+census, readiness audit, archived replay, and exact-commit pre-smoke gate.
+Workflow `31068690296` consumed the prior paid-smoke authorization; do not
+dispatch another paid run without explicit authorization. Do not start 89
+tasks.
+
+## Paid smoke result: workflow 31068690296
+
+The smoke completed but is rejected as proof. It matched baseline reward at
+9/10 and improved aggregate tokens by 11,335,452, calls by 48, actions by 86,
+steps by 49, and normalized cost by $0.051213. Six solved tasks nevertheless
+had a positive resource dimension, `write-compressor` gained an outer
+900-second timeout, and semantic audit accepted only four of six payloads.
+
+The invalid payloads were a generated `data_8000.pkl` validation-debt claim and
+an empty `__init__.py` new-file precedent. Replay also found that absolute
+`/app/report.jsonl` deliverables were not canonicalized to relative sensor
+paths. These boundaries now have RED-first repairs and permanent pre-smoke
+tests. See `GT_SMOKE_31068690296_AUDIT.md` for the full per-task comparison.

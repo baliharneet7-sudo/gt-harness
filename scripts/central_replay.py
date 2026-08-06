@@ -452,6 +452,12 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
                 for row in summary["validation_log"]
                 if row["command_class"] == "declared_validation"
             ),
+            "validation_attributed_declared": sum(
+                1
+                for row in summary["validation_log"]
+                if row["command_class"] == "declared_validation"
+                and row.get("status_attributed")
+            ),
             "validation_recognized": sum(
                 1
                 for row in summary["validation_log"]
@@ -513,7 +519,7 @@ def _outcomes(task: dict[str, Any]) -> list[str]:
         failed.append(
             f"unaccounted context-compiler effects: {compiler_counts['unaccounted_bug']}"
         )
-    new_declared = int(task["new"]["validation_declared"])
+    new_declared = int(task["new"].get("validation_attributed_declared") or 0)
     ledger_total = int(task["new"]["ledger_checks_total"])
     if new_declared > 0 and ledger_total == 0:
         failed.append("runtime classified declared validations but the ledger recorded none")

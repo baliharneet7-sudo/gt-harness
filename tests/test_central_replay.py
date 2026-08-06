@@ -91,6 +91,23 @@ def test_replay_records_declared_validation_in_the_ledger(tmp_path):
     assert _outcomes(report) == []
 
 
+def test_replay_does_not_require_a_certificate_for_unattributed_declared_pipeline(
+    tmp_path,
+):
+    trajectory = _trajectory([("pytest -q | tail -1", 0)])
+    trajectory_path = tmp_path / "miniswe_trajectory.json"
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt_path = tmp_path / "central_receipt.json"
+    receipt_path.write_text(json.dumps(_receipt()), encoding="utf-8")
+
+    report = replay_task(trajectory_path, receipt_path, "task")
+
+    assert report["new"]["validation_declared"] == 1
+    assert report["new"]["validation_attributed_declared"] == 0
+    assert report["new"]["ledger_checks_total"] == 0
+    assert _outcomes(report) == []
+
+
 def test_replay_flags_artifact_driven_validation_debt(tmp_path):
     trajectory = _trajectory(
         [

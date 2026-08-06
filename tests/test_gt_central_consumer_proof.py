@@ -233,6 +233,65 @@ def test_newfile_precedent_records_a_concrete_precedent_path():
     assert row["payload"]["precedent_path"] == "bottle.py"
 
 
+def test_newfile_precedent_ranks_semantically_related_nonempty_sibling():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="write task_file/scripts/optimized_packer.py",
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            "write",
+            WR0,
+            SR1,
+            created=("task_file/scripts/optimized_packer.py",),
+            before_contents={
+                "task_file/scripts/__init__.py": "",
+                "task_file/scripts/baseline_packer.py": "def pack(requests):\n    return []\n",
+                "task_file/scripts/cost_model.py": "def cost(item):\n    return 1\n",
+            },
+            after_contents={
+                "task_file/scripts/optimized_packer.py": "def pack(requests):\n    return []\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    row = _feature_rows(runtime.summary(), "newfile_precedent")[0]
+    assert row["payload"]["precedent_path"] == "task_file/scripts/baseline_packer.py"
+
+
+def test_newfile_precedent_abstains_when_only_sibling_is_empty_package_marker():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="write task_file/scripts/optimized_packer.py",
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            "write",
+            WR0,
+            SR1,
+            created=("task_file/scripts/optimized_packer.py",),
+            before_contents={"task_file/scripts/__init__.py": ""},
+            after_contents={
+                "task_file/scripts/optimized_packer.py": "def pack(requests):\n    return []\n"
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    _assert_quiet(runtime, "newfile_precedent")
+
+
 def test_newfile_precedent_ignores_derived_and_cache_artifacts():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)

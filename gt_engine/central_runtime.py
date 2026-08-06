@@ -88,6 +88,22 @@ _DERIVED_SUFFIXES = frozenset(
         ".tar",
         ".gz",
         ".zip",
+        # Serialized/generated data and model artifacts are not authored
+        # source.  A model-selected benchmark may create them, but their
+        # creation must not advance source revision or validation debt.
+        ".pkl",
+        ".pickle",
+        ".npy",
+        ".npz",
+        ".pt",
+        ".parquet",
+        ".feather",
+        ".arrow",
+        ".h5",
+        ".hdf5",
+        ".onnx",
+        ".pb",
+        ".wasm",
     }
 )
 _DERIVED_PATH_PARTS = frozenset(
@@ -269,6 +285,15 @@ def source_revision_of(
     return digest.hexdigest()
 
 
+def _workspace_relative_path(path: str) -> str:
+    normalized = str(path or "").strip().replace("\\", "/")
+    if normalized.startswith("/app/"):
+        return normalized[5:]
+    if normalized.startswith("./"):
+        return normalized[2:]
+    return normalized
+
+
 def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
     """Return paths the task contract explicitly names as required output."""
     found: list[str] = []
@@ -280,7 +305,7 @@ def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
         ):
             continue
         for token in re.findall(r"`([^`\r\n]+)`", line):
-            path = token.strip()
+            path = _workspace_relative_path(token)
             if path.lower().endswith(_DELIVERABLE_SUFFIXES) and not is_submit_command(path):
                 found.append(path)
         for match in re.finditer(
@@ -288,7 +313,7 @@ def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
             line,
             re.I,
         ):
-            path = match.group(1)
+            path = _workspace_relative_path(match.group(1))
             if path not in found:
                 found.append(path)
     return tuple(dict.fromkeys(found))
@@ -2777,12 +2802,40 @@ class CentralFeatureRuntime:
                     continue
                 parent = created_path.rsplit("/", 1)[0] if "/" in created_path else ""
                 suffix = "." + created_path.rsplit(".", 1)[-1] if "." in created_path else ""
+                created_stem = created_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                created_tokens = set(re.findall(r"[a-z0-9]+", created_stem.lower()))
+
+                def concrete_precedent(path: str) -> bool:
+                    if path in transition.before_contents:
+                        return bool(transition.before_contents[path].strip())
+                    if snapshot is not None and path in snapshot.entries:
+                        return snapshot.entries[path].size > 0
+                    return False
+
+                def precedent_rank(
+                    path: str, expected_tokens: set[str] = created_tokens
+                ) -> tuple[int, bool, int, str]:
+                    name = path.rsplit("/", 1)[-1]
+                    stem = name.rsplit(".", 1)[0]
+                    tokens = set(re.findall(r"[a-z0-9]+", stem.lower()))
+                    overlap = len(expected_tokens & tokens)
+                    size = (
+                        snapshot.entries[path].size
+                        if snapshot is not None and path in snapshot.entries
+                        else len(transition.before_contents.get(path, ""))
+                    )
+                    return (-overlap, name == "__init__.py", -size, path)
+
                 candidates = sorted(
-                    path
-                    for path in source_precedent_paths
-                    if path not in transition.created
-                    and (path.rsplit("/", 1)[0] if "/" in path else "") == parent
-                    and (not suffix or path.lower().endswith(suffix.lower()))
+                    (
+                        path
+                        for path in source_precedent_paths
+                        if path not in transition.created
+                        and (path.rsplit("/", 1)[0] if "/" in path else "") == parent
+                        and (not suffix or path.lower().endswith(suffix.lower()))
+                        and concrete_precedent(path)
+                    ),
+                    key=precedent_rank,
                 )
                 if candidates:
                     precedent_created_path = created_path

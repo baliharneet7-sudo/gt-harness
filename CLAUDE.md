@@ -55,6 +55,15 @@ one-switch policy; the paid workflow explicitly selects ACTIVE with SHADOW
 preflight. Disabled task-start localization cannot surface on call two, and
 new-file precedent is one-shot per task.
 
+Workflow `31068690296` is a rejected diagnostic smoke: it preserved 9/10
+outcomes and improved aggregate resources, but six tasks had a positive
+resource dimension, `write-compressor` gained an outer 900-second timeout, and
+two of six provider payloads were semantically wrong. The repairs permanently
+classify serialized data/model files as derived artifacts, canonicalize
+`/app/...` task deliverables to sensor-relative paths, and require a non-empty,
+semantically ranked new-file precedent. Empty `__init__.py` is not useful
+precedent. Do not cite this run as an approved GT win; 89 remains blocked.
+
 Provider-free proof is gated by `python -m scripts.central_feature_census` and must
 print all of:
 `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,

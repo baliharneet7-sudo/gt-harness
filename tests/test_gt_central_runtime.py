@@ -722,6 +722,7 @@ def test_task_deliverable_paths_extracts_contract_outputs():
     )
 
     assert "report.jsonl" in task_deliverable_paths(instruction)
+    assert task_deliverable_paths("Create a /app/report.jsonl file.") == ("report.jsonl",)
     assert task_deliverable_paths("just fix the bug") == ()
 
 
@@ -733,6 +734,9 @@ def test_classify_change_never_advances_source_for_artifacts():
         ("data.comp", "f"),
         ("build/x.o", "f"),
         ("app.so", "f"),
+        ("data_8000.pkl", "f"),
+        ("weights.npy", "f"),
+        ("checkpoint.pt", "f"),
         ("logs/run.log", "f"),
         ("__pycache__/x.pyc", "f"),
         ("build", "d"),
@@ -786,6 +790,35 @@ def test_validation_debt_does_not_fire_on_artifact_only_changes():
     assert runtime.model_feedback() == ""
     assert runtime.summary()["source_epoch"] == 0
     assert runtime.summary()["action_metrics"]["workspace_change_actions"] == 0
+
+
+def test_generated_binary_data_cannot_trigger_validation_debt_after_source_edits():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Build then verify with `python3 setup.py build_ext --inplace`.",
+        revision="r0",
+        explicit_checks=("python3 setup.py build_ext --inplace",),
+    )
+    for action_id, path in ((1, "app.py"), (2, "app.py"), (3, "data_8000.pkl")):
+        runtime.observe_action(
+            action_id=action_id,
+            command=f"write {path}",
+            output="",
+            returncode=0,
+            transition=WorkspaceTransition(
+                action_id, "write", f"r{action_id - 1}", f"r{action_id}", modified=(path,)
+            ),
+            revision=f"r{action_id}",
+        )
+
+    summary = runtime.summary()
+    action_three = [
+        row for row in summary["receipts"] if row["action"] == 3
+    ]
+    surface = next(row for row in action_three if row["feature_id"] == "GT_CHANGE_SURFACE")
+    assert surface["payload"]["source_relevant"] == []
+    assert not any(row["feature_id"] == "GT_EDIT_CHECK" for row in action_three)
+    assert summary["source_epoch"] == 2
 
 
 def test_validation_debt_selects_highest_priority_declared_check():
