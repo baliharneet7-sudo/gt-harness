@@ -272,7 +272,7 @@ jobs:
           case "$FEATURE" in
             lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
             submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
-            all17|integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak enable_all_features=true) ;;
+            all17|integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak enable_all_features=true --ak integration_mode=active) ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
           esac
           FEATURE_ARGS+=(

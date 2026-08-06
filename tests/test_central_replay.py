@@ -111,7 +111,7 @@ def test_replay_flags_artifact_driven_validation_debt(tmp_path):
     assert _outcomes(report) == []
 
 
-def test_replay_detects_old_certificate_loss(tmp_path):
+def test_replay_invalidates_legacy_certificate_without_attributable_action(tmp_path):
     trajectory = _trajectory([("pwd", 0)], instruction="Just work.")
     trajectory_path = tmp_path / "miniswe_trajectory.json"
     trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
@@ -127,7 +127,30 @@ def test_replay_detects_old_certificate_loss(tmp_path):
 
     report = replay_task(trajectory_path, receipt_path, "task")
 
-    assert "old grounded certificate checks were lost" in " ".join(_outcomes(report))
+    assert report["old"]["attributable_certificate_checks"] == []
+    assert report["old"]["invalidated_certificate_checks"] == ["pytest -q"]
+    assert _outcomes(report) == []
+
+
+def test_replay_detects_attributable_certificate_loss(tmp_path):
+    trajectory = _trajectory([("pytest -q", 0)], instruction="Just work.")
+    trajectory_path = tmp_path / "miniswe_trajectory.json"
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt_path = tmp_path / "central_receipt.json"
+    receipt = _receipt()
+    cert = next(
+        row for row in receipt["features"]["receipts"] if row["feature_id"] == "GT_CERT_DELIVERY"
+    )
+    cert["payload"]["check_count"] = 1
+    cert["payload"]["checks"] = ["pytest -q"]
+    receipt["features"]["validation_log"] = [{"command": "pytest -q", "grounded": True}]
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = replay_task(trajectory_path, receipt_path, "task")
+    assert report["old"]["attributable_certificate_checks"] == ["pytest -q"]
+    report["new"]["ledger_checks_total"] = 0
+
+    assert "old attributable certificate checks were lost" in " ".join(_outcomes(report))
 
 
 def test_replay_reconstructs_archived_engine_syntax_evidence(tmp_path):

@@ -13,6 +13,7 @@ from gt_engine.central_runtime import (
     EvidenceLedger,
     FileState,
     InterventionDecision,
+    ValidationStatus,
     WorkspaceSensor,
     WorkspaceSnapshot,
     WorkspaceTransition,
@@ -404,6 +405,69 @@ def test_explicit_verifier_path_is_a_grounded_check_without_an_interpreter():
     assert classify_validation_command("python3 /app/test_outputs.py", checks).grounded
 
 
+def test_declared_verifier_text_in_a_read_is_not_a_validation_result():
+    checks = ("/app/test_outputs.py",)
+
+    classification = classify_validation_command("cat /app/test_outputs.py", checks)
+
+    assert classification.is_validation is False
+    assert classification.grounded is False
+    assert classification.status is ValidationStatus.UNKNOWN
+
+
+def test_trailing_reporter_prevents_validator_status_attribution():
+    classification = classify_validation_command("pytest -q; echo done").with_result(
+        result_code=0,
+        output="1 failed\ndone\n",
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+
+    assert classification.is_validation is True
+    assert classification.status is ValidationStatus.UNKNOWN
+    assert classification.status_attributed is False
+    assert classification.failure_kind == ""
+
+
+def test_background_validation_is_pending_not_passing():
+    classification = classify_validation_command("pytest -q &").with_result(
+        result_code=0,
+        output="",
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+
+    assert classification.is_validation is True
+    assert classification.status is ValidationStatus.PENDING
+    assert classification.status_attributed is False
+
+
+def test_pipeline_reporter_does_not_borrow_validator_status_without_pipefail():
+    classification = classify_validation_command("pytest -q | tee /tmp/results.txt").with_result(
+        result_code=0,
+        output="1 failed\n",
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+
+    assert classification.is_validation is True
+    assert classification.status is ValidationStatus.UNKNOWN
+    assert classification.status_attributed is False
+
+
+def test_terminal_validator_owns_the_action_result():
+    classification = classify_validation_command("python3 /app/test_outputs.py").with_result(
+        result_code=0,
+        output="all checks passed\n",
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+
+    assert classification.status is ValidationStatus.PASS
+    assert classification.status_attributed is True
+    assert classification.validator_segment_index == 0
+
+
 def test_explicit_check_parser_keeps_contract_named_build_and_pipe_commands():
     instruction = (
         "To build, run `python3 setup.py build_ext --inplace`, then test using "
@@ -459,6 +523,71 @@ def test_change_and_failure_capabilities_fire_only_at_their_real_boundaries():
     summary = runtime.summary()
     assert summary["produced_counts"]["covering_red"] == 1
     assert summary["produced_counts"]["GT_HYPOTHESIS"] == 1
+
+
+def test_newfile_precedent_is_one_shot_per_task_not_per_created_filename():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Add source modules.", revision="w0", source_revision="s0")
+    snapshot = WorkspaceSnapshot(
+        revision="w1",
+        healthy=True,
+        entries={
+            "src/existing.py": FileState("f", 10, 1.0, 1.0, "h1"),
+            "src/first.py": FileState("f", 10, 2.0, 2.0, "h2"),
+        },
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="touch src/first.py",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(
+            1,
+            "touch src/first.py",
+            "w0",
+            "w1",
+            created=("src/first.py",),
+            before_contents={"src/existing.py": "def existing(): pass\n"},
+            after_contents={"src/first.py": "def first(): pass\n"},
+        ),
+        revision="w1",
+        source_revision="s1",
+        snapshot=snapshot,
+    )
+    snapshot2 = WorkspaceSnapshot(
+        revision="w2",
+        healthy=True,
+        entries={
+            **snapshot.entries,
+            "src/second.py": FileState("f", 10, 3.0, 3.0, "h3"),
+        },
+    )
+    runtime.observe_action(
+        action_id=2,
+        command="touch src/second.py",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(
+            2,
+            "touch src/second.py",
+            "w1",
+            "w2",
+            created=("src/second.py",),
+            before_contents={"src/existing.py": "def existing(): pass\n"},
+            after_contents={"src/second.py": "def second(): pass\n"},
+        ),
+        revision="w2",
+        source_revision="s2",
+        snapshot=snapshot2,
+    )
+
+    rows = [
+        row
+        for row in runtime.summary()["receipts"]
+        if row["feature_id"] == "newfile_precedent"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["action"] == 1
 
 
 def test_signature_delta_requires_explicit_before_after_evidence():

@@ -33,6 +33,7 @@ from gt_engine.preflight import (
     ProposedAction,
     pass_decision,
     shell_segments,
+    shell_structure,
 )
 from gt_engine.semantic_decisions import (
     DecisionNeedKind,
@@ -563,6 +564,13 @@ def is_submit_command(command: str) -> bool:
     return _SUBMIT_MARKER in compact
 
 
+class ValidationStatus(StrEnum):
+    UNKNOWN = "unknown"
+    PENDING = "pending"
+    PASS = "pass"
+    FAIL = "fail"
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationClassification:
     """Single immutable classification of one shell action's validation meaning.
@@ -583,6 +591,11 @@ class ValidationClassification:
     source_revision: str = ""
     workspace_revision: str = ""
     diagnostic_fingerprint: str = ""
+    status: ValidationStatus = ValidationStatus.UNKNOWN
+    status_attributed: bool = False
+    validator_segment_index: int | None = None
+    attribution_reason: str = "not_executed"
+    shell_connectors: tuple[str, ...] = ()
 
     def with_result(
         self,
@@ -593,7 +606,52 @@ class ValidationClassification:
         workspace_revision: str,
     ) -> ValidationClassification:
         """Return a copy carrying execution outcome and revision bindings."""
-        failure_kind = classify_failure_kind(result_code, output)
+        if not self.is_validation:
+            return replace(
+                self,
+                result_code=result_code,
+                source_revision=source_revision,
+                workspace_revision=workspace_revision,
+                status=ValidationStatus.UNKNOWN,
+                status_attributed=False,
+                attribution_reason="not_validation",
+            )
+        terminal_background = bool(
+            self.shell_connectors
+            and self.validator_segment_index is not None
+            and len(self.shell_connectors) > self.validator_segment_index
+            and "&" in self.shell_connectors[self.validator_segment_index]
+        )
+        if terminal_background:
+            return replace(
+                self,
+                result_code=result_code,
+                source_revision=source_revision,
+                workspace_revision=workspace_revision,
+                status=ValidationStatus.PENDING,
+                status_attributed=False,
+                failure_kind="",
+                diagnostic_fingerprint="",
+                attribution_reason="validator_dispatched_in_background",
+            )
+        segments = _shell_segments(self.command)
+        if (
+            self.validator_segment_index is None
+            or self.validator_segment_index != len(segments) - 1
+        ):
+            return replace(
+                self,
+                result_code=result_code,
+                source_revision=source_revision,
+                workspace_revision=workspace_revision,
+                status=ValidationStatus.UNKNOWN,
+                status_attributed=False,
+                failure_kind="",
+                diagnostic_fingerprint="",
+                attribution_reason="later_shell_segment_owns_action_status",
+            )
+        status = ValidationStatus.PASS if result_code == 0 else ValidationStatus.FAIL
+        failure_kind = classify_failure_kind(result_code, output) if result_code != 0 else ""
         failure_signature = " ".join(
             line.strip() for line in (output or "").splitlines() if _FAILURE_LINE.search(line)
         )[:240]
@@ -607,6 +665,9 @@ class ValidationClassification:
             source_revision=source_revision,
             workspace_revision=workspace_revision,
             diagnostic_fingerprint=fingerprint,
+            status=status,
+            status_attributed=True,
+            attribution_reason="terminal_foreground_validator_owns_action_status",
         )
 
 
@@ -665,8 +726,51 @@ def classify_validation_command(
 ) -> ValidationClassification:
     """Classify validation by shell structure, never by source/comment text."""
     normalized = normalize_command(command)
-    grounded = is_grounded_check(normalized, explicit_checks)
-    recognized = any(_recognized_validation(segment) for segment in _shell_segments(command))
+    segments, connectors = shell_structure(command)
+    checks = tuple(dict.fromkeys(normalize_command(item) for item in explicit_checks if item))
+    recognized_indices = [
+        index for index, segment in enumerate(segments) if _recognized_validation(segment)
+    ]
+    declared_check_id: str | None = None
+    declared_segment_index: int | None = None
+    for check in checks:
+        if check == normalized:
+            declared_check_id = check
+            declared_segment_index = len(segments) - 1 if segments else None
+            break
+        try:
+            check_segments = shell_segments(check)
+        except ValueError:
+            check_segments = ()
+        if len(check_segments) == 1:
+            check_words = check_segments[0]
+            for index, segment in enumerate(segments):
+                if tuple(segment) == tuple(check_words):
+                    declared_check_id = check
+                    declared_segment_index = index
+                    break
+                # A task may name only a verifier artifact.  It is grounded
+                # when that exact operand is executed by a validator, never
+                # merely because a reader such as ``cat`` mentions the path.
+                if (
+                    len(check_words) == 1
+                    and check_words[0] in segment[1:]
+                    and _recognized_validation(segment)
+                ):
+                    declared_check_id = check
+                    declared_segment_index = index
+                    break
+            if declared_check_id is not None:
+                break
+    grounded = declared_check_id is not None
+    recognized = bool(recognized_indices)
+    validator_segment_index = (
+        declared_segment_index
+        if declared_segment_index is not None
+        else recognized_indices[-1]
+        if recognized_indices
+        else None
+    )
     if grounded:
         command_class = "declared_validation"
     elif recognized:
@@ -680,13 +784,15 @@ def classify_validation_command(
         failure_kind="",
         command=command,
         normalized_command=normalized,
-        declared_check_id=_declared_check_id(normalized, explicit_checks),
+        declared_check_id=declared_check_id,
+        validator_segment_index=validator_segment_index,
+        shell_connectors=connectors,
     )
 
 
 def _declared_check_id(normalized: str, explicit_checks: Iterable[str]) -> str | None:
     for check in explicit_checks:
-        if check == normalized or check in normalized:
+        if normalize_command(check) == normalized:
             return check
     return None
 
@@ -768,8 +874,7 @@ def explicit_check_commands(instruction: str) -> tuple[str, ...]:
 
 
 def is_grounded_check(command: str, explicit_checks: Iterable[str]) -> bool:
-    normalized = normalize_command(command)
-    return any(check == normalized or check in normalized for check in explicit_checks)
+    return classify_validation_command(command, explicit_checks).grounded
 
 
 @dataclass(slots=True)
@@ -791,9 +896,25 @@ class EvidenceLedger:
         classification: ValidationClassification | None = None,
     ) -> None:
         key = normalize_command(command)
+        effective_returncode = returncode
+        if classification is not None:
+            if classification.result_code is None:
+                classification = classification.with_result(
+                    result_code=returncode,
+                    output="",
+                    source_revision=revision,
+                    workspace_revision=classification.workspace_revision,
+                )
+            if classification.status not in {ValidationStatus.PASS, ValidationStatus.FAIL}:
+                # Intent without an attributable foreground result is not a
+                # certificate and cannot create or clear a submit blocker.
+                return
+            effective_returncode = 0 if classification.status is ValidationStatus.PASS else (
+                classification.result_code if classification.result_code not in {None, 0} else 1
+            )
         evidence = CheckEvidence(
             command=key,
-            returncode=returncode,
+            returncode=effective_returncode,
             revision=revision,
             grounded=grounded,
             command_class=(classification.command_class if classification else "unknown"),
@@ -805,7 +926,7 @@ class EvidenceLedger:
             source_revision=(classification.source_revision if classification else revision),
         )
         self.outcomes[key] = evidence
-        if returncode == 0:
+        if effective_returncode == 0:
             self.checks.pop(key, None)
             return
         self.checks[key] = evidence
@@ -1674,6 +1795,24 @@ class CentralFeatureRuntime:
                 },
             )
 
+    def suppress_task_start_delivery(self) -> None:
+        """Close call-zero localization when the host disabled that surface."""
+
+        self._decisions.resolve_open_needs_by_kind(
+            DecisionNeedKind.LOCALIZE_TASK,
+            resolution="task_start_advisory_disabled",
+        )
+        for receipt in tuple(self.receipts):
+            if (
+                receipt.action_id == 0
+                and receipt.feature_id == "GT_LOC_RESLOT"
+                and receipt.model_visible
+            ):
+                self._suppress_receipt_delivery(
+                    receipt,
+                    reason="task_start_advisory_disabled",
+                )
+
     def refresh_structural_evidence(
         self,
         *,
@@ -2006,6 +2145,13 @@ class CentralFeatureRuntime:
             self._decisions.invalidate_other_revisions(source_rev)
         self._current_source_revision = source_rev
         classification = validation or classify_validation_command(command, self._explicit_checks)
+        if classification.result_code is None:
+            classification = classification.with_result(
+                result_code=returncode,
+                output=output,
+                source_revision=source_rev,
+                workspace_revision=revision,
+            )
         is_search = bool(self._SEARCH.search(normalized))
         self._action_metrics["observed_actions"] += 1
         self._action_metrics["successful_actions" if returncode == 0 else "failed_actions"] += 1
@@ -2041,7 +2187,6 @@ class CentralFeatureRuntime:
                         span.end_line,
                         span.whole_file,
                         source_rev,
-                        output_hash,
                     )
                     self._recent_reads = [
                         item
@@ -2052,7 +2197,6 @@ class CentralFeatureRuntime:
                             item.get("end_line"),
                             item.get("whole_file"),
                             item.get("source_revision"),
-                            item.get("output_hash"),
                         )
                         != identity
                     ]
@@ -2071,15 +2215,24 @@ class CentralFeatureRuntime:
                 "source_revision": source_rev,
                 "workspace_revision": revision,
                 "diagnostic_fingerprint": classification.diagnostic_fingerprint,
+                "status": classification.status.value,
+                "status_attributed": classification.status_attributed,
+                "validator_segment_index": classification.validator_segment_index,
+                "attribution_reason": classification.attribution_reason,
             }
         )
         if classification.is_validation:
             self._action_metrics["check_actions"] += 1
             self._latest_validation = {
                 "command": classification.normalized_command,
-                "returncode": returncode,
+                "returncode": classification.result_code,
+                "status": classification.status.value,
+                "status_attributed": classification.status_attributed,
                 "source_revision": source_rev,
+                "workspace_revision": revision,
+                "action_id": action_id,
             }
+        if classification.status in {ValidationStatus.PASS, ValidationStatus.FAIL}:
             self._mark_lifecycle("behavior_observed", action_id=action_id)
             if self._workspace_edited:
                 self._post_edit_checks += 1
@@ -2091,13 +2244,19 @@ class CentralFeatureRuntime:
                 self._mark_lifecycle(
                     phase,
                     action_id=action_id,
-                    status="passed" if returncode == 0 else "failed",
+                    status=(
+                        "passed"
+                        if classification.status is ValidationStatus.PASS
+                        else "failed"
+                    ),
                 )
             if classification.declared_check_id:
                 self._declared_check_states[classification.declared_check_id] = (
-                    "passed" if returncode == 0 else "failed"
+                    "passed"
+                    if classification.status is ValidationStatus.PASS
+                    else "failed"
                 )
-            if returncode == 0:
+            if classification.status is ValidationStatus.PASS:
                 self._unvalidated_material_edits = 0
                 self._validation_debt_notified = False
                 self._submit_risk_revisions.discard(source_rev)
@@ -2145,6 +2304,8 @@ class CentralFeatureRuntime:
                     "command": normalized,
                     "paths": list(source_relevant),
                     "source_revision": source_rev,
+                    "workspace_revision": revision,
+                    "action_id": action_id,
                 }
                 self._declared_check_states = {
                     check: ("stale" if state == "passed" else state)
@@ -2419,10 +2580,9 @@ class CentralFeatureRuntime:
                     },
                 )
 
-        failure_kind = classify_failure_kind(returncode, output)
+        failure_kind = classification.failure_kind
         if (
-            returncode != 0
-            and classification.is_validation
+            classification.status is ValidationStatus.FAIL
             and failure_kind == "validation_failure"
         ):
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
@@ -2439,6 +2599,8 @@ class CentralFeatureRuntime:
                 "fingerprint": classification.diagnostic_fingerprint,
                 "diagnostic": bounded_diagnostic,
                 "source_revision": source_rev,
+                "workspace_revision": revision,
+                "action_id": action_id,
             }
             self.record_producer_event(
                 feature_id="covering_red",
@@ -2571,7 +2733,7 @@ class CentralFeatureRuntime:
                     },
                 )
 
-        if transition.created:
+        if transition.created and not self._precedent_verified:
             available_paths = set(transition.before_contents)
             if snapshot is not None:
                 available_paths.update(snapshot.entries)

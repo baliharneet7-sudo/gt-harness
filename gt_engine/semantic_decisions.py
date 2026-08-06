@@ -238,6 +238,18 @@ class SemanticDecisionEngine:
             resolution=str(resolution or "resolved"),
         )
 
+    def resolve_open_needs_by_kind(
+        self, kind: DecisionNeedKind, *, resolution: str
+    ) -> tuple[str, ...]:
+        """Resolve every currently open need of one lifecycle kind."""
+
+        resolved: list[str] = []
+        for need_id, need in tuple(self._needs.items()):
+            if need.open and need.kind is kind:
+                self.resolve_need(need_id, resolution=resolution)
+                resolved.append(need_id)
+        return tuple(resolved)
+
     def invalidate_other_revisions(self, source_revision: str) -> None:
         """Invalidate stale claims/needs after authored source changes."""
         for claim_id, claim in tuple(self._claims.items()):

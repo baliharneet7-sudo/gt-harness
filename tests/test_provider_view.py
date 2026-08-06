@@ -102,6 +102,26 @@ def test_dedupe_runs_below_compaction_trigger():
     assert tool_contents == ["X" * 50]
 
 
+def test_observation_only_compiler_preserves_duplicate_history_exactly():
+    messages = _history(
+        ("cat a.py", "X" * 50),
+        ("cat a.py", "X" * 50),
+    )
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state={"source_revision": "s1"},
+        trigger_chars=1,
+        target_chars=1,
+        transform=False,
+    )
+
+    assert view == messages
+    assert metrics.compacted is False
+    assert metrics.duplicate_turns_removed == 0
+    assert metrics.input_chars == metrics.output_chars
+
+
 def test_compiler_proves_existing_read_fact_at_exact_provider_message():
     messages = _history(("cat src/app.py", "def run(): pass"))
     state = {
@@ -136,6 +156,35 @@ def test_compiler_proves_existing_read_fact_at_exact_provider_message():
     assert view == messages
 
 
+def test_compiler_canonicalizes_app_absolute_and_repository_relative_paths():
+    messages = _history(("sed -n '1,80p' src/app.py", "def run(): pass"))
+    state = {
+        "source_revision": "s1",
+        "workspace_revision": "w1",
+        "recent_reads": [
+            {
+                "path": "/app/src/app.py",
+                "source_revision": "s1",
+                "workspace_revision": "w1",
+                "action_id": 1,
+                "returncode": 0,
+            }
+        ],
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=state,
+        trigger_chars=10**18,
+        target_chars=10**18,
+    )
+
+    row = next(item for item in metrics.fact_accounting if item["kind"] == "read")
+    assert row["disposition"] == "represented_message"
+    assert row["provider_message_indices"] == [1, 2]
+    assert view == messages
+
+
 def test_compiler_emits_missing_current_failure_but_not_private_revisions():
     messages = _history(("cat src/app.py", "def run(): pass"))
     state = {
@@ -158,14 +207,41 @@ def test_compiler_emits_missing_current_failure_but_not_private_revisions():
     )
 
     joined = "\n".join(str(item.get("content") or "") for item in view)
-    assert "FAILED tests/test_app.py::test_contract" in joined
+    assert "FAILED tests/test_app.py::test_contract" not in joined
     failure = next(row for row in metrics.fact_accounting if row["kind"] == "failure")
     revisions = [row for row in metrics.fact_accounting if row["kind"] == "revision"]
-    assert failure["disposition"] == "selected_state_frame"
-    assert failure["provider_message_indices"] == [len(view) - 1]
+    assert failure["disposition"] == "no_compaction_controller_only"
+    assert failure["provider_message_indices"] == []
     assert all(row["disposition"] == "controller_only" for row in revisions)
-    assert metrics.selected_fact_count == 1
+    assert metrics.selected_fact_count == 0
     assert metrics.controller_only_fact_count == 2
+    assert metrics.accounted_fact_count == metrics.candidate_fact_count
+
+
+def test_below_compaction_trigger_preserves_provider_messages_byte_for_byte():
+    messages = _history(("cat src/app.py", "def run(): pass"))
+    state = {
+        "source_revision": "s2",
+        "workspace_revision": "w2",
+        "unresolved_failure": {
+            "command": "pytest -q",
+            "diagnostic": "FAILED tests/test_app.py::test_contract",
+            "source_revision": "s2",
+            "workspace_revision": "w2",
+            "action_id": 2,
+        },
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=state,
+        trigger_chars=10**18,
+        target_chars=10**18,
+    )
+
+    assert view == messages
+    assert metrics.compacted is False
+    assert metrics.selected_fact_count == 0
     assert metrics.accounted_fact_count == metrics.candidate_fact_count
 
 

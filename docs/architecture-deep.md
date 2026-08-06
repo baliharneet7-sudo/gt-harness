@@ -6,6 +6,11 @@ efficiency lives and where it leaks.
 v
 ## The pipeline, step by step
 
+> The Terminal-Bench GT arm is `eval.gt_central_agent:MiniSweCentralAgent`.
+> Its preflight/postflight lifecycle and provider accounting are documented in
+> `docs/architecture.md` and `AGENTS.md`; the nano loop below is a separate
+> harness and must not be used to infer central-runtime timing.
+
 1. **CLI** (`cli.py`) — parses args, forces UTF-8 stdout, routes the model name
    to a provider: `--base-url` set → `OpenAIProvider` against any
    OpenAI-compatible endpoint (ASU gateway, vLLM, ollama); name starts with

@@ -23,6 +23,9 @@ DIAGNOSTIC_METRICS = (
     "output_tokens",
     "uncached_input_tokens",
     "context_chars_sent",
+    "provider_request_chars_sent",
+    "provider_requests_hashed",
+    "provider_request_hash_coverage",
     "model_output_chars",
     "failed_actions",
     "repeated_commands",
@@ -58,6 +61,8 @@ DIAGNOSTIC_METRICS = (
     "context_facts_accounted",
     "context_exact_duplicate_chars_removed",
     "context_unique_reasoning_chars_removed",
+    "context_state_frame_calls",
+    "context_provider_view_changed_calls",
     "context_selected_facts_action_measurable",
     "context_selected_facts_action_aligned",
     "context_compiler_effects_considered",
@@ -65,6 +70,9 @@ DIAGNOSTIC_METRICS = (
     "context_compiler_effects_unaccounted",
     "preflight_known_segment_operations",
     "preflight_unknown_segment_operations",
+    "preflight_typed_targets",
+    "validation_attributed_results",
+    "validation_unattributed_intents",
     "agent_wall_time_seconds",
     "trial_wall_time_seconds",
 )
@@ -469,6 +477,14 @@ def extract_trajectory(
             "context_compiler_effects_unaccounted",
             "preflight_known_segment_operations",
             "preflight_unknown_segment_operations",
+            "preflight_typed_targets",
+            "provider_request_chars_sent",
+            "provider_requests_hashed",
+            "provider_request_hash_coverage",
+            "context_state_frame_calls",
+            "context_provider_view_changed_calls",
+            "validation_attributed_results",
+            "validation_unattributed_intents",
         ):
             result[key] = receipt_metrics.get(key, result.get(key, 0))
         result["total_gt_context_chars_added"] = (

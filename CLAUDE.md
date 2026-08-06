@@ -40,6 +40,21 @@ one reasoning step later and never before its evidence exists. Every
 model-visible payload must name concrete paths, symbols, commands, checks, or
 diagnostics; related feature payloads are coalesced to avoid context spam.
 
+Validation intent is not a result certificate. The shared classifier records
+UNKNOWN/PENDING/PASS/FAIL, and only a terminal foreground validator may own the
+outer shell status. Reads of verifier files, background commands, trailing
+reporters, and unproven pipelines cannot pass or fail an obligation. The typed
+shell adapter preserves command newlines and keeps heredoc/interpreter source
+opaque, so source strings and diagnostics never become fake targets.
+
+The paid no-compaction path is strictly observation-only: it preserves the
+Mini-SWE message sequence, performs no turn deduplication, and appends no
+generic state frame. Each call hashes the provider-prepared messages after
+private metadata is stripped. `integration_mode=off|audit|active` is the
+one-switch policy; the paid workflow explicitly selects ACTIVE with SHADOW
+preflight. Disabled task-start localization cannot surface on call two, and
+new-file precedent is one-shot per task.
+
 Provider-free proof is gated by `python -m scripts.central_feature_census` and must
 print all of:
 `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
@@ -87,12 +102,13 @@ controller-only, is stale, or is omitted by the frame budget. The per-call
 invariant is `candidate_fact_count == accounted_fact_count`; the final request
 hash proves what the model actually received.
 
-The compiler preserves all distinct Mini-SWE reasoning. Exact turn dedupe now
-fingerprints assistant content, reasoning content, selected commands, and tool
-results, so only byte-identical reasoning/action/result turns may collapse.
-Lossy historical compaction is disabled in the paid workflow. The compiler
-still runs every call and emits a fact only when that material current fact is
-not already present, preventing duplicate context.
+The compiler preserves all distinct Mini-SWE reasoning. In the separately
+gated compaction transform, exact-turn dedupe fingerprints assistant content,
+reasoning content, selected commands, and tool results, so only byte-identical
+reasoning/action/result turns may collapse. That transform is disabled in the
+paid workflow: the compiler accounts for facts on every call but does not emit
+a recurring state frame or remove any turn. Grounded decision evidence uses
+the bounded one-shot semantic-delivery path.
 
 Compound Bash is classified segment by segment. Typed read observations carry
 canonical path, requested line range, source/workspace revision, return code,

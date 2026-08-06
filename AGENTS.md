@@ -153,6 +153,40 @@ ablation proves it preserves outcomes; the compiler and exact accounting still
 run on every request. Read observations come from every typed shell segment,
 not only a command's primary label, and retain path/range/revision/result hash.
 
+## Regression-hardening contract (2026-08-05)
+
+Validation intent and outcome are separate. `ValidationStatus` is `UNKNOWN`,
+`PENDING`, `PASS`, or `FAIL`; PASS/FAIL is legal only when the validator is the
+terminal foreground segment that owns the shell action's return status. A
+verifier mentioned by `cat`, a background check, a validator followed by
+`echo`, or a validator piped into a reporter without mechanically proven
+`pipefail` remains UNKNOWN/PENDING and cannot create or clear a certificate.
+
+The shared shell parser preserves top-level newlines, treats heredoc bodies and
+interpreter `-c`/`-e` programs as opaque, and derives targets only from parsed
+operands/redirections. It never regex-scans raw source or diagnostic text into
+typed targets. Unsupported syntax abstains to `OTHER`/PASS.
+
+When compaction is disabled, the compiler is observation-only: it may account
+facts but must not deduplicate turns, append a user state frame, or change any
+provider message. Missing facts are `no_compaction_controller_only`.
+Exact-turn deduplication and bounded state frames belong only to the separately
+gated compaction transform. Read identity canonicalizes `/app/path` and
+relative paths and excludes output hashes from the identity.
+
+The receipt hashes Mini-SWE's provider-prepared message list after private
+`extra` metadata is removed/reordered. No model marker is required.
+`provider_request_hash_coverage` must be 1.0 and, with paid compaction disabled,
+`context_state_frame_calls` and `context_provider_view_changed_calls` must be
+zero.
+
+`integration_mode` is the single host switch: `off` disables GT behavior,
+`audit` permits private accounting but preserves provider history and
+downgrades intervention to SHADOW, and `active` enables grounded one-shot
+delivery. The paid workflow is explicitly ACTIVE + SHADOW preflight + no
+compaction. A disabled task-start advisory is resolved at action zero and may
+not leak into call two. `newfile_precedent` is one-shot per task.
+
 ## Provider-free proof
 
 `python -m scripts.central_feature_census` must print all required lines before any paid

@@ -23,7 +23,8 @@ from harbor.agents.base import BaseAgent
 from harbor.agents.installed.base import BaseInstalledAgent
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
-from eval.gt_central_agent import MiniSweCentralAgent
+from eval.gt_central_agent import GTIntegrationMode, MiniSweCentralAgent
+from gt_engine.central_runtime import CentralFeatureRuntime, ValidationClassification
 from gt_engine.preflight import PreflightMode
 from scripts.central_feature_census import census as central_feature_census
 
@@ -34,6 +35,8 @@ def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
     run_source = inspect.getsource(MiniSweCentralAgent.run)
     setup_source = inspect.getsource(MiniSweCentralAgent.setup)
+    validation_source = inspect.getsource(ValidationClassification)
+    observation_source = inspect.getsource(CentralFeatureRuntime.observe_action)
     workflow = (ROOT / ".github/workflows/tb2_miniswe_engine.yml").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
@@ -51,6 +54,12 @@ def audit() -> dict[str, bool]:
             "--ak preflight_mode=shadow" in workflow
             and "--ak enable_preflight=true" not in workflow
         ),
+        "paid_integration_mode_is_explicit_active": "--ak integration_mode=active" in workflow,
+        "one_switch_off_is_provider_neutral": (
+            GTIntegrationMode.OFF.value == "off"
+            and "transform=False" in run_source
+            and "self.integration_mode is GTIntegrationMode.OFF" in source
+        ),
         "provider_free_gate_covers_preflight": "tests/test_gt_preflight.py" in workflow,
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in workflow
@@ -61,6 +70,17 @@ def audit() -> dict[str, bool]:
             0
             <= run_source.find("record_context_compiler_call(")
             < run_source.find("model.query, query_messages")
+        ),
+        "provider_prepared_hash_precedes_model_query": (
+            0
+            <= run_source.find("_provider_request_receipt(model, query_messages)")
+            < run_source.find("model.query, query_messages")
+        ),
+        "validation_status_is_attributed_not_outer_rc_only": (
+            "status_attributed=True" in validation_source
+            and "later_shell_segment_owns_action_status" in validation_source
+            and "classification.status is ValidationStatus.PASS" in observation_source
+            and "classification.status is ValidationStatus.FAIL" in observation_source
         ),
         "typed_proposal_precedes_environment_exec": (
             0

@@ -32,6 +32,7 @@ from gt_engine.central_runtime import (
     explicit_check_commands,
     feature_payload_grounded,
     is_submit_command,
+    normalize_command,
     task_deliverable_paths,
 )
 from gt_engine.preflight import ActionDisposition, adapt_proposed_action
@@ -155,6 +156,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     shadow_barrier_calls: set[int] = set()
     shadow_suffix_actions_prevented = 0
     shadow_barriers: list[dict[str, Any]] = []
+    attributed_validation_commands: set[str] = set()
 
     for event in events:
         action_id = event["index"]
@@ -257,6 +259,8 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             source_revision=source_revision,
             workspace_revision="replay-w0",
         )
+        if classification.status_attributed:
+            attributed_validation_commands.add(classification.normalized_command)
         runtime.observe_action(
             action_id=action_id,
             command=event["command"],
@@ -339,6 +343,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             active_state=active_state,
             trigger_chars=10**18,
             target_chars=10**18,
+            transform=False,
         )
         runtime.record_context_compiler_call(
             call=action_id + 1,
@@ -386,6 +391,14 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             )
         }
     )
+    old_attributable_certificate_checks = sorted(
+        check
+        for check in old_grounded_certificate_checks
+        if normalize_command(check) in attributed_validation_commands
+    )
+    old_invalidated_certificate_checks = sorted(
+        set(old_grounded_certificate_checks) - set(old_attributable_certificate_checks)
+    )
     old_produced = old_features.get("produced_counts")
     if old_produced is None:
         old_produced = Counter(row.get("feature_id") for row in old_receipts)
@@ -421,6 +434,8 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             "ungrounded_deliveries": old_ungrounded_deliveries,
             "certificate": old_cert_payload,
             "grounded_certificate_checks": old_grounded_certificate_checks,
+            "attributable_certificate_checks": old_attributable_certificate_checks,
+            "invalidated_certificate_checks": old_invalidated_certificate_checks,
             "exit_status": str((trajectory.get("info") or {}).get("exit_status") or ""),
         },
         "new": {
@@ -502,9 +517,11 @@ def _outcomes(task: dict[str, Any]) -> list[str]:
     ledger_total = int(task["new"]["ledger_checks_total"])
     if new_declared > 0 and ledger_total == 0:
         failed.append("runtime classified declared validations but the ledger recorded none")
-    old_grounded_cert_count = len(task["old"].get("grounded_certificate_checks") or ())
-    if old_grounded_cert_count > 0 and ledger_total == 0:
-        failed.append("old grounded certificate checks were lost by the repaired policy")
+    old_attributable_cert_count = len(
+        task["old"].get("attributable_certificate_checks") or ()
+    )
+    if old_attributable_cert_count > 0 and ledger_total == 0:
+        failed.append("old attributable certificate checks were lost by the repaired policy")
     if task["new"]["submit_holds"] or task["new"]["batch_interrupts"]:
         failed.append("repaired policy blocked or interrupted Mini-SWE")
     if task["new"]["interrupted_actions"]:

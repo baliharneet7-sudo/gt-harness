@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import time
@@ -13,6 +14,7 @@ from harbor.models.agent.context import AgentContext
 from minisweagent.exceptions import FormatError
 
 from eval.gt_central_agent import (
+    GTIntegrationMode,
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
     _message_context_chars,
@@ -179,6 +181,95 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     assert delivery["delivered_before_call"] == 1
     assert delivery["one_step_late"] is False
     assert delivery["not_predictive"] is True
+
+
+@pytest.mark.asyncio
+async def test_disabled_task_start_advisory_never_leaks_into_call_two(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname='demo'\n")
+            (root / "src" / "greeter.py").write_text("def greet(): return 'hello'\n")
+
+    model = _ScriptedModel(
+        ["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_task_start_advisory=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Change the greeting.", TransferEnvironment(), AgentContext())
+
+    assert len(model.observed_history) == 2
+    assert not any(
+        "src/greeter.py" in item
+        for history in model.observed_history
+        for item in history
+    )
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert not any(
+        row["feature_id"] == "GT_LOC_RESLOT"
+        for row in receipt["guidance_deliveries"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_receipt_hashes_the_provider_prepared_messages_not_private_extra(tmp_path):
+    class PreparedModel(_ScriptedModel):
+        model_kwargs = {"temperature": 1.0}
+        tools = [{"type": "function", "function": {"name": "bash"}}]
+
+        def __init__(self, commands):
+            super().__init__(commands)
+            self.raw_history = []
+
+        def _prepare_messages_for_api(self, messages):
+            return [
+                {key: value for key, value in message.items() if key != "extra"}
+                for message in messages
+            ]
+
+        def query(self, messages):
+            self.raw_history.append(json.loads(json.dumps(messages)))
+            return super().query(messages)
+
+    model = PreparedModel(
+        ["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect café, then finish.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    row = receipt["model_call_contexts"][1]
+    logical = model.observed_history[1]
+    prepared = model._prepare_messages_for_api(model.raw_history[1])
+    expected = hashlib.sha256(
+        json.dumps(
+            prepared,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert row["provider_messages_sha256"] == expected
+    assert row["provider_request_chars"] == len(
+        json.dumps(
+            prepared,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    )
+    assert row["provider_message_count"] == len(prepared)
+    assert logical
 
 
 @pytest.mark.asyncio
@@ -384,11 +475,13 @@ async def test_off_and_shadow_dispatch_identical_model_commands(tmp_path):
         logs_dir=tmp_path / "off",
         model_name="test",
         preflight_mode=PreflightMode.OFF,
+        integration_mode=GTIntegrationMode.OFF,
     )
     shadow = MiniSweCentralAgent(
         logs_dir=tmp_path / "shadow",
         model_name="test",
         preflight_mode=PreflightMode.SHADOW,
+        integration_mode=GTIntegrationMode.AUDIT,
     )
     off._model_factory = lambda: off_model
     shadow._model_factory = lambda: shadow_model
@@ -411,6 +504,43 @@ async def test_off_and_shadow_dispatch_identical_model_commands(tmp_path):
     shadow_receipt = json.loads((tmp_path / "shadow" / "central_receipt.json").read_text())
     assert off_receipt["features"]["action_cycles"] == []
     assert len(shadow_receipt["features"]["action_cycles"]) == 2
+    assert off_receipt["integration_mode"] == "off"
+    assert shadow_receipt["integration_mode"] == "audit"
+    assert [
+        row["provider_messages_sha256"] for row in off_receipt["model_call_contexts"]
+    ] == [
+        row["provider_messages_sha256"] for row in shadow_receipt["model_call_contexts"]
+    ]
+
+
+def test_integration_mode_is_one_switch_and_audit_cannot_intervene(tmp_path):
+    off = MiniSweCentralAgent(
+        logs_dir=tmp_path / "off",
+        model_name="test",
+        integration_mode="off",
+        preflight_mode="assistive_safe",
+        enable_context_compaction=True,
+        enable_task_start_advisory=True,
+    )
+    audit = MiniSweCentralAgent(
+        logs_dir=tmp_path / "audit",
+        model_name="test",
+        integration_mode="audit",
+        preflight_mode="assistive_safe",
+        enable_context_compaction=True,
+        enable_task_start_advisory=True,
+    )
+
+    assert off.integration_mode is GTIntegrationMode.OFF
+    assert off.preflight_mode is PreflightMode.OFF
+    assert off.enable_context_compaction is False
+    assert off.enable_task_start_advisory is False
+    assert off.enable_lint is False
+    assert off.enable_submit_readiness is False
+    assert audit.integration_mode is GTIntegrationMode.AUDIT
+    assert audit.preflight_mode is PreflightMode.SHADOW
+    assert audit.enable_context_compaction is False
+    assert audit.enable_task_start_advisory is False
 
 
 @pytest.mark.asyncio

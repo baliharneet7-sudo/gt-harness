@@ -37,6 +37,26 @@ It is therefore the deterministic evidence engine for the GT arm, not a
 post-run tracer. The language model still supplies reasoning; GT supplies
 repository facts, deterministic checks, routing, and completion evidence.
 
+### Central Mini-SWE action boundary
+
+The active Terminal-Bench arm is two-sided and in-process:
+
+```text
+model.query
+  -> typed ProposedAction (newline-aware; heredoc/code bodies opaque)
+  -> deterministic preflight (default PASS; paid mode SHADOW)
+  -> environment.exec
+  -> source/workspace revisions + attributed validation status
+  -> postflight effects and one-shot semantic decision frame
+  -> exact provider-prepared request receipt
+  -> next model.query
+```
+
+GT does not predict an action before model selection. Validation PASS/FAIL is
+recorded only when the terminal foreground validator owns the shell return
+code. With compaction disabled, facts are audited without changing provider
+history. The host switch is `integration_mode=off|audit|active`.
+
 The two audit streams answer different questions:
 
 - `gt_ledger.jsonl`: which exact evidence bytes were sealed and delivered.

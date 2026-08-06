@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,56 @@ def _percentile(values: list[float], percentile: float) -> float:
     return round(ordered[index], 6)
 
 
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+
+
+def _provider_request_receipt(
+    model: Any, messages: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str, str, int]:
+    """Hash the exact messages produced by Mini-SWE's provider adapter.
+
+    A neutral observer may already wrap the preparation method.  In that case
+    use its original pure preparation function so measurement cannot create a
+    duplicate observer event.  Scripted test models use the same minimum
+    contract as Mini-SWE: private ``extra`` metadata is not provider-visible.
+    """
+
+    observer = getattr(model, "_research_receipt_observer", None)
+    prepare = getattr(observer, "_original_prepare", None)
+    if not callable(prepare):
+        prepare = getattr(model, "_prepare_messages_for_api", None)
+    if callable(prepare):
+        prepared = prepare(messages)
+    else:
+        prepared = [
+            {key: value for key, value in item.items() if key != "extra"}
+            for item in messages
+        ]
+    envelope = {
+        "model": str(
+            getattr(getattr(model, "config", None), "model_name", "")
+            or getattr(model, "model_name", "")
+        ),
+        "model_kwargs": getattr(model, "model_kwargs", {}) or {},
+        "tools": getattr(model, "tools", None),
+        "messages": prepared,
+    }
+    messages_bytes = _canonical_json(prepared)
+    return (
+        prepared,
+        hashlib.sha256(_canonical_json(envelope)).hexdigest(),
+        hashlib.sha256(messages_bytes).hexdigest(),
+        len(messages_bytes.decode("utf-8")),
+    )
+
+
 def _inject_runtime_evidence(
     messages: list[dict[str, Any]], evidence: str
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -107,6 +158,26 @@ def _mini_config() -> dict[str, Any]:
     import yaml
 
     return yaml.safe_load((builtin_config_dir / "mini.yaml").read_text(encoding="utf-8"))
+
+
+class GTIntegrationMode(StrEnum):
+    """One-switch policy for provider-visible GT integration."""
+
+    OFF = "off"
+    AUDIT = "audit"
+    ACTIVE = "active"
+
+    @classmethod
+    def parse(cls, value: str | GTIntegrationMode) -> GTIntegrationMode:
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value).strip().lower())
+        except ValueError as exc:
+            choices = ", ".join(item.value for item in cls)
+            raise ValueError(
+                f"unknown GT integration mode {value!r}; expected {choices}"
+            ) from exc
 
 
 class MiniSweCentralAgent(BaseAgent):
@@ -136,6 +207,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_context_compaction: bool = False,
         context_trigger_chars: int = 120_000,
         context_target_chars: int = 60_000,
+        integration_mode: str | GTIntegrationMode | None = None,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
         preflight_timeout_sec: float = 0.1,
@@ -151,6 +223,22 @@ class MiniSweCentralAgent(BaseAgent):
         self.model_timeout_sec = model_timeout_sec
         self.model_loop_timeout_sec = model_loop_timeout_sec
         self.cost_limit = cost_limit
+        inferred_integration_mode = (
+            GTIntegrationMode.AUDIT if self.runtime_mode == "shadow" else GTIntegrationMode.ACTIVE
+        )
+        self.integration_mode = GTIntegrationMode.parse(
+            integration_mode if integration_mode is not None else inferred_integration_mode
+        )
+        if self.integration_mode is GTIntegrationMode.OFF:
+            enable_lint = False
+            enable_submit_readiness = False
+            enable_all_features = False
+            enable_repository_intelligence = False
+            enable_task_start_advisory = False
+            enable_context_compaction = False
+        elif self.integration_mode is GTIntegrationMode.AUDIT:
+            enable_task_start_advisory = False
+            enable_context_compaction = False
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
@@ -165,6 +253,13 @@ class MiniSweCentralAgent(BaseAgent):
             if parsed_preflight_mode not in {PreflightMode.OFF, legacy_mode}:
                 raise ValueError("enable_preflight conflicts with explicit preflight_mode")
             parsed_preflight_mode = legacy_mode
+        if self.integration_mode is GTIntegrationMode.OFF:
+            parsed_preflight_mode = PreflightMode.OFF
+        elif (
+            self.integration_mode is GTIntegrationMode.AUDIT
+            and parsed_preflight_mode is PreflightMode.ASSISTIVE_SAFE
+        ):
+            parsed_preflight_mode = PreflightMode.SHADOW
         self.preflight_mode = parsed_preflight_mode
         # Compatibility for external receipt consumers; dispatch uses the enum.
         self.enable_preflight = parsed_preflight_mode is not PreflightMode.OFF
@@ -174,7 +269,10 @@ class MiniSweCentralAgent(BaseAgent):
         self._sensor = WorkspaceSensor()
         self._features = CentralFeatureRuntime(
             enabled=enable_all_features,
-            model_visible=self.runtime_mode == "treatment",
+            model_visible=(
+                self.runtime_mode == "treatment"
+                and self.integration_mode is GTIntegrationMode.ACTIVE
+            ),
         )
         self._model_factory: Callable[[], Any] = self._build_model
 
@@ -483,6 +581,8 @@ class MiniSweCentralAgent(BaseAgent):
                 graph_revision=repository_evidence.graph_revision,
             )
             self._features.consume_effects(action_id=0, call=0)
+        if not self.enable_task_start_advisory:
+            self._features.suppress_task_start_delivery()
         calls = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -542,6 +642,7 @@ class MiniSweCentralAgent(BaseAgent):
                         trigger_chars=self.context_trigger_chars,
                         target_chars=self.context_target_chars,
                         keep_recent_turns=2,
+                        transform=True,
                     )
                 else:
                     query_messages, provider_view_metrics = build_provider_view(
@@ -550,6 +651,7 @@ class MiniSweCentralAgent(BaseAgent):
                         trigger_chars=10**18,
                         target_chars=10**18,
                         keep_recent_turns=2,
+                        transform=False,
                     )
                 if provider_view_metrics.compacted:
                     context_compactions += 1
@@ -565,15 +667,15 @@ class MiniSweCentralAgent(BaseAgent):
                     ) = _inject_runtime_evidence(query_messages, pending_guidance)
                     delivery_metadata = self._features.confirm_prepared_guidance() or {}
                     pending_guidance = ""
-                request_payload_sha256 = hashlib.sha256(
-                    json.dumps(
-                        query_messages,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        default=str,
-                    ).encode("utf-8")
+                logical_messages_sha256 = hashlib.sha256(
+                    _canonical_json(query_messages)
                 ).hexdigest()
+                (
+                    provider_messages,
+                    request_payload_sha256,
+                    provider_messages_sha256,
+                    provider_request_chars,
+                ) = _provider_request_receipt(model, query_messages)
                 self._features.record_context_compiler_call(
                     call=calls,
                     request_payload_sha256=request_payload_sha256,
@@ -635,6 +737,10 @@ class MiniSweCentralAgent(BaseAgent):
                         "stock_context_chars": context_chars - runtime_enrichment_chars,
                         "context_chars": context_chars,
                         "request_payload_sha256": request_payload_sha256,
+                        "logical_messages_sha256": logical_messages_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "provider_request_chars": provider_request_chars,
+                        "provider_message_count": len(provider_messages),
                         "runtime_message_index": runtime_message_index,
                         "provider_view_compacted": provider_view_metrics.compacted,
                         "provider_view_input_chars": provider_view_metrics.input_chars,
@@ -1278,6 +1384,27 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "elapsed_seconds": elapsed_seconds,
                 "context_chars_sent": context_chars_sent,
+                "provider_request_chars_sent": sum(
+                    int(row.get("provider_request_chars") or 0)
+                    for row in model_call_contexts
+                ),
+                "provider_requests_hashed": sum(
+                    bool(row.get("provider_messages_sha256"))
+                    and bool(row.get("request_payload_sha256"))
+                    for row in model_call_contexts
+                ),
+                "provider_request_hash_coverage": (
+                    round(
+                        sum(
+                            bool(row.get("provider_messages_sha256"))
+                            for row in model_call_contexts
+                        )
+                        / len(model_call_contexts),
+                        6,
+                    )
+                    if model_call_contexts
+                    else 1.0
+                ),
                 "context_compactions": context_compactions,
                 "context_chars_elided": context_chars_elided,
                 "context_compiler_calls": sum(
@@ -1331,6 +1458,16 @@ class MiniSweCentralAgent(BaseAgent):
                     int(row.get("context_unique_reasoning_chars_removed") or 0)
                     for row in model_call_contexts
                 ),
+                "context_state_frame_calls": sum(
+                    bool((row.get("context_compiler") or {}).get("active_state_chars"))
+                    for row in model_call_contexts
+                ),
+                "context_provider_view_changed_calls": sum(
+                    bool(row.get("provider_view_compacted"))
+                    or bool(row.get("context_exact_duplicate_chars_removed"))
+                    or bool((row.get("context_compiler") or {}).get("active_state_chars"))
+                    for row in model_call_contexts
+                ),
                 "preflight_mode": self.preflight_mode.value,
                 "preflight_calls": len(preflight_rows),
                 "preflight_candidate_dispositions": {
@@ -1381,6 +1518,9 @@ class MiniSweCentralAgent(BaseAgent):
                     for row in preflight_rows
                     for nested in row["proposed"].get("operations") or ()
                 ),
+                "preflight_typed_targets": sum(
+                    len(row["proposed"].get("targets") or ()) for row in preflight_rows
+                ),
                 "preflight_latency_ms": {
                     "p50": _percentile(preflight_latencies, 0.50),
                     "p95": _percentile(preflight_latencies, 0.95),
@@ -1410,6 +1550,22 @@ class MiniSweCentralAgent(BaseAgent):
                 "preflight_false_intervention_status": "requires_outcome_oracle",
                 "postflight_only_feature_count": sum(
                     placement.postflight_only for placement in PREFLIGHT_FEATURE_PLACEMENT.values()
+                ),
+                "validation_status_distribution": {
+                    status: sum(
+                        row.get("status") == status
+                        for row in feature_summary.get("validation_log") or ()
+                    )
+                    for status in ("unknown", "pending", "pass", "fail")
+                },
+                "validation_attributed_results": sum(
+                    bool(row.get("status_attributed"))
+                    for row in feature_summary.get("validation_log") or ()
+                ),
+                "validation_unattributed_intents": sum(
+                    bool(row.get("is_validation"))
+                    and not bool(row.get("status_attributed"))
+                    for row in feature_summary.get("validation_log") or ()
                 ),
                 "stale_batched_actions_prevented": sum(
                     int(row.get("cancelled") or 0) for row in feature_summary["batch_interrupts"]
@@ -1526,6 +1682,7 @@ class MiniSweCentralAgent(BaseAgent):
                     {
                         "schema": "central-runtime-receipt-v3",
                         "mode": self.runtime_mode,
+                        "integration_mode": self.integration_mode.value,
                         "preflight_mode": self.preflight_mode.value,
                         "calls": calls,
                         "actions": actions_count,
@@ -1562,6 +1719,7 @@ class MiniSweCentralAgent(BaseAgent):
             context.cost_usd = cost
             context.metadata = {
                 "runtime_mode": self.runtime_mode,
+                "integration_mode": self.integration_mode.value,
                 "api_calls": calls,
                 "actions": actions_count,
                 "input_tokens": input_tokens,

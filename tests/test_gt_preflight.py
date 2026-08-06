@@ -93,6 +93,68 @@ def test_compound_write_redirection_is_not_mistyped_as_a_read():
     assert any(item.mutates_workspace for item in proposal.operations)
 
 
+def test_multiline_shell_commands_are_separate_top_level_segments():
+    proposal = adapt_proposed_action(
+        {"command": "cat src/app.py\npython3 tests/test_app.py"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert [item.operation for item in proposal.operations] == [
+        ActionOperation.READ,
+        ActionOperation.VALIDATE,
+    ]
+    assert [segment[0] for segment in proposal.shell_segments] == ["cat", "python3"]
+
+
+def test_heredoc_body_is_opaque_and_only_shell_operands_become_targets():
+    proposal = adapt_proposed_action(
+        {
+            "command": (
+                "cat <<'EOF' > /app/eval.scm\n"
+                "(load \"src/models.py\")\n"
+                "File written to bogus/output.py\n"
+                "EOF\n"
+                "python3 /app/test/calculator.py\n"
+            )
+        },
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert [segment[0] for segment in proposal.shell_segments] == ["cat", "python3"]
+    paths = {target.path for target in proposal.targets}
+    assert "/app/eval.scm" in paths
+    assert "/app/test/calculator.py" in paths
+    assert "src/models.py" not in paths
+    assert not any("bogus/output.py" in path for path in paths)
+
+
+def test_inline_interpreter_program_is_opaque_to_target_extraction():
+    proposal = adapt_proposed_action(
+        {
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                "print(Path('src/models.py').read_text())\""
+            )
+        },
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert proposal.operation is ActionOperation.OTHER
+    assert proposal.targets == ()
+
+
 def test_validation_classification_applies_only_to_runner_segment():
     command = "cd /app && python -m pytest -q; echo EXIT:$?"
     classification = classify_validation_command(command, (command,))

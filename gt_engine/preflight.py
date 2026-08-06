@@ -177,10 +177,6 @@ class ActionCycleReceipt:
         }
 
 
-_PATH = re.compile(
-    r"(?:^|[\s'\"])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|"
-    r"[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)(?=$|[\s'\":,])"
-)
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MUTATING_EXECUTABLES = frozenset(
     {
@@ -239,6 +235,56 @@ def _without_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
+def _strip_shell_comments(command: str) -> str:
+    """Remove top-level shell comments while preserving command newlines.
+
+    ``shlex`` normally consumes the newline that terminates a comment.  That
+    would merge the next command into the current segment, so comments are
+    removed before lexing and their newline is retained as a real list
+    separator.  Quoted ``#`` characters are ordinary data.
+    """
+
+    kept: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            if char != "\n":
+                kept.extend(("\\", char))
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            kept.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            kept.append(char)
+            index += 1
+            continue
+        if char == "#" and (index == 0 or command[index - 1].isspace()):
+            newline = command.find("\n", index)
+            if newline < 0:
+                break
+            kept.append("\n")
+            index = newline + 1
+            continue
+        kept.append(char)
+        index += 1
+    if escaped:
+        kept.append("\\")
+    return "".join(kept)
+
+
 def _shell_parts(
     command: str,
 ) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
@@ -246,12 +292,15 @@ def _shell_parts(
 
     try:
         lexer = shlex.shlex(
-            _without_heredoc_bodies(command),
+            _strip_shell_comments(_without_heredoc_bodies(command)),
             posix=True,
-            punctuation_chars=";|&<>",
+            punctuation_chars=";|&<>\n",
         )
+        # Newlines are Bash list separators, not generic whitespace.  Keeping
+        # them as punctuation prevents two commands from being fused.
+        lexer.whitespace = " \t\r"
         lexer.whitespace_split = True
-        lexer.commenters = "#"
+        lexer.commenters = ""
         tokens = list(lexer)
     except ValueError:
         return (), ()
@@ -259,22 +308,36 @@ def _shell_parts(
     connectors: list[str] = []
     current: list[str] = []
     for token in tokens:
-        if token and set(token) <= {";", "|", "&"}:
+        normalized_connector = token.replace("\n", ";")
+        if normalized_connector and set(normalized_connector) <= {";", "|", "&"}:
             if current:
                 segments.append(tuple(current))
                 current = []
-                connectors.append(token)
+                connectors.append(normalized_connector)
             continue
         current.append(token)
     if current:
         segments.append(tuple(current))
-    return tuple(segments), tuple(connectors[: max(0, len(segments) - 1)])
+    return tuple(segments), tuple(connectors)
 
 
 def shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
     """Parse top-level executable segments once for proposal and validation."""
 
     return _shell_parts(command)[0]
+
+
+def shell_structure(
+    command: str,
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    """Return parsed shell segments and list/pipeline connectors.
+
+    Connectors may contain one terminal operator (notably ``&``) after the
+    last segment.  Consumers must therefore not assume ``len(connectors)`` is
+    exactly ``len(segments) - 1``.
+    """
+
+    return _shell_parts(command)
 
 
 def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
@@ -292,14 +355,6 @@ def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
         if any(token in {">", ">>"} or token.startswith(">>") for token in words):
             signals.append("shell_redirection")
     return tuple(dict.fromkeys(signals))
-
-
-def _targets(command: str) -> tuple[ActionTarget, ...]:
-    return tuple(
-        ActionTarget(path=value.replace("\\", "/"))
-        for value in dict.fromkeys(_PATH.findall(command))
-        if not value.startswith("../") and value not in {"/dev/null"}
-    )
 
 
 _READ_EXECUTABLES = frozenset(
@@ -347,6 +402,12 @@ def _looks_like_path(value: str) -> bool:
     cleaned = value.strip("'\"")
     if not cleaned or cleaned.startswith("-") or cleaned in _NON_TARGET_TOKENS:
         return False
+    # Code strings, diagnostics, and shell expressions are not path operands.
+    # Abstaining here is safer than presenting source text as a concrete file.
+    if any(char.isspace() for char in cleaned):
+        return False
+    if any(char in cleaned for char in ";|&<>(){}[]=,"):
+        return False
     if cleaned.isdigit() or _SED_RANGE.match(cleaned):
         return False
     return bool("/" in cleaned or "." in posixpath.basename(cleaned))
@@ -357,6 +418,11 @@ def _segment_operand_paths(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
     skip_next = False
     head = words[0].rsplit("/", 1)[-1] if words else ""
     program_indices: set[int] = set()
+    opaque_indices: set[int] = set()
+    if head in {"python", "python3", "py", "node", "ruby", "perl", "bash", "sh"}:
+        for index, token in enumerate(words[1:], start=1):
+            if token in {"-c", "-e"} and index + 1 < len(words):
+                opaque_indices.add(index + 1)
     if head in {"sed", "awk", "perl", "rg", "grep", "ack", "ag"}:
         expression_option = False
         for index, token in enumerate(words[1:], start=1):
@@ -381,6 +447,8 @@ def _segment_operand_paths(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
         if token.startswith("-"):
             continue
         if index in program_indices:
+            continue
+        if index in opaque_indices:
             continue
         # A sed program or search query is not a path merely because it
         # contains punctuation.
@@ -423,8 +491,6 @@ def _segment_is_validation(words: tuple[str, ...], validation: Any | None) -> bo
     not become validation merely because a later runner is a declared check.
     """
 
-    if validation is None or not bool(getattr(validation, "is_validation", False)):
-        return False
     if not words:
         return False
     head = words[0].rsplit("/", 1)[-1].lower()
@@ -659,7 +725,10 @@ def adapt_proposed_action(
         validation_kind = str(getattr(validation, "command_class", "validation"))
     elif operation == ActionOperation.VALIDATE:
         validation_kind = head
-    parsed_targets: list[ActionTarget] = list(_targets(command))
+    # Targets come only from mechanically parsed executable operands and
+    # redirections.  Regex-scanning the raw command leaks heredoc bodies,
+    # interpreter source strings, and diagnostics into typed intent.
+    parsed_targets: list[ActionTarget] = []
     for observed in operations:
         for target in observed.targets:
             if target not in parsed_targets:

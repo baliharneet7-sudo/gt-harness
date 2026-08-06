@@ -33,6 +33,9 @@ jobs:
         run: |
           python -m pytest tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_preflight.py \
+            tests/test_provider_view.py \
+            tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py -q
 
@@ -43,10 +46,14 @@ jobs:
         run: |
           python -m ruff check gt_engine/central_runtime.py \
             gt_engine/central_controls.py \
+            gt_engine/preflight.py gt_engine/provider_view.py \
+            gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_preflight.py tests/test_provider_view.py \
+            tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py
 
@@ -77,4 +84,3 @@ jobs:
           name: central-provider-free-${{ github.run_id }}
           path: central_provider_free_receipt.json
           if-no-files-found: warn
-

@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -439,13 +440,37 @@ def _command_turn_indices(
 ) -> list[int]:
     if not command:
         return []
+    normalized = " ".join(command.strip().split())
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
         if message.get("role") != "assistant":
             continue
-        if command in _action_commands(message):
+        if any(
+            candidate == command or " ".join(candidate.strip().split()) == normalized
+            for candidate in _action_commands(message)
+        ):
             return [index, *_paired_tool_indices(messages, index)]
     return []
+
+
+def _command_mentions_path(command: str, path: str) -> bool:
+    normalized_path = str(path or "").replace("\\", "/").strip()
+    if not normalized_path:
+        return False
+    relative = normalized_path
+    if relative.startswith("/app/"):
+        relative = relative[5:]
+    elif relative.startswith("./"):
+        relative = relative[2:]
+    forms = tuple(dict.fromkeys((normalized_path, relative, f"./{relative}", f"/app/{relative}")))
+    normalized_command = str(command or "").replace("\\", "/")
+    for form in forms:
+        if not form:
+            continue
+        pattern = rf"(?<![A-Za-z0-9_./-]){re.escape(form)}(?![A-Za-z0-9_./-])"
+        if re.search(pattern, normalized_command):
+            return True
+    return False
 
 
 def _fact_representation_indices(
@@ -460,7 +485,10 @@ def _fact_representation_indices(
                 message = messages[index]
                 if message.get("role") != "assistant":
                     continue
-                if any(path in command for command in _action_commands(message)):
+                if any(
+                    _command_mentions_path(command, path)
+                    for command in _action_commands(message)
+                ):
                     tools = _paired_tool_indices(messages, index)
                     if tools:
                         return [index, *tools]
@@ -474,7 +502,7 @@ def _fact_representation_indices(
             for index in range(len(messages) - 1, -1, -1):
                 commands = _action_commands(messages[index])
                 if commands and all(
-                    any(path in command for command in commands)
+                    any(_command_mentions_path(command, path) for command in commands)
                     for path in fact.paths
                 ):
                     return [index, *_paired_tool_indices(messages, index)]
@@ -743,6 +771,7 @@ def build_provider_view(
     trigger_chars: int = 120_000,
     target_chars: int = 60_000,
     keep_recent_turns: int = 2,
+    transform: bool = True,
 ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
     """Return a compact inference view without mutating the audit history.
 
@@ -753,32 +782,79 @@ def build_provider_view(
     3. The most recent assistant/tool turns remain verbatim.
     """
     raw_input_chars = _chars(messages)
+    if not transform:
+        untouched = copy.deepcopy(messages)
+        facts, duplicate_fact_count = _context_facts(active_state)
+        _state_text, _selected_fact_ids, compiled_rows = _compile_fact_frame(
+            facts, untouched
+        )
+        accounting = tuple(
+            {
+                **row,
+                "disposition": (
+                    "no_compaction_controller_only"
+                    if row["disposition"] == "selected_state_frame"
+                    else row["disposition"]
+                ),
+                "provider_message_indices": (
+                    []
+                    if row["disposition"] == "selected_state_frame"
+                    else row["provider_message_indices"]
+                ),
+            }
+            for row in compiled_rows
+        )
+        return untouched, _provider_metrics(
+            compacted=False,
+            raw_input_chars=raw_input_chars,
+            input_chars=raw_input_chars,
+            view=untouched,
+            preserved_recent_messages=len(untouched),
+            state_text="",
+            duplicate_turns_removed=0,
+            duplicate_fact_count=duplicate_fact_count,
+            selected_fact_ids=(),
+            accounting=accounting,
+        )
     deduped = dedupe_provider_view(copy.deepcopy(messages))
     input_chars = _chars(deduped)
     duplicate_turns_removed = max(0, len(_turn_bounds(messages)) - len(_turn_bounds(deduped)))
     facts, duplicate_fact_count = _context_facts(active_state)
 
     if input_chars <= max(1, int(trigger_chars)):
-        state_text, selected_fact_ids, accounting_rows = _compile_fact_frame(
+        _state_text, _selected_fact_ids, compiled_rows = _compile_fact_frame(
             facts, deduped
         )
-        insertion_index = len(deduped)
-        view = [*deduped]
-        if state_text:
-            view.append({"role": "user", "content": state_text})
-        accounting = _apply_frame_index(
-            accounting_rows, insertion_index=insertion_index
+        # Below the compaction threshold the stock provider history is already
+        # authoritative.  Private engine state is accounted for, but missing
+        # facts are not converted into an extra user turn on every request.
+        # Decision-relevant one-shot evidence uses the semantic delivery path.
+        accounting = tuple(
+            {
+                **row,
+                "disposition": (
+                    "no_compaction_controller_only"
+                    if row["disposition"] == "selected_state_frame"
+                    else row["disposition"]
+                ),
+                "provider_message_indices": (
+                    []
+                    if row["disposition"] == "selected_state_frame"
+                    else row["provider_message_indices"]
+                ),
+            }
+            for row in compiled_rows
         )
-        return view, _provider_metrics(
+        return deduped, _provider_metrics(
             compacted=False,
             raw_input_chars=raw_input_chars,
             input_chars=input_chars,
-            view=view,
+            view=deduped,
             preserved_recent_messages=len(deduped),
-            state_text=state_text,
+            state_text="",
             duplicate_turns_removed=duplicate_turns_removed,
             duplicate_fact_count=duplicate_fact_count,
-            selected_fact_ids=selected_fact_ids,
+            selected_fact_ids=(),
             accounting=accounting,
         )
 

@@ -300,13 +300,15 @@ jobs:
               # No wall-time or per-call time censors so hard tasks are never
               # cut off mid-run; provider errors fail fast (no retries).
               # Lossy provider-view compaction is OFF for the paid arm. The
-              # deterministic compiler still runs on every request, proves
-              # exact duplicate removal and fact placement, and preserves all
-              # distinct Mini-SWE reasoning. The task-start repository fact
-              # stays OFF during isolation. Preflight remains observational
-              # (shadow) until a separately authorized assistive experiment.
+              # deterministic compiler still accounts for every fact on every
+              # request, but transform=false preserves the exact Mini-SWE
+              # history: no turn removal and no recurring state-frame insert.
+              # The task-start repository fact stays OFF during isolation.
+              # Preflight remains observational (shadow) until a separately
+              # authorized assistive experiment.
               FEATURE_ARGS+=(
                 --ak enable_lint=true --ak enable_submit_readiness=true
+                --ak integration_mode=active
                 --ak preflight_mode=shadow
                 --ak enable_context_compaction=false
                 --ak enable_task_start_advisory=false
