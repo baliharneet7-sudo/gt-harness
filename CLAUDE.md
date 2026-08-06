@@ -46,7 +46,8 @@ print all of:
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
 `ALL_17_CONSUMER_PATHS_PROVEN`, `ALL_17_TRIGGERS_PROVEN`,
 `ALL_17_PAYLOADS_CONCRETE`, `ALL_17_CONSUMERS_APPLIED`,
-`ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, and `NO_ACTIONS_BLOCKED`.
+`ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, `NO_ACTIONS_BLOCKED`, and
+`ALL_EFFECTS_CONTEXT_ACCOUNTED`.
 Receipts are schema v3 with effect-application and exact request-boundary proof.
 The 89-task run
 remains blocked until the ten-task treatment smoke and repeated matched trials
@@ -75,6 +76,37 @@ suppression are disabled. Five features remain strictly postflight-only;
 twelve have evidence-gated two-sided placement. See
 `GT_PRE_ACTION_IMPLEMENTATION_RECEIPT_20260805.md` for proof and remaining
 benchmark gates.
+
+### Deterministic context compiler state (2026-08-05)
+
+GT is the in-process Mini-SWE controller and context compiler, not a stream of
+extra advice. Every provider request now passes through a typed fact compiler.
+It proves whether each current fact is already represented at exact provider
+message indices, is selected into one bounded declarative state frame, remains
+controller-only, is stale, or is omitted by the frame budget. The per-call
+invariant is `candidate_fact_count == accounted_fact_count`; the final request
+hash proves what the model actually received.
+
+The compiler preserves all distinct Mini-SWE reasoning. Exact turn dedupe now
+fingerprints assistant content, reasoning content, selected commands, and tool
+results, so only byte-identical reasoning/action/result turns may collapse.
+Lossy historical compaction is disabled in the paid workflow. The compiler
+still runs every call and emits a fact only when that material current fact is
+not already present, preventing duplicate context.
+
+Compound Bash is classified segment by segment. Typed read observations carry
+canonical path, requested line range, source/workspace revision, return code,
+and output hash into controller state. Validation classification is bound only
+to the actual runner segment; setup/reporting segments do not inherit it, and
+shell programs such as `sed 's/x/y/'` are not treated as file targets.
+
+Every feature effect receives first-eligible context accounting without being
+misreported as model influence. `provider_payload` proves delivery;
+`controller_state_considered` proves private deterministic controller work;
+superseded, stale, audit-only, existing-actuation, and no-next-call outcomes
+stay explicit. Next-action anchor alignment is a utilization proxy, not proof
+of an internal model acknowledgement. A matched benchmark is still required
+for a causal efficiency claim.
 
 ### Final ten-task correctness audit
 

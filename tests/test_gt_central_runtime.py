@@ -811,6 +811,7 @@ def test_documented_direct_census_entrypoint_is_executable():
     assert "ALL_17_CONSUMERS_APPLIED" in completed.stdout
     assert "ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST" in completed.stdout
     assert "NO_ACTIONS_BLOCKED" in completed.stdout
+    assert "ALL_EFFECTS_CONTEXT_ACCOUNTED" in completed.stdout
 
 
 def test_predecided_actions_are_audited_without_cancellation():

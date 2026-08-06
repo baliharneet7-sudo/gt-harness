@@ -865,7 +865,7 @@ def render_runtime_feedback(detail: str, *, limit: int = 320) -> str:
 def render_runtime_advisory(detail: str, *, limit: int = 160) -> str:
     """Render ordinary evidence without falsely implying a submit boundary."""
     cleaned = _PRIVATE_TERMS.sub("runtime", " ".join(detail.split()))
-    prefix = "Runtime evidence: "
+    prefix = "Observed task fact: "
     available = max(0, limit - len(prefix))
     if len(cleaned) > available:
         cleaned = cleaned[: max(0, available - 3)].rstrip() + "..."
@@ -1200,6 +1200,7 @@ class CentralFeatureRuntime:
         # or policy; it records whether an already-existing consumer path was
         # actually exercised.
         self._effect_trace: list[dict[str, Any]] = []
+        self._last_context_compiler_call = 0
         self._producer_events: list[dict[str, Any]] = []
         self._pending_state_reads: list[dict[str, Any]] = []
         self._batch_interrupts: list[dict[str, Any]] = []
@@ -1212,7 +1213,7 @@ class CentralFeatureRuntime:
         self._last_edit: dict[str, Any] | None = None
         self._latest_validation: dict[str, Any] | None = None
         self._latest_failure: dict[str, Any] | None = None
-        self._recent_reads: list[str] = []
+        self._recent_reads: list[dict[str, Any]] = []
         self._submit_risk_revisions: set[str] = set()
         self._current_source_revision = ""
         self._decisions = SemanticDecisionEngine(max_frame_chars=320)
@@ -2006,6 +2007,7 @@ class CentralFeatureRuntime:
         source_revision: str | None = None,
         snapshot: WorkspaceSnapshot | None = None,
         validation: ValidationClassification | None = None,
+        proposed: ProposedAction | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -2026,6 +2028,47 @@ class CentralFeatureRuntime:
             self._action_metrics["repeated_commands"] += 1
         if is_search:
             self._action_metrics["search_actions"] += 1
+        if proposed is not None:
+            output_hash = hashlib.sha256((output or "").encode("utf-8", "replace")).hexdigest()
+            for operation in proposed.operations:
+                if operation.operation != ActionOperation.READ:
+                    continue
+                for span in operation.read_spans:
+                    observation = {
+                        "path": span.path,
+                        "start_line": span.start_line,
+                        "end_line": span.end_line,
+                        "whole_file": span.whole_file,
+                        "source_revision": source_rev,
+                        "workspace_revision": revision,
+                        "action_id": action_id,
+                        "returncode": returncode,
+                        "output_hash": output_hash,
+                        "content_mapped": len(operation.read_spans) == 1,
+                    }
+                    identity = (
+                        span.path,
+                        span.start_line,
+                        span.end_line,
+                        span.whole_file,
+                        source_rev,
+                        output_hash,
+                    )
+                    self._recent_reads = [
+                        item
+                        for item in self._recent_reads
+                        if (
+                            item.get("path"),
+                            item.get("start_line"),
+                            item.get("end_line"),
+                            item.get("whole_file"),
+                            item.get("source_revision"),
+                            item.get("output_hash"),
+                        )
+                        != identity
+                    ]
+                    self._recent_reads.append(observation)
+            self._recent_reads = self._recent_reads[-24:]
         self._validation_log.append(
             {
                 "action": action_id,
@@ -2250,9 +2293,41 @@ class CentralFeatureRuntime:
             anchors = self._search_anchors(output)
             for anchor in anchors:
                 path = str(anchor.get("path") or "")
-                if path and path not in self._recent_reads:
-                    self._recent_reads.append(path)
-            self._recent_reads = self._recent_reads[-12:]
+                if path:
+                    observation = {
+                        "path": path,
+                        "start_line": int(anchor.get("line") or 0) or None,
+                        "end_line": int(anchor.get("line") or 0) or None,
+                        "whole_file": False,
+                        "source_revision": source_rev,
+                        "workspace_revision": revision,
+                        "action_id": action_id,
+                        "returncode": returncode,
+                        "output_hash": hashlib.sha256(
+                            (output or "").encode("utf-8", "replace")
+                        ).hexdigest(),
+                        "content_mapped": False,
+                        "observation_kind": "search_anchor",
+                    }
+                    identity = (
+                        observation["path"],
+                        observation["start_line"],
+                        observation["source_revision"],
+                        observation["observation_kind"],
+                    )
+                    self._recent_reads = [
+                        item
+                        for item in self._recent_reads
+                        if (
+                            item.get("path"),
+                            item.get("start_line"),
+                            item.get("source_revision"),
+                            item.get("observation_kind"),
+                        )
+                        != identity
+                    ]
+                    self._recent_reads.append(observation)
+            self._recent_reads = self._recent_reads[-24:]
             self.record_producer_event(
                 feature_id="localization",
                 action_id=action_id,
@@ -2928,6 +3003,8 @@ class CentralFeatureRuntime:
                 "effect_kind": effect.effect_kind.value,
                 "evidence_action": effect.evidence_action,
                 "applied_call": call,
+                "source_revision": state.source_revision,
+                "workspace_revision": state.workspace_revision,
                 "state_fields_changed": [section_name] if before != after else [],
                 "state_reads": [
                     {"action": read["action"], "purpose": read["purpose"]} for read in pending_reads
@@ -2942,6 +3019,7 @@ class CentralFeatureRuntime:
                     for event in producer_events
                 ],
                 "provider_delivery_ids": [],
+                "context_compiler": {},
                 "disposition": (
                     "existing_engine_actuation"
                     if pending_reads
@@ -3002,6 +3080,12 @@ class CentralFeatureRuntime:
             row["provider_delivery_ids"].append(delivery_id)
             row["actuator_events"].append({"kind": "provider_payload", "delivery_id": delivery_id})
             row["disposition"] = "provider_payload"
+            if row.get("context_compiler"):
+                row["context_compiler"].setdefault(
+                    "first_status", row["context_compiler"].get("status", "")
+                )
+                row["context_compiler"]["status"] = "provider_payload"
+                row["context_compiler"]["provider_delivery_id"] = delivery_id
             for index, effect in enumerate(self._effects):
                 if effect.receipt_id != row["effect_id"]:
                     continue
@@ -3128,6 +3212,93 @@ class CentralFeatureRuntime:
             if effect.evidence_action == action_id and effect.required_before_action is not None:
                 self._effects[index] = replace(effect, predecided_actions_cancelled=cancelled)
 
+    def context_compiler_state(self) -> list[dict[str, Any]]:
+        """Return at most one current controller-state candidate per feature.
+
+        The provider compiler considers these rows but does not render their
+        payloads.  Model-visible facts still require the existing grounded
+        decision-frame path; this index exists to prove how private feature
+        effects narrow controller state without inflating the prompt.
+        """
+
+        latest: dict[str, dict[str, Any]] = {}
+        for trace in self._effect_trace:
+            latest[str(trace["feature_id"])] = trace
+        return [
+            {
+                "effect_id": str(trace["effect_id"]),
+                "feature_id": feature_id,
+                "evidence_action": int(trace["evidence_action"]),
+                "action_id": int(trace["evidence_action"]),
+                "applied_call": int(trace["applied_call"]),
+                "source_revision": str(trace.get("source_revision") or ""),
+                "workspace_revision": str(trace.get("workspace_revision") or ""),
+                "effect_disposition": str(trace.get("disposition") or ""),
+                "state_fields_changed": list(trace.get("state_fields_changed") or ()),
+            }
+            for feature_id, trace in sorted(latest.items())
+        ]
+
+    def record_context_compiler_call(
+        self,
+        *,
+        call: int,
+        request_payload_sha256: str,
+        fact_accounting: Iterable[dict[str, Any]],
+    ) -> None:
+        """Account for every effect eligible before this provider request.
+
+        This is provenance, not a claim of model influence.  A private effect
+        may be considered as controller state, superseded by newer state, or
+        remain audit-only.  Only a confirmed delivery is labelled provider
+        visible.
+        """
+
+        self._last_context_compiler_call = max(self._last_context_compiler_call, call)
+        facts_by_effect = {
+            str(row.get("effect_id") or ""): row
+            for row in fact_accounting
+            if row.get("effect_id")
+        }
+        latest_by_feature: dict[str, str] = {}
+        for trace in self._effect_trace:
+            if int(trace.get("applied_call") or 0) < call:
+                latest_by_feature[str(trace["feature_id"])] = str(trace["effect_id"])
+        for trace in self._effect_trace:
+            if trace.get("context_compiler"):
+                continue
+            applied_call = int(trace.get("applied_call") or 0)
+            if applied_call >= call:
+                continue
+            effect_id = str(trace["effect_id"])
+            fact = facts_by_effect.get(effect_id)
+            if trace.get("provider_delivery_ids"):
+                status = "provider_payload"
+            elif fact is not None:
+                status = (
+                    "stale_state_rejected"
+                    if fact.get("disposition") == "stale_source_revision"
+                    else "controller_state_considered"
+                )
+            elif latest_by_feature.get(str(trace["feature_id"])) != effect_id:
+                status = "superseded_before_request"
+            elif trace.get("state_reads"):
+                status = "existing_engine_actuation"
+            else:
+                status = "audit_only"
+            trace["context_compiler"] = {
+                "status": status,
+                "first_eligible_call": applied_call + 1,
+                "first_considered_call": call,
+                "one_step_late": call != applied_call + 1,
+                "request_payload_sha256": request_payload_sha256,
+                "fact_id": str((fact or {}).get("fact_id") or ""),
+                "fact_disposition": str((fact or {}).get("disposition") or ""),
+                "provider_message_indices": list(
+                    (fact or {}).get("provider_message_indices") or ()
+                ),
+            }
+
     def progress_ledger(self) -> dict[str, Any]:
         """Bounded deterministic state summary for compacted provider views.
 
@@ -3142,10 +3313,16 @@ class CentralFeatureRuntime:
             "last_edit": self._last_edit,
             "latest_validation": self._latest_validation,
             "unresolved_failure": self._latest_failure,
-            "recent_reads": list(self._recent_reads),
+            "recent_reads": [
+                dict(item)
+                for item in self._recent_reads
+                if not self._current_source_revision
+                or item.get("source_revision") == self._current_source_revision
+            ],
             "changed_paths": list(self._recent_source_paths),
             "declared_checks": declared or list(self._explicit_checks),
             "source_revision": self._current_source_revision,
+            "feature_states": self.context_compiler_state(),
         }
 
     def summary(self) -> dict[str, Any]:
@@ -3153,6 +3330,26 @@ class CentralFeatureRuntime:
         for receipt in self.receipts:
             by_feature[receipt.feature_id] += 1
         accountability = self._effect_accountability()
+        compiler_accountability = [
+            {
+                "effect_id": str(trace["effect_id"]),
+                "feature_id": str(trace["feature_id"]),
+                "evidence_action": int(trace["evidence_action"]),
+                **(
+                    dict(trace.get("context_compiler") or {})
+                    if trace.get("context_compiler")
+                    else {
+                        "status": (
+                            "no_eligible_model_call"
+                            if int(trace.get("applied_call") or 0)
+                            >= self._last_context_compiler_call
+                            else "unaccounted_bug"
+                        )
+                    }
+                ),
+            }
+            for trace in self._effect_trace
+        ]
         return {
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
@@ -3177,6 +3374,11 @@ class CentralFeatureRuntime:
             "effect_accountability_counts": {
                 outcome: sum(row["outcome"] == outcome for row in accountability)
                 for outcome in sorted({row["outcome"] for row in accountability})
+            },
+            "context_compiler_effect_accountability": compiler_accountability,
+            "context_compiler_effect_accountability_counts": {
+                status: sum(row["status"] == status for row in compiler_accountability)
+                for status in sorted({row["status"] for row in compiler_accountability})
             },
             "producer_events": list(self._producer_events),
             "controller_state": self._controller_state.as_dict(),
@@ -3265,8 +3467,9 @@ class CentralFeatureRuntime:
             paths = ", ".join(alternate.get("paths") or ())
             return (
                 f"The same validation failure repeated {payload.get('repeat_count')} times "
-                f"without a source revision change; inspect {paths or 'the last changed source'} "
-                f"to test: {alternate.get('discriminator')}."
+                f"without a source revision change; recorded changed source: "
+                f"{paths or 'unknown'}; distinguishing failure evidence: "
+                f"{alternate.get('discriminator')}."
             )
         if feature_id == "signature_delta":
             paths = ", ".join(payload.get("changed_paths") or ())

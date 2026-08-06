@@ -35,6 +35,7 @@ from gt_engine.central_runtime import (
     task_deliverable_paths,
 )
 from gt_engine.preflight import ActionDisposition, adapt_proposed_action
+from gt_engine.provider_view import build_provider_view
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -149,6 +150,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
     simulated_deliveries: list[dict[str, Any]] = []
     engine_syntax_checks_replayed = 0
     preflight_operations: Counter[str] = Counter()
+    preflight_segment_operations: Counter[str] = Counter()
     preflight_candidates: list[dict[str, Any]] = []
     shadow_barrier_calls: set[int] = set()
     shadow_suffix_actions_prevented = 0
@@ -170,6 +172,9 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             validation=pre_classification,
         )
         preflight_operations[proposed.operation.value] += 1
+        preflight_segment_operations.update(
+            operation.operation.value for operation in proposed.operations
+        )
         # Archived receipts do not contain a complete pre-execution manifest.
         # File-existence policy must therefore abstain. Submit policy can be
         # replayed because its grounded ledger and source revision are complete.
@@ -261,6 +266,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             revision="replay-w0",
             source_revision=source_revision,
             validation=classification,
+            proposed=proposed,
         )
         if classification.is_validation:
             ledger.record_check(
@@ -323,6 +329,22 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
                     "feedback": feedback,
                 }
             )
+        active_state = {
+            **runtime.progress_ledger(),
+            "source_revision": source_revision,
+            "workspace_revision": "replay-w0",
+        }
+        _provider_view, compiler = build_provider_view(
+            [{"role": "user", "content": instruction}],
+            active_state=active_state,
+            trigger_chars=10**18,
+            target_chars=10**18,
+        )
+        runtime.record_context_compiler_call(
+            call=action_id + 1,
+            request_payload_sha256=f"replay-call-{action_id + 1}",
+            fact_accounting=compiler.fact_accounting,
+        )
 
     summary = runtime.summary()
     for row in summary["receipts"]:
@@ -443,12 +465,26 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             "interrupted_actions": summary["action_metrics"]["interrupted_actions"],
             "preflight_shadow": {
                 "operation_distribution": dict(sorted(preflight_operations.items())),
+                "segment_operation_distribution": dict(
+                    sorted(preflight_segment_operations.items())
+                ),
+                "known_segment_operations": sum(
+                    count
+                    for operation, count in preflight_segment_operations.items()
+                    if operation != "other"
+                ),
+                "unknown_segment_operations": preflight_segment_operations.get(
+                    "other", 0
+                ),
                 "material_candidates": preflight_candidates,
                 "file_policy_status": "abstained_without_preexecution_snapshot",
                 "barrier_calls": len(shadow_barrier_calls),
                 "suffix_actions_prevented": shadow_suffix_actions_prevented,
                 "barriers": shadow_barriers,
             },
+            "context_compiler_effect_accountability": summary[
+                "context_compiler_effect_accountability_counts"
+            ],
         },
     }
 
@@ -457,6 +493,11 @@ def _outcomes(task: dict[str, Any]) -> list[str]:
     failed: list[str] = []
     if task["new"]["artifact_debt_triggers"]:
         failed.append(f"artifact-driven validation debt: {task['new']['artifact_debt_triggers']}")
+    compiler_counts = task["new"].get("context_compiler_effect_accountability") or {}
+    if compiler_counts.get("unaccounted_bug"):
+        failed.append(
+            f"unaccounted context-compiler effects: {compiler_counts['unaccounted_bug']}"
+        )
     new_declared = int(task["new"]["validation_declared"])
     ledger_total = int(task["new"]["ledger_checks_total"])
     if new_declared > 0 and ledger_total == 0:

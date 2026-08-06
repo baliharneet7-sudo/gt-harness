@@ -25,6 +25,7 @@ from gt_engine.central_runtime import (
     feature_payload_grounded,
     feature_payload_valid,
 )
+from gt_engine.provider_view import build_provider_view
 
 EXPECTED_TIMING = {
     "obligations": ("task_start", (0,)),
@@ -127,21 +128,36 @@ def census() -> dict:
         for effect in effects:
             effect_windows.append(effect.as_dict())
         feedback = runtime.model_feedback(deferred=True)
-        if not feedback:
-            return
-        metadata = runtime.confirm_prepared_guidance() or {}
-        evidence_action = int(metadata.get("evidence_action") or 0)
-        decision_windows.append(
-            {
-                "feature_id": metadata.get("feature_id"),
-                "contributing_features": metadata.get("contributing_features", []),
-                "evidence_action": evidence_action,
-                "prepared_after_action": after_action,
-                "delivered_before_next_decision": True,
-                "not_predictive": evidence_action <= after_action,
-                "not_late": evidence_action == after_action,
-                "chars": len(feedback),
-            }
+        if feedback:
+            metadata = runtime.confirm_prepared_guidance() or {}
+            evidence_action = int(metadata.get("evidence_action") or 0)
+            decision_windows.append(
+                {
+                    "feature_id": metadata.get("feature_id"),
+                    "contributing_features": metadata.get("contributing_features", []),
+                    "evidence_action": evidence_action,
+                    "prepared_after_action": after_action,
+                    "delivered_before_next_decision": True,
+                    "not_predictive": evidence_action <= after_action,
+                    "not_late": evidence_action == after_action,
+                    "chars": len(feedback),
+                }
+            )
+        active_state = {
+            **runtime.progress_ledger(),
+            "source_revision": runtime.progress_ledger().get("source_revision") or "r0",
+            "workspace_revision": f"r{after_action}",
+        }
+        _view, compiler = build_provider_view(
+            [{"role": "user", "content": "provider-free census"}],
+            active_state=active_state,
+            trigger_chars=10**18,
+            target_chars=10**18,
+        )
+        runtime.record_context_compiler_call(
+            call=after_action + 1,
+            request_payload_sha256=f"provider-free-call-{after_action + 1}",
+            fact_accounting=compiler.fact_accounting,
         )
 
     runtime.begin_task(
@@ -279,6 +295,17 @@ def census() -> dict:
         >= set(CENTRAL_FEATURE_IDS)
         and summary["action_metrics"]["submit_holds"] == 0
         and summary["action_metrics"]["batch_interrupts"] == 0
+        and all(
+            row["status"] != "unaccounted_bug" and not row.get("one_step_late", False)
+            for row in summary["context_compiler_effect_accountability"]
+        )
+    )
+    summary["all_effects_context_accounted"] = bool(
+        summary["context_compiler_effect_accountability"]
+    ) and all(
+        row["status"] not in {"unaccounted_bug", "no_eligible_model_call"}
+        and not row.get("one_step_late", False)
+        for row in summary["context_compiler_effect_accountability"]
     )
     applied_features = {
         row["feature_id"]
@@ -346,6 +373,11 @@ def main() -> int:
         else "VISIBLE_PAYLOAD_TIMING_INVALID"
     )
     print("NO_ACTIONS_BLOCKED" if result["no_actions_blocked"] else "ACTIONS_BLOCKED")
+    print(
+        "ALL_EFFECTS_CONTEXT_ACCOUNTED"
+        if result["all_effects_context_accounted"]
+        else "EFFECT_CONTEXT_NOT_ACCOUNTED"
+    )
     return 0 if result["all_17_consumer_paths_proven"] else 1
 
 

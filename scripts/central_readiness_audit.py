@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
+    run_source = inspect.getsource(MiniSweCentralAgent.run)
     setup_source = inspect.getsource(MiniSweCentralAgent.setup)
     workflow = (ROOT / ".github/workflows/tb2_miniswe_engine.yml").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
@@ -51,6 +52,21 @@ def audit() -> dict[str, bool]:
             and "--ak enable_preflight=true" not in workflow
         ),
         "provider_free_gate_covers_preflight": "tests/test_gt_preflight.py" in workflow,
+        "provider_free_gate_covers_context_compiler": (
+            "tests/test_provider_view.py" in workflow
+            and "tests/test_gt_deep_metrics.py" in workflow
+        ),
+        "paid_lossy_compaction_disabled": "--ak enable_context_compaction=false" in workflow,
+        "context_compiler_precedes_model_query": (
+            0
+            <= run_source.find("record_context_compiler_call(")
+            < run_source.find("model.query, query_messages")
+        ),
+        "typed_proposal_precedes_environment_exec": (
+            0
+            <= run_source.find("adapt_proposed_action(")
+            < run_source.find("await environment.exec(")
+        ),
         "task_exec_env_is_empty": "env={}," in source,
         "treatment_workflow_central": (
             'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
@@ -68,6 +84,9 @@ def audit() -> dict[str, bool]:
         ),
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]
+        ),
+        "all_effects_context_accounted": bool(
+            feature_result["all_effects_context_accounted"]
         ),
     }
 

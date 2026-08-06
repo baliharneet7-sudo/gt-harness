@@ -133,7 +133,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_all_features: bool = True,
         enable_repository_intelligence: bool = True,
         enable_task_start_advisory: bool = False,
-        enable_context_compaction: bool = True,
+        enable_context_compaction: bool = False,
         context_trigger_chars: int = 120_000,
         context_target_chars: int = 60_000,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
@@ -574,6 +574,11 @@ class MiniSweCentralAgent(BaseAgent):
                         default=str,
                     ).encode("utf-8")
                 ).hexdigest()
+                self._features.record_context_compiler_call(
+                    call=calls,
+                    request_payload_sha256=request_payload_sha256,
+                    fact_accounting=provider_view_metrics.fact_accounting,
+                )
                 if delivery_metadata is not None:
                     evidence_action = int(delivery_metadata.get("evidence_action") or 0)
                     guidance_deliveries.append(
@@ -635,8 +640,30 @@ class MiniSweCentralAgent(BaseAgent):
                         "provider_view_input_chars": provider_view_metrics.input_chars,
                         "provider_view_output_chars": provider_view_metrics.output_chars,
                         "provider_view_elided_chars": provider_view_metrics.elided_chars,
+                        "context_compiler": provider_view_metrics.as_dict(),
+                        "context_compiler_ran": provider_view_metrics.compiler_ran,
+                        "context_fact_candidates": provider_view_metrics.candidate_fact_count,
+                        "context_facts_selected": provider_view_metrics.selected_fact_count,
+                        "context_facts_represented": (
+                            provider_view_metrics.represented_fact_count
+                        ),
+                        "context_facts_controller_only": (
+                            provider_view_metrics.controller_only_fact_count
+                        ),
+                        "context_facts_omitted": provider_view_metrics.omitted_fact_count,
+                        "context_facts_accounted": provider_view_metrics.accounted_fact_count,
+                        "context_stale_facts": provider_view_metrics.stale_fact_count,
+                        "context_duplicate_facts": provider_view_metrics.duplicate_fact_count,
+                        "context_exact_duplicate_chars_removed": (
+                            provider_view_metrics.exact_duplicate_chars_removed
+                        ),
+                        "context_unique_reasoning_chars_removed": (
+                            provider_view_metrics.unique_assistant_reasoning_chars_removed
+                        ),
                         "query_started_at": None,
                         "next_action_relation": "",
+                        "context_selected_facts_action_measurable": 0,
+                        "context_selected_facts_action_aligned": 0,
                     }
                 )
                 try:
@@ -684,6 +711,35 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     for index, action in enumerate(actions)
                 )
+                next_commands = tuple(
+                    str(action.get("command") or action.get("cmd") or "")
+                    for action in actions
+                )
+                compiler_fact_rows = model_call_contexts[-1]["context_compiler"].get(
+                    "fact_accounting", []
+                )
+                for fact_row in compiler_fact_rows:
+                    if fact_row.get("disposition") != "selected_state_frame":
+                        continue
+                    anchors = tuple(
+                        str(anchor)
+                        for anchor in fact_row.get("action_anchors") or ()
+                        if anchor
+                    )
+                    measurable = bool(anchors and next_commands)
+                    aligned = measurable and any(
+                        anchor in command
+                        for anchor in anchors
+                        for command in next_commands
+                    )
+                    fact_row["next_action_measurable"] = measurable
+                    fact_row["next_action_anchor_aligned"] = aligned
+                    model_call_contexts[-1][
+                        "context_selected_facts_action_measurable"
+                    ] += int(measurable)
+                    model_call_contexts[-1][
+                        "context_selected_facts_action_aligned"
+                    ] += int(aligned)
                 if pending_reconsideration_cycle:
                     self._features.record_reconsideration(
                         cycle_id=pending_reconsideration_cycle,
@@ -981,6 +1037,7 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=source_revision,
                         snapshot=snapshot,
                         validation=classification,
+                        proposed=proposed,
                     )
                     if self.preflight_mode is not PreflightMode.OFF:
                         self._features.record_action_postflight(
@@ -1182,6 +1239,9 @@ class MiniSweCentralAgent(BaseAgent):
                 seen_preflight_evidence.add(evidence_key)
             action_metrics = feature_summary["action_metrics"]
             accountability_counts = feature_summary["effect_accountability_counts"]
+            compiler_effect_counts = feature_summary[
+                "context_compiler_effect_accountability_counts"
+            ]
             total_tokens = input_tokens + output_tokens
             uncached_input_tokens = max(0, input_tokens - cache_tokens)
             normalized_cost = normalized_token_cost(
@@ -1220,6 +1280,57 @@ class MiniSweCentralAgent(BaseAgent):
                 "context_chars_sent": context_chars_sent,
                 "context_compactions": context_compactions,
                 "context_chars_elided": context_chars_elided,
+                "context_compiler_calls": sum(
+                    bool(row.get("context_compiler_ran")) for row in model_call_contexts
+                ),
+                "context_fact_candidates": sum(
+                    int(row.get("context_fact_candidates") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_facts_selected": sum(
+                    int(row.get("context_facts_selected") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_facts_represented": sum(
+                    int(row.get("context_facts_represented") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_facts_controller_only": sum(
+                    int(row.get("context_facts_controller_only") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_facts_omitted": sum(
+                    int(row.get("context_facts_omitted") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_facts_accounted": sum(
+                    int(row.get("context_facts_accounted") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_selected_facts_action_measurable": sum(
+                    int(row.get("context_selected_facts_action_measurable") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_selected_facts_action_aligned": sum(
+                    int(row.get("context_selected_facts_action_aligned") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_stale_facts": sum(
+                    int(row.get("context_stale_facts") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_duplicate_facts": sum(
+                    int(row.get("context_duplicate_facts") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_exact_duplicate_chars_removed": sum(
+                    int(row.get("context_exact_duplicate_chars_removed") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_unique_reasoning_chars_removed": sum(
+                    int(row.get("context_unique_reasoning_chars_removed") or 0)
+                    for row in model_call_contexts
+                ),
                 "preflight_mode": self.preflight_mode.value,
                 "preflight_calls": len(preflight_rows),
                 "preflight_candidate_dispositions": {
@@ -1246,6 +1357,30 @@ class MiniSweCentralAgent(BaseAgent):
                         {row["proposed"]["operation"] for row in preflight_rows}
                     )
                 },
+                "preflight_segment_operation_distribution": {
+                    operation: sum(
+                        nested.get("operation") == operation
+                        for row in preflight_rows
+                        for nested in row["proposed"].get("operations") or ()
+                    )
+                    for operation in sorted(
+                        {
+                            str(nested.get("operation") or "")
+                            for row in preflight_rows
+                            for nested in row["proposed"].get("operations") or ()
+                        }
+                    )
+                },
+                "preflight_known_segment_operations": sum(
+                    nested.get("operation") != ActionOperation.OTHER.value
+                    for row in preflight_rows
+                    for nested in row["proposed"].get("operations") or ()
+                ),
+                "preflight_unknown_segment_operations": sum(
+                    nested.get("operation") == ActionOperation.OTHER.value
+                    for row in preflight_rows
+                    for nested in row["proposed"].get("operations") or ()
+                ),
                 "preflight_latency_ms": {
                     "p50": _percentile(preflight_latencies, 0.50),
                     "p95": _percentile(preflight_latencies, 0.95),
@@ -1326,6 +1461,18 @@ class MiniSweCentralAgent(BaseAgent):
                     for row in feature_summary["effect_trace"]
                 ),
                 "effect_accountability": accountability_counts,
+                "context_compiler_effect_accountability": compiler_effect_counts,
+                "context_compiler_effects_considered": sum(
+                    count
+                    for status, count in compiler_effect_counts.items()
+                    if status != "no_eligible_model_call"
+                ),
+                "context_compiler_effects_no_eligible_call": compiler_effect_counts.get(
+                    "no_eligible_model_call", 0
+                ),
+                "context_compiler_effects_unaccounted": compiler_effect_counts.get(
+                    "unaccounted_bug", 0
+                ),
                 "inert_private_state_effects": accountability_counts.get("inert_private_state", 0),
                 "pending_decision_claim_effects": accountability_counts.get(
                     "pending_decision_claim", 0

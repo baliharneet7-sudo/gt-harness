@@ -30,6 +30,53 @@ applied 361 effects; only 36 were model-visible provider payloads. The effect
 trace and summary now distinguish deterministic `engine_internal_state` work
 from actual provider delivery and from genuinely unread private state.
 
+## Deterministic context-compiler repair (2026-08-05)
+
+The regression diagnosis found that the host was central in execution but not
+yet rigorous enough in context selection. It reconstructed only one primary
+operation from compound Bash, populated recent reads mainly from search output,
+labelled active facts as "represented by full history" without proving where,
+and used a dedupe fingerprint that could collapse turns with different
+Mini-SWE reasoning. Lossy compaction also started far below the provider's
+actual context limit in the failed smoke, removing old reasoning without an
+outcome-preservation proof.
+
+The repaired request path is:
+
+```text
+durable Mini-SWE history + typed controller state
+  -> exact-turn dedupe (reasoning/content/commands/results all included)
+  -> ContextFact inventory with source/workspace revision
+  -> exact representation proof at provider message indices
+  -> bounded selection only for current material facts absent from history
+  -> final request hash
+  -> model.query
+  -> next-action anchor-alignment measurement
+```
+
+Every candidate fact is accounted as `represented_message`,
+`selected_state_frame`, `controller_only`, `stale_source_revision`, or
+`state_frame_budget`. The compiler cannot silently call a fact represented and
+cannot truncate through the middle of a fact. Controller revisions and private
+feature state affect deterministic selection without becoming prompt text.
+Requirements remain revision-persistent; validation, failure, read, change,
+and structural source evidence are revision-bound.
+
+Every compound shell segment is typed independently and the same
+`ProposedAction` reaches preflight and postflight. Read observations record
+canonical path, requested line range, revisions, return code, and output hash.
+Validation is attached only to the segment that actually runs the check.
+Ambiguous executable behavior remains `OTHER` and therefore defaults to PASS.
+The archived ten-task replay classified 641/698 primary actions (91.8%) and
+deliberately abstained on 57. It accounted all 324 replayed effects: 321 as
+controller-state context and 3 as provider payloads, with zero unaccounted
+effects.
+
+Lossy context compaction is disabled in the paid workflow. The fact compiler,
+exact duplicate removal, request accounting, and typed state still run on every
+provider call. This is the conservative configuration for the next smoke; a
+future compaction policy requires a matched outcome-preservation ablation.
+
 ## Why Round 11 was inefficient
 
 - The selected ten tasks stayed at 9/10 while calls rose 420 to 650, actions
@@ -62,8 +109,8 @@ The model-facing interface is stock Mini-SWE:
 - stock system and instance templates;
 - stock `LitellmModel`;
 - one Bash tool;
-- no typed GT tool;
-- no GT prompt tags or facts;
+- no typed GT tool or model-acknowledgement marker;
+- only bounded source-backed facts absent from retained history;
 - no task-container GT source, state, package, binary, or provider key.
 
 The runtime emits both a Mini-SWE-compatible trajectory and ATIF-v1.7 on the
@@ -102,7 +149,7 @@ inventory: ten FACT identities (`caller_contract`, `covering_red`,
 seven CAP_OWNER identities. Each delivery is accepted only when its trigger
 boundary, current workspace revision, non-empty feature-specific payload, and
 freshness marker pass the payload contract. Treatment receipts are model
-visible through bounded generic guidance; shadow receipts remain private.
+visible through bounded grounded decision facts; shadow receipts remain private.
 
 `scripts/central_feature_census.py` forces every trigger independently and
 requires all 17 payloads to be non-opaque, fresh, correctly timed, and

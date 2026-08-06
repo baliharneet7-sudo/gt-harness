@@ -95,7 +95,8 @@ jobs:
             tests/test_gt_central_consumer_proof.py \
             tests/test_central_replay.py \
             tests/test_gt_central_agent.py \
-            tests/test_provider_view.py -q
+            tests/test_provider_view.py \
+            tests/test_gt_deep_metrics.py -q
           python scripts/central_feature_census.py \
             --output provider-free-central-census.json >/dev/null
 
@@ -298,14 +299,16 @@ jobs:
               # Benchmark treatment: bounded by step_limit and cost_limit only.
               # No wall-time or per-call time censors so hard tasks are never
               # cut off mid-run; provider errors fail fast (no retries).
-              # Smart provider-view compaction is on (dedup + typed progress
-              # ledger); the task-start repository advisory stays OFF during
-              # isolation. Preflight remains observational (shadow) until the
-              # provider-free assistive gate proves intervention semantics.
+              # Lossy provider-view compaction is OFF for the paid arm. The
+              # deterministic compiler still runs on every request, proves
+              # exact duplicate removal and fact placement, and preserves all
+              # distinct Mini-SWE reasoning. The task-start repository fact
+              # stays OFF during isolation. Preflight remains observational
+              # (shadow) until a separately authorized assistive experiment.
               FEATURE_ARGS+=(
                 --ak enable_lint=true --ak enable_submit_readiness=true
                 --ak preflight_mode=shadow
-                --ak enable_context_compaction=true
+                --ak enable_context_compaction=false
                 --ak enable_task_start_advisory=false
               )
               ;;

@@ -155,6 +155,20 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
         json.dumps(
             {
                 "features": {},
+                "metrics": {
+                    "context_compiler_calls": 2,
+                    "context_fact_candidates": 7,
+                    "context_facts_represented": 4,
+                    "context_facts_selected": 1,
+                    "context_facts_controller_only": 2,
+                    "context_facts_omitted": 2,
+                    "context_facts_accounted": 7,
+                    "context_unique_reasoning_chars_removed": 0,
+                    "context_compiler_effects_considered": 5,
+                    "context_compiler_effects_unaccounted": 0,
+                    "preflight_known_segment_operations": 3,
+                    "preflight_unknown_segment_operations": 1,
+                },
                 "model_call_contexts": [
                     {"stock_context_chars": 100, "runtime_advisory_chars": 0, "context_chars": 100},
                     {
@@ -172,6 +186,13 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["runtime_advisory_context_chars"] == 80
     assert metrics["stock_context_chars_from_receipt"] == 250
     assert metrics["max_context_chars_from_receipt"] == 230
+    assert metrics["context_compiler_calls"] == 2
+    assert metrics["context_fact_candidates"] == 7
+    assert metrics["context_facts_accounted"] == 7
+    assert metrics["context_unique_reasoning_chars_removed"] == 0
+    assert metrics["context_compiler_effects_considered"] == 5
+    assert metrics["context_compiler_effects_unaccounted"] == 0
+    assert metrics["preflight_known_segment_operations"] == 3
 
 
 def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):

@@ -28,6 +28,7 @@ from gt_engine.central_runtime import (
     classify_validation_command,
     feature_payload_grounded,
 )
+from gt_engine.provider_view import build_provider_view
 
 WR0 = "workspace-v0"
 SR0 = "source-v0"
@@ -988,3 +989,45 @@ def test_effect_trace_is_additive_and_links_confirmed_provider_delivery():
     syntax = next(row for row in trace if row["feature_id"] == "syntax_result")
     assert syntax["disposition"] == "provider_payload"
     assert syntax["provider_delivery_ids"] == [confirmed["delivery_id"]]
+
+
+def test_context_compiler_accounts_every_effect_without_claiming_model_visibility():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Fix it", revision=WR0, source_revision=SR0)
+    runtime.record_syntax(
+        action_id=1,
+        revision=SR1,
+        source_revision=SR1,
+        failed=False,
+        reason="changed_file_syntax_pass",
+        path="app.py",
+        command="python3 -m py_compile app.py",
+        returncode=0,
+    )
+    runtime.consume_effects(action_id=1, call=1)
+    active_state = {
+        **runtime.progress_ledger(),
+        "source_revision": SR1,
+        "workspace_revision": WR0,
+    }
+    _view, metrics = build_provider_view(
+        [{"role": "user", "content": "Fix it"}],
+        active_state=active_state,
+        trigger_chars=10**18,
+        target_chars=10**18,
+    )
+
+    runtime.record_context_compiler_call(
+        call=2,
+        request_payload_sha256="request-hash",
+        fact_accounting=metrics.fact_accounting,
+    )
+    summary = runtime.summary()
+    rows = summary["context_compiler_effect_accountability"]
+
+    assert rows
+    assert all(row["status"] != "unaccounted_bug" for row in rows)
+    assert all(row["first_considered_call"] == 2 for row in rows)
+    assert all(row["one_step_late"] is False for row in rows)
+    assert all(row["status"] == "controller_state_considered" for row in rows)
+    assert summary["guidance_events"] == 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import posixpath
 import re
 import shlex
 from collections.abc import Mapping
@@ -68,6 +69,34 @@ class ActionTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ReadSpan:
+    """A mechanically observed source range requested by one shell segment."""
+
+    path: str
+    start_line: int | None = None
+    end_line: int | None = None
+    whole_file: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedOperation:
+    """One mechanically classified operation inside a proposed Bash action.
+
+    This is shell structure, not inferred model intent.  Compound actions can
+    carry several operations while unsupported segments remain OTHER.
+    """
+
+    segment_index: int
+    executable: str
+    operation: ActionOperation
+    targets: tuple[ActionTarget, ...] = ()
+    read_spans: tuple[ReadSpan, ...] = ()
+    mutates_workspace: bool = False
+    confidence: float = 0.0
+    parser_evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ProposedAction:
     action_id: str
     raw_command: str
@@ -81,6 +110,7 @@ class ProposedAction:
     batch_index: int
     batch_size: int
     parser_confidence: float
+    operations: tuple[ObservedOperation, ...] = ()
     target_must_be_absent: bool = False
     shell_segments: tuple[tuple[str, ...], ...] = ()
     parser_evidence: tuple[str, ...] = ()
@@ -92,6 +122,8 @@ class ProposedAction:
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
         row["operation"] = self.operation.value
+        for operation in row["operations"]:
+            operation["operation"] = str(operation["operation"])
         row["cycle_id"] = self.cycle_id
         return row
 
@@ -149,7 +181,7 @@ _PATH = re.compile(
     r"(?:^|[\s'\"])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|"
     r"[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)(?=$|[\s'\":,])"
 )
-_COMPOUND = re.compile(r"(?:&&|\|\||;|\n|`|\$\()")
+_SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 _MUTATING_EXECUTABLES = frozenset(
     {
         "apply_patch",
@@ -207,23 +239,42 @@ def _without_heredoc_bodies(command: str) -> str:
     return "\n".join(kept)
 
 
-def shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
-    """Parse top-level executable segments once for proposal and validation."""
+def _shell_parts(
+    command: str,
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    """Parse executable segments and the connectors between them once."""
+
     try:
-        lexer = shlex.shlex(_without_heredoc_bodies(command), posix=True, punctuation_chars=";|&")
+        lexer = shlex.shlex(
+            _without_heredoc_bodies(command),
+            posix=True,
+            punctuation_chars=";|&<>",
+        )
         lexer.whitespace_split = True
         lexer.commenters = "#"
         tokens = list(lexer)
     except ValueError:
-        return ()
-    segments: list[list[str]] = [[]]
+        return (), ()
+    segments: list[tuple[str, ...]] = []
+    connectors: list[str] = []
+    current: list[str] = []
     for token in tokens:
         if token and set(token) <= {";", "|", "&"}:
-            if segments[-1]:
-                segments.append([])
+            if current:
+                segments.append(tuple(current))
+                current = []
+                connectors.append(token)
             continue
-        segments[-1].append(token)
-    return tuple(tuple(segment) for segment in segments if segment)
+        current.append(token)
+    if current:
+        segments.append(tuple(current))
+    return tuple(segments), tuple(connectors[: max(0, len(segments) - 1)])
+
+
+def shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
+    """Parse top-level executable segments once for proposal and validation."""
+
+    return _shell_parts(command)[0]
 
 
 def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
@@ -251,6 +302,323 @@ def _targets(command: str) -> tuple[ActionTarget, ...]:
     )
 
 
+_READ_EXECUTABLES = frozenset(
+    {
+        "cat",
+        "cmp",
+        "diff",
+        "du",
+        "file",
+        "head",
+        "less",
+        "ls",
+        "more",
+        "nl",
+        "od",
+        "pwd",
+        "readlink",
+        "realpath",
+        "stat",
+        "strings",
+        "tail",
+        "wc",
+        "xxd",
+        "hexdump",
+    }
+)
+_SEARCH_EXECUTABLES = frozenset({"rg", "grep", "find", "ack", "ag"})
+_VALIDATE_EXECUTABLES = frozenset({"pytest", "ctest"})
+_NON_TARGET_TOKENS = frozenset({"/dev/null", "-", "."})
+_SED_RANGE = re.compile(r"^(\d+)(?:,(\d+))?p$")
+
+
+def _resolve_segment_path(value: str, cwd: str) -> str:
+    cleaned = value.strip("'\"").replace("\\", "/")
+    if not cleaned or cleaned in _NON_TARGET_TOKENS:
+        return ""
+    if cleaned.startswith("/"):
+        return posixpath.normpath(cleaned)
+    if cwd:
+        return posixpath.normpath(posixpath.join(cwd, cleaned))
+    return posixpath.normpath(cleaned)
+
+
+def _looks_like_path(value: str) -> bool:
+    cleaned = value.strip("'\"")
+    if not cleaned or cleaned.startswith("-") or cleaned in _NON_TARGET_TOKENS:
+        return False
+    if cleaned.isdigit() or _SED_RANGE.match(cleaned):
+        return False
+    return bool("/" in cleaned or "." in posixpath.basename(cleaned))
+
+
+def _segment_operand_paths(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
+    values: list[str] = []
+    skip_next = False
+    head = words[0].rsplit("/", 1)[-1] if words else ""
+    program_indices: set[int] = set()
+    if head in {"sed", "awk", "perl", "rg", "grep", "ack", "ag"}:
+        expression_option = False
+        for index, token in enumerate(words[1:], start=1):
+            if expression_option:
+                program_indices.add(index)
+                expression_option = False
+                break
+            if token in {"-e", "--expression"}:
+                expression_option = True
+                continue
+            if token.startswith("-"):
+                continue
+            program_indices.add(index)
+            break
+    for index, token in enumerate(words[1:], start=1):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in {">", ">>"}:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        if index in program_indices:
+            continue
+        # A sed program or search query is not a path merely because it
+        # contains punctuation.
+        if index == 1 and head in {"sed", "awk", "rg", "grep", "ack", "ag"}:
+            if _SED_RANGE.match(token.strip("'\"")) or not _looks_like_path(token):
+                continue
+        if not _looks_like_path(token):
+            continue
+        resolved = _resolve_segment_path(token, cwd)
+        if resolved and resolved not in values:
+            values.append(resolved)
+    return tuple(values)
+
+
+def _redirection_targets(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
+    targets: list[str] = []
+    for index, token in enumerate(words[:-1]):
+        if token not in {">", ">>"}:
+            continue
+        resolved = _resolve_segment_path(words[index + 1], cwd)
+        if resolved and resolved not in targets and resolved != "/dev/null":
+            targets.append(resolved)
+    return tuple(targets)
+
+
+def _sed_range(words: tuple[str, ...]) -> tuple[int | None, int | None]:
+    for token in words[1:]:
+        match = _SED_RANGE.match(token.strip("'\""))
+        if match:
+            start = int(match.group(1))
+            return start, int(match.group(2) or start)
+    return None, None
+
+
+def _segment_is_validation(words: tuple[str, ...], validation: Any | None) -> bool:
+    """Bind a whole-command validation result only to its actual runner.
+
+    The immutable classifier is authoritative for the action, but a compound
+    command can also contain setup and reporting segments.  Those segments do
+    not become validation merely because a later runner is a declared check.
+    """
+
+    if validation is None or not bool(getattr(validation, "is_validation", False)):
+        return False
+    if not words:
+        return False
+    head = words[0].rsplit("/", 1)[-1].lower()
+    lowered = tuple(word.lower() for word in words[1:])
+    if head in {"python", "python3", "py"}:
+        if any(word in {"pytest", "unittest"} for word in lowered):
+            return True
+        script = next((word for word in lowered if not word.startswith("-")), "")
+        return any(marker in posixpath.basename(script) for marker in ("test", "check", "verify"))
+    if head in {"node", "ruby", "bash", "sh"}:
+        script = next((word for word in lowered if not word.startswith("-")), "")
+        return any(marker in posixpath.basename(script) for marker in ("test", "check", "verify"))
+    if head in {"npm", "pnpm", "yarn", "npx", "gradle", "gradlew", "mvn"}:
+        return any(word in {"test", "check", "verify"} for word in lowered)
+    return any(marker in head for marker in ("test", "check", "verify"))
+
+
+def _classify_operations(
+    command: str,
+    segments: tuple[tuple[str, ...], ...],
+    *,
+    connectors: tuple[str, ...] = (),
+    validation: Any | None,
+) -> tuple[ObservedOperation, ...]:
+    operations: list[ObservedOperation] = []
+    current_cwd = ""
+    pending_pipeline_read_indices: list[int] = []
+    for segment_index, words in enumerate(segments):
+        if not words:
+            continue
+        if segment_index and (
+            segment_index - 1 >= len(connectors)
+            or connectors[segment_index - 1] != "|"
+        ):
+            pending_pipeline_read_indices.clear()
+        head = words[0].rsplit("/", 1)[-1].lower()
+        if head == "cd" and len(words) > 1:
+            current_cwd = _resolve_segment_path(words[1], current_cwd)
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    head,
+                    ActionOperation.OTHER,
+                    confidence=1.0,
+                    parser_evidence=("shell_context:cwd", f"cwd:{current_cwd}"),
+                )
+            )
+            continue
+
+        operands = _segment_operand_paths(words, current_cwd)
+        redirections = _redirection_targets(words, current_cwd)
+        base_targets = tuple(ActionTarget(path) for path in operands)
+        evidence = (f"head:{head or 'unknown'}", f"segment:{segment_index}")
+
+        if redirections:
+            source_operands = tuple(path for path in operands if path not in redirections)
+            if head in _READ_EXECUTABLES and source_operands:
+                spans = tuple(ReadSpan(path=path, whole_file=True) for path in source_operands)
+                operations.append(
+                    ObservedOperation(
+                        segment_index,
+                        head,
+                        ActionOperation.READ,
+                        tuple(ActionTarget(path) for path in source_operands),
+                        spans,
+                        confidence=0.98,
+                        parser_evidence=(*evidence, "source_before_redirection"),
+                    )
+                )
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    head,
+                    ActionOperation.EDIT,
+                    tuple(ActionTarget(path, "redirection") for path in redirections),
+                    mutates_workspace=True,
+                    confidence=0.98,
+                    parser_evidence=(*evidence, "shell_redirection"),
+                )
+            )
+            pending_pipeline_read_indices.clear()
+            continue
+
+        if _SUBMIT_MARKER in command and _SUBMIT_MARKER in " ".join(words):
+            operation, confidence = ActionOperation.SUBMIT, 1.0
+        elif head in _READ_EXECUTABLES:
+            operation, confidence = ActionOperation.READ, 0.98
+        elif head == "sed" and "-n" in words and "-i" not in words:
+            operation, confidence = ActionOperation.READ, 0.95
+        elif head == "awk" and not redirections:
+            operation, confidence = ActionOperation.READ, 0.85
+        elif head in _SEARCH_EXECUTABLES:
+            operation, confidence = ActionOperation.SEARCH, 0.95
+        elif head in _VALIDATE_EXECUTABLES or (
+            head in {"go", "cargo"} and len(words) > 1 and words[1] == "test"
+        ):
+            operation, confidence = ActionOperation.VALIDATE, 0.95
+        elif _segment_is_validation(words, validation):
+            operation, confidence = ActionOperation.VALIDATE, 1.0
+        elif head in {"sed", "perl"} and any(flag in words for flag in ("-i", "-pi")):
+            operation, confidence = ActionOperation.EDIT, 0.9
+        elif head in {
+            "apply_patch",
+            "cp",
+            "install",
+            "ln",
+            "mv",
+            "patch",
+            "tee",
+            "truncate",
+        }:
+            operation, confidence = ActionOperation.EDIT, 0.95
+        elif head == "git" and len(words) > 1 and words[1] in _MUTATING_GIT_SUBCOMMANDS:
+            operation, confidence = ActionOperation.EDIT, 0.9
+        elif head in {"touch", "mkdir"}:
+            operation, confidence = ActionOperation.CREATE, 0.95
+        elif head in {"rm", "rmdir"}:
+            operation, confidence = ActionOperation.DELETE, 0.95
+        elif head in {"pip", "pip3", "npm", "yarn", "pnpm", "apt", "apt-get"} and any(
+            word in {"install", "add"} for word in words[1:3]
+        ):
+            operation, confidence = ActionOperation.INSTALL, 0.95
+        else:
+            operation, confidence = ActionOperation.OTHER, 0.2
+
+        read_spans: tuple[ReadSpan, ...] = ()
+        if operation == ActionOperation.READ and operands:
+            start, end = _sed_range(words) if head == "sed" else (None, None)
+            read_spans = tuple(
+                ReadSpan(
+                    path=path,
+                    start_line=start,
+                    end_line=end,
+                    whole_file=start is None and end is None,
+                )
+                for path in operands
+            )
+        mutates = operation in {
+            ActionOperation.EDIT,
+            ActionOperation.CREATE,
+            ActionOperation.DELETE,
+            ActionOperation.INSTALL,
+        }
+        operations.append(
+            ObservedOperation(
+                segment_index,
+                head,
+                operation,
+                base_targets,
+                read_spans,
+                mutates,
+                confidence,
+                evidence,
+            )
+        )
+        current_index = len(operations) - 1
+        if operation == ActionOperation.READ and read_spans:
+            pending_pipeline_read_indices.append(current_index)
+        elif head == "sed" and operation == ActionOperation.READ and not operands:
+            start, end = _sed_range(words)
+            if start is not None and pending_pipeline_read_indices:
+                for read_index in pending_pipeline_read_indices:
+                    previous = operations[read_index]
+                    operations[read_index] = ObservedOperation(
+                        previous.segment_index,
+                        previous.executable,
+                        previous.operation,
+                        previous.targets,
+                        tuple(
+                            ReadSpan(span.path, start, end, False)
+                            for span in previous.read_spans
+                        ),
+                        previous.mutates_workspace,
+                        previous.confidence,
+                        (*previous.parser_evidence, "range_from_pipeline_filter"),
+                    )
+        else:
+            pending_pipeline_read_indices.clear()
+    return tuple(operations)
+
+
+_PRIMARY_OPERATION_PRIORITY = {
+    ActionOperation.SUBMIT: 0,
+    ActionOperation.DELETE: 1,
+    ActionOperation.EDIT: 2,
+    ActionOperation.CREATE: 3,
+    ActionOperation.INSTALL: 4,
+    ActionOperation.VALIDATE: 5,
+    ActionOperation.SEARCH: 6,
+    ActionOperation.READ: 7,
+    ActionOperation.OTHER: 8,
+}
+
+
 def adapt_proposed_action(
     action: Mapping[str, Any],
     *,
@@ -268,45 +636,39 @@ def adapt_proposed_action(
         + hashlib.sha256(f"{model_call}:{batch_index}:{command}".encode()).hexdigest()[:12]
     )
     stripped = command.strip()
-    segments = shell_segments(stripped)
+    segments, connectors = _shell_parts(stripped)
     words = list(segments[0]) if len(segments) == 1 else []
     head = words[0].rsplit("/", 1)[-1] if words else ""
-    compound = len(segments) != 1 or bool(_COMPOUND.search(stripped))
     mutation_signals = _mutation_signals(segments)
-    operation = ActionOperation.OTHER
-    confidence = 0.2 if stripped else 0.0
+    operations = _classify_operations(
+        command,
+        segments,
+        connectors=connectors,
+        validation=validation,
+    )
+    meaningful = tuple(item for item in operations if item.operation != ActionOperation.OTHER)
+    primary = min(
+        meaningful or operations,
+        key=lambda item: (_PRIMARY_OPERATION_PRIORITY[item.operation], item.segment_index),
+        default=None,
+    )
+    operation = primary.operation if primary is not None else ActionOperation.OTHER
+    confidence = primary.confidence if primary is not None else (0.2 if stripped else 0.0)
     validation_kind: str | None = None
-    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in stripped:
-        operation, confidence = ActionOperation.SUBMIT, 1.0
-    elif validation is not None and bool(getattr(validation, "is_validation", False)):
-        operation, confidence = ActionOperation.VALIDATE, 1.0
+    if validation is not None and bool(getattr(validation, "is_validation", False)):
         validation_kind = str(getattr(validation, "command_class", "validation"))
-    elif not compound and head in {"cat", "head", "tail", "less", "more"}:
-        operation, confidence = ActionOperation.READ, 0.98
-    elif not compound and head == "sed" and "-n" in words and "-i" not in words:
-        operation, confidence = ActionOperation.READ, 0.95
-    elif not compound and head in {"rg", "grep", "find", "ack", "ag"}:
-        operation, confidence = ActionOperation.SEARCH, 0.95
-    elif head in {"pytest", "go", "cargo", "make", "ctest"} and (
-        head != "go" or (len(words) > 1 and words[1] == "test")
-    ):
-        operation, confidence = ActionOperation.VALIDATE, 0.95
+    elif operation == ActionOperation.VALIDATE:
         validation_kind = head
-    elif head in {"sed", "perl"} and any(flag in words for flag in ("-i", "-pi")):
-        operation, confidence = ActionOperation.EDIT, 0.9
-    elif head in {"touch", "mkdir"}:
-        operation, confidence = ActionOperation.CREATE, 0.95
-    elif head in {"rm", "rmdir"}:
-        operation, confidence = ActionOperation.DELETE, 0.95
-    elif head in {"pip", "pip3", "npm", "yarn", "pnpm", "apt", "apt-get"} and any(
-        word in {"install", "add"} for word in words[1:3]
-    ):
-        operation, confidence = ActionOperation.INSTALL, 0.95
+    parsed_targets: list[ActionTarget] = list(_targets(command))
+    for observed in operations:
+        for target in observed.targets:
+            if target not in parsed_targets:
+                parsed_targets.append(target)
     return ProposedAction(
         action_id=action_id,
         raw_command=command,
         operation=operation,
-        targets=_targets(command),
+        targets=tuple(parsed_targets),
         mutates_workspace=(
             operation
             in {
@@ -324,6 +686,7 @@ def adapt_proposed_action(
         batch_index=max(0, int(batch_index)),
         batch_size=max(1, int(batch_size)),
         parser_confidence=confidence,
+        operations=operations,
         target_must_be_absent=(
             operation == ActionOperation.CREATE
             and head == "mkdir"

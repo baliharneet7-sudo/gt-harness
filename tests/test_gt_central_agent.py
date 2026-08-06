@@ -814,13 +814,13 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     await agent.run("Fix it, then run `pytest -q`.", environment, context)
 
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
-    assert not any("Runtime evidence:" in item for item in model.observed_history[0])
+    assert not any("Observed task fact:" in item for item in model.observed_history[0])
     assert any(
-        "Runtime evidence: Syntax check failed for app.py" in item
+        "Observed task fact: Syntax check failed for app.py" in item
         for item in model.observed_history[1]
     )
     assert not any(
-        "Runtime evidence: Syntax check failed for app.py" in item
+        "Observed task fact: Syntax check failed for app.py" in item
         for history in model.observed_history[2:]
         for item in history
     )
@@ -834,7 +834,7 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
         for item in history
     )
     # The durable trajectory stays clean; timing proof lives in receipt-v2.
-    assert "Runtime evidence:" not in trajectory
+    assert "Observed task fact:" not in trajectory
     assert "groundtruth" not in trajectory.lower()
     assert "gt_" not in trajectory.lower()
     assert context.metadata["exit_status"] == "Submitted"
@@ -879,6 +879,19 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert deliveries[1]["not_predictive"] is True
     contexts = receipt["model_call_contexts"]
     assert len(contexts) == metrics["api_calls"]
+    assert metrics["context_compiler_calls"] == metrics["api_calls"]
+    assert metrics["context_unique_reasoning_chars_removed"] == 0
+    assert metrics["context_compiler_effects_unaccounted"] == 0
+    assert all(row["context_compiler_ran"] for row in contexts)
+    assert all(
+        row["context_facts_accounted"] == row["context_fact_candidates"]
+        for row in contexts
+    )
+    assert all(
+        row["context_compiler"]["accounted_fact_count"]
+        == row["context_compiler"]["candidate_fact_count"]
+        for row in contexts
+    )
     assert contexts[1]["runtime_advisory_chars"] == deliveries[0]["chars"]
     assert contexts[1]["stock_context_chars"] > 0
     assert contexts[3]["runtime_advisory_chars"] == deliveries[1]["chars"]

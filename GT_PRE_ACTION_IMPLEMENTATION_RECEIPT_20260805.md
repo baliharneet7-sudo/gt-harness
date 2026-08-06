@@ -86,6 +86,32 @@ The summary now uses `engine_internal_state` for deterministic producer work,
 read. This matches the engine model: lack of model text is not evidence of
 lack of engine work.
 
+### Deterministic context-compiler and segment-accounting addendum
+
+The post-smoke regression repair closes the remaining gap between owning the
+action loop and owning context correctly. `ProposedAction` now contains every
+mechanically known shell-segment operation, not only one primary command label.
+The same object is reused by postflight, so a compound `cd && nl file | sed -n
+'20,40p'` records the actual read path/range before the output is reduced into
+controller state. Whole-command validation classification is attached only to
+the runner segment, and shell programs such as `sed 's/x/y/'` are excluded from
+file targets.
+
+Every provider call now runs a deterministic `ContextFact` compiler. It records
+exact provider-message indices when a fact is already present, selects a
+bounded declarative frame only for current material facts that are absent, and
+keeps controller-only/stale/budget omissions explicit. The request receipt
+requires candidate and accounted fact counts to match. Exact-turn dedupe now
+includes assistant content and reasoning, so different Mini-SWE reasoning is
+never removed merely because a command and output repeat. Lossy compaction is
+disabled in the paid workflow.
+
+The archived ten-task replay completed `REPLAY_OK`: 641/698 primary actions
+were typed (91.8%), 57 remained conservative `OTHER/PASS`, and all 324 replayed
+feature effects were context-accounted (321 controller state, 3 provider
+payloads, 0 unaccounted). This is an implementation/correctness proof. It does
+not retroactively turn the 4/10 smoke into an efficiency win.
+
 ## Current call graph
 
 ```text

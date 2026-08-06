@@ -115,14 +115,53 @@ non-prediction, deduplication, and next action. Do not re-enable the historical
 generic guidance stream; its 94 advisories in run `30869649342` were the
 documented context/token regression.
 
+## Deterministic context compiler contract (2026-08-05)
+
+GT is not an advice sidecar. `MiniSweCentralAgent` compiles every provider
+request from the durable Mini-SWE history plus typed current controller state.
+The compiler may expose only source-backed task facts; it does not reason,
+predict intent, invent a plan, ask the model to acknowledge GT, or delete
+distinct Mini-SWE reasoning.
+
+Every candidate `ContextFact` receives exactly one replayable disposition in
+the request receipt:
+
+- `represented_message`: exact provider-message indices already contain the
+  command/result fact, so no duplicate text is added;
+- `selected_state_frame`: a current material fact is absent from retained
+  history and is emitted once in a bounded declarative frame;
+- `controller_only`: revision/control state affects deterministic selection but
+  is not useful model text;
+- `stale_source_revision`: revision-bound evidence is rejected;
+- `state_frame_budget`: a complete fact could not fit and is omitted rather
+  than truncated into a misleading fragment.
+
+`candidate_fact_count == accounted_fact_count` must hold on every model call.
+Request hash and message indices prove exposure. `next_action_anchor_aligned`
+is only a behavioral utilization proxy; it must never be called proof of an
+internal model acknowledgement or causal benefit. Causal influence requires a
+matched arm/ablation. Effect receipts separately record first-eligible compiler
+status (`provider_payload`, `controller_state_considered`,
+`stale_state_rejected`, `superseded_before_request`,
+`existing_engine_actuation`, `audit_only`, or `no_eligible_model_call`).
+
+Exact-turn deduplication includes assistant content, hidden reasoning content,
+tool commands, and tool results. Therefore byte-identical duplicate turns may
+be removed, but two turns with different Mini-SWE reasoning must both survive.
+Lossy old-turn compaction is disabled in the paid workflow until a matched
+ablation proves it preserves outcomes; the compiler and exact accounting still
+run on every request. Read observations come from every typed shell segment,
+not only a command's primary label, and retain path/range/revision/result hash.
+
 ## Provider-free proof
 
-`python -m scripts.central_feature_census` must print all ten lines before any paid
+`python -m scripts.central_feature_census` must print all required lines before any paid
 run: `ALL_17_PRODUCERS_PROVEN`, `ALL_17_CONSUMERS_PROVEN`,
 `ALL_EFFECTS_TIMING_VALID`, `ALL_PAYLOADS_GROUNDED`,
 `ALL_17_CONSUMER_PATHS_PROVEN`, `ALL_17_TRIGGERS_PROVEN`,
 `ALL_17_PAYLOADS_CONCRETE`, `ALL_17_CONSUMERS_APPLIED`,
 `ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST`, and `NO_ACTIONS_BLOCKED`.
+It must additionally print `ALL_EFFECTS_CONTEXT_ACCOUNTED`.
 The census cannot pass on producer receipts alone.
 `scripts/central_readiness_audit.py` must print `READY`. The workflow's
 provider-free suite must also include `tests/test_gt_preflight.py`.
