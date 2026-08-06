@@ -1753,24 +1753,6 @@ class CentralFeatureRuntime:
                         confidence=1.0,
                         source_revision=source_revision,
                     )
-            elif proposed.operation == ActionOperation.EDIT and proposed.targets:
-                missing = tuple(
-                    target.path
-                    for target in proposed.targets
-                    if target.path not in snapshot.entries
-                )
-                if missing and proposed.parser_confidence >= 0.9:
-                    decision = PreflightDecision(
-                        ActionDisposition.RETURN_TO_MODEL,
-                        proposed.raw_command,
-                        evidence=(
-                            "Proposed edit targets are absent from the current workspace: "
-                            + ", ".join(missing),
-                        ),
-                        reason_codes=("edit_target_absent",),
-                        confidence=1.0,
-                        source_revision=source_revision,
-                    )
             elif (
                 proposed.operation == ActionOperation.CREATE
                 and proposed.target_must_be_absent
@@ -1807,6 +1789,13 @@ class CentralFeatureRuntime:
             ActionDisposition.RETURN_TO_MODEL,
         }:
             return False, "disposition_not_assistive"
+        # A missing shell target is not a decision-changing contradiction:
+        # redirects and scratch-file creation expect absence, while in-place
+        # tools fail safely and expose their real diagnostic through
+        # authoritative postflight.  Returning to the model here spends a
+        # provider call before any new evidence exists.
+        if "edit_target_absent" in decision.reason_codes:
+            return False, "postflight_safe_absent_target"
         evidence = tuple(" ".join(item.split()) for item in decision.evidence if item.strip())
         if not evidence:
             return False, "missing_evidence"

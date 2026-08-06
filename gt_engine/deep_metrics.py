@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,8 @@ DIAGNOSTIC_METRICS = (
     "steps_to_first_check",
     "steps_to_submit",
     "gt_context_chars_added",
+    "context_state_frame_chars_added",
+    "total_gt_context_chars_added",
     "effects_produced",
     "effects_applied",
     "state_mutations",
@@ -62,6 +65,8 @@ DIAGNOSTIC_METRICS = (
     "context_compiler_effects_unaccounted",
     "preflight_known_segment_operations",
     "preflight_unknown_segment_operations",
+    "agent_wall_time_seconds",
+    "trial_wall_time_seconds",
 )
 # Frozen DeepSeek V4 Flash experiment rates per million tokens. Provider cost
 # was configured as ignore_errors and is often zero, so this normalized metric
@@ -84,6 +89,14 @@ _CENSORED = {
     "ModelTimeout",
     "Cancelled",
 }
+_CENSORED_HARBOR_EXCEPTIONS = {
+    "AgentTimeoutError",
+    "AgentSetupTimeoutError",
+    "EnvironmentBuildTimeoutError",
+    "TaskTimeoutError",
+    "TimeoutError",
+    "CancelledError",
+}
 
 
 def normalized_token_cost(cache_miss: int, cache_hit: int, output: int) -> float:
@@ -101,6 +114,17 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"trajectory must be an object or list: {path}")
     return payload
+
+
+def _elapsed_seconds(started_at: Any, finished_at: Any) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        finish = datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round(max(0.0, (finish - start).total_seconds()), 6)
 
 
 def _returncode(message: dict[str, Any]) -> int | None:
@@ -213,6 +237,7 @@ def extract_trajectory(
     task: str | None = None,
     reward: int | float | None = None,
     receipt_path: Path | None = None,
+    harbor_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Extract the same resource and behavior metrics from GT-off or GT-on."""
     payload = _load_json(path)
@@ -292,13 +317,29 @@ def extract_trajectory(
     total_tokens = input_tokens + output_tokens
     normalized_cost = normalized_token_cost(cache_miss_tokens, cache_tokens, output_tokens)
     exit_status = str((payload.get("info") or {}).get("exit_status") or "")
-    censored = exit_status in _CENSORED
+    exception_type = str(
+        ((harbor_result or {}).get("exception_info") or {}).get("exception_type") or ""
+    )
+    censored_reason = exception_type if exception_type in _CENSORED_HARBOR_EXCEPTIONS else ""
+    if not censored_reason and exit_status in _CENSORED:
+        censored_reason = exit_status
+    agent_execution = (harbor_result or {}).get("agent_execution") or {}
+    agent_wall_time = _elapsed_seconds(
+        agent_execution.get("started_at"), agent_execution.get("finished_at")
+    )
+    trial_wall_time = _elapsed_seconds(
+        (harbor_result or {}).get("started_at"), (harbor_result or {}).get("finished_at")
+    )
     result: dict[str, Any] = {
         "task": task or path.name.removesuffix("_trajectory.json"),
         "reward": reward,
         "solved": None if reward is None else bool(reward),
         "exit_status": exit_status,
-        "censored": censored,
+        "censored": bool(censored_reason),
+        "censored_reason": censored_reason,
+        "harbor_exception_type": exception_type,
+        "agent_wall_time_seconds": agent_wall_time,
+        "trial_wall_time_seconds": trial_wall_time,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cache_tokens": cache_tokens,
@@ -381,6 +422,13 @@ def extract_trajectory(
                 "runtime_advisory_context_chars": sum(
                     int(item.get("runtime_advisory_chars") or 0) for item in call_contexts
                 ),
+                "gt_context_chars_added": sum(
+                    int(item.get("runtime_advisory_chars") or 0) for item in call_contexts
+                ),
+                "context_state_frame_chars_added": sum(
+                    int((item.get("context_compiler") or {}).get("active_state_chars") or 0)
+                    for item in call_contexts
+                ),
                 "stock_context_chars_from_receipt": sum(
                     int(item.get("stock_context_chars") or 0) for item in call_contexts
                 ),
@@ -422,7 +470,11 @@ def extract_trajectory(
             "preflight_known_segment_operations",
             "preflight_unknown_segment_operations",
         ):
-            result[key] = receipt_metrics.get(key, 0)
+            result[key] = receipt_metrics.get(key, result.get(key, 0))
+        result["total_gt_context_chars_added"] = (
+            int(result.get("gt_context_chars_added") or 0)
+            + int(result.get("context_state_frame_chars_added") or 0)
+        )
     return result
 
 
@@ -476,6 +528,10 @@ def compare_arms(
         rows[task] = {
             "baseline_solved": b_solved,
             "treatment_solved": a_solved,
+            "baseline_censored": bool(before.get("censored")),
+            "baseline_censored_reason": str(before.get("censored_reason") or ""),
+            "treatment_censored": bool(after.get("censored")),
+            "treatment_censored_reason": str(after.get("censored_reason") or ""),
             "deltas": deltas,
             "diagnostic_deltas": diagnostic_deltas,
             "strict_pareto": pareto,
@@ -508,18 +564,31 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
         "",
         f"Gate: **{'PASS' if comparison['gate_passed'] else 'FAIL'}**",
         "",
+        "Solve regressions: "
+        + (", ".join(comparison["solve_regressions"]) or "none"),
+        "Treatment censors: "
+        + (", ".join(comparison["censored_treatment"]) or "none"),
+        "Strict Pareto failures: "
+        + (", ".join(comparison["pareto_failures"]) or "none"),
+        "",
         "Delta is treatment minus baseline; positive resource deltas are regressions.",
         "",
-        "| task | outcome | tokens | calls | actions | steps | cost | Pareto |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| task | outcome | tokens | calls | actions | steps | cost | agent sec "
+        "| censor | Pareto |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
     for task, row in comparison["tasks"].items():
         delta = row["deltas"]
+        agent_delta = row["diagnostic_deltas"].get("agent_wall_time_seconds")
+        agent_value = "n/a" if agent_delta is None else f"{agent_delta:+,.0f}"
         lines.append(
             f"| {task} | {row['baseline_solved']}→{row['treatment_solved']} "
             f"| {delta['total_tokens']:+,.0f} | {delta['api_calls']:+,.0f} "
             f"| {delta['actions']:+,.0f} | {delta['assistant_steps']:+,.0f} "
-            f"| ${delta['normalized_cost_usd']:+.6f} | {row['strict_pareto']} |"
+            f"| ${delta['normalized_cost_usd']:+.6f} "
+            f"| {agent_value} "
+            f"| {row['treatment_censored_reason'] or 'no'} "
+            f"| {row['strict_pareto']} |"
         )
     lines.extend(
         [
@@ -529,9 +598,10 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
             "Milestone deltas are action indices, not resource gates. "
             "Missing paired values are `n/a`.",
             "",
-            "| task | uncached | context chars | failed | wasted | to submit | GT chars "
+            "| task | uncached | context chars | failed | wasted | to submit | GT guidance "
+            "| GT state "
             "| timely payloads | late payloads | predictive payloads |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
 
@@ -545,6 +615,7 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
             f"| {value(row, 'context_chars_sent')} | {value(row, 'failed_actions')} "
             f"| {value(row, 'wasted_action_proxy')} | {value(row, 'steps_to_submit')} "
             f"| {value(row, 'gt_context_chars_added')} "
+            f"| {value(row, 'context_state_frame_chars_added')} "
             f"| {value(row, 'timely_payload_deliveries')} "
             f"| {value(row, 'late_payload_deliveries')} "
             f"| {value(row, 'predictive_payload_deliveries')} |"

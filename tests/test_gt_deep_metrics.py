@@ -61,6 +61,36 @@ def test_extract_trajectory_uses_identical_deep_metrics_for_any_arm(tmp_path):
     assert metrics["solved"] is True
 
 
+def test_extract_trajectory_includes_outer_harbor_timeout_and_wall_time(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": ""},
+                "messages": [_assistant("pytest -q", prompt=100, completion=10)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {
+        "task_name": "task",
+        "agent_execution": {
+            "started_at": "2026-08-06T01:00:00Z",
+            "finished_at": "2026-08-06T01:15:00Z",
+        },
+        "started_at": "2026-08-06T00:59:00Z",
+        "finished_at": "2026-08-06T01:16:00Z",
+        "exception_info": {"exception_type": "AgentTimeoutError"},
+    }
+
+    metrics = extract_trajectory(path, task="task", reward=0, harbor_result=harbor_result)
+
+    assert metrics["censored"] is True
+    assert metrics["censored_reason"] == "AgentTimeoutError"
+    assert metrics["agent_wall_time_seconds"] == 900.0
+    assert metrics["trial_wall_time_seconds"] == 1020.0
+
+
 def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources():
     baseline = {
         "task": {
@@ -170,11 +200,17 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                     "preflight_unknown_segment_operations": 1,
                 },
                 "model_call_contexts": [
-                    {"stock_context_chars": 100, "runtime_advisory_chars": 0, "context_chars": 100},
+                    {
+                        "stock_context_chars": 100,
+                        "runtime_advisory_chars": 0,
+                        "context_chars": 100,
+                        "context_compiler": {"active_state_chars": 20},
+                    },
                     {
                         "stock_context_chars": 150,
                         "runtime_advisory_chars": 80,
                         "context_chars": 230,
+                        "context_compiler": {"active_state_chars": 30},
                     },
                 ],
             }
@@ -184,6 +220,8 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     metrics = extract_trajectory(trajectory, task="task", receipt_path=receipt)
 
     assert metrics["runtime_advisory_context_chars"] == 80
+    assert metrics["context_state_frame_chars_added"] == 50
+    assert metrics["total_gt_context_chars_added"] == 130
     assert metrics["stock_context_chars_from_receipt"] == 250
     assert metrics["max_context_chars_from_receipt"] == 230
     assert metrics["context_compiler_calls"] == 2

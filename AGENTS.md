@@ -229,3 +229,36 @@ Against the frozen GT-off baseline, the final smoke measured token delta
 action delta `-103`. These are a single matched-smoke efficiency signal, not a
 causal quality claim. The 89-task run has not been started; dispatch it only
 from this commit or a descendant after retaining the receipt audit.
+
+## Context-compiler smoke audit (2026-08-05)
+
+Paid shadow smoke `31061665540` ran commit `a45601f0ba05`. Integration
+integrity passed: 334/334 compiler/API calls, 349/349 preflighted actions all
+applied as PASS, 5,287/5,287 facts accounted, 339/339 effects accounted, and
+21/21 grounded first-eligible deliveries with zero late/predictive payloads,
+zero compactions, and zero unique reasoning removal. The smoke naturally fired
+11/17 feature IDs; all 17 paths remain provider-free proven.
+
+The efficiency acceptance gate failed despite preserving verifier reward 9/10.
+`cobol-modernization` was a new treatment `AgentTimeoutError`,
+`schemelike-metacircular-eval` reached the step cap, six solved tasks failed
+strict per-task Pareto, and aggregate normalized token cost increased 13.33%.
+The 89-task run remains blocked.
+
+Never infer censoring only from `central_receipt.json`: Harbor can terminate the
+agent after the last receipt. Shared metrics must consume the adjacent trial
+result or frozen merged result and report outer exception type plus agent wall
+time.
+
+The smoke exposed 104 shadow candidate returns, all caused by
+`edit_target_absent` on normal scratch-file creation or shell edits. That is not
+a material contradiction. Current code defaults such proposals to PASS and
+rejects legacy absent-target interventions; post-fix replay produces zero
+material candidates. Only new mechanically grounded evidence may return to the
+model.
+
+GT context accounting includes both active guidance and compiler state frames.
+For this smoke the exact totals were 2,337 guidance characters plus 182,536
+state-frame characters, not merely 21 delivery receipts. Keep
+`gt_context_chars_added`, `context_state_frame_chars_added`, and
+`total_gt_context_chars_added` distinct.

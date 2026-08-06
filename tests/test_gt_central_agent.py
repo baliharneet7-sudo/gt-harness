@@ -275,7 +275,7 @@ async def test_material_edit_preflight_returns_then_revised_edit_executes(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_real_missing_edit_producer_returns_before_exec_then_revised_edit_runs(tmp_path):
+async def test_missing_edit_passes_to_shell_then_postflight_keeps_loop_live(tmp_path):
     class ExistingFileEnvironment(_Environment):
         def __init__(self):
             super().__init__()
@@ -324,13 +324,13 @@ async def test_real_missing_edit_producer_returns_before_exec_then_revised_edit_
 
     await agent.run("Edit app.py.", environment, AgentContext())
 
-    assert environment.executed_edits == [revised]
-    assert any("missing.py" in item for item in model.observed_history[1])
+    assert environment.executed_edits == [first, revised]
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     cycles = receipt["features"]["action_cycles"]
     first_cycle = next(row for row in cycles if row["proposed"]["raw_command"] == first)
-    assert first_cycle["applied_disposition"] == "return_to_model"
-    assert first_cycle["executed"] is False
+    assert first_cycle["candidate_decision"]["disposition"] == "pass"
+    assert first_cycle["applied_disposition"] == "pass"
+    assert first_cycle["executed"] is True
     revised_cycle = next(row for row in cycles if row["proposed"]["raw_command"] == revised)
     assert revised_cycle["executed"] is True
     assert revised_cycle["postflight"]["source_revision"]
@@ -338,8 +338,8 @@ async def test_real_missing_edit_producer_returns_before_exec_then_revised_edit_
     assert session["fresh"] is True
     assert len(session["refresh_log"]) == 2
     assert session["source_revision"] == receipt["source_revision"]
-    assert receipt["metrics"]["preflight_commands_returned_to_model"] == 1
-    assert receipt["metrics"]["preflight_commands_changed_after_return"] == 1
+    assert receipt["metrics"]["preflight_commands_returned_to_model"] == 0
+    assert receipt["metrics"]["preflight_commands_changed_after_return"] == 0
 
 
 @pytest.mark.asyncio
@@ -368,7 +368,7 @@ async def test_shadow_records_material_candidate_but_executes_original(tmp_path)
         for row in receipt["features"]["action_cycles"]
         if row["proposed"]["raw_command"].startswith("sed -i")
     )
-    assert cycle["candidate_decision"]["disposition"] == "return_to_model"
+    assert cycle["candidate_decision"]["disposition"] == "pass"
     assert cycle["applied_disposition"] == "pass"
     assert cycle["executed"] is True
 
@@ -695,13 +695,13 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "enable_preflight=true" not in workflow
 
 
-def test_paid_engine_workflow_has_no_time_censors():
+def test_paid_engine_workflow_has_no_additional_inner_model_time_censors():
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
 
-    # Benchmark treatment is bounded by step_limit and cost_limit only; no
-    # wall-time or per-call time censors that can cut a hard task mid-run.
+    # The agent adds no inner model-call/loop censor. Harbor's matched outer
+    # agent timeout still applies and must be read from the trial result.
     assert "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow

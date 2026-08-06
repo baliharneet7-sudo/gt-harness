@@ -482,8 +482,10 @@ by feature/revision; guidance is limited to four events and 640 characters per
 task; and the duplicate direct-lint injection is removed. Receipt-v2 adds
 cache-normalized token accounting, action/check/change/failure counters,
 lifecycle positions, guidance candidate/suppression counts, and explicit
-censoring. Model calls have a 120-second request limit and the model loop has a
-900-second wall limit while retaining the 100-step cap.
+censoring. The current central paid workflow adds no inner model-call or
+model-loop timeout and retains the 100-step cap. Harbor still applies its
+matched outer agent timeout; arm-neutral metrics must read that exception from
+the trial result because it can occur after the last central receipt.
 
 Ordinary feature guidance is now a transient next-decision payload: it is
 prepared after a verified tool observation, sent in exactly the next model
@@ -500,3 +502,18 @@ comparable solved task. Provider-free tests and the forced all-17 producer
 census pass. This is implementation proof, not efficiency proof; the next gate
 is the three-task GitHub treatment canary, followed by repeated ten-task shadow
 and treatment runs. The 89-task workflow remains blocked.
+
+## Context-compiler smoke `31061665540`
+
+The replacement context-compiler smoke ran at `a45601f0ba05`. It preserved
+verifier outcome 9/10 and passed the request/effect/timing audit, but it failed
+the strict efficiency gate because of a new treatment Harbor timeout, step
+censoring, per-task Pareto failures, and higher normalized token cost. See
+`GT_SMOKE_31061665540_CONTEXT_COMPILER_AUDIT.md`. The 89-task run is still
+blocked.
+
+Post-smoke code removes the noisy `edit_target_absent` preflight candidate and
+joins outer Harbor censor/wall-time evidence into arm-neutral metrics. Compiler
+context totals now include state-frame characters separately from active
+guidance. These repairs are provider-free proven; no later paid smoke is
+claimed.

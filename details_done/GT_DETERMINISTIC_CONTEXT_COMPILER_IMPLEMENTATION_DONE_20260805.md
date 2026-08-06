@@ -273,3 +273,34 @@ Required post-smoke audit:
   repeated matched efficiency trials pass.
 
 No 89-task run was started by this implementation phase.
+
+## Paid smoke and audit addendum
+
+The authorized GitHub smoke completed as run `31061665540` from exact audited
+commit `a45601f0ba05`. All ten task jobs and the merge job succeeded. The
+integration audit passed with 334/334 compiler calls, 349/349 shadow PASS
+actions, 5,287/5,287 facts accounted, 339/339 effects accounted, and 21/21
+grounded first-eligible deliveries. There were zero compactions and zero unique
+assistant-reasoning characters removed.
+
+The experiment gate failed. Reward was preserved at 9/10, but
+`cobol-modernization` incurred a treatment-only outer `AgentTimeoutError`,
+`schemelike-metacircular-eval` reached the step limit, six solved tasks failed
+strict Pareto, and normalized token cost increased 13.33%. The 89-task run
+remains blocked.
+
+Audit-driven repairs after the paid commit:
+
+1. arm-neutral metrics now join Harbor outer exceptions and agent/trial wall
+   time, preventing post-receipt timeouts from being mislabeled uncensored;
+2. `edit_target_absent` no longer returns to the model—the live shadow receipts
+   showed 104 false material candidates, while post-fix replay shows zero;
+3. compiler context accounting now includes 182,536 state-frame characters in
+   addition to 2,337 active-guidance characters.
+
+Post-fix proof: 173 paid-workflow semantic tests passed, both census entrypoints
+passed, readiness printed `READY`, Ruff passed, and the ten-task replay printed
+`REPLAY_OK`. Full detail is in
+`GT_SMOKE_31061665540_CONTEXT_COMPILER_AUDIT.md`.
+
+No second paid smoke and no 89-task run were started.

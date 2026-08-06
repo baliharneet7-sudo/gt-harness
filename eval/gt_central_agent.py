@@ -1425,6 +1425,15 @@ class MiniSweCentralAgent(BaseAgent):
                 "gt_context_chars_added": sum(
                     int(row.get("runtime_advisory_chars") or 0) for row in model_call_contexts
                 ),
+                "context_state_frame_chars_added": sum(
+                    int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
+                    for row in model_call_contexts
+                ),
+                "total_gt_context_chars_added": sum(
+                    int(row.get("runtime_advisory_chars") or 0)
+                    + int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
+                    for row in model_call_contexts
+                ),
                 "stock_context_chars_sent": sum(
                     int(row.get("stock_context_chars") or 0) for row in model_call_contexts
                 ),

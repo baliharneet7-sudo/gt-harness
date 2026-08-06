@@ -21,6 +21,23 @@ def _rewards(path: str) -> dict[str, int | float]:
     }
 
 
+def _harbor_results(path: str) -> dict[str, dict]:
+    if not path:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "trial_results" in payload:
+        rows = payload["trial_results"]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        rows = [payload]
+    return {
+        str(row.get("task_name")): row
+        for row in rows
+        if isinstance(row, dict) and row.get("task_name")
+    }
+
+
 def _find_receipt(root: Path | None, task: str) -> Path | None:
     if root is None:
         return None
@@ -53,6 +70,20 @@ def _reward_beside_trajectory(path: Path) -> int | float | None:
         return None
 
 
+def _result_beside_trajectory(path: Path) -> dict | None:
+    result_path = path.parent.parent / "result.json"
+    if not result_path.exists():
+        return None
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    return payload if isinstance(payload, dict) else None
+
+
+def _reward_from_result(result: dict | None) -> int | float | None:
+    rewards = ((result or {}).get("verifier_result") or {}).get("rewards") or {}
+    value = rewards.get("reward")
+    return value if isinstance(value, (int, float)) else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -61,6 +92,7 @@ def main() -> int:
     extract.add_argument("--input", required=True)
     extract.add_argument("--receipts", default="")
     extract.add_argument("--rewards", default="")
+    extract.add_argument("--results", default="")
     extract.add_argument("--tasks", default="")
     extract.add_argument("--output", required=True)
     compare = sub.add_parser("compare")
@@ -74,6 +106,7 @@ def main() -> int:
         root = Path(args.input)
         receipt_root = Path(args.receipts) if args.receipts else None
         rewards = _rewards(args.rewards)
+        harbor_results = _harbor_results(args.results)
         requested = {item.strip() for item in args.tasks.split(",") if item.strip()}
         tasks = {}
         for path in sorted(root.rglob("*_trajectory.json")):
@@ -84,11 +117,18 @@ def main() -> int:
             if receipt_path is None and path.name == "miniswe_trajectory.json":
                 adjacent = path.parent / "central_receipt.json"
                 receipt_path = adjacent if adjacent.exists() else None
+            harbor_result = harbor_results.get(task) or _result_beside_trajectory(path)
+            reward = rewards.get(task)
+            if reward is None:
+                reward = _reward_from_result(harbor_result)
+            if reward is None:
+                reward = _reward_beside_trajectory(path)
             tasks[task] = extract_trajectory(
                 path,
                 task=task,
-                reward=rewards.get(task, _reward_beside_trajectory(path)),
+                reward=reward,
                 receipt_path=receipt_path,
+                harbor_result=harbor_result,
             )
         output = {"schema": "central-deep-metrics-v1", "arm": args.name, "tasks": tasks}
         Path(args.output).write_text(json.dumps(output, indent=2), encoding="utf-8")

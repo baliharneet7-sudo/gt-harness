@@ -151,6 +151,50 @@ def test_attached_output_redirection_is_classified_as_edit():
     assert any(target.path == "src/generated.py" for target in proposal.targets)
 
 
+def test_absent_output_target_is_expected_creation_and_preflight_passes():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    proposal = adapt_proposed_action(
+        {"command": "cat > /tmp/probe.py <<'EOF'\nprint('ok')\nEOF"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    decision = runtime.preflight_action(
+        proposal,
+        WorkspaceSnapshot("w1", {}, True, ""),
+        revision="w1",
+        source_revision="s1",
+    )
+
+    assert decision.disposition == ActionDisposition.PASS
+    assert "edit_target_absent" not in decision.reason_codes
+
+
+def test_absent_in_place_edit_target_fails_open_to_shell_postflight():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    proposal = adapt_proposed_action(
+        {"command": "sed -i 's/x/y/' missing.py"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    decision = runtime.preflight_action(
+        proposal,
+        WorkspaceSnapshot("w1", {}, True, ""),
+        revision="w1",
+        source_revision="s1",
+    )
+
+    assert decision.disposition == ActionDisposition.PASS
+    assert "edit_target_absent" not in decision.reason_codes
+
+
 def test_read_and_unknown_default_to_literal_pass():
     runtime = CentralFeatureRuntime(model_visible=True)
     snapshot = WorkspaceSnapshot("w1", {}, True, "")
@@ -261,6 +305,12 @@ def test_material_intervention_requires_grounded_bounded_evidence_and_dedupes():
     )
     grounded = replace(
         empty,
+        evidence=("app.py has a mechanically proven coupled-file contract",),
+        reason_codes=("material_edit_risk",),
+        evidence_grade=EvidenceGrade.DIRECT,
+    )
+    absent_target = replace(
+        empty,
         evidence=("missing.py is absent from the current workspace",),
         reason_codes=("edit_target_absent",),
         evidence_grade=EvidenceGrade.DIRECT,
@@ -268,6 +318,10 @@ def test_material_intervention_requires_grounded_bounded_evidence_and_dedupes():
 
     assert runtime.admit_preflight_intervention(proposal, empty)[0] is False
     assert runtime.admit_preflight_intervention(proposal, heuristic)[0] is False
+    assert runtime.admit_preflight_intervention(proposal, absent_target) == (
+        False,
+        "postflight_safe_absent_target",
+    )
     assert runtime.admit_preflight_intervention(proposal, grounded) == (True, "admitted")
     assert runtime.admit_preflight_intervention(proposal, grounded) == (
         False,

@@ -195,3 +195,21 @@ model text. Usefulness requires a downstream state read, decision-frame
 contribution, validation/batch action, or provider delivery. The detailed
 archived comparison is in
 `GT_SMOKE_30976148466_BASELINE_COMPARISON.md`.
+
+### Latest context-compiler smoke and hard gate
+
+Smoke `31061665540` at `a45601f0ba05` preserved reward 9/10 and passed every
+integration-accounting invariant, but failed the experiment gate. It had a new
+outer Harbor timeout on `cobol-modernization`, a step-capped `schemelike`, six
+strict per-task Pareto failures, and +13.33% aggregate normalized token cost.
+Do not promote it and do not start 89 tasks.
+
+The live receipts also proved that `edit_target_absent` was an invalid material
+preflight rule: 104 normal edit/scratch commands became candidate returns.
+Shadow mode prevented execution changes. Current code makes absent targets PASS
+and provider-free replay yields zero such candidates. Never restore this rule.
+
+Outer Harbor exceptions occur after the last central receipt and must be joined
+from trial/merged results. Context accounting must include bounded compiler
+state-frame characters as well as active guidance characters. The complete
+audit is `GT_SMOKE_31061665540_CONTEXT_COMPILER_AUDIT.md`.
