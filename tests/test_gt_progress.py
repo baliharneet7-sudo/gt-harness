@@ -74,3 +74,22 @@ def test_environment_error_stalls_without_source_contradiction():
     )
     assert transition is not None
     assert transition.current == "STALLED"
+
+
+def test_central_policy_detects_alternating_cycle_only_after_six_observations():
+    ledger = ProgressLedger(stall_threshold=3, cycle_threshold=6)
+    transitions = []
+    for index, signature in enumerate(("a", "b", "a", "b", "a", "b")):
+        transitions.append(
+            ledger.observe(
+                signature,
+                information_gain=index < 2,
+                changed=False,
+                is_error=False,
+            )
+        )
+
+    assert all(item is None for item in transitions[:5])
+    assert transitions[5] is not None
+    assert transitions[5].current == "STALLED"
+    assert transitions[5].reason == "cyclic_actions_without_information"

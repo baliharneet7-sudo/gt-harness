@@ -83,18 +83,45 @@ def test_extract_trajectory_includes_outer_harbor_timeout_and_wall_time(tmp_path
         "exception_info": {"exception_type": "AgentTimeoutError"},
     }
 
-    metrics = extract_trajectory(path, task="task", reward=0, harbor_result=harbor_result)
+    metrics = extract_trajectory(path, task="task", reward=1, harbor_result=harbor_result)
 
     assert metrics["censored"] is True
     assert metrics["censored_reason"] == "AgentTimeoutError"
+    assert metrics["official_solved"] is True
+    assert metrics["uncensored_resolved"] is False
+    assert metrics["solved"] is False
     assert metrics["agent_wall_time_seconds"] == 900.0
     assert metrics["trial_wall_time_seconds"] == 1020.0
+
+
+def test_rewarded_clean_step_exhaustion_is_salvaged_resolved_not_censored(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "LimitsExceeded"},
+                "messages": [_assistant("pytest -q", prompt=10, completion=1)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {"task_name": "task", "exception_info": None}
+
+    metrics = extract_trajectory(path, task="task", reward=1, harbor_result=harbor_result)
+
+    assert metrics["official_solved"] is True
+    assert metrics["censored"] is False
+    assert metrics["uncensored_resolved"] is True
+    assert metrics["solved"] is True
+    assert metrics["solver_exhausted"] is True
 
 
 def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources():
     baseline = {
         "task": {
             "solved": True,
+            "official_solved": True,
+            "uncensored_resolved": True,
             "censored": False,
             "total_tokens": 100,
             "api_calls": 10,
@@ -122,6 +149,12 @@ def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources(
     assert compare_arms(baseline, positive)["gate_passed"] is False
     assert compare_arms(baseline, regressed)["solve_regressions"] == ["task"]
     assert compare_arms(baseline, censored)["censored_treatment"] == ["task"]
+    assert compare_arms(baseline, efficient)["outcomes"] == {
+        "baseline_official_resolved": 1,
+        "treatment_official_resolved": 1,
+        "baseline_uncensored_resolved": 1,
+        "treatment_uncensored_resolved": 1,
+    }
 
 
 def test_compare_arms_reports_deep_behavior_context_and_timing_deltas():

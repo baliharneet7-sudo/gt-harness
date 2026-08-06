@@ -88,6 +88,7 @@ jobs:
           set -euo pipefail
           python -m pytest \
             tests/test_gt_preflight.py \
+            tests/test_central_readiness.py \
             tests/test_gt_semantic_engine.py \
             tests/test_gt_repository_intelligence.py \
             tests/test_gt_checkpoint_ledger.py \
@@ -96,7 +97,10 @@ jobs:
             tests/test_central_replay.py \
             tests/test_gt_central_agent.py \
             tests/test_provider_view.py \
-            tests/test_gt_deep_metrics.py -q
+            tests/test_gt_deep_metrics.py \
+            tests/test_gt_completion.py \
+            tests/test_harbor_budget.py \
+            tests/test_run_outcome.py -q
           python scripts/central_feature_census.py \
             --output provider-free-central-census.json >/dev/null
 
@@ -276,6 +280,23 @@ jobs:
           docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
           echo "loaded task image from cache for ${{ matrix.task }}"
 
+      - name: Resolve Harbor's exact task-owned agent budget
+        env:
+          DATASET: ${{ inputs.dataset }}
+          TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          harbor dataset download "$DATASET" -o ds --export
+          DATASET_NAME="${DATASET%@*}"
+          TASK_CONFIG="ds/${DATASET_NAME}/${TASK}/task.toml"
+          mkdir -p results/terminal-bench
+          EXECUTION_BUDGET=$(python scripts/resolve_harbor_budget.py \
+            --task-config "$TASK_CONFIG" \
+            --multiplier 1.0 \
+            --output "results/terminal-bench/harbor-budget-${TASK}.json")
+          echo "EXECUTION_BUDGET=${EXECUTION_BUDGET}" >> "$GITHUB_ENV"
+          echo "resolved Harbor agent budget: ${EXECUTION_BUDGET}s"
+
       - name: Run harbor - task ${{ matrix.task }}
         id: harbor
         env:
@@ -296,13 +317,12 @@ jobs:
             lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
             submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
             integrated)
-              # Benchmark treatment: bounded by step_limit and cost_limit only.
-              # No wall-time or per-call time censors so hard tasks are never
-              # cut off mid-run; provider errors fail fast (no retries).
-              # Lossy provider-view compaction is OFF for the paid arm. The
-              # deterministic compiler still accounts for every fact on every
-              # request, but transform=false preserves the exact Mini-SWE
-              # history: no turn removal and no recurring state-frame insert.
+              # The agent receives Harbor's exact task-owned deadline and
+              # reserves only enough time to return cleanly before Harbor's
+              # outer cancellation. No timeout or resource limit is increased.
+              # Deterministic provider-view compaction removes exact duplicate
+              # turns first and preserves the latest two turns plus current
+              # typed task state; it never calls another model.
               # The task-start repository fact stays OFF during isolation.
               # Preflight remains observational (shadow) until a separately
               # authorized assistive experiment.
@@ -310,7 +330,10 @@ jobs:
                 --ak enable_lint=true --ak enable_submit_readiness=true
                 --ak integration_mode=active
                 --ak preflight_mode=shadow
-                --ak enable_context_compaction=false
+                --ak enable_context_compaction=true
+                --ak enable_completion_controller=true
+                --ak enable_progress_control=true
+                --ak execution_budget_sec="$EXECUTION_BUDGET"
                 --ak enable_task_start_advisory=false
               )
               ;;

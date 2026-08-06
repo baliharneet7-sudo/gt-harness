@@ -108,15 +108,18 @@ def test_cli_validates_real_shape_without_dispatch(tmp_path: Path, capsys):
     assert '"resolved_floor": 83' in capsys.readouterr().out
 
 
-def test_tb2_manifest_validates_ten_tasks_and_ungraded_case(tmp_path: Path):
+def test_tb2_manifest_validates_ten_tasks_with_frozen_official_rewards(tmp_path: Path):
     manifest = json.loads(
         (Path(__file__).parents[1] / "config" / "tb2_deepseek_smoke10.json").read_text()
     )
-    baseline = {task: "resolved" for task in manifest["tasks"] if task != "headless-terminal"}
-    baseline["headless-terminal"] = "not_graded"
+    baseline = {task: "resolved" for task in manifest["tasks"]}
     result = validate_tb2_smoke(manifest, baseline)
     assert result["task_count"] == 10
-    assert result["ungraded"] == ["headless-terminal"]
+    assert result["ungraded"] == []
+    assert manifest["baseline"]["known_rewards"]["write-compressor"] == 1.0
+    assert manifest["baseline"]["outcome_contract"]["comparison_gate_field"] == (
+        "uncensored_resolved"
+    )
 
 
 def test_feature_opportunity_audit_is_per_task_and_requires_terminal_state():

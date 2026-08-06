@@ -146,12 +146,16 @@ status (`provider_payload`, `controller_state_considered`,
 `existing_engine_actuation`, `audit_only`, or `no_eligible_model_call`).
 
 Exact-turn deduplication includes assistant content, hidden reasoning content,
-tool commands, and tool results. Therefore byte-identical duplicate turns may
-be removed, but two turns with different Mini-SWE reasoning must both survive.
-Lossy old-turn compaction is disabled in the paid workflow until a matched
-ablation proves it preserves outcomes; the compiler and exact accounting still
-run on every request. Read observations come from every typed shell segment,
-not only a command's primary label, and retain path/range/revision/result hash.
+action metadata, tool output, and tool status (transport-local tool-call IDs are
+ignored). Therefore duplicate semantic turns may be removed, but two turns
+with different Mini-SWE reasoning or return status must both survive. The paid
+workflow now enables the bounded deterministic transform at a 70% of the
+400,000-character context envelope trigger and a 50% target. It first removes
+duplicate turns, then compacts only older turns while retaining the latest two
+turns and a typed current-state frame. Below the trigger it preserves the
+provider history byte-for-byte (apart from exact duplicate turns). No LLM is
+used to summarize. Read observations come from every typed shell segment, not
+only a command's primary label, and retain path/range/revision/result hash.
 
 ## Regression-hardening contract (2026-08-05)
 
@@ -176,16 +180,54 @@ relative paths and excludes output hashes from the identity.
 
 The receipt hashes Mini-SWE's provider-prepared message list after private
 `extra` metadata is removed/reordered. No model marker is required.
-`provider_request_hash_coverage` must be 1.0 and, with paid compaction disabled,
-`context_state_frame_calls` and `context_provider_view_changed_calls` must be
-zero.
+`provider_request_hash_coverage` must be 1.0. With compaction enabled, view
+changes are permitted only at the deterministic threshold and must report
+duplicate removal or bounded old-turn elision; unique reasoning removal,
+unaccounted facts, and duplicate evidence remain failures.
 
 `integration_mode` is the single host switch: `off` disables GT behavior,
 `audit` permits private accounting but preserves provider history and
 downgrades intervention to SHADOW, and `active` enables grounded one-shot
-delivery. The paid workflow is explicitly ACTIVE + SHADOW preflight + no
-compaction. A disabled task-start advisory is resolved at action zero and may
-not leak into call two. `newfile_precedent` is one-shot per task.
+delivery. The paid workflow is explicitly ACTIVE + SHADOW preflight + bounded
+deterministic compaction + executable completion checks + progress control.
+Harbor's task-owned `agent.timeout_sec` is resolved from the exported
+`task.toml` and passed unchanged to the agent; a small reserve exits cleanly
+before Harbor's outer cancellation. A disabled task-start advisory is resolved
+at action zero and may not leak into call two. `newfile_precedent` is one-shot
+per task.
+
+## Outcome-preservation lifecycle (2026-08-06)
+
+Reward and solve are not interchangeable. The official verifier reward is
+reported separately from `uncensored_resolved`; a rewarded run with an outer
+Harbor exception is a censored salvage witness and cannot count as a preserved
+solve. Internal clean exhaustion (`LimitsExceeded`, step/cost cap, or the
+engine's deadline-reserve exit) is recorded separately and is not mislabeled as
+an outer censor when Harbor still receives a normal result.
+
+Completion control is deliberately fail-open. The task contract first removes
+Terminal-Bench's host workflow text. Only a complete set of mechanically
+equivalent predicates can produce a certificate. Each predicate is executed
+privately at one workspace revision; a current all-pass certificate emits the
+existing submit marker exactly once and cancels the pre-decided suffix. Any
+uncovered obligation, timeout, ambiguity, stale revision, or failed predicate
+continues the model loop. Completion probes and auto-submit attempts are
+included in `effective_actions`, so controller savings cannot be hidden as
+model-action savings.
+
+Progress control records repeated identical observations at three occurrences,
+alternating cycles at six, and budget risk near 80% of the step limit. It is
+controller state, not generic model advice, and does not block a command by
+itself. Context compaction similarly preserves the complete audit history and
+changes only the provider view when the bounded threshold is exceeded.
+
+The archived `31068690296` treatment remains rejected evidence: official reward
+was 9/10, but uncensored resolved was 8/10 because `write-compressor` hit the
+outer 900-second timeout. The corrected archived replay identifies that the
+task had already satisfied both real obligations before the timeout; the new
+certificate/auto-submit path is provider-free proven but still needs an
+authorized matched smoke. The 89-task run remains blocked until outcome
+preservation and repeated outcome-first efficiency gates pass.
 
 ## Post-smoke semantic hardening (workflow 31068690296)
 

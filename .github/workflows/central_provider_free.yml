@@ -27,13 +27,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
-            "pytest==9.1.1" "pytest-asyncio==1.4.0" "ruff==0.16.0"
+            "pytest==9.1.1" "pytest-asyncio==1.4.0" "ruff==0.16.0" \
+            vendor/groundtruth_mcp-*.whl
 
       - name: Central runtime tests
         run: |
           python -m pytest tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
             tests/test_gt_preflight.py \
+            tests/test_central_readiness.py \
             tests/test_provider_view.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
@@ -53,6 +55,7 @@ jobs:
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
+            tests/test_central_readiness.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py

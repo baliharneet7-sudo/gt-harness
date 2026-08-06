@@ -18,11 +18,44 @@ from enum import StrEnum
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<text>.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _DIRECTIVE_RE = re.compile(
-    r"(?i)\b(?:must|should|required|ensure|implement|create|install|support|"
+    r"(?i)\b(?:must|should|required|ensure|implement|create|write|install|support|"
     r"supports|has support|keep|do not|don't|never|be careful|has to|need to|"
     r"make sure|call your|put it in|produce|generate|replace|remove|reconstruct|"
     r"source the|mimics?)\b"
 )
+
+_HARNESS_SCAFFOLD_HEADINGS = frozenset(
+    {
+        "recommended workflow",
+        "command execution rules",
+        "useful command examples",
+    }
+)
+_HARNESS_SCAFFOLD_START_RE = re.compile(
+    r"(?i)^you can execute bash commands and edit files to implement the necessary changes\.?$"
+)
+
+
+def _task_issue_core(issue_text: str) -> str:
+    """Remove host-supplied agent instructions from the task's normative text.
+
+    Terminal-Bench appends a generic workflow, tool protocol, submit marker,
+    and command examples to the actual task.  Those rows govern the host loop;
+    they are not task completion predicates.  The boundary is structural and
+    deterministic rather than benchmark-task-specific.
+    """
+
+    kept: list[str] = []
+    for raw in (issue_text or "").splitlines():
+        stripped = raw.strip()
+        if _HARNESS_SCAFFOLD_START_RE.fullmatch(stripped):
+            break
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip().lower()
+            if heading in _HARNESS_SCAFFOLD_HEADINGS:
+                break
+        kept.append(raw)
+    return "\n".join(kept).strip()
 _CONTENT_SCAN_RE = re.compile(
     r"(?i)\b(?:saniti[sz]e|api keys?|credentials?|secrets?|sensitive values?|"
     r"remove all|replace the actual value|repository after)\b"
@@ -344,7 +377,8 @@ def _typed_predicates(
 
 def extract_task_contract(issue_text: str) -> TaskContract:
     """Extract the complete bounded task contract without requiring graph.db."""
-    combined = _engine_candidates(issue_text) + _markdown_candidates(issue_text)
+    normative_text = _task_issue_core(issue_text)
+    combined = _engine_candidates(normative_text) + _markdown_candidates(normative_text)
     seen: set[str] = set()
     obligations: list[Obligation] = []
     for source, raw in combined:
@@ -377,9 +411,9 @@ def extract_task_contract(issue_text: str) -> TaskContract:
             )
         )
     frozen = tuple(obligations)
-    mode = _task_mode(issue_text)
+    mode = _task_mode(normative_text)
     return TaskContract(
-        role=_role(issue_text),
+        role=_role(normative_text),
         obligations=frozen,
         task_mode=mode,
         predicates=_typed_predicates(frozen, mode),

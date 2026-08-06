@@ -64,6 +64,18 @@ def test_dedupe_keeps_distinct_turns_untouched():
     assert len(deduped) == len(messages)
 
 
+def test_dedupe_keeps_same_text_when_tool_status_differs():
+    messages = _history(("pytest -q", "same output"), ("pytest -q", "same output"))
+    tools = [item for item in messages if item.get("role") == "tool"]
+    tools[0]["extra"] = {"returncode": 0}
+    tools[1]["extra"] = {"returncode": 1}
+
+    deduped = dedupe_provider_view(messages)
+
+    assert len([item for item in deduped if item.get("role") == "assistant"]) == 2
+    assert len([item for item in deduped if item.get("role") == "tool"]) == 2
+
+
 def test_dedupe_never_deletes_distinct_miniswe_reasoning():
     messages = _history(
         ("cat a.py", "SAME BODY"),

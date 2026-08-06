@@ -47,22 +47,37 @@ reporters, and unproven pipelines cannot pass or fail an obligation. The typed
 shell adapter preserves command newlines and keeps heredoc/interpreter source
 opaque, so source strings and diagnostics never become fake targets.
 
-The paid no-compaction path is strictly observation-only: it preserves the
-Mini-SWE message sequence, performs no turn deduplication, and appends no
-generic state frame. Each call hashes the provider-prepared messages after
-private metadata is stripped. `integration_mode=off|audit|active` is the
-one-switch policy; the paid workflow explicitly selects ACTIVE with SHADOW
-preflight. Disabled task-start localization cannot surface on call two, and
-new-file precedent is one-shot per task.
+The paid path uses bounded deterministic context compaction: exact semantic
+duplicate turns (including tool status, but excluding transport-local IDs) are
+removed first, then only older turns are compacted once the 70%-of-400,000
+character envelope is exceeded. The latest two turns and a typed current-state
+frame survive; below the threshold the history is unchanged apart from exact
+duplicates. No LLM summarizes context and unique reasoning is never silently
+removed. Each call hashes the provider-prepared messages after private metadata
+is stripped. `integration_mode=off|audit|active` is the one-switch policy; the
+paid workflow explicitly selects ACTIVE with SHADOW preflight, completion
+certificates, progress control, and the exact task-owned Harbor deadline.
+Disabled task-start localization cannot surface on call two, and new-file
+precedent is one-shot per task.
 
-Workflow `31068690296` is a rejected diagnostic smoke: it preserved 9/10
-outcomes and improved aggregate resources, but six tasks had a positive
-resource dimension, `write-compressor` gained an outer 900-second timeout, and
-two of six provider payloads were semantically wrong. The repairs permanently
+Workflow `31068690296` is a rejected diagnostic smoke: official reward was
+9/10, but uncensored resolved was 8/10 because `write-compressor` gained an
+outer 900-second timeout. Six tasks had a positive resource dimension and two
+of six provider payloads were semantically wrong. The repairs permanently
 classify serialized data/model files as derived artifacts, canonicalize
 `/app/...` task deliverables to sensor-relative paths, and require a non-empty,
 semantically ranked new-file precedent. Empty `__init__.py` is not useful
 precedent. Do not cite this run as an approved GT win; 89 remains blocked.
+
+Completion and deadline controls are now conservative and measurable. Host
+workflow text is removed before extracting obligations; auto-submit is enabled
+only when every remaining obligation has an executable, current, passing
+predicate. A certificate invokes the existing submit marker once and cancels
+pre-decided suffixes; predicate checks and submit attempts are counted in
+`effective_actions`. Harbor's exported `task.toml` timeout is passed to the
+agent with a reserve so the engine returns before outer cancellation. Reward,
+outer-censor state, solver exhaustion, and uncensored resolved are reported as
+separate fields.
 
 Provider-free proof is gated by `python -m scripts.central_feature_census` and must
 print all of:

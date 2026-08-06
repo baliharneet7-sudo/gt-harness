@@ -54,8 +54,12 @@ model.query
 
 GT does not predict an action before model selection. Validation PASS/FAIL is
 recorded only when the terminal foreground validator owns the shell return
-code. With compaction disabled, facts are audited without changing provider
-history. The host switch is `integration_mode=off|audit|active`.
+code. The active loop is two-sided: typed preflight (SHADOW by default), host
+execution, postflight observation, progress/completion control, then the next
+model request. Deterministic provider-view compaction is bounded: it removes
+semantic duplicate turns first, preserves the latest two turns, and carries a
+typed current-state frame only above the configured threshold. The audit
+history is never mutated. The host switch is `integration_mode=off|audit|active`.
 
 The two audit streams answer different questions:
 

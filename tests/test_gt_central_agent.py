@@ -797,6 +797,14 @@ def test_shadow_and_treatment_are_both_central_gt_on_arms(tmp_path):
     assert shadow.name() == "miniswe-central-shadow"
 
 
+def test_context_compaction_defaults_to_seventy_percent_then_fifty_percent(tmp_path):
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+
+    assert agent.context_capacity_chars == 400_000
+    assert agent.context_trigger_chars == 280_000
+    assert agent.context_target_chars == 200_000
+
+
 def test_context_accounting_includes_reasoning_and_tool_calls():
     message = {
         "role": "assistant",
@@ -825,16 +833,21 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert "enable_preflight=true" not in workflow
 
 
-def test_paid_engine_workflow_has_no_additional_inner_model_time_censors():
+def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_engine.yml"
     ).read_text(encoding="utf-8")
 
-    # The agent adds no inner model-call/loop censor. Harbor's matched outer
-    # agent timeout still applies and must be read from the trial result.
+    # The same task.toml timeout still owns the experiment.  GT receives that
+    # value only so it can return before Harbor asynchronously cancels run().
     assert "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
+    assert "scripts/resolve_harbor_budget.py" in workflow
+    assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
+    assert "--agent-timeout-multiplier 1.0" in workflow
+    assert "--ak enable_context_compaction=true" in workflow
+    assert "--ak enable_completion_controller=true" in workflow
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1241,101 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
     assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
     assert receipt["metrics"]["actions"] == 0
     assert context.metadata["exit_status"] == "ModelTimeout"
+
+
+@pytest.mark.asyncio
+async def test_executable_completion_certificate_auto_submits_before_next_model_call(tmp_path):
+    task = """Please solve this issue: Write me data.comp that's compressed such that
+running cat data.comp | /app/decomp gives exactly data.txt.
+You can generate data.comp any way you want, but data.comp must be at most 2500 bytes.
+
+## Recommended Workflow
+1. Analyze the codebase
+2. Submit with echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+"""
+
+    class ArtifactEnvironment(_Environment):
+        def __init__(self):
+            super().__init__()
+            self.created = False
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                manifest = (
+                    "f\t100\t1.0\t1.0\tdata.txt\t\n"
+                    "f\t100\t1.0\t1.0\tdecomp\t\n"
+                )
+                if self.created:
+                    manifest += "f\t2372\t2.0\t2.0\tdata.comp\t\n"
+                return ExecResult(stdout=manifest, return_code=0)
+            if command.startswith("sha256sum"):
+                return ExecResult(stdout=("a" * 64) + "  data.comp\n", return_code=0)
+            if command == "write candidate":
+                self.created = True
+                return ExecResult(return_code=0)
+            if command.startswith("tmp=$(mktemp)"):
+                return ExecResult(return_code=0)
+            if command.startswith("test -f /app/data.comp"):
+                return ExecResult(return_code=0)
+            if command == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
+            raise AssertionError(f"unexpected command: {command}")
+
+    model = _ScriptedModel(["write candidate"])
+    environment = ArtifactEnvironment()
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+    context = AgentContext()
+
+    await agent.run(task, environment, context)
+
+    assert len(model.observed_history) == 1
+    executed = [command for command, _ in environment.commands]
+    assert executed.count("echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT") == 1
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    certificate = receipt["completion"]["latest_certificate"]
+    assert certificate["status"] == "complete"
+    assert certificate["auto_submit_eligible"] is True
+    assert receipt["completion"]["auto_submit_count"] == 1
+    assert receipt["metrics"]["auto_submits"] == 1
+    assert receipt["metrics"]["effective_actions"] == 4
+    gt_certificate = next(
+        row
+        for row in receipt["features"]["receipts"]
+        if row["feature_id"] == "GT_CERT_DELIVERY"
+    )
+    assert gt_certificate["payload"]["check_count"] == 2
+    assert gt_certificate["payload"]["passing_checks"] == 2
+    assert gt_certificate["payload"]["readiness"] == "validated"
+    assert context.metadata["exit_status"] == "Submitted"
+
+
+@pytest.mark.asyncio
+async def test_execution_budget_reserve_exits_before_outer_timeout(tmp_path):
+    class SlowModel(_ScriptedModel):
+        def query(self, messages):
+            time.sleep(0.05)
+            return super().query(messages)
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        execution_budget_sec=0.03,
+        deadline_reserve_sec=0.01,
+    )
+    agent._model_factory = lambda: SlowModel(["echo too-late"])
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["censored"] is False
+    assert receipt["metrics"]["deadline_reserve_exits"] == 1
+    assert receipt["deadline"]["execution_budget_sec"] == 0.03
+    assert context.metadata["exit_status"] == "DeadlineReserveReached"
 
 
 @pytest.mark.asyncio

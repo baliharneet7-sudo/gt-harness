@@ -72,10 +72,14 @@ deliberately abstained on 57. It accounted all 324 replayed effects: 321 as
 controller-state context and 3 as provider payloads, with zero unaccounted
 effects.
 
-Lossy context compaction is disabled in the paid workflow. The fact compiler,
-exact duplicate removal, request accounting, and typed state still run on every
-provider call. This is the conservative configuration for the next smoke; a
-future compaction policy requires a matched outcome-preservation ablation.
+The paid workflow now enables bounded deterministic context compaction. Exact
+semantic duplicate turns are removed first (transport-local tool-call IDs are
+ignored, but tool status and action metadata are retained); only older turns
+are compacted above the 70%-of-400,000-character envelope trigger, with a 50%
+target and the latest two turns preserved. The typed current-state frame is
+bounded, no LLM summarizes, unique reasoning is not silently removed, and the
+immutable audit history is unchanged. A matched outcome-preservation smoke is
+still required before claiming efficiency.
 
 ## Why Round 11 was inefficient
 
@@ -152,10 +156,11 @@ freshness marker pass the payload contract. Treatment receipts are model
 visible through bounded grounded decision facts; shadow receipts remain private.
 
 `scripts/central_feature_census.py` forces every trigger independently and
-requires all 17 payloads to be non-opaque, fresh, correctly timed, and
-model-visible. This proves producer deliverability; it does not claim every
-real task will trigger every feature. Changed-file syntax feedback and bounded
-submission readiness remain the only hard interventions.
+requires all 17 producer/consumer paths to be non-opaque, fresh, correctly
+timed, concrete, applied, and context-accounted. It proves provider-free
+deliverability; it does not claim every real task will trigger every feature or
+that every private engine effect becomes model text. Changed-file syntax
+feedback and bounded submission readiness remain the only hard interventions.
 
 ## GT-on evaluation implementation
 
@@ -482,10 +487,12 @@ by feature/revision; guidance is limited to four events and 640 characters per
 task; and the duplicate direct-lint injection is removed. Receipt-v2 adds
 cache-normalized token accounting, action/check/change/failure counters,
 lifecycle positions, guidance candidate/suppression counts, and explicit
-censoring. The current central paid workflow adds no inner model-call or
-model-loop timeout and retains the 100-step cap. Harbor still applies its
-matched outer agent timeout; arm-neutral metrics must read that exception from
-the trial result because it can occur after the last central receipt.
+censoring. The current central paid workflow resolves Harbor's task-owned
+`agent.timeout_sec` from exported `task.toml`, passes the exact budget into the
+in-process loop, and reserves 15 seconds for a clean return before Harbor's
+outer cancellation. It retains the 100-step cap and does not increase any
+resource limit. Arm-neutral metrics still read outer exceptions from the trial
+result because Harbor can terminate after the last central receipt.
 
 Ordinary feature guidance is now a transient next-decision payload: it is
 prepared after a verified tool observation, sent in exactly the next model

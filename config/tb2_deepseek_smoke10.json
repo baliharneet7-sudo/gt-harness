@@ -12,15 +12,21 @@
       "fix-code-vulnerability": 1.0,
       "portfolio-optimization": 1.0,
       "modernize-scientific-stack": 1.0,
-      "headless-terminal": null,
+      "headless-terminal": 1.0,
       "llm-inference-batching-scheduler": 1.0,
       "break-filter-js-from-html": 1.0,
-      "write-compressor": 0.0,
+      "write-compressor": 1.0,
       "gpt2-codegolf": 0.0,
       "schemelike-metacircular-eval": 1.0,
       "cobol-modernization": 1.0
     },
-    "ungraded_tasks": ["headless-terminal"]
+    "ungraded_tasks": [],
+    "outcome_contract": {
+      "official_resolved": "verifier reward == 1",
+      "uncensored_resolved": "verifier reward == 1 and Harbor process completed without outer cancellation",
+      "comparison_gate_field": "uncensored_resolved",
+      "known_outer_timeout_tasks": ["gpt2-codegolf"]
+    }
   },
   "tasks": [
     "fix-code-vulnerability",

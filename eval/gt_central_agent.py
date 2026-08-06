@@ -56,6 +56,13 @@ from gt_engine.central_runtime import (
     task_deliverable_paths,
 )
 from gt_engine.checkpoint_ledger import ShadowCheckpointLedger
+from gt_engine.completion import (
+    CompletionCertificate,
+    CompletionStatus,
+    PredicateObservation,
+    certificate_from_observations,
+    compile_completion_plan,
+)
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.preflight import (
     PREFLIGHT_FEATURE_PLACEMENT,
@@ -66,6 +73,7 @@ from gt_engine.preflight import (
     pass_decision,
 )
 from gt_engine.provider_view import build_provider_view
+from gt_engine.progress import ProgressLedger
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 
 
@@ -197,6 +205,8 @@ class MiniSweCentralAgent(BaseAgent):
         command_timeout_sec: int = 30,
         model_timeout_sec: int | None = None,
         model_loop_timeout_sec: int | None = None,
+        execution_budget_sec: float | None = None,
+        deadline_reserve_sec: float = 15.0,
         cost_limit: float = 3.0,
         max_submit_holds: int = 1,
         enable_lint: bool = True,
@@ -205,8 +215,12 @@ class MiniSweCentralAgent(BaseAgent):
         enable_repository_intelligence: bool = True,
         enable_task_start_advisory: bool = False,
         enable_context_compaction: bool = False,
-        context_trigger_chars: int = 120_000,
-        context_target_chars: int = 60_000,
+        enable_completion_controller: bool = True,
+        completion_check_timeout_sec: float = 10.0,
+        enable_progress_control: bool = True,
+        context_capacity_chars: int = 400_000,
+        context_trigger_chars: int | None = None,
+        context_target_chars: int | None = None,
         integration_mode: str | GTIntegrationMode | None = None,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
@@ -222,6 +236,10 @@ class MiniSweCentralAgent(BaseAgent):
         self.command_timeout_sec = command_timeout_sec
         self.model_timeout_sec = model_timeout_sec
         self.model_loop_timeout_sec = model_loop_timeout_sec
+        self.execution_budget_sec = (
+            None if execution_budget_sec is None else max(0.001, float(execution_budget_sec))
+        )
+        self.deadline_reserve_sec = max(0.0, float(deadline_reserve_sec))
         self.cost_limit = cost_limit
         inferred_integration_mode = (
             GTIntegrationMode.AUDIT if self.runtime_mode == "shadow" else GTIntegrationMode.ACTIVE
@@ -236,17 +254,42 @@ class MiniSweCentralAgent(BaseAgent):
             enable_repository_intelligence = False
             enable_task_start_advisory = False
             enable_context_compaction = False
+            enable_completion_controller = False
+            enable_progress_control = False
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
             enable_context_compaction = False
+            enable_completion_controller = False
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
         self.enable_repository_intelligence = enable_repository_intelligence
         self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_context_compaction = enable_context_compaction
-        self.context_trigger_chars = max(1_000, int(context_trigger_chars))
-        self.context_target_chars = max(800, int(context_target_chars))
+        self.enable_completion_controller = enable_completion_controller
+        self.completion_check_timeout_sec = max(
+            0.05, float(completion_check_timeout_sec)
+        )
+        self.enable_progress_control = enable_progress_control
+        self.context_capacity_chars = max(10_000, int(context_capacity_chars))
+        self.context_trigger_chars = max(
+            1_000,
+            int(
+                context_trigger_chars
+                if context_trigger_chars is not None
+                else self.context_capacity_chars * 0.70
+            ),
+        )
+        self.context_target_chars = max(
+            800,
+            int(
+                context_target_chars
+                if context_target_chars is not None
+                else self.context_capacity_chars * 0.50
+            ),
+        )
+        if self.context_target_chars >= self.context_trigger_chars:
+            raise ValueError("context_target_chars must be smaller than context_trigger_chars")
         parsed_preflight_mode = PreflightMode.parse(preflight_mode)
         if enable_preflight is not None:
             legacy_mode = PreflightMode.ASSISTIVE_SAFE if enable_preflight else PreflightMode.OFF
@@ -266,6 +309,7 @@ class MiniSweCentralAgent(BaseAgent):
         self.preflight_timeout_sec = max(0.001, float(preflight_timeout_sec))
         self._ledger = EvidenceLedger(max_holds=max_submit_holds)
         self._checkpoints = ShadowCheckpointLedger()
+        self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
         self._sensor = WorkspaceSensor()
         self._features = CentralFeatureRuntime(
             enabled=enable_all_features,
@@ -417,6 +461,46 @@ class MiniSweCentralAgent(BaseAgent):
             )
         return ""
 
+    async def _evaluate_completion(
+        self,
+        environment: BaseEnvironment,
+        plan: Any,
+        *,
+        workspace_revision: str,
+        action_id: int,
+        timeout_sec: float,
+    ) -> CompletionCertificate:
+        """Run only task-text-equivalent predicates as private host probes."""
+
+        observations: list[PredicateObservation] = []
+        for predicate in plan.predicates:
+            try:
+                result = await environment.exec(
+                    predicate.command,
+                    cwd=self.cwd,
+                    env={},
+                    timeout_sec=max(0.05, min(self.completion_check_timeout_sec, timeout_sec)),
+                )
+                output = (result.stdout or "") + (result.stderr or "")
+                returncode = result.return_code
+            except Exception as exc:
+                output = f"{type(exc).__name__}: {exc}"
+                returncode = -1
+            observations.append(
+                PredicateObservation(
+                    predicate_id=predicate.predicate_id,
+                    returncode=returncode,
+                    output=output,
+                    workspace_revision=workspace_revision,
+                )
+            )
+        return certificate_from_observations(
+            plan,
+            tuple(observations),
+            workspace_revision=workspace_revision,
+            action_id=action_id,
+        )
+
     def _write_atif(
         self,
         messages: list[dict[str, Any]],
@@ -538,6 +622,16 @@ class MiniSweCentralAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        started = time.monotonic()
+        effective_budget = self.execution_budget_sec
+        if self.model_loop_timeout_sec is not None:
+            legacy_budget = float(self.model_loop_timeout_sec)
+            effective_budget = (
+                legacy_budget
+                if effective_budget is None
+                else min(effective_budget, legacy_budget)
+            )
+        deadline = None if effective_budget is None else started + effective_budget
         config = _mini_config()
         model = self._model_factory()
         system_info = await self._system_information(environment)
@@ -568,6 +662,20 @@ class MiniSweCentralAgent(BaseAgent):
             explicit_checks=explicit_checks,
             task_deliverables=task_deliverables,
         )
+        completion_plan = compile_completion_plan(instruction, cwd=self.cwd)
+        completion_certificates: list[CompletionCertificate] = []
+        last_completion_workspace_revision = ""
+        completion_target_paths = {
+            path[len(self.cwd.rstrip("/")) + 1 :]
+            if path.startswith(self.cwd.rstrip("/") + "/")
+            else path.lstrip("./")
+            for path in completion_plan.target_paths
+        }
+        auto_submit_attempts = 0
+        auto_submit_count = 0
+        self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
+        progress_transitions: list[dict[str, Any]] = []
+        seen_progress_signatures: set[str] = set()
         repository_evidence, repository_session = await self._start_repository_session(
             environment,
             instruction,
@@ -588,7 +696,6 @@ class MiniSweCentralAgent(BaseAgent):
         input_tokens = output_tokens = cache_tokens = 0
         cost = 0.0
         terminal = ""
-        started = time.monotonic()
         receipts: list[dict[str, Any]] = []
         guidance_deliveries: list[dict[str, Any]] = []
         model_call_contexts: list[dict[str, Any]] = []
@@ -601,6 +708,7 @@ class MiniSweCentralAgent(BaseAgent):
         context_compactions = 0
         context_chars_elided = 0
         pending_reconsideration_cycle = ""
+        deadline_reserve_exits = 0
 
         if (
             repository_evidence.available
@@ -620,13 +728,39 @@ class MiniSweCentralAgent(BaseAgent):
                     terminal = "CostLimitExceeded"
                     censored_reason = "cost_limit"
                     break
+                remaining_to_deadline = (
+                    None if deadline is None else deadline - time.monotonic()
+                )
                 if (
-                    self.model_loop_timeout_sec is not None
-                    and elapsed >= self.model_loop_timeout_sec
+                    remaining_to_deadline is not None
+                    and remaining_to_deadline <= self.deadline_reserve_sec
                 ):
-                    terminal = "WallTimeExceeded"
-                    censored_reason = "model_loop_wall_time"
+                    terminal = "DeadlineReserveReached"
+                    deadline_reserve_exits += 1
                     break
+                budget_transition = (
+                    self._progress.budget_risk(
+                        iteration=max(calls, actions_count),
+                        limit=self.step_limit,
+                        unresolved=not bool(
+                            completion_certificates
+                            and completion_certificates[-1].auto_submit_eligible
+                        ),
+                    )
+                    if self.enable_progress_control
+                    else None
+                )
+                if budget_transition is not None:
+                    progress_transitions.append(
+                        {
+                            "prior": budget_transition.prior,
+                            "current": budget_transition.current,
+                            "reason": budget_transition.reason,
+                            "streak": budget_transition.streak,
+                            "signature": budget_transition.signature,
+                            "action_id": actions_count,
+                        }
+                    )
                 calls += 1
                 active_state = {
                     **self._features.progress_ledger(),
@@ -634,6 +768,14 @@ class MiniSweCentralAgent(BaseAgent):
                     "project_checks": list(repository_evidence.project_checks),
                     "source_revision": source_revision,
                     "workspace_revision": snapshot.revision,
+                    "decision": {
+                        "progress_state": self._progress.state,
+                        "completion_plan": completion_plan.status.value,
+                        "completion_eligible": bool(
+                            completion_certificates
+                            and completion_certificates[-1].auto_submit_eligible
+                        ),
+                    },
                 }
                 if self.enable_context_compaction:
                     query_messages, provider_view_metrics = build_provider_view(
@@ -777,13 +919,38 @@ class MiniSweCentralAgent(BaseAgent):
                     model_call_contexts[-1]["query_started_at"] = query_started_at
                     if delivery_metadata is not None:
                         guidance_deliveries[-1]["query_started_at"] = query_started_at
+                    remaining_for_query = (
+                        None
+                        if deadline is None
+                        else max(0.0, deadline - query_started_at - self.deadline_reserve_sec)
+                    )
+                    query_timeout = (
+                        self.model_timeout_sec
+                        if remaining_for_query is None
+                        else (
+                            remaining_for_query
+                            if self.model_timeout_sec is None
+                            else min(float(self.model_timeout_sec), remaining_for_query)
+                        )
+                    )
+                    if query_timeout is not None and query_timeout <= 0:
+                        terminal = "DeadlineReserveReached"
+                        deadline_reserve_exits += 1
+                        break
                     message = await asyncio.wait_for(
                         asyncio.to_thread(model.query, query_messages),
-                        timeout=self.model_timeout_sec,
+                        timeout=query_timeout,
                     )
                 except TimeoutError:
-                    terminal = "ModelTimeout"
-                    censored_reason = "model_request_timeout"
+                    if (
+                        deadline is not None
+                        and deadline - time.monotonic() <= self.deadline_reserve_sec + 0.01
+                    ):
+                        terminal = "DeadlineReserveReached"
+                        deadline_reserve_exits += 1
+                    else:
+                        terminal = "ModelTimeout"
+                        censored_reason = "model_request_timeout"
                     break
                 except InterruptAgentFlow as flow:
                     messages.extend(flow.messages)
@@ -1036,11 +1203,22 @@ class MiniSweCentralAgent(BaseAgent):
                         )
 
                     try:
+                        action_timeout = float(self.command_timeout_sec)
+                        if deadline is not None:
+                            action_timeout = min(
+                                action_timeout,
+                                max(
+                                    0.05,
+                                    deadline
+                                    - time.monotonic()
+                                    - self.deadline_reserve_sec,
+                                ),
+                            )
                         result = await environment.exec(
                             command,
                             cwd=self.cwd,
                             env={},
-                            timeout_sec=self.command_timeout_sec,
+                            timeout_sec=action_timeout,
                         )
                     except Exception as exc:
                         result = ExecResult(
@@ -1085,6 +1263,42 @@ class MiniSweCentralAgent(BaseAgent):
                     ) or (
                         proposed.mutates_workspace and bool(transition.changed_paths)
                     )
+                    observation_signature = hashlib.sha256(
+                        _canonical_json(
+                            {
+                                "command": command,
+                                "returncode": result.return_code,
+                                "output_sha256": hashlib.sha256(
+                                    output["output"].encode("utf-8", "surrogatepass")
+                                ).hexdigest(),
+                                "source_revision": source_revision,
+                                "workspace_revision": snapshot.revision,
+                            }
+                        )
+                    ).hexdigest()
+                    information_gain = observation_signature not in seen_progress_signatures
+                    seen_progress_signatures.add(observation_signature)
+                    if self.enable_progress_control:
+                        progress_transition = self._progress.observe(
+                            observation_signature,
+                            information_gain=information_gain,
+                            changed=material_workspace_change,
+                            is_error=result.return_code != 0,
+                            contradictory=(
+                                classification.is_validation and result.return_code != 0
+                            ),
+                        )
+                        if progress_transition is not None:
+                            progress_transitions.append(
+                                {
+                                    "prior": progress_transition.prior,
+                                    "current": progress_transition.current,
+                                    "reason": progress_transition.reason,
+                                    "streak": progress_transition.streak,
+                                    "signature": progress_transition.signature,
+                                    "action_id": actions_count,
+                                }
+                            )
                     if (
                         repository_session is not None
                         and source_revision != proposed.source_revision
@@ -1206,6 +1420,94 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                         action_id=actions_count,
                     )
+                    auto_submitted = False
+                    completion_triggered = bool(
+                        self.enable_completion_controller
+                        and completion_plan.executable
+                        and snapshot.healthy
+                        and snapshot.revision != last_completion_workspace_revision
+                        and (
+                            bool(set(transition.changed_paths) & completion_target_paths)
+                            or proposed.operation is ActionOperation.VALIDATE
+                        )
+                    )
+                    if completion_triggered:
+                        remaining_for_checks = (
+                            self.completion_check_timeout_sec
+                            if deadline is None
+                            else max(
+                                0.05,
+                                deadline
+                                - time.monotonic()
+                                - self.deadline_reserve_sec,
+                            )
+                        )
+                        certificate = await self._evaluate_completion(
+                            environment,
+                            completion_plan,
+                            workspace_revision=snapshot.revision,
+                            action_id=actions_count,
+                            timeout_sec=remaining_for_checks,
+                        )
+                        completion_certificates.append(certificate)
+                        last_completion_workspace_revision = snapshot.revision
+                        receipts.append(
+                            {
+                                "action": actions_count,
+                                "kind": "completion_certificate",
+                                "decision": (
+                                    "AUTO_SUBMIT"
+                                    if certificate.auto_submit_eligible
+                                    else "CONTINUE"
+                                ),
+                                "revision": snapshot.revision,
+                                "reason_codes": list(certificate.reason_codes),
+                            }
+                        )
+                        if certificate.auto_submit_eligible:
+                            auto_submit_attempts += 1
+                            try:
+                                submit_result = await environment.exec(
+                                    "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                                    cwd=self.cwd,
+                                    env={},
+                                    timeout_sec=max(0.05, min(5.0, remaining_for_checks)),
+                                )
+                            except Exception:
+                                submit_result = ExecResult(return_code=-1)
+                            if submit_result.return_code == 0:
+                                auto_submit_count += 1
+                                auto_submitted = True
+                                readiness_evidence = self._ledger.readiness_evidence(
+                                    source_revision
+                                )
+                                self._features.record_submit(
+                                    action_id=actions_count,
+                                    revision=snapshot.revision,
+                                    source_revision=source_revision,
+                                    refused=False,
+                                    sensor_healthy=snapshot.healthy,
+                                    check_count=(
+                                        len(readiness_evidence)
+                                        + len(certificate.observations)
+                                    ),
+                                    passing_checks=sum(
+                                        item.returncode == 0
+                                        for item in readiness_evidence
+                                    )
+                                    + sum(
+                                        item.returncode == 0
+                                        for item in certificate.observations
+                                    ),
+                                    failing_checks=sum(
+                                        item.returncode != 0
+                                        for item in readiness_evidence
+                                    )
+                                    + sum(
+                                        item.returncode != 0
+                                        for item in certificate.observations
+                                    ),
+                                )
                     outputs.append(output)
                     # A submit can emit GT_CERT_DELIVERY before its shell
                     # command executes.  Consume every action's effects
@@ -1222,7 +1524,7 @@ class MiniSweCentralAgent(BaseAgent):
                             or source_revision != proposed.source_revision
                         )
                     )
-                    if effects and not submit:
+                    if effects and not (submit or auto_submitted):
                         later_actions = actions[index + 1 :]
                         first_submit = next(
                             (
@@ -1241,7 +1543,7 @@ class MiniSweCentralAgent(BaseAgent):
                             evidence_action=actions_count,
                             executed=executed_after,
                         )
-                    if submit:
+                    if submit or auto_submitted:
                         cancelled = len(actions) - index - 1
                         if cancelled:
                             if self.preflight_mode is not PreflightMode.OFF:
@@ -1249,7 +1551,11 @@ class MiniSweCentralAgent(BaseAgent):
                                     self._features.record_cancelled_proposal(
                                         cancelled_proposal,
                                         mode=self.preflight_mode,
-                                        reason="terminal_submit",
+                                        reason=(
+                                            "completion_auto_submit"
+                                            if auto_submitted
+                                            else "terminal_submit"
+                                        ),
                                     )
                             outputs.extend(
                                 {
@@ -1262,7 +1568,11 @@ class MiniSweCentralAgent(BaseAgent):
                             self._features.record_batch_interrupt(
                                 action_id=actions_count,
                                 cancelled=cancelled,
-                                reason="terminal_submit",
+                                reason=(
+                                    "completion_auto_submit"
+                                    if auto_submitted
+                                    else "terminal_submit"
+                                ),
                             )
                         terminal = "Submitted"
                         break
@@ -1407,6 +1717,32 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "context_compactions": context_compactions,
                 "context_chars_elided": context_chars_elided,
+                "context_capacity_chars": self.context_capacity_chars,
+                "context_trigger_chars": self.context_trigger_chars,
+                "context_target_chars": self.context_target_chars,
+                "completion_plan_status": completion_plan.status.value,
+                "completion_predicates": len(completion_plan.predicates),
+                "completion_certificate_evaluations": len(completion_certificates),
+                "completion_predicate_checks": sum(
+                    len(item.observations) for item in completion_certificates
+                ),
+                "completion_certificates_complete": sum(
+                    item.status is CompletionStatus.COMPLETE
+                    for item in completion_certificates
+                ),
+                "auto_submit_attempts": auto_submit_attempts,
+                "auto_submits": auto_submit_count,
+                "effective_actions": (
+                    actions_count
+                    + sum(len(item.observations) for item in completion_certificates)
+                    + auto_submit_attempts
+                ),
+                "progress_state": self._progress.state,
+                "progress_transitions": len(progress_transitions),
+                "deadline_configured": effective_budget is not None,
+                "execution_budget_sec": effective_budget,
+                "deadline_reserve_sec": self.deadline_reserve_sec,
+                "deadline_reserve_exits": deadline_reserve_exits,
                 "context_compiler_calls": sum(
                     bool(row.get("context_compiler_ran")) for row in model_call_contexts
                 ),
@@ -1695,6 +2031,34 @@ class MiniSweCentralAgent(BaseAgent):
                             repository_session.summary() if repository_session is not None else None
                         ),
                         "checkpoint_ledger": self._checkpoints.summary(),
+                        "completion": {
+                            "plan": completion_plan.as_dict(),
+                            "certificates": [
+                                item.as_dict() for item in completion_certificates
+                            ],
+                            "latest_certificate": (
+                                completion_certificates[-1].as_dict()
+                                if completion_certificates
+                                else None
+                            ),
+                            "auto_submit_attempts": auto_submit_attempts,
+                            "auto_submit_count": auto_submit_count,
+                        },
+                        "progress": {
+                            "state": self._progress.state,
+                            "transitions": progress_transitions,
+                        },
+                        "deadline": {
+                            "execution_budget_sec": effective_budget,
+                            "reserve_sec": self.deadline_reserve_sec,
+                            "elapsed_sec": elapsed_seconds,
+                            "remaining_sec": (
+                                None
+                                if deadline is None
+                                else max(0.0, deadline - time.monotonic())
+                            ),
+                            "reserve_exits": deadline_reserve_exits,
+                        },
                         "metrics": deep_metrics,
                         "features": feature_summary,
                         "interventions": receipts,
@@ -1734,6 +2098,12 @@ class MiniSweCentralAgent(BaseAgent):
                 "exit_status": terminal,
                 "censored": bool(censored_reason),
                 "censored_reason": censored_reason,
+                "completion_plan_status": completion_plan.status.value,
+                "completion_certificates": len(completion_certificates),
+                "auto_submits": auto_submit_count,
+                "progress_state": self._progress.state,
+                "execution_budget_sec": effective_budget,
+                "deadline_reserve_exits": deadline_reserve_exits,
                 "workspace_sensor_healthy": snapshot.healthy,
             }
             if repository_session is not None:

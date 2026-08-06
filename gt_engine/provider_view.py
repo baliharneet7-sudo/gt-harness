@@ -259,21 +259,31 @@ def _turn_fingerprint(
     messages: list[dict[str, Any]], start: int, end: int
 ) -> str:
     assistant = messages[start]
-    commands = [
-        str(action.get("command") or "")
-        for action in (assistant.get("extra") or {}).get("actions") or []
-    ]
-    contents = [
-        str(messages[idx].get("content") or "") for idx in range(start + 1, end)
-    ]
+    # Tool-call IDs are transport-local and differ across retries.  The
+    # command, assistant reasoning, action metadata, tool output, and tool
+    # status are semantic evidence and must all participate in deduplication.
+    # Previously only command text and output text were hashed, so two turns
+    # with the same prose but different return codes could be collapsed.
+    actions = []
+    for action in (assistant.get("extra") or {}).get("actions") or []:
+        normalized = dict(action)
+        normalized.pop("tool_call_id", None)
+        normalized.pop("id", None)
+        actions.append(normalized)
+    tool_turns = []
+    for idx in range(start + 1, end):
+        tool = dict(messages[idx])
+        tool.pop("tool_call_id", None)
+        tool_turns.append(tool)
     return hashlib.sha256(
         json.dumps(
             [
                 str(assistant.get("content") or ""),
                 str(assistant.get("reasoning_content") or ""),
-                commands,
-                contents,
+                actions,
+                tool_turns,
             ],
+            ensure_ascii=False,
             sort_keys=True,
             default=str,
         ).encode("utf-8")

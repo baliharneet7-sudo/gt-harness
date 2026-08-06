@@ -55,3 +55,31 @@ def test_extract_task_contract_prefers_engine_rows_over_noise():
     texts = " ".join(o.text for o in contract.obligations).lower()
     assert "read and analyze the repository carefully" not in texts
     assert "report.jsonl" in texts
+
+
+def test_terminal_bench_harness_scaffolding_is_not_a_task_obligation():
+    text = """Please solve this issue: Write me data.comp that's compressed such that
+running cat data.comp | /app/decomp gives exactly data.txt.
+You can generate data.comp any way you want, but data.comp must be at most 2500 bytes.
+
+You can execute bash commands and edit files to implement the necessary changes.
+
+## Recommended Workflow
+1. Analyze the codebase by finding and reading relevant files
+2. Create a script to reproduce the issue
+3. Edit the source code to resolve the issue
+4. Verify your fix works by running your script again
+
+## Command Execution Rules
+1. You issue at least one command
+2. The system executes the command(s) in a subshell
+"""
+
+    contract = tc.extract_task_contract(text)
+    obligations = [item.text.lower() for item in contract.obligations]
+
+    assert len(obligations) == 2
+    assert any("gives exactly data.txt" in item for item in obligations)
+    assert any("at most 2500 bytes" in item for item in obligations)
+    assert all("workflow" not in item for item in obligations)
+    assert all("subshell" not in item for item in obligations)

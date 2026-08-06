@@ -8,6 +8,7 @@ not claim model efficacy or replace the live task-container surface audit.
 from __future__ import annotations
 
 import inspect
+import importlib.util
 import json
 import sys
 import tempfile
@@ -30,6 +31,24 @@ from scripts.central_feature_census import census as central_feature_census
 
 ROOT = Path(__file__).resolve().parents[1]
 
+_REQUIRED_GROUNDTRUTH_RUNTIME = (
+    "groundtruth.runtime.terminal_evidence",
+    "groundtruth.runtime.deterministic_queries",
+    "groundtruth.runtime.miniswe_provider_boundary",
+)
+
+
+def _vendored_runtime_surface_available() -> bool:
+    """Fail readiness when an older/incomplete groundtruth wheel is installed."""
+
+    try:
+        return all(
+            importlib.util.find_spec(module_name) is not None
+            for module_name in _REQUIRED_GROUNDTRUTH_RUNTIME
+        )
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
 
 def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
@@ -49,6 +68,7 @@ def audit() -> dict[str, bool]:
         "setup_has_no_upload": "upload_" not in setup_source,
         "stock_litellm_model": type(model) is LitellmModel,
         "stock_bash_tool_only": BASH_TOOL["function"]["name"] == "bash",
+        "vendored_groundtruth_runtime_surface": _vendored_runtime_surface_available(),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
         "paid_preflight_is_shadow_only": (
             "--ak preflight_mode=shadow" in workflow
@@ -65,7 +85,10 @@ def audit() -> dict[str, bool]:
             "tests/test_provider_view.py" in workflow
             and "tests/test_gt_deep_metrics.py" in workflow
         ),
-        "paid_lossy_compaction_disabled": "--ak enable_context_compaction=false" in workflow,
+        "paid_deterministic_compaction_enabled": (
+            "--ak enable_context_compaction=true" in workflow
+            and "tests/test_provider_view.py" in workflow
+        ),
         "context_compiler_precedes_model_query": (
             0
             <= run_source.find("record_context_compiler_call(")
@@ -97,10 +120,19 @@ def audit() -> dict[str, bool]:
         "legacy_agent_not_in_paid_workflow": (
             "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
         ),
-        "paid_integrated_has_no_additional_inner_model_time_censors": (
+        "paid_exact_harbor_deadline_is_propagated": (
             "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
+            and "scripts/resolve_harbor_budget.py" in workflow
+            and '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
+            and "--agent-timeout-multiplier 1.0" in workflow
             and "--ak model_timeout_sec" not in workflow
             and "--ak model_loop_timeout_sec" not in workflow
+        ),
+        "paid_completion_and_progress_control_enabled": (
+            "--ak enable_completion_controller=true" in workflow
+            and "--ak enable_progress_control=true" in workflow
+            and "tests/test_gt_completion.py" in workflow
+            and "tests/test_harbor_budget.py" in workflow
         ),
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]

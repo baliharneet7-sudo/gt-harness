@@ -15,6 +15,7 @@ PRIMARY_RESOURCES = (
     "total_tokens",
     "api_calls",
     "actions",
+    "effective_actions",
     "assistant_steps",
     "normalized_cost_usd",
 )
@@ -90,12 +91,15 @@ _EDIT = re.compile(
     re.I,
 )
 _CENSORED = {
+    "ModelTimeout",
+    "Cancelled",
+}
+_SOLVER_EXHAUSTED = {
     "LimitsExceeded",
     "StepLimitExceeded",
     "CostLimitExceeded",
     "WallTimeExceeded",
-    "ModelTimeout",
-    "Cancelled",
+    "DeadlineReserveReached",
 }
 _CENSORED_HARBOR_EXCEPTIONS = {
     "AgentTimeoutError",
@@ -338,11 +342,21 @@ def extract_trajectory(
     trial_wall_time = _elapsed_seconds(
         (harbor_result or {}).get("started_at"), (harbor_result or {}).get("finished_at")
     )
+    official_solved = None if reward is None else bool(reward)
+    uncensored_resolved = (
+        None if official_solved is None else official_solved and not bool(censored_reason)
+    )
     result: dict[str, Any] = {
         "task": task or path.name.removesuffix("_trajectory.json"),
         "reward": reward,
-        "solved": None if reward is None else bool(reward),
+        # ``reward`` is the official verifier signal.  A rewarded process that
+        # Harbor interrupted is a useful salvage witness, but it is not a
+        # completed solve and must never enter solve-preservation gates as one.
+        "official_solved": official_solved,
+        "uncensored_resolved": uncensored_resolved,
+        "solved": uncensored_resolved,
         "exit_status": exit_status,
+        "solver_exhausted": exit_status in _SOLVER_EXHAUSTED,
         "censored": bool(censored_reason),
         "censored_reason": censored_reason,
         "harbor_exception_type": exception_type,
@@ -380,6 +394,7 @@ def extract_trajectory(
         + result.get("repeated_commands", 0)
         + result.get("no_action_assistant_steps", 0)
     )
+    result["effective_actions"] = result.get("actions", 0)
     for key in (
         "api_calls",
         "assistant_steps",
@@ -485,6 +500,10 @@ def extract_trajectory(
             "context_provider_view_changed_calls",
             "validation_attributed_results",
             "validation_unattributed_intents",
+            "completion_predicate_checks",
+            "auto_submit_attempts",
+            "auto_submits",
+            "effective_actions",
         ):
             result[key] = receipt_metrics.get(key, result.get(key, 0))
         result["total_gt_context_chars_added"] = (
@@ -542,6 +561,12 @@ def compare_arms(
             if not pareto:
                 pareto_failures.append(task)
         rows[task] = {
+            "baseline_official_solved": before.get(
+                "official_solved", before.get("solved")
+            ),
+            "treatment_official_solved": after.get(
+                "official_solved", after.get("solved")
+            ),
             "baseline_solved": b_solved,
             "treatment_solved": a_solved,
             "baseline_censored": bool(before.get("censored")),
@@ -561,6 +586,32 @@ def compare_arms(
     return {
         "tasks": rows,
         "task_count": len(tasks),
+        "outcomes": {
+            "baseline_official_resolved": sum(
+                baseline[task].get("official_solved", baseline[task].get("solved"))
+                is True
+                for task in tasks
+            ),
+            "treatment_official_resolved": sum(
+                treatment[task].get("official_solved", treatment[task].get("solved"))
+                is True
+                for task in tasks
+            ),
+            "baseline_uncensored_resolved": sum(
+                baseline[task].get(
+                    "uncensored_resolved", baseline[task].get("solved")
+                )
+                is True
+                for task in tasks
+            ),
+            "treatment_uncensored_resolved": sum(
+                treatment[task].get(
+                    "uncensored_resolved", treatment[task].get("solved")
+                )
+                is True
+                for task in tasks
+            ),
+        },
         "outcomes_complete": outcomes_complete,
         "comparable_solved": comparable_solved,
         "solve_regressions": solve_regressions,
