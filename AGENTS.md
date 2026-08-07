@@ -467,3 +467,23 @@ That rules out a first-turn GT payload cause but does not clear the later
 bounded context transform as a contributor. Use the archived audit
 `details_done/GT_SMOKE_31142998081_OUTCOME_AUDIT_20260806.md`; do a request
 diff/replay and a separately authorized ablation before another paid smoke.
+
+## 10/10 versus 8/10 comparison (2026-08-06)
+
+The prior 10/10 GT-on smoke (`31136099371`, `8ab1896`) is real paid evidence,
+not a replay. The later 8/10 smoke (`31142998081`, `5c92a6a`) used the same
+tasks, model/temperature, agent, active/shadow modes, compaction,
+completion/progress controls, step cap, and task-owned budgets. Their initial
+schemelike provider request was byte-identical, but the temperature-1 first
+model action already differed before any GT-visible evidence.
+
+The repair did not change the compactor, completion controller, or progress
+controller. It repaired graph-runtime installation and graph-role semantics,
+added applicability accounting, and prevents claims from leaking after their
+first eligible provider call. In the lost task both runs rendered the exact
+same 135-character `GT_EDIT_CHECK` payload; current graph effects were private
+and caused no controller action/state frame. Therefore do not attribute the
+observed outcome loss to the repair, and do not dismiss it as proven noise
+either. Follow `details_done/GT_ON_10OF10_VS_8OF10_COMPARISON_AND_PLAN_20260806.md`:
+first request-diff/fixed-trajectory proof, then a separately authorized
+component ablation smoke.

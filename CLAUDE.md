@@ -313,3 +313,19 @@ a direct first-turn GT delivery cause, not later bounded compaction or the
 single action-71 validation payload. Read
 `details_done/GT_SMOKE_31142998081_OUTCOME_AUDIT_20260806.md` before changing
 features or funding another run.
+
+### 10/10 versus 8/10 comparison (2026-08-06)
+
+`31136099371` was a real GT-on 10/10 paid smoke. Its configuration matches
+the later rejected 8/10 smoke: task slice, model/temperature, active/shadow
+modes, compaction, controls, step cap, and budgets. The first schemelike
+provider request was byte-identical, while the temperature-1 first response
+already differed. `5c92a6a` changed graph runtime/semantics and first-window
+delivery, not the compactor, completion, or progress code. The sole visible
+schemelike payload was byte-for-byte the same in both runs.
+
+The observed loss is neither proof that the repair caused a regression nor
+proof of harmless noise. The next gate is a provider-free request-diff and
+fixed-trajectory replay, followed by a separately authorized component
+ablation. Details:
+`details_done/GT_ON_10OF10_VS_8OF10_COMPARISON_AND_PLAN_20260806.md`.
