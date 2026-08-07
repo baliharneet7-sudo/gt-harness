@@ -329,3 +329,14 @@ proof of harmless noise. The next gate is a provider-free request-diff and
 fixed-trajectory replay, followed by a separately authorized component
 ablation. Details:
 `details_done/GT_ON_10OF10_VS_8OF10_COMPARISON_AND_PLAN_20260806.md`.
+
+### Provider-free run-diff gate (2026-08-06)
+
+`scripts/central_run_diff.py` is the required offline comparator for two
+GT-on artifact roots. It identifies the first model-action divergence,
+attributes whether it predates visible evidence, compares prepared-request
+hashes and context transforms, and fails on incomplete receipt accounting.
+It must not call the provider or change any artifact. The replay CLI now works
+both directly and as a module; both run forms and the comparator are in the
+release gate. Full details:
+`details_done/GT_PROVIDER_FREE_RUN_DIFF_GATE_20260806.md`.

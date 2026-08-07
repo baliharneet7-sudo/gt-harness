@@ -53,6 +53,7 @@ RELEASE_TESTS = (
     "tests/test_gt_central_consumer_proof.py::test_newfile_precedent_ranks_semantically_related_nonempty_sibling",
     "tests/test_gt_central_consumer_proof.py::test_newfile_precedent_abstains_when_only_sibling_is_empty_package_marker",
     "tests/test_central_replay.py::test_replay_does_not_require_a_certificate_for_unattributed_declared_pipeline",
+    "tests/test_central_run_diff.py",
     "tests/test_provider_view.py::test_below_compaction_trigger_preserves_provider_messages_byte_for_byte",
     "tests/test_provider_view.py::test_compaction_never_removes_distinct_assistant_reasoning",
     "tests/test_provider_view.py::test_recent_oversized_observation_is_bounded_even_when_it_is_the_only_turn",

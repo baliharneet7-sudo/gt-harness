@@ -487,3 +487,15 @@ observed outcome loss to the repair, and do not dismiss it as proven noise
 either. Follow `details_done/GT_ON_10OF10_VS_8OF10_COMPARISON_AND_PLAN_20260806.md`:
 first request-diff/fixed-trajectory proof, then a separately authorized
 component ablation smoke.
+
+## Provider-free run-diff gate (2026-08-06)
+
+Before interpreting two GT-on smokes, run
+`python -m scripts.central_run_diff <left-root> <right-root>`. It is an
+offline, fail-closed receipt/trajectory comparator: it reports first divergent
+model action, whether that predates visible GT evidence, prepared-request hash
+differences, frames, compaction, preflight, and accounting completeness. It
+must never call a model or modify an artifact. Both direct and module forms of
+`central_replay` are required to work. This gate is in the provider-free and
+pre-smoke suites. See
+`details_done/GT_PROVIDER_FREE_RUN_DIFF_GATE_20260806.md`.

@@ -21,7 +21,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from gt_engine.central_runtime import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from gt_engine.central_runtime import (  # noqa: E402
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     EvidenceLedger,
@@ -35,8 +39,8 @@ from gt_engine.central_runtime import (
     normalize_command,
     task_deliverable_paths,
 )
-from gt_engine.preflight import ActionDisposition, adapt_proposed_action
-from gt_engine.provider_view import build_provider_view
+from gt_engine.preflight import ActionDisposition, adapt_proposed_action  # noqa: E402
+from gt_engine.provider_view import build_provider_view  # noqa: E402
 
 
 def _load_json(path: Path) -> dict[str, Any]:
