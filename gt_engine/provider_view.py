@@ -1,11 +1,9 @@
-"""Deterministic provider-history compaction for the central Mini-SWE loop.
+"""Deterministic, reasoning-preserving provider history for Mini-SWE.
 
-Compaction is smart, never aggressive: it first drops byte-identical duplicate
-assistant/tool turns (no duplicate text is sent), then replaces only older
-turns with an omission marker plus a typed state summary.  The summary carries
-forward the bounded progress ledger (last edit, latest validation, unresolved
-failure, read targets, changed paths) so the model never loses working memory
-and is never told to rerun a completed command.
+The audit trajectory retains exact model reasoning and tool output.  The
+provider view bounds oversized tool observations and, only when necessary,
+clears older tool bodies to immutable receipts.  Assistant reasoning is never
+compacted by this module.
 """
 
 from __future__ import annotations
@@ -85,6 +83,10 @@ class ProviderViewMetrics:
     omitted_fact_reasons: dict[str, str] = field(default_factory=dict)
     fact_accounting: tuple[dict[str, Any], ...] = ()
     frame_sha256: str = ""
+    bounded_observation_count: int = 0
+    bounded_observation_chars_removed: int = 0
+    duplicate_turns_represented: int = 0
+    old_tool_results_cleared: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -113,12 +115,79 @@ class ProviderViewMetrics:
             "omitted_fact_reasons": dict(self.omitted_fact_reasons),
             "fact_accounting": [dict(row) for row in self.fact_accounting],
             "frame_sha256": self.frame_sha256,
+            "bounded_observation_count": self.bounded_observation_count,
+            "bounded_observation_chars_removed": self.bounded_observation_chars_removed,
+            "duplicate_turns_represented": self.duplicate_turns_represented,
+            "old_tool_results_cleared": self.old_tool_results_cleared,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RequestBudget:
+    context_limit_tokens: int
+    counted_tokens: int
+    conservative_tokens: int
+    effective_tokens: int
+    hard_prompt_limit: int
+    remaining_tokens: int
+    counter_source: str
+
+    @property
+    def within_limit(self) -> bool:
+        return self.effective_tokens <= self.hard_prompt_limit
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            **asdict(self),
+            "within_limit": self.within_limit,
         }
 
 
 def _chars(messages: list[dict[str, Any]]) -> int:
     return sum(
         len(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)) for item in messages
+    )
+
+
+def provider_request_budget(
+    messages: list[dict[str, Any]],
+    *,
+    model_name: str,
+    context_limit_tokens: int = 1_048_576,
+    hard_ratio: float = 0.90,
+) -> RequestBudget:
+    """Measure a provider request with a conservative no-overflow fallback."""
+
+    payload = json.dumps(
+        messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    conservative = len(payload)
+    counted = 0
+    source = "utf8_byte_upper_bound"
+    try:
+        import litellm
+
+        counted = int(litellm.token_counter(model=model_name, messages=messages) or 0)
+        if counted > 0:
+            source = "litellm_token_counter+utf8_byte_upper_bound"
+    except Exception:
+        counted = 0
+    limit = max(1, int(context_limit_tokens))
+    ratio = min(0.99, max(0.50, float(hard_ratio)))
+    hard = max(1, int(limit * ratio))
+    effective = max(counted, conservative)
+    return RequestBudget(
+        context_limit_tokens=limit,
+        counted_tokens=counted,
+        conservative_tokens=conservative,
+        effective_tokens=effective,
+        hard_prompt_limit=hard,
+        remaining_tokens=hard - effective,
+        counter_source=source,
     )
 
 
@@ -310,6 +379,163 @@ def dedupe_provider_view(messages: list[dict[str, Any]]) -> list[dict[str, Any]]
             for index in range(start, end):
                 keep[index] = False
     return [message for message, flag in zip(messages, keep, strict=False) if flag]
+
+
+_DIAGNOSTIC_LINE_RE = re.compile(
+    r"(?i)(?:traceback|exception|error|failed?|assert(?:ion)?|panic|fatal|warning)"
+)
+
+
+def _tool_return_code(message: dict[str, Any]) -> int | None:
+    extra = message.get("extra")
+    if isinstance(extra, dict) and extra.get("returncode") is not None:
+        try:
+            return int(extra["returncode"])
+        except (TypeError, ValueError):
+            return None
+    match = re.search(r"<returncode>\s*(-?\d+)\s*</returncode>", str(message.get("content") or ""))
+    return int(match.group(1)) if match else None
+
+
+def _bound_tool_content(
+    content: str,
+    *,
+    return_code: int | None,
+    max_chars: int = 20_000,
+) -> tuple[str, int]:
+    """Create a deterministic head/diagnostic/tail provider observation."""
+
+    if len(content) <= max_chars:
+        return content, 0
+    digest = hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
+    notice = (
+        "\n[Tool output bounded by host: "
+        f"full_chars={len(content)} omitted_chars={{omitted}} sha256={digest}; "
+        "use a narrower command if omitted detail is required.]\n"
+    )
+    payload_budget = max(2_000, max_chars - len(notice.format(omitted=0)))
+    diagnostics = ""
+    if return_code not in (None, 0):
+        selected: list[str] = []
+        used = 0
+        for line in content.splitlines():
+            if not _DIAGNOSTIC_LINE_RE.search(line):
+                continue
+            normalized = line.rstrip()
+            if not normalized or normalized in selected:
+                continue
+            addition = len(normalized) + 1
+            if used + addition > 4_000:
+                break
+            selected.append(normalized)
+            used += addition
+        if selected:
+            diagnostics = "\n[Selected diagnostic lines]\n" + "\n".join(selected) + "\n"
+    remaining = max(1_000, payload_budget - len(diagnostics))
+    head_chars = min(8_000 if not diagnostics else 6_000, remaining // 2)
+    tail_chars = max(1, remaining - head_chars)
+    omitted = max(0, len(content) - head_chars - tail_chars)
+    bounded = (
+        content[:head_chars]
+        + notice.format(omitted=omitted)
+        + diagnostics
+        + content[-tail_chars:]
+    )
+    if len(bounded) > max_chars:
+        bounded = bounded[:max_chars]
+    return bounded, max(0, len(content) - len(bounded))
+
+
+def _prepare_provider_history(
+    messages: list[dict[str, Any]],
+    *,
+    observation_limit_chars: int = 20_000,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Bound tool bodies and represent later exact duplicates append-only."""
+
+    prepared = copy.deepcopy(messages)
+    bounded_count = 0
+    bounded_removed = 0
+    for item in prepared:
+        if item.get("role") != "tool":
+            continue
+        original = str(item.get("content") or "")
+        bounded, omitted = _bound_tool_content(
+            original,
+            return_code=_tool_return_code(item),
+            max_chars=max(2_000, int(observation_limit_chars)),
+        )
+        if omitted:
+            item["content"] = bounded
+            bounded_count += 1
+            bounded_removed += omitted
+
+    duplicate_count = 0
+    duplicate_removed = 0
+    first_by_fingerprint: dict[str, int] = {}
+    original_turns = _turn_bounds(messages)
+    prepared_turns = _turn_bounds(prepared)
+    for position, ((original_start, original_end), (start, end)) in enumerate(
+        zip(original_turns, prepared_turns, strict=False)
+    ):
+        fingerprint = _turn_fingerprint(messages, original_start, original_end)
+        if fingerprint not in first_by_fingerprint:
+            first_by_fingerprint[fingerprint] = position
+            continue
+        prior = first_by_fingerprint[fingerprint]
+        duplicate_count += 1
+        for index in range(start + 1, end):
+            tool = prepared[index]
+            old = str(tool.get("content") or "")
+            full_original = str(messages[original_start + (index - start)].get("content") or "")
+            digest = hashlib.sha256(
+                full_original.encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            replacement = (
+                f"[Exact duplicate of prior action {prior + 1}; "
+                f"output_sha256={digest} chars={len(full_original)}.]"
+            )
+            tool["content"] = replacement
+            duplicate_removed += max(0, len(old) - len(replacement))
+
+    return prepared, {
+        "bounded_count": bounded_count,
+        "bounded_removed": bounded_removed,
+        "duplicate_count": duplicate_count,
+        "duplicate_removed": duplicate_removed,
+    }
+
+
+def _clear_old_tool_results(
+    view: list[dict[str, Any]],
+    *,
+    target_chars: int,
+    keep_recent_turns: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Clear only old tool bodies; preserve every assistant message exactly."""
+
+    cleared = copy.deepcopy(view)
+    turns = _turn_bounds(cleared)
+    protected = max(1, int(keep_recent_turns))
+    clearable = turns[: max(0, len(turns) - protected)]
+    count = 0
+    for start, end in clearable:
+        if _chars(cleared) <= target_chars:
+            break
+        for index in range(start + 1, end):
+            tool = cleared[index]
+            original = str(tool.get("content") or "")
+            if original.startswith("[Earlier tool result cleared:"):
+                continue
+            digest = hashlib.sha256(
+                original.encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            tool["content"] = (
+                f"[Earlier tool result cleared: chars={len(original)} "
+                f"sha256={digest} returncode={_tool_return_code(tool)}.]"
+            )
+            count += 1
+    return cleared, count
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -680,20 +906,13 @@ def _compile_fact_frame(
     return state_text, tuple(selected), accounting
 
 
-def _apply_frame_index(
-    accounting: list[dict[str, Any]], *, insertion_index: int
-) -> tuple[dict[str, Any], ...]:
-    rows: list[dict[str, Any]] = []
-    for original in accounting:
-        row = dict(original)
-        indices = [int(index) for index in row["provider_message_indices"]]
-        if row["disposition"] == "selected_state_frame":
-            indices = [insertion_index]
-        else:
-            indices = [index + 1 if index >= insertion_index else index for index in indices]
-        row["provider_message_indices"] = indices
-        rows.append(row)
-    return tuple(rows)
+def _assistant_reasoning_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        len(str(item.get("content") or ""))
+        + len(str(item.get("reasoning_content") or ""))
+        for item in messages
+        if item.get("role") == "assistant"
+    )
 
 
 def _provider_metrics(
@@ -708,6 +927,12 @@ def _provider_metrics(
     duplicate_fact_count: int,
     selected_fact_ids: tuple[str, ...],
     accounting: tuple[dict[str, Any], ...],
+    assistant_reasoning_input_chars: int,
+    exact_duplicate_chars_removed: int = 0,
+    bounded_observation_count: int = 0,
+    bounded_observation_chars_removed: int = 0,
+    duplicate_turns_represented: int = 0,
+    old_tool_results_cleared: int = 0,
 ) -> ProviderViewMetrics:
     output_chars = _chars(view)
     dispositions = [str(row["disposition"]) for row in accounting]
@@ -726,8 +951,10 @@ def _provider_metrics(
         preserved_recent_messages=preserved_recent_messages,
         active_state_chars=len(state_text),
         duplicate_turns_removed=duplicate_turns_removed,
-        exact_duplicate_chars_removed=max(0, raw_input_chars - input_chars),
-        unique_assistant_reasoning_chars_removed=0,
+        exact_duplicate_chars_removed=max(0, exact_duplicate_chars_removed),
+        unique_assistant_reasoning_chars_removed=max(
+            0, assistant_reasoning_input_chars - _assistant_reasoning_chars(view)
+        ),
         candidate_fact_count=len(accounting),
         selected_fact_count=dispositions.count("selected_state_frame"),
         represented_fact_count=dispositions.count("represented_message"),
@@ -748,30 +975,11 @@ def _provider_metrics(
             if state_text
             else ""
         ),
+        bounded_observation_count=bounded_observation_count,
+        bounded_observation_chars_removed=bounded_observation_chars_removed,
+        duplicate_turns_represented=duplicate_turns_represented,
+        old_tool_results_cleared=old_tool_results_cleared,
     )
-
-
-def _compact_message(message: dict[str, Any]) -> dict[str, Any]:
-    compacted = copy.deepcopy(message)
-    role = str(compacted.get("role") or "")
-    if role == "assistant":
-        # The command actions remain so the model knows what was run; only the
-        # long reasoning/result prose is dropped, and the typed state summary
-        # carries the outcome forward.
-        compacted["content"] = ""
-        compacted.pop("reasoning_content", None)
-        extra = compacted.get("extra")
-        if isinstance(extra, dict):
-            compacted["extra"] = {
-                key: value for key, value in extra.items() if key in {"actions"}
-            }
-    elif role == "tool":
-        original = str(compacted.get("content") or "")
-        compacted["content"] = (
-            f"Earlier command result summarized in the current task state above; "
-            f"the exact output is not resent. (was {len(original)} characters)"
-        )
-    return compacted
 
 
 def build_provider_view(
@@ -783,15 +991,16 @@ def build_provider_view(
     keep_recent_turns: int = 2,
     transform: bool = True,
 ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
-    """Return a compact inference view without mutating the audit history.
+    """Return a bounded provider view without mutating the audit trajectory.
 
-    1. Byte-identical duplicate assistant/tool turns are dropped first, so no
-       duplicate text is ever sent.
-    2. If the deduped view still exceeds the trigger, only older turns are
-       summarized and the typed state summary (progress ledger) is injected.
-    3. The most recent assistant/tool turns remain verbatim.
+    ``transform=False`` is byte-identical observation-only mode.  Transform
+    mode bounds each tool result deterministically, represents later exact
+    duplicates append-only, and clears only old tool bodies if the complete
+    view still exceeds the configured trigger.  It never deletes assistant
+    reasoning or injects ephemeral state-frame turns.
     """
     raw_input_chars = _chars(messages)
+    reasoning_input_chars = _assistant_reasoning_chars(messages)
     if not transform:
         untouched = copy.deepcopy(messages)
         facts, duplicate_fact_count = _context_facts(active_state)
@@ -825,97 +1034,57 @@ def build_provider_view(
             duplicate_fact_count=duplicate_fact_count,
             selected_fact_ids=(),
             accounting=accounting,
+            assistant_reasoning_input_chars=reasoning_input_chars,
         )
-    deduped = dedupe_provider_view(copy.deepcopy(messages))
-    input_chars = _chars(deduped)
-    duplicate_turns_removed = max(0, len(_turn_bounds(messages)) - len(_turn_bounds(deduped)))
+
+    prepared, preparation = _prepare_provider_history(messages)
+    input_chars = _chars(prepared)
     facts, duplicate_fact_count = _context_facts(active_state)
-
-    if input_chars <= max(1, int(trigger_chars)):
-        _state_text, _selected_fact_ids, compiled_rows = _compile_fact_frame(
-            facts, deduped
+    view = prepared
+    cleared = 0
+    if input_chars > max(1, int(trigger_chars)):
+        view, cleared = _clear_old_tool_results(
+            view,
+            target_chars=max(1, int(target_chars)),
+            keep_recent_turns=keep_recent_turns,
         )
-        # Below the compaction threshold the stock provider history is already
-        # authoritative.  Private engine state is accounted for, but missing
-        # facts are not converted into an extra user turn on every request.
-        # Decision-relevant one-shot evidence uses the semantic delivery path.
-        accounting = tuple(
-            {
-                **row,
-                "disposition": (
-                    "no_compaction_controller_only"
-                    if row["disposition"] == "selected_state_frame"
-                    else row["disposition"]
-                ),
-                "provider_message_indices": (
-                    []
-                    if row["disposition"] == "selected_state_frame"
-                    else row["provider_message_indices"]
-                ),
-            }
-            for row in compiled_rows
-        )
-        return deduped, _provider_metrics(
-            compacted=False,
-            raw_input_chars=raw_input_chars,
-            input_chars=input_chars,
-            view=deduped,
-            preserved_recent_messages=len(deduped),
-            state_text="",
-            duplicate_turns_removed=duplicate_turns_removed,
-            duplicate_fact_count=duplicate_fact_count,
-            selected_fact_ids=(),
-            accounting=accounting,
-        )
-
-    original = deduped
-    assistant_indices = [
-        index for index, item in enumerate(original) if item.get("role") == "assistant"
-    ]
-    if assistant_indices:
-        recent_start = assistant_indices[-max(1, int(keep_recent_turns))]
-    else:
-        recent_start = len(original)
-
-    prefix_end = 0
-    while prefix_end < len(original) and original[prefix_end].get("role") in {
-        "system",
-        "user",
-    }:
-        prefix_end += 1
-    prefix = original[:prefix_end]
-    middle = [_compact_message(item) for item in original[prefix_end:recent_start]]
-    recent = original[recent_start:]
-    target = max(1, int(target_chars))
-    while True:
-        base_view = [*prefix, *middle, *recent]
-        state_text, selected_fact_ids, accounting_rows = _compile_fact_frame(
-            facts, base_view
-        )
-        insertion_index = len(prefix) + len(middle)
-        view = [*prefix, *middle]
-        if state_text:
-            view.append({"role": "user", "content": state_text})
-        view.extend(recent)
-        if _chars(view) <= target or len(middle) < 2:
-            break
-        removed = middle.pop(0)
-        if removed.get("role") == "assistant":
-            while middle and middle[0].get("role") == "tool":
-                middle.pop(0)
-
-    accounting = _apply_frame_index(
-        accounting_rows, insertion_index=insertion_index
+    _state_text, _selected_fact_ids, compiled_rows = _compile_fact_frame(facts, view)
+    accounting = tuple(
+        {
+            **row,
+            "disposition": (
+                "no_compaction_controller_only"
+                if row["disposition"] == "selected_state_frame"
+                else row["disposition"]
+            ),
+            "provider_message_indices": (
+                []
+                if row["disposition"] == "selected_state_frame"
+                else row["provider_message_indices"]
+            ),
+        }
+        for row in compiled_rows
+    )
+    compacted = bool(
+        preparation["bounded_count"]
+        or preparation["duplicate_count"]
+        or cleared
     )
     return view, _provider_metrics(
-        compacted=True,
+        compacted=compacted,
         raw_input_chars=raw_input_chars,
         input_chars=input_chars,
         view=view,
-        preserved_recent_messages=len(recent),
-        state_text=state_text,
-        duplicate_turns_removed=duplicate_turns_removed,
+        preserved_recent_messages=len(view),
+        state_text="",
+        duplicate_turns_removed=0,
         duplicate_fact_count=duplicate_fact_count,
-        selected_fact_ids=selected_fact_ids,
+        selected_fact_ids=(),
         accounting=accounting,
+        assistant_reasoning_input_chars=reasoning_input_chars,
+        exact_duplicate_chars_removed=preparation["duplicate_removed"],
+        bounded_observation_count=preparation["bounded_count"],
+        bounded_observation_chars_removed=preparation["bounded_removed"],
+        duplicate_turns_represented=preparation["duplicate_count"],
+        old_tool_results_cleared=cleared,
     )

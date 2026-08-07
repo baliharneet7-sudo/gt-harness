@@ -99,6 +99,7 @@ jobs:
             tests/test_provider_view.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_completion.py \
+            tests/test_gt_progress.py \
             tests/test_harbor_budget.py \
             tests/test_run_outcome.py -q
           python scripts/central_feature_census.py \

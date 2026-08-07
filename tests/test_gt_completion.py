@@ -22,6 +22,18 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
 """
 
 
+SCHEDULER_TASK = """Your goal is to read requests from
+``/app/task_file/input_data/requests_bucket_1.jsonl``
+``/app/task_file/input_data/requests_bucket_2.jsonl`` and produce a plan in
+``/app/task_file/output_data/plan_b1.jsonl``
+``/app/task_file/output_data/plan_b2.jsonl``.
+
+## Deliverables
+Generate the two output plan files above. Keep the input files unchanged.
+The plans must satisfy the scheduling constraints.
+"""
+
+
 def test_write_compressor_compiles_to_complete_oracle_free_plan():
     plan = compile_completion_plan(WRITE_COMPRESSOR_TASK, cwd="/app")
 
@@ -33,6 +45,27 @@ def test_write_compressor_compiles_to_complete_oracle_free_plan():
     assert plan.uncovered_obligation_ids == ()
     assert plan.target_paths == ("/app/data.comp",)
     assert all("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in item.command for item in plan.predicates)
+
+
+def test_partial_plan_exposes_confirmed_outputs_as_progress_probes_only():
+    plan = compile_completion_plan(SCHEDULER_TASK, cwd="/app")
+
+    assert plan.status is CompletionStatus.PARTIAL
+    assert plan.executable is False
+    assert {item.kind for item in plan.predicates} == {"required_output_exists"}
+    assert plan.target_paths == (
+        "/app/task_file/output_data/plan_b1.jsonl",
+        "/app/task_file/output_data/plan_b2.jsonl",
+    )
+    assert all(item.obligation_ids == () for item in plan.predicates)
+    assert all(item.command.startswith("test -s ") for item in plan.predicates)
+
+
+def test_exact_completion_predicates_do_not_duplicate_output_existence_probe():
+    plan = compile_completion_plan(WRITE_COMPRESSOR_TASK, cwd="/app")
+
+    assert [item.kind for item in plan.predicates].count("required_output_exists") == 0
+    assert plan.target_paths == ("/app/data.comp",)
 
 
 def test_completion_certificate_requires_every_current_passing_predicate():

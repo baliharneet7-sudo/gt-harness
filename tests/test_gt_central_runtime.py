@@ -726,6 +726,33 @@ def test_task_deliverable_paths_extracts_contract_outputs():
     assert task_deliverable_paths("just fix the bug") == ()
 
 
+def test_task_deliverable_paths_uses_wrapped_output_context_and_rejects_inputs():
+    instruction = """Your goal is to read requests from
+``/app/task_file/input_data/requests_bucket_1.jsonl``
+``/app/task_file/input_data/requests_bucket_2.jsonl`` and produce a plan in
+``/app/task_file/output_data/plan_b1.jsonl``
+``/app/task_file/output_data/plan_b2.jsonl``.
+
+## Deliverables
+Generate the two output plan files above. Keep the input files unchanged.
+"""
+
+    assert task_deliverable_paths(instruction) == (
+        "task_file/output_data/plan_b1.jsonl",
+        "task_file/output_data/plan_b2.jsonl",
+    )
+
+
+def test_task_deliverable_paths_does_not_conflate_compressor_input_and_output():
+    instruction = (
+        "I have a decompressor in /app/decomp. It reads compressed data and a "
+        "file /app/data.txt. Write me data.comp such that running "
+        "cat data.comp | /app/decomp gives exactly data.txt."
+    )
+
+    assert task_deliverable_paths(instruction) == ("data.comp",)
+
+
 def test_classify_change_never_advances_source_for_artifacts():
     for path, kind in (
         ("benchmark_out.txt", "f"),

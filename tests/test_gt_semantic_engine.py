@@ -128,7 +128,7 @@ def test_same_boundary_syntax_and_signature_claims_are_coalesced_not_destroyed()
     assert second == ""
 
 
-def test_provider_view_compacts_old_content_but_preserves_protocol_and_active_state():
+def test_provider_view_compacts_only_tool_bodies_and_accounts_private_state():
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "fix greet and run pytest"},
@@ -174,7 +174,15 @@ def test_provider_view_compacts_old_content_but_preserves_protocol_and_active_st
     assert view[1] == messages[1]
     assert metrics.compacted is True
     assert metrics.output_chars < metrics.input_chars
-    assert "tests/test_app.py:9" in str(view)
+    assert "tests/test_app.py:9" not in str(view)
+    failure_fact = next(
+        row for row in metrics.fact_accounting if row["state_key"] == "latest_failure"
+    )
+    assert failure_fact["disposition"] == "no_compaction_controller_only"
+    assert [item["content"] for item in view if item["role"] == "assistant"] == [
+        item["content"] for item in messages if item["role"] == "assistant"
+    ]
+    assert metrics.unique_assistant_reasoning_chars_removed == 0
     assert view[-4:] == messages[-4:]
     assert all(
         not (message.get("role") == "tool") or message.get("tool_call_id")

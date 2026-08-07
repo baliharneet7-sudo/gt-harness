@@ -115,6 +115,25 @@ class Obligation:
     subjects: tuple[str, ...] = ()
 
 
+class TaskResourceRole(StrEnum):
+    """The mechanically supported relationship between a task and one path."""
+
+    INPUT = "input"
+    OUTPUT = "output"
+    REFERENCE = "reference"
+    EXECUTABLE = "executable"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class TaskResource:
+    path: str
+    role: TaskResourceRole
+    mutable: bool
+    source_span: str
+    confidence: float
+
+
 class TaskMode(StrEnum):
     PATCH = "PATCH"
     BUILD_INSTALL = "BUILD_INSTALL"
@@ -140,6 +159,160 @@ class TaskContract:
     obligations: tuple[Obligation, ...]
     task_mode: TaskMode = TaskMode.PATCH
     predicates: tuple[TypedPredicate, ...] = ()
+    resources: tuple[TaskResource, ...] = ()
+
+
+_RESOURCE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:/app/)?(?:[A-Za-z0-9_.-]+/)*"
+    r"[A-Za-z0-9_.-]+\.(?:jsonl?|csv|txt|md|out|comp|py|c|cc|cpp|h|hpp|"
+    r"js|jsx|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml)\b"
+)
+_ABSOLUTE_RESOURCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])/app/[A-Za-z0-9_./-]+"
+)
+_OUTPUT_CUE_RE = re.compile(
+    r"(?i)\b(?:write|create|produce|generate|save|emit|deliver|output)\b"
+)
+_INPUT_CUE_RE = re.compile(
+    r"(?i)\b(?:read|input|incoming|source|provided|existing|unchanged)\b"
+)
+
+
+def _resource_path(raw: str) -> str:
+    path = str(raw or "").strip("`'\".,:;()[]{} ").replace("\\", "/")
+    if path.startswith("/app/"):
+        return path[5:]
+    if path.startswith("./"):
+        return path[2:]
+    return path
+
+
+def _resource_occurrences(line: str) -> list[tuple[int, str]]:
+    found: dict[tuple[int, str], None] = {}
+    for pattern in (_RESOURCE_PATH_RE, _ABSOLUTE_RESOURCE_RE):
+        for match in pattern.finditer(line or ""):
+            cleaned = _resource_path(match.group(0))
+            if cleaned and " " not in cleaned:
+                found[(match.start(), cleaned)] = None
+    return sorted(found, key=lambda item: item[0])
+
+
+def _direct_output_score(prefix: str, path: str) -> int:
+    escaped = re.escape(path.rsplit("/", 1)[-1])
+    if re.search(
+        rf"(?is)\b(?:write|create|produce|generate|save|emit|deliver)\b"
+        rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{escaped}\b",
+        prefix[-220:],
+    ):
+        return 90
+    tail = prefix[-180:]
+    cue = list(_OUTPUT_CUE_RE.finditer(tail))
+    if cue and not re.search(r"[.!?]\s", tail[cue[-1].end() :]):
+        return 90
+    return 0
+
+
+def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
+    """Extract typed path roles without guessing across ambiguous task prose.
+
+    Markdown frequently wraps the verb and its paths onto separate lines.  A
+    small flow state carries an explicit input/output cue across that block;
+    structural ``input_data``/``output_data`` paths and direct verbs override
+    the flow.  Conflicting low-confidence evidence abstains to UNKNOWN.
+    """
+
+    core = _task_issue_core(issue_text)
+    scores: dict[str, dict[TaskResourceRole, int]] = {}
+    spans: dict[str, str] = {}
+    order: list[str] = []
+    section_role = TaskResourceRole.UNKNOWN
+    flow_role = TaskResourceRole.UNKNOWN
+
+    for raw in core.splitlines():
+        stripped = raw.strip()
+        if not stripped:
+            flow_role = TaskResourceRole.UNKNOWN
+            continue
+        heading = re.match(r"^#{1,6}\s+(?P<name>.+?)\s*$", stripped)
+        if heading:
+            name = heading.group("name").strip().lower()
+            section_role = (
+                TaskResourceRole.OUTPUT
+                if any(word in name for word in ("deliverable", "output", "result"))
+                else TaskResourceRole.INPUT
+                if any(word in name for word in ("input", "source data"))
+                else TaskResourceRole.UNKNOWN
+            )
+            flow_role = section_role
+            continue
+
+        output_cue = bool(_OUTPUT_CUE_RE.search(stripped))
+        input_cue = bool(_INPUT_CUE_RE.search(stripped))
+        if output_cue:
+            flow_role = TaskResourceRole.OUTPUT
+        elif input_cue:
+            flow_role = TaskResourceRole.INPUT
+
+        for offset, path in _resource_occurrences(raw):
+            if path not in scores:
+                scores[path] = {}
+                spans[path] = stripped[:500]
+                order.append(path)
+            row = scores[path]
+            normalized = path.lower()
+            prefix = raw[: offset + len(path)]
+            basename = re.escape(path.rsplit("/", 1)[-1])
+
+            def add(role: TaskResourceRole, score: int) -> None:
+                row[role] = max(score, row.get(role, 0))
+
+            if "/input_data/" in f"/{normalized}" or normalized.startswith("input_data/"):
+                add(TaskResourceRole.INPUT, 100)
+            if "/output_data/" in f"/{normalized}" or normalized.startswith("output_data/"):
+                add(TaskResourceRole.OUTPUT, 100)
+            if re.search(rf"(?i)\bgives\s+exactly\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b", raw):
+                add(TaskResourceRole.INPUT, 95)
+            if re.search(rf"(?i)\bkeep\b[^.\n]{{0,100}}{basename}[^.\n]{{0,60}}\bunchanged\b", raw):
+                add(TaskResourceRole.INPUT, 100)
+            direct_output = _direct_output_score(prefix, path)
+            if direct_output:
+                add(TaskResourceRole.OUTPUT, direct_output)
+            if re.search(
+                rf"(?i)\b(?:read|have|provided|existing)\b(?:\s+\S+){{0,8}}\s+"
+                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
+                prefix[-220:],
+            ):
+                add(TaskResourceRole.INPUT, 80)
+            if re.search(
+                rf"(?i)\b(?:executable|decompressor|compiler|interpreter)\b"
+                rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b",
+                prefix[-220:],
+            ):
+                add(TaskResourceRole.EXECUTABLE, 85)
+            if section_role is not TaskResourceRole.UNKNOWN:
+                add(section_role, 60)
+            if flow_role is not TaskResourceRole.UNKNOWN:
+                add(flow_role, 50)
+            if not row:
+                add(TaskResourceRole.UNKNOWN, 1)
+
+    resources: list[TaskResource] = []
+    for path in order:
+        ranked = sorted(scores[path].items(), key=lambda item: (-item[1], item[0].value))
+        role, score = ranked[0]
+        if len(ranked) > 1 and ranked[1][1] == score and ranked[1][0] is not role:
+            role = TaskResourceRole.UNKNOWN
+            score = 0
+        resources.append(
+            TaskResource(
+                path=path,
+                role=role,
+                mutable=role is TaskResourceRole.OUTPUT,
+                source_span=spans[path],
+                confidence=min(1.0, score / 100.0),
+            )
+        )
+    return tuple(resources)
 
 
 def _clean(text: str) -> str:
@@ -417,6 +590,7 @@ def extract_task_contract(issue_text: str) -> TaskContract:
         obligations=frozen,
         task_mode=mode,
         predicates=_typed_predicates(frozen, mode),
+        resources=extract_task_resources(normative_text),
     )
 
 

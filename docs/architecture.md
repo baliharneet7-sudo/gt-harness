@@ -57,9 +57,19 @@ recorded only when the terminal foreground validator owns the shell return
 code. The active loop is two-sided: typed preflight (SHADOW by default), host
 execution, postflight observation, progress/completion control, then the next
 model request. Deterministic provider-view compaction is bounded: it removes
-semantic duplicate turns first, preserves the latest two turns, and carries a
-typed current-state frame only above the configured threshold. The audit
-history is never mutated. The host switch is `integration_mode=off|audit|active`.
+no assistant turn or distinct reasoning. Oversized tool observations are
+bounded even when recent, exact duplicate results are represented append-only,
+and only old tool bodies may become hash/return-code receipts. No generic
+state frame is inserted. The exact provider-prepared request is budgeted before
+dispatch; an over-budget request is not sent. The audit history is never
+mutated. The host switch is `integration_mode=off|audit|active`.
+
+Task paths are normalized once into typed roles. Only high-confidence `OUTPUT`
+resources affect task-deliverable progress; `INPUT` resources never do.
+Output-existence probes can advance controller progress but cannot cover a task
+obligation or issue an auto-submit certificate. `BUDGET_RISK` persists through
+mere observation novelty and clears only after authored source or confirmed
+task-output change.
 
 The two audit streams answer different questions:
 

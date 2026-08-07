@@ -126,13 +126,14 @@ controller-only, is stale, or is omitted by the frame budget. The per-call
 invariant is `candidate_fact_count == accounted_fact_count`; the final request
 hash proves what the model actually received.
 
-The compiler preserves all distinct Mini-SWE reasoning. In the separately
-gated compaction transform, exact-turn dedupe fingerprints assistant content,
-reasoning content, selected commands, and tool results, so only byte-identical
-reasoning/action/result turns may collapse. That transform is disabled in the
-paid workflow: the compiler accounts for facts on every call but does not emit
-a recurring state frame or remove any turn. Grounded decision evidence uses
-the bounded one-shot semantic-delivery path.
+The compiler preserves all distinct Mini-SWE reasoning. The paid compaction
+transform is enabled, but it may change only tool-observation bodies: oversized
+results are bounded, exact duplicate results are represented append-only, and
+old tool bodies may become hash/return-code receipts. Assistant content and
+reasoning are never removed, and the compiler does not emit a recurring state
+frame. Grounded decision evidence uses the bounded one-shot semantic-delivery
+path. The exact provider-prepared request must pass the hard context-headroom
+check before `model.query()` or guidance-delivery confirmation.
 
 Compound Bash is classified segment by segment. Typed read observations carry
 canonical path, requested line range, source/workspace revision, return code,
@@ -253,3 +254,21 @@ Outer Harbor exceptions occur after the last central receipt and must be joined
 from trial/merged results. Context accounting must include bounded compiler
 state-frame characters as well as active guidance characters. The complete
 audit is `GT_SMOKE_31061665540_CONTEXT_COMPILER_AUDIT.md`.
+
+### Regression repair after workflow 31078501162
+
+The later paid smoke `31078501162` regressed to 7/10 and is also rejected.
+The scheduler reached 100 steps because task outputs were misclassified and
+novel observations could clear budget risk without task progress. The
+compressor exceeded the provider context limit because the old compactor
+could remove distinct reasoning yet still produce an oversized request.
+
+Current code uses typed task-resource roles, output-only deliverable
+projection, non-certifying output-existence progress probes, sticky budget
+risk, reasoning-preserving tool-result compaction, and an exact pre-query
+provider budget. Over-budget exits are internal solver exhaustion, not Harbor
+censoring, and unsent guidance is not marked delivered. New receipts include
+provider headroom, stable-prefix/cacheability, bounded-observation, completion,
+and task-progress metrics. This is provider-free proof, not a recovered solve
+claim; another matched smoke still requires authorization and the 89-task run
+remains blocked.

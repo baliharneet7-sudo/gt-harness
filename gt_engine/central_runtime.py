@@ -40,6 +40,7 @@ from gt_engine.semantic_decisions import (
     SemanticClaimKind,
     SemanticDecisionEngine,
 )
+from gt_engine.task_contract import TaskResourceRole, extract_task_resources
 
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
@@ -295,28 +296,16 @@ def _workspace_relative_path(path: str) -> str:
 
 
 def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
-    """Return paths the task contract explicitly names as required output."""
-    found: list[str] = []
-    for line in instruction.splitlines():
-        if not re.search(
-            r"\b(?:output|report|result|write|create|save|produce|generate|deliverable)\b",
-            line,
-            re.I,
-        ):
-            continue
-        for token in re.findall(r"`([^`\r\n]+)`", line):
-            path = _workspace_relative_path(token)
-            if path.lower().endswith(_DELIVERABLE_SUFFIXES) and not is_submit_command(path):
-                found.append(path)
-        for match in re.finditer(
-            r"(?<![A-Za-z0-9_.-])([\w./-]+\.(?:jsonl?|csv|txt|md|out|comp))\b",
-            line,
-            re.I,
-        ):
-            path = _workspace_relative_path(match.group(1))
-            if path not in found:
-                found.append(path)
-    return tuple(dict.fromkeys(found))
+    """Return only high-confidence OUTPUT paths from the typed task contract."""
+
+    return tuple(
+        resource.path
+        for resource in extract_task_resources(instruction)
+        if resource.role is TaskResourceRole.OUTPUT
+        and resource.confidence >= 0.8
+        and resource.path.lower().endswith(_DELIVERABLE_SUFFIXES)
+        and not is_submit_command(resource.path)
+    )
 
 
 class InterventionDecision(StrEnum):

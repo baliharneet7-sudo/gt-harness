@@ -15,7 +15,7 @@ import shlex
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 
-from gt_engine.task_contract import TaskContract, extract_task_contract
+from gt_engine.task_contract import TaskContract, TaskResourceRole, extract_task_contract
 
 
 class CompletionStatus(StrEnum):
@@ -186,6 +186,34 @@ def _compile_artifact_size(
     return None
 
 
+def _compile_output_existence(
+    contract: TaskContract,
+    cwd: str,
+    *,
+    skip_paths: set[str],
+) -> tuple[CompletionPredicate, ...]:
+    """Compile progress probes for confirmed outputs without claiming coverage."""
+
+    compiled: list[CompletionPredicate] = []
+    for resource in contract.resources:
+        if resource.role is not TaskResourceRole.OUTPUT or resource.confidence < 0.8:
+            continue
+        path = _absolute(resource.path, cwd)
+        if not path or path in skip_paths:
+            continue
+        command = f"test -s {shlex.quote(path)}"
+        compiled.append(
+            CompletionPredicate(
+                predicate_id=_predicate_id("required_output_exists", command, ()),
+                kind="required_output_exists",
+                command=command,
+                obligation_ids=(),
+                target_paths=(path,),
+            )
+        )
+    return tuple(compiled)
+
+
 def compile_completion_plan(instruction: str, *, cwd: str = "/app") -> CompletionPlan:
     """Compile all mechanically equivalent predicates recognized in the task.
 
@@ -204,6 +232,13 @@ def compile_completion_plan(instruction: str, *, cwd: str = "/app") -> Completio
         predicate, obligation_ids = result
         compiled.append(predicate)
         covered.update(obligation_ids)
+    compiled.extend(
+        _compile_output_existence(
+            contract,
+            cwd,
+            skip_paths={path for item in compiled for path in item.target_paths},
+        )
+    )
     obligation_ids = tuple(item.obligation_id for item in contract.obligations)
     uncovered = tuple(item for item in obligation_ids if item not in covered)
     status = (

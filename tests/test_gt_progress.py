@@ -49,6 +49,22 @@ def test_unresolved_contract_triggers_budget_risk_without_exact_loop():
     assert transition.reason == "unresolved_contract_near_iteration_limit"
 
 
+def test_novel_activity_cannot_clear_budget_risk_without_task_state_progress():
+    ledger = ProgressLedger(stall_threshold=3)
+    transition = ledger.budget_risk(iteration=80, limit=100, unresolved=True)
+    assert transition is not None and ledger.state == "BUDGET_RISK"
+
+    observed = ledger.observe(
+        "new-scratch-output",
+        information_gain=True,
+        changed=False,
+        is_error=False,
+    )
+
+    assert observed is None
+    assert ledger.state == "BUDGET_RISK"
+
+
 def test_nonconsecutive_repetition_stalls_within_unchanged_epoch():
     ledger = ProgressLedger(stall_threshold=3)
     ledger.observe("same", information_gain=True, changed=False, is_error=False)

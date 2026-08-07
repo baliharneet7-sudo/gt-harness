@@ -8,7 +8,11 @@ from gt_engine.central_runtime import (
     classify_validation_command,
 )
 from gt_engine.preflight import adapt_proposed_action
-from gt_engine.provider_view import build_provider_view, dedupe_provider_view
+from gt_engine.provider_view import (
+    build_provider_view,
+    dedupe_provider_view,
+    provider_request_budget,
+)
 
 
 def _turn(command: str, output: str, *, index: int) -> list[dict]:
@@ -96,7 +100,7 @@ def test_dedupe_never_deletes_distinct_miniswe_reasoning():
     ]
 
 
-def test_dedupe_runs_below_compaction_trigger():
+def test_duplicate_is_represented_below_tool_clearing_trigger():
     messages = _history(
         ("cat a.py", "X" * 50),
         ("cat a.py", "X" * 50),
@@ -108,10 +112,12 @@ def test_dedupe_runs_below_compaction_trigger():
         target_chars=10**18,
     )
 
-    assert metrics.compacted is False
-    assert metrics.duplicate_turns_removed == 1
+    assert metrics.compacted is True
+    assert metrics.duplicate_turns_removed == 0
+    assert metrics.duplicate_turns_represented == 1
     tool_contents = [m.get("content") for m in view if m.get("role") == "tool"]
-    assert tool_contents == ["X" * 50]
+    assert tool_contents[0] == "X" * 50
+    assert "Exact duplicate of prior action" in tool_contents[1]
 
 
 def test_observation_only_compiler_preserves_duplicate_history_exactly():
@@ -257,7 +263,7 @@ def test_below_compaction_trigger_preserves_provider_messages_byte_for_byte():
     assert metrics.accounted_fact_count == metrics.candidate_fact_count
 
 
-def test_smart_compaction_summarizes_progress_and_never_tells_model_to_rerun():
+def test_tool_clearing_keeps_controller_state_private_and_never_deletes_reasoning():
     messages = [{"role": "user", "content": "task"}]
     for index in range(20):
         messages.extend(_turn(f"cat file{index}.py", "B" * 200, index=index))
@@ -288,14 +294,14 @@ def test_smart_compaction_summarizes_progress_and_never_tells_model_to_rerun():
 
     assert metrics.compacted is True
     joined = " ".join(str(m.get("content") or "") for m in view)
-    # The typed progress ledger is injected...
-    assert "Latest source edit" in joined
-    assert "write app.py" in joined
-    assert "Files already read" in joined
-    assert "a.py" in joined
-    # ...and the model is never told to rerun a completed command.
+    # Ephemeral compiler state is not injected into a rewritten old turn.
+    assert "Latest source edit" not in joined
+    assert "Files already read" not in joined
     assert "rerun the command" not in joined.lower()
-    # Recent turns stay verbatim.
+    assert metrics.old_tool_results_cleared > 0
+    assert metrics.unique_assistant_reasoning_chars_removed == 0
+    assert metrics.accounted_fact_count == metrics.candidate_fact_count
+    # Recent tool turns stay verbatim.
     tail = " ".join(str(m.get("content") or "") for m in view[-4:])
     assert "B" * 200 in tail
 
@@ -371,7 +377,7 @@ def test_progress_ledger_records_real_compound_read_operations():
     assert reads[-1]["output_hash"]
 
 
-def test_active_state_budget_keeps_complete_validation_and_failure_facts():
+def test_active_state_budget_accounts_validation_and_failure_without_ephemeral_frame():
     messages = [{"role": "user", "content": "task"}]
     for index in range(4):
         messages.extend(_turn(f"cat file{index}.py", "body" * 100, index=index))
@@ -402,6 +408,94 @@ def test_active_state_budget_keeps_complete_validation_and_failure_facts():
     )
     joined = "\n".join(str(item.get("content") or "") for item in view)
 
-    assert "pytest -q" in joined
-    assert "FAILED tests/test_app.py::test_contract" in joined
+    assert "pytest -q" not in joined
+    assert "FAILED tests/test_app.py::test_contract" not in joined
     assert "x" * 1_000 not in joined
+    assert _metrics.accounted_fact_count == _metrics.candidate_fact_count
+    assert _metrics.selected_fact_count == 0
+
+
+def test_compaction_never_removes_distinct_assistant_reasoning():
+    messages = _history(
+        ("cat a.py", "A" * 500),
+        ("cat b.py", "B" * 500),
+        ("cat c.py", "C" * 500),
+    )
+    assistants = [item for item in messages if item.get("role") == "assistant"]
+    for index, item in enumerate(assistants):
+        item["content"] = f"public reasoning {index}"
+        item["reasoning_content"] = f"private reasoning {index}"
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state={},
+        trigger_chars=1,
+        target_chars=400,
+    )
+
+    kept = [item for item in view if item.get("role") == "assistant"]
+    assert [item.get("content") for item in kept] == [
+        "public reasoning 0",
+        "public reasoning 1",
+        "public reasoning 2",
+    ]
+    assert [item.get("reasoning_content") for item in kept] == [
+        "private reasoning 0",
+        "private reasoning 1",
+        "private reasoning 2",
+    ]
+    assert metrics.unique_assistant_reasoning_chars_removed == 0
+
+
+def test_recent_oversized_observation_is_bounded_even_when_it_is_the_only_turn():
+    huge = "TRACE\n" + ("diagnostic line\n" * 200_000)
+    messages = _history(("cat dbg_trace.txt", huge))
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state={},
+        trigger_chars=280_000,
+        target_chars=200_000,
+    )
+
+    tool = next(item for item in view if item.get("role") == "tool")
+    assert len(tool["content"]) <= 21_000
+    assert "Tool output bounded by host" in tool["content"]
+    assert "sha256=" in tool["content"]
+    assert metrics.output_chars < 200_000
+
+
+def test_duplicate_turn_is_represented_append_only_instead_of_deleting_history():
+    messages = _history(
+        ("cat a.py", "SAME BODY"),
+        ("cat a.py", "SAME BODY"),
+    )
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state={},
+        trigger_chars=10**18,
+        target_chars=10**18,
+    )
+
+    assistants = [item for item in view if item.get("role") == "assistant"]
+    tools = [item for item in view if item.get("role") == "tool"]
+    assert len(assistants) == 2
+    assert len(tools) == 2
+    assert tools[0]["content"] == "SAME BODY"
+    assert "Exact duplicate of prior action" in tools[1]["content"]
+    assert metrics.duplicate_turns_removed == 0
+
+
+def test_provider_request_budget_fails_closed_before_provider_overflow():
+    budget = provider_request_budget(
+        [{"role": "tool", "content": "x" * 20_000}],
+        model_name="unknown-test-model",
+        context_limit_tokens=10_000,
+        hard_ratio=0.90,
+    )
+
+    assert budget.within_limit is False
+    assert budget.hard_prompt_limit == 9_000
+    assert budget.effective_tokens >= budget.conservative_tokens
+    assert budget.remaining_tokens < 0

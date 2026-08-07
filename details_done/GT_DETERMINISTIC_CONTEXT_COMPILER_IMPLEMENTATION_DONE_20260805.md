@@ -6,6 +6,16 @@ Scope: central context selection, compound-action semantics, effect accounting,
 deep metrics, release gates, and archived ten-task replay
 Paid 89-task run: **blocked**
 
+> **Superseded provider-view policy (2026-08-06):** This receipt describes the
+> earlier context-compiler implementation. Workflow `31078501162` later proved
+> that its state-frame/lossy-compaction policy was not outcome-safe. The active
+> contract is documented in
+> `GT_REGRESSION_PRESERVATION_IMPLEMENTATION_20260806.md`: paid compaction is
+> enabled, assistant reasoning is never removed, only tool bodies may be
+> bounded/receipted, no generic state frame is injected, and every exact
+> provider request must pass the pre-query hard-budget gate. Treat statements
+> below about disabled compaction or emitted state frames as historical.
+
 ## Result
 
 GroundTruth is now implemented as the deterministic context compiler inside

@@ -72,7 +72,7 @@ from gt_engine.preflight import (
     adapt_proposed_action,
     pass_decision,
 )
-from gt_engine.provider_view import build_provider_view
+from gt_engine.provider_view import build_provider_view, provider_request_budget
 from gt_engine.progress import ProgressLedger
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 
@@ -143,6 +143,29 @@ def _provider_request_receipt(
         hashlib.sha256(messages_bytes).hexdigest(),
         len(messages_bytes.decode("utf-8")),
     )
+
+
+def _stable_provider_prefix(
+    previous: list[dict[str, Any]] | None,
+    current: list[dict[str, Any]],
+) -> tuple[int, int, float]:
+    """Measure the exact append-stable provider-message prefix.
+
+    This is a transport-visible cacheability measurement, not a claim about
+    model attention.  A changed or elided old message ends the prefix.
+    """
+
+    if not previous or not current:
+        return 0, 0, 0.0
+    count = 0
+    chars = 0
+    for prior, present in zip(previous, current, strict=False):
+        if _canonical_json(prior) != _canonical_json(present):
+            break
+        count += 1
+        chars += len(_canonical_json(present).decode("utf-8"))
+    total_chars = sum(len(_canonical_json(item).decode("utf-8")) for item in current)
+    return count, chars, round(chars / total_chars, 6) if total_chars else 0.0
 
 
 def _inject_runtime_evidence(
@@ -221,6 +244,8 @@ class MiniSweCentralAgent(BaseAgent):
         context_capacity_chars: int = 400_000,
         context_trigger_chars: int | None = None,
         context_target_chars: int | None = None,
+        provider_context_limit_tokens: int = 1_048_576,
+        provider_context_hard_ratio: float = 0.90,
         integration_mode: str | GTIntegrationMode | None = None,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
@@ -290,6 +315,10 @@ class MiniSweCentralAgent(BaseAgent):
         )
         if self.context_target_chars >= self.context_trigger_chars:
             raise ValueError("context_target_chars must be smaller than context_trigger_chars")
+        self.provider_context_limit_tokens = max(1, int(provider_context_limit_tokens))
+        self.provider_context_hard_ratio = min(
+            0.99, max(0.50, float(provider_context_hard_ratio))
+        )
         parsed_preflight_mode = PreflightMode.parse(preflight_mode)
         if enable_preflight is not None:
             legacy_mode = PreflightMode.ASSISTIVE_SAFE if enable_preflight else PreflightMode.OFF
@@ -676,6 +705,7 @@ class MiniSweCentralAgent(BaseAgent):
         self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
         progress_transitions: list[dict[str, Any]] = []
         seen_progress_signatures: set[str] = set()
+        task_progress_changes = 0
         repository_evidence, repository_session = await self._start_repository_session(
             environment,
             instruction,
@@ -705,10 +735,12 @@ class MiniSweCentralAgent(BaseAgent):
         context_chars_sent = 0
         model_output_chars = 0
         censored_reason = ""
+        solver_exhausted_reason = ""
         context_compactions = 0
         context_chars_elided = 0
         pending_reconsideration_cycle = ""
         deadline_reserve_exits = 0
+        previous_provider_messages: list[dict[str, Any]] | None = None
 
         if (
             repository_evidence.available
@@ -722,11 +754,11 @@ class MiniSweCentralAgent(BaseAgent):
                 elapsed = time.monotonic() - started
                 if calls >= self.step_limit:
                     terminal = "StepLimitExceeded"
-                    censored_reason = "assistant_step_limit"
+                    solver_exhausted_reason = "assistant_step_limit"
                     break
                 if cost >= self.cost_limit:
                     terminal = "CostLimitExceeded"
-                    censored_reason = "cost_limit"
+                    solver_exhausted_reason = "cost_limit"
                     break
                 remaining_to_deadline = (
                     None if deadline is None else deadline - time.monotonic()
@@ -736,6 +768,7 @@ class MiniSweCentralAgent(BaseAgent):
                     and remaining_to_deadline <= self.deadline_reserve_sec
                 ):
                     terminal = "DeadlineReserveReached"
+                    solver_exhausted_reason = "deadline_reserve_reached"
                     deadline_reserve_exits += 1
                     break
                 budget_transition = (
@@ -807,8 +840,6 @@ class MiniSweCentralAgent(BaseAgent):
                         runtime_message_index,
                         runtime_enrichment_chars,
                     ) = _inject_runtime_evidence(query_messages, pending_guidance)
-                    delivery_metadata = self._features.confirm_prepared_guidance() or {}
-                    pending_guidance = ""
                 logical_messages_sha256 = hashlib.sha256(
                     _canonical_json(query_messages)
                 ).hexdigest()
@@ -818,11 +849,25 @@ class MiniSweCentralAgent(BaseAgent):
                     provider_messages_sha256,
                     provider_request_chars,
                 ) = _provider_request_receipt(model, query_messages)
+                request_budget = provider_request_budget(
+                    provider_messages,
+                    model_name=str(self.model_name or ""),
+                    context_limit_tokens=self.provider_context_limit_tokens,
+                    hard_ratio=self.provider_context_hard_ratio,
+                )
+                (
+                    stable_prefix_messages,
+                    stable_prefix_chars,
+                    stable_prefix_ratio,
+                ) = _stable_provider_prefix(previous_provider_messages, provider_messages)
                 self._features.record_context_compiler_call(
                     call=calls,
                     request_payload_sha256=request_payload_sha256,
                     fact_accounting=provider_view_metrics.fact_accounting,
                 )
+                if request_budget.within_limit and runtime_message_index is not None:
+                    delivery_metadata = self._features.confirm_prepared_guidance() or {}
+                    pending_guidance = ""
                 if delivery_metadata is not None:
                     evidence_action = int(delivery_metadata.get("evidence_action") or 0)
                     guidance_deliveries.append(
@@ -883,6 +928,13 @@ class MiniSweCentralAgent(BaseAgent):
                         "provider_messages_sha256": provider_messages_sha256,
                         "provider_request_chars": provider_request_chars,
                         "provider_message_count": len(provider_messages),
+                        "provider_stable_prefix_messages": stable_prefix_messages,
+                        "provider_stable_prefix_chars": stable_prefix_chars,
+                        "provider_stable_prefix_ratio": stable_prefix_ratio,
+                        "request_budget": request_budget.as_dict(),
+                        "request_budget_within_limit": request_budget.within_limit,
+                        "request_budget_effective_tokens": request_budget.effective_tokens,
+                        "request_budget_remaining_tokens": request_budget.remaining_tokens,
                         "runtime_message_index": runtime_message_index,
                         "provider_view_compacted": provider_view_metrics.compacted,
                         "provider_view_input_chars": provider_view_metrics.input_chars,
@@ -914,6 +966,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "context_selected_facts_action_aligned": 0,
                     }
                 )
+                if not request_budget.within_limit:
+                    terminal = "ContextBudgetExhausted"
+                    solver_exhausted_reason = "context_budget_exhausted"
+                    break
+                previous_provider_messages = [dict(item) for item in provider_messages]
                 try:
                     query_started_at = time.monotonic()
                     model_call_contexts[-1]["query_started_at"] = query_started_at
@@ -935,6 +992,7 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     if query_timeout is not None and query_timeout <= 0:
                         terminal = "DeadlineReserveReached"
+                        solver_exhausted_reason = "deadline_reserve_reached"
                         deadline_reserve_exits += 1
                         break
                     message = await asyncio.wait_for(
@@ -947,6 +1005,7 @@ class MiniSweCentralAgent(BaseAgent):
                         and deadline - time.monotonic() <= self.deadline_reserve_sec + 0.01
                     ):
                         terminal = "DeadlineReserveReached"
+                        solver_exhausted_reason = "deadline_reserve_reached"
                         deadline_reserve_exits += 1
                     else:
                         terminal = "ModelTimeout"
@@ -1263,6 +1322,19 @@ class MiniSweCentralAgent(BaseAgent):
                     ) or (
                         proposed.mutates_workspace and bool(transition.changed_paths)
                     )
+                    # Progress recovery is deliberately narrower than the
+                    # stale-batch safety barrier above.  Scratch files,
+                    # caches, and unknown mutations can invalidate a
+                    # pre-decided suffix without proving that the task moved
+                    # forward.  Only authored source or a confirmed task
+                    # output advances the monotonic task-progress epoch.
+                    task_progress_change = any(
+                        item.origin
+                        in {ChangeOrigin.MODEL_AUTHORED, ChangeOrigin.TASK_DELIVERABLE}
+                        for item in classified_transition
+                    )
+                    if task_progress_change:
+                        task_progress_changes += 1
                     observation_signature = hashlib.sha256(
                         _canonical_json(
                             {
@@ -1282,7 +1354,7 @@ class MiniSweCentralAgent(BaseAgent):
                         progress_transition = self._progress.observe(
                             observation_signature,
                             information_gain=information_gain,
-                            changed=material_workspace_change,
+                            changed=task_progress_change,
                             is_error=result.return_code != 0,
                             contradictory=(
                                 classification.is_validation and result.return_code != 0
@@ -1423,7 +1495,7 @@ class MiniSweCentralAgent(BaseAgent):
                     auto_submitted = False
                     completion_triggered = bool(
                         self.enable_completion_controller
-                        and completion_plan.executable
+                        and completion_plan.predicates
                         and snapshot.healthy
                         and snapshot.revision != last_completion_workspace_revision
                         and (
@@ -1715,6 +1787,35 @@ class MiniSweCentralAgent(BaseAgent):
                     if model_call_contexts
                     else 1.0
                 ),
+                "provider_request_budget_failures": sum(
+                    not bool(row.get("request_budget_within_limit", True))
+                    for row in model_call_contexts
+                ),
+                "provider_request_min_headroom_tokens": min(
+                    (
+                        int(row.get("request_budget_remaining_tokens") or 0)
+                        for row in model_call_contexts
+                    ),
+                    default=self.provider_context_limit_tokens,
+                ),
+                "provider_stable_prefix_chars": sum(
+                    int(row.get("provider_stable_prefix_chars") or 0)
+                    for row in model_call_contexts
+                ),
+                "provider_stable_prefix_ratio_mean": (
+                    round(
+                        sum(
+                            float(row.get("provider_stable_prefix_ratio") or 0.0)
+                            for row in model_call_contexts[1:]
+                        )
+                        / len(model_call_contexts[1:]),
+                        6,
+                    )
+                    if len(model_call_contexts) > 1
+                    else 0.0
+                ),
+                "provider_context_limit_tokens": self.provider_context_limit_tokens,
+                "provider_context_hard_ratio": self.provider_context_hard_ratio,
                 "context_compactions": context_compactions,
                 "context_chars_elided": context_chars_elided,
                 "context_capacity_chars": self.context_capacity_chars,
@@ -1739,6 +1840,7 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "progress_state": self._progress.state,
                 "progress_transitions": len(progress_transitions),
+                "task_progress_changes": task_progress_changes,
                 "deadline_configured": effective_budget is not None,
                 "execution_budget_sec": effective_budget,
                 "deadline_reserve_sec": self.deadline_reserve_sec,
@@ -1792,6 +1894,27 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "context_unique_reasoning_chars_removed": sum(
                     int(row.get("context_unique_reasoning_chars_removed") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_bounded_observations": sum(
+                    int((row.get("context_compiler") or {}).get("bounded_observation_count") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_bounded_observation_chars_removed": sum(
+                    int(
+                        (row.get("context_compiler") or {}).get(
+                            "bounded_observation_chars_removed"
+                        )
+                        or 0
+                    )
+                    for row in model_call_contexts
+                ),
+                "context_duplicate_turns_represented": sum(
+                    int((row.get("context_compiler") or {}).get("duplicate_turns_represented") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_old_tool_results_cleared": sum(
+                    int((row.get("context_compiler") or {}).get("old_tool_results_cleared") or 0)
                     for row in model_call_contexts
                 ),
                 "context_state_frame_calls": sum(
@@ -1910,6 +2033,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "no_action_assistant_steps": no_action_assistant_steps,
                 "censored": bool(censored_reason),
                 "censored_reason": censored_reason,
+                "solver_exhausted": bool(solver_exhausted_reason),
+                "solver_exhausted_reason": solver_exhausted_reason,
                 "guidance_events": feature_summary["guidance_events"],
                 "guidance_chars": feature_summary["guidance_chars"],
                 "guidance_candidates": feature_summary["guidance_candidates"],
@@ -2098,6 +2223,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "exit_status": terminal,
                 "censored": bool(censored_reason),
                 "censored_reason": censored_reason,
+                "solver_exhausted": bool(solver_exhausted_reason),
+                "solver_exhausted_reason": solver_exhausted_reason,
                 "completion_plan_status": completion_plan.status.value,
                 "completion_certificates": len(completion_certificates),
                 "auto_submits": auto_submit_count,

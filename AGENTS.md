@@ -373,3 +373,44 @@ For this smoke the exact totals were 2,337 guidance characters plus 182,536
 state-frame characters, not merely 21 delivery receipts. Keep
 `gt_context_chars_added`, `context_state_frame_chars_added`, and
 `total_gt_context_chars_added` distinct.
+
+## Regression repair after workflow 31078501162 (2026-08-06)
+
+Workflow `31078501162` is rejected evidence: GT-on resolved 7/10 against the
+frozen 9/10 baseline. `llm-inference-batching-scheduler` exhausted 100 steps;
+`write-compressor` reached the provider context limit. The failures exposed
+four controller defects, not missing 17-feature triggers:
+
+1. line-local deliverable parsing could label an input as the output and miss
+   wrapped output paths;
+2. novelty could clear `BUDGET_RISK` even when no source or required output
+   changed;
+3. the provider compactor could delete distinct assistant reasoning while
+   reporting zero unique-reasoning removal; and
+4. no exact provider-prepared request budget stopped an overflow before
+   `model.query()`.
+
+The repaired contract is permanent. Task paths are first normalized into
+typed `TaskResource` rows (`INPUT`, `OUTPUT`, `REFERENCE`, `EXECUTABLE`, or
+`UNKNOWN`). Only high-confidence outputs become task deliverables. Confirmed
+outputs may produce private `test -s` progress probes, but those probes cover
+no normative obligation and can never make a partial completion plan eligible
+for auto-submit.
+
+Provider compaction preserves every assistant content and reasoning field.
+It bounds oversized tool observations (including the newest observation),
+represents exact duplicate results append-only, and may clear only old tool
+bodies to hash/return-code receipts. It does not inject a generic state frame.
+Every exact provider-prepared request is measured before `model.query()` with
+a configured hard headroom. An over-budget request is not sent, no pending
+guidance is confirmed as delivered, and the exit is recorded as internal
+`ContextBudgetExhausted`, not an outer censor.
+
+`BUDGET_RISK` is monotonic until authored source or a confirmed task output
+changes. Scratch, cache, derived-artifact, and observation novelty cannot clear
+it. Receipts now expose bounded-observation counts/chars, duplicate-result
+representation, cleared old tool results, provider budget/headroom, exact
+append-stable provider-prefix metrics, completion probes, and task-progress
+changes. These repairs are provider-free implementation proof only. They do
+not restore the 9/10 baseline until an authorized matched smoke passes; the
+89-task run remains blocked.

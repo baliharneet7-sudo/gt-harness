@@ -256,6 +256,15 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                     "context_compiler_effects_unaccounted": 0,
                     "preflight_known_segment_operations": 3,
                     "preflight_unknown_segment_operations": 1,
+                    "provider_request_budget_failures": 0,
+                    "provider_request_min_headroom_tokens": 636681,
+                    "provider_stable_prefix_chars": 12345,
+                    "provider_stable_prefix_ratio_mean": 0.8125,
+                    "context_bounded_observations": 1,
+                    "context_bounded_observation_chars_removed": 2784946,
+                    "context_duplicate_turns_represented": 2,
+                    "context_old_tool_results_cleared": 12,
+                    "task_progress_changes": 3,
                 },
                 "model_call_contexts": [
                     {
@@ -289,6 +298,15 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["context_compiler_effects_considered"] == 5
     assert metrics["context_compiler_effects_unaccounted"] == 0
     assert metrics["preflight_known_segment_operations"] == 3
+    assert metrics["provider_request_budget_failures"] == 0
+    assert metrics["provider_request_min_headroom_tokens"] == 636681
+    assert metrics["provider_stable_prefix_chars"] == 12345
+    assert metrics["provider_stable_prefix_ratio_mean"] == 0.8125
+    assert metrics["context_bounded_observations"] == 1
+    assert metrics["context_bounded_observation_chars_removed"] == 2784946
+    assert metrics["context_duplicate_turns_represented"] == 2
+    assert metrics["context_old_tool_results_cleared"] == 12
+    assert metrics["task_progress_changes"] == 3
 
 
 def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):

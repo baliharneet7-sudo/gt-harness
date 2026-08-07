@@ -43,6 +43,21 @@ class ProgressLedger:
         contradictory: bool | None = None,
     ) -> ProgressTransition | None:
         prior = self.state
+        # Budget risk is a task-state condition, not an observation-novelty
+        # condition.  A fresh scratch result must not clear it; only a material
+        # workspace/progress change can recover the controller.
+        if prior == "BUDGET_RISK" and not changed:
+            if signature:
+                self._signature_counts[signature] = (
+                    self._signature_counts.get(signature, 0) + 1
+                )
+                self._history.append(signature)
+                self._history = self._history[-self.cycle_threshold :]
+                self._repeat_streak = (
+                    self._repeat_streak + 1 if signature == self._last_signature else 1
+                )
+                self._last_signature = signature
+            return None
         if changed:
             self._signature_counts.clear()
             self._history.clear()

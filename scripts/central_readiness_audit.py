@@ -132,7 +132,17 @@ def audit() -> dict[str, bool]:
             "--ak enable_completion_controller=true" in workflow
             and "--ak enable_progress_control=true" in workflow
             and "tests/test_gt_completion.py" in workflow
+            and "tests/test_gt_progress.py" in workflow
             and "tests/test_harbor_budget.py" in workflow
+        ),
+        "provider_budget_and_reasoning_preservation_gated": (
+            "test_provider_request_budget_fails_closed_before_provider_overflow"
+            in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
+            and "test_over_budget_next_request_does_not_confirm_pending_guidance"
+            in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
+            and "test_compaction_never_removes_distinct_assistant_reasoning"
+            in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
+            and "tests/test_gt_progress.py" in workflow
         ),
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]

@@ -18,6 +18,7 @@ from eval.gt_central_agent import (
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
     _message_context_chars,
+    _stable_provider_prefix,
 )
 from gt_engine.preflight import (
     ActionDisposition,
@@ -39,6 +40,23 @@ class _Environment:
         if "-printf" in command:
             return ExecResult(stdout="", return_code=0)
         return ExecResult(stdout="", return_code=0)
+
+
+def test_stable_provider_prefix_counts_only_exact_append_stable_messages():
+    previous = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "reasoning-a"},
+    ]
+    appended = [*previous, {"role": "tool", "content": "result"}]
+    count, chars, ratio = _stable_provider_prefix(previous, appended)
+
+    assert count == 3
+    assert chars > 0
+    assert 0.0 < ratio < 1.0
+
+    changed = [dict(previous[0]), {"role": "user", "content": "changed"}]
+    assert _stable_provider_prefix(previous, changed)[0] == 1
 
 
 class _ScriptedModel:
@@ -1241,6 +1259,83 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
     assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
     assert receipt["metrics"]["actions"] == 0
     assert context.metadata["exit_status"] == "ModelTimeout"
+
+
+@pytest.mark.asyncio
+async def test_provider_budget_failure_stops_before_model_query_and_is_receipted(tmp_path):
+    class MustNotQuery(_ScriptedModel):
+        def __init__(self):
+            super().__init__(["echo never-executed"])
+            self.queries = 0
+
+        def query(self, messages):
+            self.queries += 1
+            raise AssertionError("an over-budget provider request must not be sent")
+
+    model = MustNotQuery()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        provider_context_limit_tokens=100,
+        provider_context_hard_ratio=0.5,
+    )
+    agent._model_factory = lambda: model
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    assert model.queries == 0
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["provider_request_budget_failures"] == 1
+    assert receipt["metrics"]["censored"] is False
+    assert receipt["metrics"]["censored_reason"] == ""
+    assert receipt["metrics"]["solver_exhausted"] is True
+    assert receipt["metrics"]["solver_exhausted_reason"] == "context_budget_exhausted"
+    assert receipt["model_call_contexts"][0]["request_budget_within_limit"] is False
+    assert context.metadata["exit_status"] == "ContextBudgetExhausted"
+
+
+@pytest.mark.asyncio
+async def test_over_budget_next_request_does_not_confirm_pending_guidance(tmp_path):
+    class LargeFailureEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "pytest -q":
+                return ExecResult(
+                    stdout="FAILED tests/test_app.py::test_app\n" + ("x" * 50_000),
+                    return_code=1,
+                )
+            raise AssertionError(command)
+
+    model = _ScriptedModel(
+        ["pytest -q", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_compaction=True,
+        provider_context_limit_tokens=30_000,
+        provider_context_hard_ratio=0.5,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Run `pytest -q` before finishing.",
+        LargeFailureEnvironment(),
+        AgentContext(),
+    )
+
+    assert len(model.observed_history) == 1
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["provider_request_budget_failures"] == 1
+    assert receipt["metrics"]["payload_deliveries"] == 0
+    assert receipt["guidance_deliveries"] == []
+    assert receipt["model_call_contexts"][-1]["runtime_message_index"] is not None
+    assert receipt["model_call_contexts"][-1]["request_budget_within_limit"] is False
 
 
 @pytest.mark.asyncio
