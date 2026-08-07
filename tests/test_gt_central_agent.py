@@ -868,6 +868,28 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
     assert "--ak enable_completion_controller=true" in workflow
 
 
+def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tb2_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
+    assert "--agent-import-path \"$AGENT\"" in workflow
+    assert "--ak integration_mode=active" in workflow
+    assert "--ak preflight_mode=shadow" in workflow
+    assert "--ak enable_context_compaction=true" in workflow
+    assert "--ak enable_completion_controller=true" in workflow
+    assert "--ak enable_progress_control=true" in workflow
+    assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
+    assert "scripts/resolve_harbor_budget.py" in workflow
+    assert "--agent-timeout-multiplier 1.0" in workflow
+    assert "--ak model_timeout_sec" not in workflow
+    assert "--ak model_loop_timeout_sec" not in workflow
+
+
 @pytest.mark.asyncio
 async def test_model_shell_receives_no_host_credentials_or_private_env(tmp_path):
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")

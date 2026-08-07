@@ -253,6 +253,23 @@ jobs:
           docker load -i "${{ runner.temp }}/tb2-img.tar.gz"
           echo "loaded task image from cache for ${{ matrix.task }}"
 
+      - name: Resolve Harbor's exact task-owned agent budget
+        env:
+          DATASET: ${{ inputs.dataset }}
+          TASK: ${{ matrix.task }}
+        run: |
+          set -euo pipefail
+          harbor dataset download "$DATASET" -o ds --export
+          DATASET_NAME="${DATASET%@*}"
+          TASK_CONFIG="ds/${DATASET_NAME}/${TASK}/task.toml"
+          mkdir -p results/terminal-bench
+          EXECUTION_BUDGET=$(python scripts/resolve_harbor_budget.py \
+            --task-config "$TASK_CONFIG" \
+            --multiplier 1.0 \
+            --output "results/terminal-bench/harbor-budget-${TASK}.json")
+          echo "EXECUTION_BUDGET=${EXECUTION_BUDGET}" >> "$GITHUB_ENV"
+          echo "resolved Harbor agent budget: ${EXECUTION_BUDGET}s"
+
       - name: Run harbor - task ${{ matrix.task }}
         id: harbor
         env:
@@ -272,18 +289,28 @@ jobs:
           case "$FEATURE" in
             lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
             submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
-            all17|integrated) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=true --ak enable_all_features=true --ak integration_mode=active) ;;
+            all17|integrated)
+              # This is the paid treatment contract.  Keep it identical to
+              # the engine workflow: GT is active, preflight is observational
+              # (shadow), context compaction is bounded and deterministic,
+              # completion/progress are host controls, and Harbor's own task
+              # timeout remains authoritative.
+              FEATURE_ARGS+=(
+                --ak enable_lint=true --ak enable_submit_readiness=true
+                --ak enable_all_features=true
+                --ak integration_mode=active
+                --ak preflight_mode=shadow
+                --ak enable_context_compaction=true
+                --ak enable_completion_controller=true
+                --ak enable_progress_control=true
+                --ak execution_budget_sec="$EXECUTION_BUDGET"
+                --ak enable_task_start_advisory=false
+              )
+              ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
           esac
           FEATURE_ARGS+=(
             --ak step_limit=100
-            # A live provider request exceeded 120 s after one successful
-            # model turn (run 30876371075, write-compressor).  Keep this
-            # per-request bound below the 900 s loop budget, but leave room
-            # for a healthy slow response so it is not censored as a harness
-            # failure.
-            --ak model_timeout_sec=300
-            --ak model_loop_timeout_sec=900
           )
           JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"

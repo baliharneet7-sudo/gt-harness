@@ -7,8 +7,8 @@ not claim model efficacy or replace the live task-container surface audit.
 
 from __future__ import annotations
 
-import inspect
 import importlib.util
+import inspect
 import json
 import sys
 import tempfile
@@ -56,7 +56,19 @@ def audit() -> dict[str, bool]:
     setup_source = inspect.getsource(MiniSweCentralAgent.setup)
     validation_source = inspect.getsource(ValidationClassification)
     observation_source = inspect.getsource(CentralFeatureRuntime.observe_action)
-    workflow = (ROOT / ".github/workflows/tb2_miniswe_engine.yml").read_text(encoding="utf-8")
+    # The paid ten-task smoke dispatches the central matrix workflow.  Keep
+    # the older engine workflow in the audit as a second release surface, but
+    # never let a correctly configured sibling mask a stale dispatch target.
+    workflow_paths = (
+        ROOT / ".github/workflows/tb2_miniswe_central.yml",
+        ROOT / ".github/workflows/tb2_miniswe_engine.yml",
+    )
+    workflows = tuple(path.read_text(encoding="utf-8") for path in workflow_paths)
+    workflow = workflows[0]
+    verification_workflow = workflows[1]
+    provider_free_workflow = (
+        ROOT / ".github/workflows/central_provider_free.yml"
+    ).read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
         model = agent._build_model()
@@ -70,25 +82,29 @@ def audit() -> dict[str, bool]:
         "stock_bash_tool_only": BASH_TOOL["function"]["name"] == "bash",
         "vendored_groundtruth_runtime_surface": _vendored_runtime_surface_available(),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
-        "paid_preflight_is_shadow_only": (
-            "--ak preflight_mode=shadow" in workflow
-            and "--ak enable_preflight=true" not in workflow
+        "paid_preflight_is_shadow_only": all(
+            "--ak preflight_mode=shadow" in item
+            and "--ak enable_preflight=true" not in item
+            for item in workflows
         ),
-        "paid_integration_mode_is_explicit_active": "--ak integration_mode=active" in workflow,
+        "paid_integration_mode_is_explicit_active": all(
+            "--ak integration_mode=active" in item for item in workflows
+        ),
         "one_switch_off_is_provider_neutral": (
             GTIntegrationMode.OFF.value == "off"
             and "transform=False" in run_source
             and "self.integration_mode is GTIntegrationMode.OFF" in source
         ),
-        "provider_free_gate_covers_preflight": "tests/test_gt_preflight.py" in workflow,
+        "provider_free_gate_covers_preflight": (
+            "tests/test_gt_preflight.py" in provider_free_workflow
+        ),
         "provider_free_gate_covers_context_compiler": (
-            "tests/test_provider_view.py" in workflow
-            and "tests/test_gt_deep_metrics.py" in workflow
+            "tests/test_provider_view.py" in provider_free_workflow
+            and "tests/test_gt_deep_metrics.py" in provider_free_workflow
         ),
-        "paid_deterministic_compaction_enabled": (
-            "--ak enable_context_compaction=true" in workflow
-            and "tests/test_provider_view.py" in workflow
-        ),
+        "paid_deterministic_compaction_enabled": all(
+            "--ak enable_context_compaction=true" in item for item in workflows
+        ) and "tests/test_provider_view.py" in provider_free_workflow,
         "context_compiler_precedes_model_query": (
             0
             <= run_source.find("record_context_compiler_call(")
@@ -121,19 +137,26 @@ def audit() -> dict[str, bool]:
             "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
         ),
         "paid_exact_harbor_deadline_is_propagated": (
-            "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
-            and "scripts/resolve_harbor_budget.py" in workflow
-            and '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
-            and "--agent-timeout-multiplier 1.0" in workflow
-            and "--ak model_timeout_sec" not in workflow
-            and "--ak model_loop_timeout_sec" not in workflow
+            all(
+                "--ak enable_lint=true" in item
+                and "--ak enable_submit_readiness=true" in item
+                and "scripts/resolve_harbor_budget.py" in item
+                and '--ak execution_budget_sec="$EXECUTION_BUDGET"' in item
+                and "--agent-timeout-multiplier 1.0" in item
+                and "--ak model_timeout_sec" not in item
+                and "--ak model_loop_timeout_sec" not in item
+                for item in workflows
+            )
         ),
         "paid_completion_and_progress_control_enabled": (
-            "--ak enable_completion_controller=true" in workflow
-            and "--ak enable_progress_control=true" in workflow
-            and "tests/test_gt_completion.py" in workflow
-            and "tests/test_gt_progress.py" in workflow
-            and "tests/test_harbor_budget.py" in workflow
+            all(
+                "--ak enable_completion_controller=true" in item
+                and "--ak enable_progress_control=true" in item
+                for item in workflows
+            )
+            and "tests/test_gt_completion.py" in verification_workflow
+            and "tests/test_gt_progress.py" in verification_workflow
+            and "tests/test_harbor_budget.py" in verification_workflow
         ),
         "provider_budget_and_reasoning_preservation_gated": (
             "test_provider_request_budget_fails_closed_before_provider_overflow"
@@ -142,7 +165,7 @@ def audit() -> dict[str, bool]:
             in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
             and "test_compaction_never_removes_distinct_assistant_reasoning"
             in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
-            and "tests/test_gt_progress.py" in workflow
+            and "tests/test_gt_progress.py" in verification_workflow
         ),
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]
