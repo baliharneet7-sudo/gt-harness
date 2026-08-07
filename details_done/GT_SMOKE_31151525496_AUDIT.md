@@ -88,8 +88,19 @@ provider deliveries have an explicit downstream consequence in this run.
 
 There were five provider payload deliveries: two `newfile_precedent`, one
 `signature_delta`, and two `GT_EDIT_CHECK`. Their effect traces had concrete
-source/workspace revisions, evidence actions, delivery IDs, request hashes,
-and grounded lifecycle anchors. All five were delivered in the first eligible
+source/workspace revisions, evidence actions, delivery IDs, and request
+hashes. Four payloads were semantically clean. The `signature_delta` payload
+was not fully clean: its frame named the real `headless_terminal.py` change,
+but also included `__pycache__` and
+`__pycache__/headless_terminal.cpython-313.pyc` in `changed_paths`/anchors.
+Those are derived artifacts and must not be presented as authored source.
+Thus the strict grounded-content count is **4/5**, even though all five were
+delivered at the correct lifecycle boundary. The likely code path is
+`gt_engine/central_runtime.py:3265`, which serializes every
+`transition.changed_paths`; the grounding predicate at line 454 checks only
+that required fields are non-empty and does not reject derived paths.
+
+All five were delivered in the first eligible
 provider request; late deliveries = 0 and predictive deliveries = 0. Provider
 request hash coverage was 100% for every task. No preflight command was
 returned to the model: all 428 shadow preflight decisions were `PASS`, with
@@ -123,11 +134,11 @@ The receipts support two different utilization measurements:
 | write-compressor / `newfile_precedent` | 10 | 87 | no | yes |
 
 Therefore the precise conclusion is: **5/5 were delivered to and consumed by
-the provider request; 1/5 immediately changed the next action's anchor, and
-5/5 eventually had an anchor appear in a later action.** There is no receipt
-field that can establish hidden model acknowledgement or prove that GT caused
-those later actions. A matched no-delivery/shadow ablation is required for
-that causal claim.
+the provider request, but only 4/5 were strictly clean payloads; 1/5
+immediately changed the next action's anchor, and 5/5 eventually had an
+anchor appear in a later action.** There is no receipt field that can establish
+hidden model acknowledgement or prove that GT caused those later actions. A
+matched no-delivery/shadow ablation is required for that causal claim.
 
 ## Context and engine metrics
 
