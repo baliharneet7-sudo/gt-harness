@@ -100,6 +100,35 @@ This proves correct non-intervening delivery and timing. It does not prove
 that a temperature-1 model used the five payloads; that requires a matched
 ablation or replay comparison.
 
+## Model-utilization audit
+
+The receipts support two different utilization measurements:
+
+1. **Provider consumption:** all five payloads had non-zero runtime-advisory
+   characters in the exact first-eligible request, with a request hash and a
+   subsequent model query. This proves the model received the payload.
+2. **Behavioral utilization proxy:** the runtime's strict immediate-next-action
+   check found an anchor in the first command after delivery for only
+   `schemelike-metacircular-eval` (1/5). The other four next commands were
+   different actions. A broader deep metric finds an anchor in *some later*
+   command for all five deliveries (5/5), but that can be coincidental and is
+   not causal proof.
+
+| Task / feature | Delivery call | Advisory chars | Immediate next action | Any later anchor |
+|---|---:|---:|---|---|
+| headless-terminal / `newfile_precedent` | 9 | 103 | no | yes |
+| headless-terminal / `signature_delta` | 20 | 311 | no | yes |
+| portfolio-optimization / `GT_EDIT_CHECK` | 18 | 130 | no | yes |
+| schemelike-metacircular-eval / `GT_EDIT_CHECK` | 60 | 135 | yes | yes |
+| write-compressor / `newfile_precedent` | 10 | 87 | no | yes |
+
+Therefore the precise conclusion is: **5/5 were delivered to and consumed by
+the provider request; 1/5 immediately changed the next action's anchor, and
+5/5 eventually had an anchor appear in a later action.** There is no receipt
+field that can establish hidden model acknowledgement or prove that GT caused
+those later actions. A matched no-delivery/shadow ablation is required for
+that causal claim.
+
 ## Context and engine metrics
 
 - Context facts: 6,448 candidates and 6,448 accounted; unaccounted effects = 0.
