@@ -17,6 +17,7 @@ from gt_engine.preflight import (
     EvidenceGrade,
     PreflightDecision,
     PreflightMode,
+    SegmentRole,
     adapt_proposed_action,
 )
 
@@ -173,6 +174,11 @@ def test_validation_classification_applies_only_to_runner_segment():
         ActionOperation.OTHER,
         ActionOperation.VALIDATE,
         ActionOperation.OTHER,
+    ]
+    assert [item.segment_role for item in proposal.operations] == [
+        SegmentRole.SHELL_CONTEXT,
+        SegmentRole.ACTION,
+        SegmentRole.OUTPUT_ONLY,
     ]
 
 

@@ -132,8 +132,10 @@ def _compressor_witness(
     )
     if metrics.unique_assistant_reasoning_chars_removed:
         raise RuntimeError("provider replay removed assistant reasoning")
-    if metrics.bounded_observation_count < 1:
-        raise RuntimeError("archived oversized observation was not bounded")
+    if metrics.bounded_observation_count < 1 and metrics.old_tool_results_cleared < 1:
+        raise RuntimeError(
+            "archived provider history was neither bounded nor old-tool compacted"
+        )
     if not budget.within_limit:
         raise RuntimeError(f"repaired provider replay remains over budget: {budget}")
     return {
@@ -141,6 +143,7 @@ def _compressor_witness(
         "provider_view_chars": metrics.output_chars,
         "provider_prepared_chars": provider_chars,
         "bounded_observations": metrics.bounded_observation_count,
+        "old_tool_results_cleared": metrics.old_tool_results_cleared,
         "bounded_observation_chars_removed": (
             metrics.bounded_observation_chars_removed
         ),

@@ -31,6 +31,7 @@ class CompletionPredicate:
     command: str
     obligation_ids: tuple[str, ...]
     target_paths: tuple[str, ...]
+    dependency_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +155,7 @@ def _compile_exact_decompression(
             command=command,
             obligation_ids=obligations,
             target_paths=(source,),
+            dependency_paths=(source, decoder, target),
         )
         return predicate, set(obligations)
     return None
@@ -181,6 +183,7 @@ def _compile_artifact_size(
             command=command,
             obligation_ids=obligations,
             target_paths=(path,),
+            dependency_paths=(path,),
         )
         return predicate, set(obligations)
     return None
@@ -209,6 +212,7 @@ def _compile_output_existence(
                 command=command,
                 obligation_ids=(),
                 target_paths=(path,),
+                dependency_paths=(path,),
             )
         )
     return tuple(compiled)

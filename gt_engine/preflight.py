@@ -24,6 +24,16 @@ class ActionOperation(StrEnum):
     OTHER = "other"
 
 
+class SegmentRole(StrEnum):
+    """Structural shell role used for coverage, not inferred intent."""
+
+    ACTION = "action"
+    SHELL_CONTEXT = "shell_context"
+    OUTPUT_ONLY = "output_only"
+    OPAQUE_PROGRAM = "opaque_program"
+    UNKNOWN = "unknown"
+
+
 class ActionDisposition(StrEnum):
     PASS = "pass"
     AUGMENT = "augment"
@@ -94,6 +104,7 @@ class ObservedOperation:
     mutates_workspace: bool = False
     confidence: float = 0.0
     parser_evidence: tuple[str, ...] = ()
+    segment_role: SegmentRole = SegmentRole.ACTION
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +520,27 @@ def _segment_is_validation(words: tuple[str, ...], validation: Any | None) -> bo
     return any(marker in head for marker in ("test", "check", "verify"))
 
 
+def _segment_role(
+    words: tuple[str, ...],
+    head: str,
+    operation: ActionOperation,
+    redirections: tuple[str, ...],
+) -> SegmentRole:
+    """Classify shell mechanics separately from action semantics."""
+
+    if head == "cd":
+        return SegmentRole.SHELL_CONTEXT
+    if head in {"echo", "printf"} and not redirections:
+        return SegmentRole.OUTPUT_ONLY
+    if head in {"python", "python3", "py", "node", "ruby", "bash", "sh"} and any(
+        token in {"-c", "--command", "-e", "--eval"} for token in words[1:]
+    ):
+        return SegmentRole.OPAQUE_PROGRAM
+    if operation is ActionOperation.OTHER:
+        return SegmentRole.UNKNOWN
+    return SegmentRole.ACTION
+
+
 def _classify_operations(
     command: str,
     segments: tuple[tuple[str, ...], ...],
@@ -537,6 +569,7 @@ def _classify_operations(
                     ActionOperation.OTHER,
                     confidence=1.0,
                     parser_evidence=("shell_context:cwd", f"cwd:{current_cwd}"),
+                    segment_role=SegmentRole.SHELL_CONTEXT,
                 )
             )
             continue
@@ -645,6 +678,7 @@ def _classify_operations(
                 mutates,
                 confidence,
                 evidence,
+                _segment_role(words, head, operation, redirections),
             )
         )
         current_index = len(operations) - 1

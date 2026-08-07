@@ -87,6 +87,7 @@ class ProviderViewMetrics:
     bounded_observation_chars_removed: int = 0
     duplicate_turns_represented: int = 0
     old_tool_results_cleared: int = 0
+    state_frame_message_index: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +120,7 @@ class ProviderViewMetrics:
             "bounded_observation_chars_removed": self.bounded_observation_chars_removed,
             "duplicate_turns_represented": self.duplicate_turns_represented,
             "old_tool_results_cleared": self.old_tool_results_cleared,
+            "state_frame_message_index": self.state_frame_message_index,
         }
 
 
@@ -933,6 +935,7 @@ def _provider_metrics(
     bounded_observation_chars_removed: int = 0,
     duplicate_turns_represented: int = 0,
     old_tool_results_cleared: int = 0,
+    state_frame_message_index: int | None = None,
 ) -> ProviderViewMetrics:
     output_chars = _chars(view)
     dispositions = [str(row["disposition"]) for row in accounting]
@@ -979,7 +982,33 @@ def _provider_metrics(
         bounded_observation_chars_removed=bounded_observation_chars_removed,
         duplicate_turns_represented=duplicate_turns_represented,
         old_tool_results_cleared=old_tool_results_cleared,
+        state_frame_message_index=state_frame_message_index,
     )
+
+
+def _attach_state_frame(
+    view: list[dict[str, Any]], state_text: str
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Attach one bounded current-state frame to the latest tool result.
+
+    Tool observations are already part of Mini-SWE's durable interaction
+    surface.  Reusing that surface avoids inventing a user instruction or a
+    model-facing GT marker.  If no tool result survived compaction, the frame
+    remains controller-only and the caller records that safe omission.
+    """
+
+    if not state_text:
+        return view, None
+    prepared = [dict(item) for item in view]
+    for index in range(len(prepared) - 1, -1, -1):
+        if prepared[index].get("role") != "tool":
+            continue
+        separator = "\n\n"
+        prepared[index]["content"] = (
+            str(prepared[index].get("content") or "") + separator + state_text
+        )
+        return prepared, index
+    return view, None
 
 
 def build_provider_view(
@@ -997,7 +1026,9 @@ def build_provider_view(
     mode bounds each tool result deterministically, represents later exact
     duplicates append-only, and clears only old tool bodies if the complete
     view still exceeds the configured trigger.  It never deletes assistant
-    reasoning or injects ephemeral state-frame turns.
+    reasoning.  When clearing removes the only textual representation of a
+    current fact, one bounded frame is attached to the latest retained tool
+    observation.
     """
     raw_input_chars = _chars(messages)
     reasoning_input_chars = _assistant_reasoning_chars(messages)
@@ -1048,20 +1079,36 @@ def build_provider_view(
             target_chars=max(1, int(target_chars)),
             keep_recent_turns=keep_recent_turns,
         )
-    _state_text, _selected_fact_ids, compiled_rows = _compile_fact_frame(facts, view)
+    state_text, selected_fact_ids, compiled_rows = _compile_fact_frame(facts, view)
+    state_frame_message_index: int | None = None
+    if cleared and state_text:
+        view, state_frame_message_index = _attach_state_frame(view, state_text)
+    if state_frame_message_index is not None:
+        compiled_rows = [
+            {
+                **row,
+                "provider_message_indices": [state_frame_message_index]
+                if row["disposition"] == "selected_state_frame"
+                else row["provider_message_indices"],
+            }
+            for row in compiled_rows
+        ]
     accounting = tuple(
         {
             **row,
             "disposition": (
-                "no_compaction_controller_only"
+                "selected_state_frame"
+                if (
+                    row["disposition"] == "selected_state_frame"
+                    and state_frame_message_index is not None
+                )
+                else "no_safe_delivery_surface"
+                if row["disposition"] == "selected_state_frame" and cleared
+                else "no_compaction_controller_only"
                 if row["disposition"] == "selected_state_frame"
                 else row["disposition"]
             ),
-            "provider_message_indices": (
-                []
-                if row["disposition"] == "selected_state_frame"
-                else row["provider_message_indices"]
-            ),
+            "provider_message_indices": row["provider_message_indices"],
         }
         for row in compiled_rows
     )
@@ -1076,10 +1123,12 @@ def build_provider_view(
         input_chars=input_chars,
         view=view,
         preserved_recent_messages=len(view),
-        state_text="",
+        state_text=state_text if state_frame_message_index is not None else "",
         duplicate_turns_removed=0,
         duplicate_fact_count=duplicate_fact_count,
-        selected_fact_ids=(),
+        selected_fact_ids=(
+            selected_fact_ids if state_frame_message_index is not None else ()
+        ),
         accounting=accounting,
         assistant_reasoning_input_chars=reasoning_input_chars,
         exact_duplicate_chars_removed=preparation["duplicate_removed"],
@@ -1087,4 +1136,5 @@ def build_provider_view(
         bounded_observation_chars_removed=preparation["bounded_removed"],
         duplicate_turns_represented=preparation["duplicate_count"],
         old_tool_results_cleared=cleared,
+        state_frame_message_index=state_frame_message_index,
     )

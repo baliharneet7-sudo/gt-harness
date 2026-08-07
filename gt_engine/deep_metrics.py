@@ -86,10 +86,13 @@ DIAGNOSTIC_METRICS = (
     "validation_unattributed_intents",
     "completion_predicate_checks",
     "completion_certificate_evaluations",
+    "completion_probe_execs",
+    "completion_cache_hits",
     "auto_submit_attempts",
     "auto_submits",
     "progress_transitions",
     "task_progress_changes",
+    "activity_events",
     "agent_wall_time_seconds",
     "trial_wall_time_seconds",
 )

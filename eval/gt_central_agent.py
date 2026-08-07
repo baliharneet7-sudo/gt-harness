@@ -69,6 +69,7 @@ from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
     PreflightMode,
+    SegmentRole,
     adapt_proposed_action,
     pass_decision,
 )
@@ -348,6 +349,9 @@ class MiniSweCentralAgent(BaseAgent):
             ),
         )
         self._model_factory: Callable[[], Any] = self._build_model
+        self._completion_cache: dict[tuple[str, str], PredicateObservation] = {}
+        self._completion_cache_hits = 0
+        self._completion_probe_execs = 0
 
     @staticmethod
     def name() -> str:
@@ -496,6 +500,7 @@ class MiniSweCentralAgent(BaseAgent):
         plan: Any,
         *,
         workspace_revision: str,
+        snapshot: Any | None = None,
         action_id: int,
         timeout_sec: float,
     ) -> CompletionCertificate:
@@ -503,7 +508,41 @@ class MiniSweCentralAgent(BaseAgent):
 
         observations: list[PredicateObservation] = []
         for predicate in plan.predicates:
+            dependency_material: list[Any] = []
+            for path in (
+                predicate.dependency_paths or predicate.target_paths
+            ):
+                entries = getattr(snapshot, "entries", {}) if snapshot is not None else {}
+                relative_path = path[5:] if path.startswith("/app/") else path
+                entry = entries.get(path) or entries.get(relative_path)
+                dependency_material.append(
+                    (
+                        path,
+                        None
+                        if entry is None
+                        else (
+                            entry.kind,
+                            entry.size,
+                            entry.mtime,
+                            entry.ctime,
+                            entry.link_target,
+                            entry.digest,
+                        ),
+                    )
+                )
+            dependency_key = hashlib.sha256(
+                _canonical_json(dependency_material)
+            ).hexdigest()
+            cache_key = (predicate.predicate_id, dependency_key)
+            cached = self._completion_cache.get(cache_key)
+            if cached is not None:
+                self._completion_cache_hits += 1
+                observations.append(
+                    replace(cached, workspace_revision=workspace_revision)
+                )
+                continue
             try:
+                self._completion_probe_execs += 1
                 result = await environment.exec(
                     predicate.command,
                     cwd=self.cwd,
@@ -515,14 +554,14 @@ class MiniSweCentralAgent(BaseAgent):
             except Exception as exc:
                 output = f"{type(exc).__name__}: {exc}"
                 returncode = -1
-            observations.append(
-                PredicateObservation(
+            observation = PredicateObservation(
                     predicate_id=predicate.predicate_id,
                     returncode=returncode,
                     output=output,
                     workspace_revision=workspace_revision,
                 )
-            )
+            observations.append(observation)
+            self._completion_cache[cache_key] = observation
         return certificate_from_observations(
             plan,
             tuple(observations),
@@ -693,6 +732,9 @@ class MiniSweCentralAgent(BaseAgent):
         )
         completion_plan = compile_completion_plan(instruction, cwd=self.cwd)
         completion_certificates: list[CompletionCertificate] = []
+        self._completion_cache.clear()
+        self._completion_cache_hits = 0
+        self._completion_probe_execs = 0
         last_completion_workspace_revision = ""
         completion_target_paths = {
             path[len(self.cwd.rstrip("/")) + 1 :]
@@ -704,7 +746,11 @@ class MiniSweCentralAgent(BaseAgent):
         auto_submit_count = 0
         self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
         progress_transitions: list[dict[str, Any]] = []
-        seen_progress_signatures: set[str] = set()
+        seen_semantic_signatures: set[str] = set()
+        seen_validation_fingerprints: set[str] = set()
+        seen_read_anchors: set[str] = set()
+        semantic_progress_kinds: dict[str, int] = {}
+        activity_events = 0
         task_progress_changes = 0
         repository_evidence, repository_session = await self._start_repository_session(
             environment,
@@ -1328,55 +1374,6 @@ class MiniSweCentralAgent(BaseAgent):
                     ) or (
                         proposed.mutates_workspace and bool(transition.changed_paths)
                     )
-                    # Progress recovery is deliberately narrower than the
-                    # stale-batch safety barrier above.  Scratch files,
-                    # caches, and unknown mutations can invalidate a
-                    # pre-decided suffix without proving that the task moved
-                    # forward.  Only authored source or a confirmed task
-                    # output advances the monotonic task-progress epoch.
-                    task_progress_change = any(
-                        item.origin
-                        in {ChangeOrigin.MODEL_AUTHORED, ChangeOrigin.TASK_DELIVERABLE}
-                        for item in classified_transition
-                    )
-                    if task_progress_change:
-                        task_progress_changes += 1
-                    observation_signature = hashlib.sha256(
-                        _canonical_json(
-                            {
-                                "command": command,
-                                "returncode": result.return_code,
-                                "output_sha256": hashlib.sha256(
-                                    output["output"].encode("utf-8", "surrogatepass")
-                                ).hexdigest(),
-                                "source_revision": source_revision,
-                                "workspace_revision": snapshot.revision,
-                            }
-                        )
-                    ).hexdigest()
-                    information_gain = observation_signature not in seen_progress_signatures
-                    seen_progress_signatures.add(observation_signature)
-                    if self.enable_progress_control:
-                        progress_transition = self._progress.observe(
-                            observation_signature,
-                            information_gain=information_gain,
-                            changed=task_progress_change,
-                            is_error=result.return_code != 0,
-                            contradictory=(
-                                classification.is_validation and result.return_code != 0
-                            ),
-                        )
-                        if progress_transition is not None:
-                            progress_transitions.append(
-                                {
-                                    "prior": progress_transition.prior,
-                                    "current": progress_transition.current,
-                                    "reason": progress_transition.reason,
-                                    "streak": progress_transition.streak,
-                                    "signature": progress_transition.signature,
-                                    "action_id": actions_count,
-                                }
-                            )
                     if (
                         repository_session is not None
                         and source_revision != proposed.source_revision
@@ -1429,6 +1426,108 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=source_revision,
                         workspace_revision=snapshot.revision,
                     )
+                    # Workspace activity remains useful for stale-batch safety,
+                    # but it is not proof of task progress.  A fixture reset,
+                    # scratch-file rewrite, or novel command must not clear
+                    # budget risk or prevent semantic stall detection.
+                    activity_events += 1
+                    source_paths = tuple(
+                        sorted(
+                            item.path
+                            for item in classified_transition
+                            if item.validation_relevant
+                            and item.origin
+                            in {
+                                ChangeOrigin.MODEL_AUTHORED,
+                                ChangeOrigin.TASK_DELIVERABLE,
+                            }
+                        )
+                    )
+                    read_anchors = tuple(
+                        sorted(
+                            target.path
+                            for target in proposed.targets
+                            if target.path
+                        )
+                    )
+                    new_read_anchor = bool(
+                        proposed.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+                        and any(anchor not in seen_read_anchors for anchor in read_anchors)
+                    )
+                    seen_read_anchors.update(read_anchors)
+                    validation_gain = bool(
+                        classification.is_validation
+                        and classification.status.value == "pass"
+                        and classification.status_attributed
+                    )
+                    diagnostic_gain = bool(
+                        classification.is_validation
+                        and classification.status.value == "fail"
+                        and classification.status_attributed
+                        and classification.diagnostic_fingerprint
+                        not in seen_validation_fingerprints
+                    )
+                    if classification.diagnostic_fingerprint:
+                        seen_validation_fingerprints.add(
+                            classification.diagnostic_fingerprint
+                        )
+                    if validation_gain:
+                        semantic_kind = "validation_gain"
+                    elif diagnostic_gain:
+                        semantic_kind = "diagnostic_gain"
+                    elif new_read_anchor:
+                        semantic_kind = "localization_gain"
+                    elif source_paths:
+                        semantic_kind = "patch_attempt"
+                    else:
+                        semantic_kind = "no_gain"
+                    semantic_progress_kinds[semantic_kind] = (
+                        semantic_progress_kinds.get(semantic_kind, 0) + 1
+                    )
+                    semantic_gain = semantic_kind in {
+                        "validation_gain",
+                        "diagnostic_gain",
+                        "localization_gain",
+                    }
+                    semantic_signature = hashlib.sha256(
+                        _canonical_json(
+                            {
+                                "kind": semantic_kind,
+                                "validation_status": classification.status.value,
+                                "declared_check_id": classification.declared_check_id,
+                                "failure_fingerprint": classification.diagnostic_fingerprint,
+                                "source_paths": source_paths,
+                                "read_anchors": read_anchors if new_read_anchor else (),
+                            }
+                        )
+                    ).hexdigest()
+                    semantic_information_gain = semantic_signature not in seen_semantic_signatures
+                    seen_semantic_signatures.add(semantic_signature)
+                    if semantic_gain:
+                        task_progress_changes += 1
+                    if self.enable_progress_control:
+                        progress_transition = self._progress.observe(
+                            semantic_signature,
+                            information_gain=semantic_information_gain and semantic_gain,
+                            changed=bool(source_paths),
+                            semantic_gain=semantic_gain,
+                            is_error=result.return_code != 0,
+                            contradictory=(
+                                classification.is_validation and result.return_code != 0
+                            ),
+                        )
+                        if progress_transition is not None:
+                            progress_transitions.append(
+                                {
+                                    "prior": progress_transition.prior,
+                                    "current": progress_transition.current,
+                                    "reason": progress_transition.reason,
+                                    "streak": progress_transition.streak,
+                                    "signature": progress_transition.signature,
+                                    "semantic_kind": semantic_kind,
+                                    "action_id": actions_count,
+                                }
+                            )
                     self._features.observe_action(
                         action_id=actions_count,
                         command=command,
@@ -1528,6 +1627,7 @@ class MiniSweCentralAgent(BaseAgent):
                             environment,
                             completion_plan,
                             workspace_revision=snapshot.revision,
+                            snapshot=snapshot,
                             action_id=actions_count,
                             timeout_sec=remaining_for_checks,
                         )
@@ -1837,6 +1937,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "completion_predicate_checks": sum(
                     len(item.observations) for item in completion_certificates
                 ),
+                "completion_probe_execs": self._completion_probe_execs,
+                "completion_cache_hits": self._completion_cache_hits,
                 "completion_certificates_complete": sum(
                     item.status is CompletionStatus.COMPLETE
                     for item in completion_certificates
@@ -1851,6 +1953,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "progress_state": self._progress.state,
                 "progress_transitions": len(progress_transitions),
                 "task_progress_changes": task_progress_changes,
+                "activity_events": activity_events,
+                "semantic_progress_kinds": dict(semantic_progress_kinds),
                 "deadline_configured": effective_budget is not None,
                 "execution_budget_sec": effective_budget,
                 "deadline_reserve_sec": self.deadline_reserve_sec,
@@ -1978,12 +2082,29 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                 },
                 "preflight_known_segment_operations": sum(
-                    nested.get("operation") != ActionOperation.OTHER.value
+                    nested.get("segment_role", SegmentRole.UNKNOWN.value)
+                    == SegmentRole.ACTION.value
                     for row in preflight_rows
                     for nested in row["proposed"].get("operations") or ()
                 ),
                 "preflight_unknown_segment_operations": sum(
-                    nested.get("operation") == ActionOperation.OTHER.value
+                    nested.get("segment_role", SegmentRole.UNKNOWN.value)
+                    == SegmentRole.UNKNOWN.value
+                    for row in preflight_rows
+                    for nested in row["proposed"].get("operations") or ()
+                ),
+                "preflight_shell_context_segments": sum(
+                    nested.get("segment_role") == SegmentRole.SHELL_CONTEXT.value
+                    for row in preflight_rows
+                    for nested in row["proposed"].get("operations") or ()
+                ),
+                "preflight_output_only_segments": sum(
+                    nested.get("segment_role") == SegmentRole.OUTPUT_ONLY.value
+                    for row in preflight_rows
+                    for nested in row["proposed"].get("operations") or ()
+                ),
+                "preflight_opaque_program_segments": sum(
+                    nested.get("segment_role") == SegmentRole.OPAQUE_PROGRAM.value
                     for row in preflight_rows
                     for nested in row["proposed"].get("operations") or ()
                 ),

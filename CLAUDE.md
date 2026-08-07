@@ -351,3 +351,16 @@ naturally (three exact events absent); six grounded payloads were first-call
 timely with no late/predictive delivery; 456 request hashes and 8,125 facts
 were accounted. The 89-task run remains blocked. See
 `details_done/GT_SMOKE_31145623534_OUTCOME_AND_INTEGRITY_AUDIT_20260807.md`.
+## Semantic-progress and compaction repair (2026-08-07)
+
+The regression repair is implemented provider-free and is not yet approved for
+a paid smoke. Progress now distinguishes workspace activity from semantic
+gain; scratch commands, fixture resets, derived artifacts, and unvalidated
+patches cannot clear budget risk. Compaction retains one bounded current-state
+frame on the latest retained tool observation after clearing old tool bodies,
+while preserving all distinct Mini-SWE assistant reasoning. Completion probes
+carry dependency paths and use deterministic dependency-fingerprint caching.
+Shell metrics separate context, output-only, opaque, and genuinely unknown
+segments. The workflow remains ACTIVE + SHADOW, the provider-free census and
+readiness audit pass, and the 89-task run remains blocked pending archived
+replay and an authorized matched smoke.

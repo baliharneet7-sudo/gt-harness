@@ -294,9 +294,9 @@ def test_tool_clearing_keeps_controller_state_private_and_never_deletes_reasonin
 
     assert metrics.compacted is True
     joined = " ".join(str(m.get("content") or "") for m in view)
-    # Ephemeral compiler state is not injected into a rewritten old turn.
-    assert "Latest source edit" not in joined
-    assert "Files already read" not in joined
+    # Current state is retained once old tool bodies are cleared.
+    assert "Latest source edit" in joined
+    assert "Files already read" in joined
     assert "rerun the command" not in joined.lower()
     assert metrics.old_tool_results_cleared > 0
     assert metrics.unique_assistant_reasoning_chars_removed == 0
@@ -413,6 +413,42 @@ def test_active_state_budget_accounts_validation_and_failure_without_ephemeral_f
     assert "x" * 1_000 not in joined
     assert _metrics.accounted_fact_count == _metrics.candidate_fact_count
     assert _metrics.selected_fact_count == 0
+
+
+def test_compaction_retains_missing_current_failure_in_latest_tool_observation():
+    messages = _history(
+        ("cat old.py", "old output" * 200),
+        ("cat current.py", "current output" * 200),
+        ("cat third.py", "third output" * 200),
+        ("cat fourth.py", "fourth output" * 200),
+    )
+    state = {
+        "source_revision": "s9",
+        "unresolved_failure": {
+            "command": "pytest -q",
+            "diagnostic": "FAILED tests/test_app.py::test_contract",
+            "source_revision": "s9",
+        },
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=state,
+        trigger_chars=1,
+        target_chars=100,
+    )
+
+    assert metrics.old_tool_results_cleared > 0
+    assert metrics.active_state_chars > 0
+    assert metrics.selected_fact_count == 1
+    assert metrics.state_frame_message_index is not None
+    assert "FAILED tests/test_app.py::test_contract" in str(
+        view[metrics.state_frame_message_index].get("content") or ""
+    )
+    selected = next(
+        row for row in metrics.fact_accounting if row["disposition"] == "selected_state_frame"
+    )
+    assert selected["provider_message_indices"] == [metrics.state_frame_message_index]
 
 
 def test_compaction_never_removes_distinct_assistant_reasoning():

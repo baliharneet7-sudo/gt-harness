@@ -521,3 +521,33 @@ tokens and 416 API calls, versus GT-off's 20,344,163 and 361 (+77,900 tokens,
 `gpt2-codegolf` happened to be cheaper. Do not start 89; first isolate the
 large LLM-batching and COBOL expansions with a component ablation. Full audit:
 `details_done/GT_SMOKE_31145623534_OUTCOME_AND_INTEGRITY_AUDIT_20260807.md`.
+## Semantic-progress and compaction repair (2026-08-07)
+
+The first implementation of the regression repair is provider-free and remains
+behind the existing host integration switch. Workspace activity is now
+separate from semantic progress: source edits are `patch_attempt`, while only
+new task-linked read anchors, new attributable diagnostics, or attributed
+validation passes advance `task_progress_changes`. Scratch commands, fixture
+resets, derived artifacts, and novel output hashes cannot clear `BUDGET_RISK`.
+Receipts expose `activity_events` and `semantic_progress_kinds` separately.
+
+When deterministic compaction clears old tool bodies, the compiler now attaches
+one bounded current-state frame to the latest retained tool observation, with
+fact IDs and the exact provider message index. It never removes distinct
+assistant reasoning, injects a user instruction, or fabricates a fact. If no
+tool observation survives, the selected fact is recorded as
+`no_safe_delivery_surface` rather than silently claimed as delivered.
+
+Completion predicates now carry dependency paths and cache private probe
+results by predicate plus dependency fingerprint; cached observations are
+rebased to the current workspace revision before certificate evaluation.
+Shell coverage distinguishes `shell_context`, `output_only`,
+`opaque_program`, and genuinely `unknown` segments; unsupported syntax still
+fails open to `OTHER`/PASS.
+
+These changes have passed the focused GT/progress/provider-view/preflight/
+completion/deep-metrics tests, compilation, the central feature census, and
+the readiness audit. No paid smoke has been run for this repair. A smoke is
+blocked until the full provider-free suite and archived trajectory replay pass;
+the paid workflow remains `ACTIVE + SHADOW` and the 89-task run remains
+blocked.

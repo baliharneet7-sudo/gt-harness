@@ -39,14 +39,22 @@ class ProgressLedger:
         *,
         information_gain: bool,
         changed: bool,
+        semantic_gain: bool | None = None,
         is_error: bool,
         contradictory: bool | None = None,
     ) -> ProgressTransition | None:
         prior = self.state
+        # ``changed`` describes workspace activity and is still useful to the
+        # host's stale-batch safety barrier.  It is not proof that the task
+        # moved forward: fixture resets and scratch edits are common in long
+        # trajectories.  Callers may therefore provide the narrower semantic
+        # signal explicitly; legacy callers retain the old behavior.
+        if semantic_gain is None:
+            semantic_gain = changed
         # Budget risk is a task-state condition, not an observation-novelty
-        # condition.  A fresh scratch result must not clear it; only a material
-        # workspace/progress change can recover the controller.
-        if prior == "BUDGET_RISK" and not changed:
+        # condition.  A fresh scratch result or unvalidated patch must not
+        # clear it; only a proven semantic gain can recover the controller.
+        if prior == "BUDGET_RISK" and not semantic_gain:
             if signature:
                 self._signature_counts[signature] = (
                     self._signature_counts.get(signature, 0) + 1
@@ -58,7 +66,7 @@ class ProgressLedger:
                 )
                 self._last_signature = signature
             return None
-        if changed:
+        if semantic_gain:
             self._signature_counts.clear()
             self._history.clear()
             self._repeat_streak = 0

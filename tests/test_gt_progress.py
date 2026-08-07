@@ -65,6 +65,34 @@ def test_novel_activity_cannot_clear_budget_risk_without_task_state_progress():
     assert ledger.state == "BUDGET_RISK"
 
 
+def test_patch_attempt_is_not_semantic_progress():
+    ledger = ProgressLedger(stall_threshold=2)
+    ledger.budget_risk(iteration=80, limit=100, unresolved=True)
+    observed = ledger.observe(
+        "same-semantic-state",
+        information_gain=False,
+        changed=True,
+        semantic_gain=False,
+        is_error=False,
+    )
+    assert observed is None
+    assert ledger.state == "BUDGET_RISK"
+
+
+def test_validation_gain_clears_budget_risk():
+    ledger = ProgressLedger(stall_threshold=2)
+    ledger.budget_risk(iteration=80, limit=100, unresolved=True)
+    observed = ledger.observe(
+        "validated-state",
+        information_gain=True,
+        changed=True,
+        semantic_gain=True,
+        is_error=False,
+    )
+    assert observed is not None
+    assert observed.current == "RECOVERED"
+
+
 def test_nonconsecutive_repetition_stalls_within_unchanged_epoch():
     ledger = ProgressLedger(stall_threshold=3)
     ledger.observe("same", information_gain=True, changed=False, is_error=False)
