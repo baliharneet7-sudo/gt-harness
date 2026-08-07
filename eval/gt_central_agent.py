@@ -72,8 +72,8 @@ from gt_engine.preflight import (
     adapt_proposed_action,
     pass_decision,
 )
-from gt_engine.provider_view import build_provider_view, provider_request_budget
 from gt_engine.progress import ProgressLedger
+from gt_engine.provider_view import build_provider_view, provider_request_budget
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 
 
@@ -711,10 +711,17 @@ class MiniSweCentralAgent(BaseAgent):
             instruction,
             source_revision=source_revision,
         )
+        self._features.record_repository_evidence_status(
+            source_revision=source_revision,
+            status=repository_evidence.status,
+            available=repository_evidence.available,
+        )
         if repository_evidence.available:
             self._features.register_structural_evidence(
                 source_revision=source_revision,
                 anchors=repository_evidence.anchors,
+                definitions=repository_evidence.definitions,
+                references=repository_evidence.references,
                 callers=repository_evidence.callers,
                 graph_revision=repository_evidence.graph_revision,
             )
@@ -751,7 +758,6 @@ class MiniSweCentralAgent(BaseAgent):
 
         try:
             while not terminal:
-                elapsed = time.monotonic() - started
                 if calls >= self.step_limit:
                     terminal = "StepLimitExceeded"
                     solver_exhausted_reason = "assistant_step_limit"
@@ -1402,6 +1408,8 @@ class MiniSweCentralAgent(BaseAgent):
                                 self._features.refresh_structural_evidence(
                                     source_revision=source_revision,
                                     anchors=repository_evidence.anchors,
+                                    definitions=repository_evidence.definitions,
+                                    references=repository_evidence.references,
                                     callers=repository_evidence.callers,
                                     graph_revision=repository_evidence.graph_revision,
                                 )
@@ -1410,6 +1418,8 @@ class MiniSweCentralAgent(BaseAgent):
                             self._features.refresh_structural_evidence(
                                 source_revision=source_revision,
                                 anchors=(),
+                                definitions=(),
+                                references=(),
                                 callers=(),
                                 graph_revision="",
                             )

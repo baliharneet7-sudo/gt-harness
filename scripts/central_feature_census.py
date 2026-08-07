@@ -26,13 +26,14 @@ from gt_engine.central_runtime import (
     feature_payload_valid,
 )
 from gt_engine.provider_view import build_provider_view
+from scripts.verify_gt_index_runtime import verify as verify_repository_substrate
 
 EXPECTED_TIMING = {
     "obligations": ("task_start", (0,)),
-    "localization": ("search_result", (1,)),
-    "GT_LOC_RESLOT": ("search_result", (1,)),
-    "def_partition": ("search_result", (1,)),
-    "caller_contract": ("search_result", (1,)),
+    "localization": (("task_start", "search_result"), (0, 1)),
+    "GT_LOC_RESLOT": (("task_start", "search_result"), (0, 1)),
+    "def_partition": ("task_start", (0,)),
+    "caller_contract": ("task_start", (0,)),
     "newfile_precedent": ("edit_result", (2,)),
     "GT_CHANGE_SURFACE": ("edit_result", (2,)),
     "GT_PATCH_DELTA": ("edit_result", (2,)),
@@ -50,6 +51,25 @@ EXPECTED_TIMING = {
     "GT_SS_SUBMIT_RED": ("test_result", (3,)),
     "GT_CERT_DELIVERY": ("submit", (5,)),
 }
+
+
+def _expected_model_visible(row: dict) -> bool:
+    feature_id = row["feature_id"]
+    return row["decision"] == "DELIVERED" and (
+        feature_id
+        in {
+            "covering_red",
+            "newfile_precedent",
+            "recovery",
+            "signature_delta",
+            "submit_refusal",
+            "syntax_result",
+        }
+        or (
+            feature_id == "GT_LOC_RESLOT"
+            and bool(row.get("payload", {}).get("graph_revision"))
+        )
+    )
 
 
 def audit_timing(summary: dict) -> dict:
@@ -76,23 +96,12 @@ def audit_timing(summary: dict) -> dict:
         boundaries_valid = bool(rows) and all(row["boundary"] in boundaries for row in rows)
         actions_valid = actual_actions == expected_actions
         visibility_valid = all(
-            row["model_visible"]
-            == (
-                row["decision"] == "DELIVERED"
-                and feature_id
-                in {
-                    "covering_red",
-                    "newfile_precedent",
-                    "recovery",
-                    "signature_delta",
-                    "submit_refusal",
-                    "syntax_result",
-                }
-            )
+            row["model_visible"] == _expected_model_visible(row)
             or (
                 not row["model_visible"]
                 and row.get("delivery_status") == "suppressed"
-                and row.get("delivery_reason") == "semantic_duplicate"
+                and row.get("delivery_reason")
+                in {"semantic_duplicate", "not_selected_first_eligible_request"}
             )
             for row in rows
         )
@@ -165,6 +174,41 @@ def census() -> dict:
         revision="r0",
         explicit_checks=("pytest -q",),
     )
+    runtime.register_structural_evidence(
+        source_revision="r0",
+        anchors=(
+            {"path": "bottle.py", "line": 10, "symbol": "Bottle"},
+            {"path": "tests/test_bottle.py", "line": 20, "symbol": "test_bottle"},
+        ),
+        definitions=(
+            {
+                "path": "bottle.py",
+                "line": 10,
+                "symbol": "Bottle",
+                "semantics": "graph_definition",
+            },
+        ),
+        references=(
+            {
+                "path": "tests/test_bottle.py",
+                "line": 20,
+                "symbol": "Bottle",
+                "semantics": "graph_call_reference",
+            },
+        ),
+        callers=(
+            {
+                "caller_path": "tests/test_bottle.py",
+                "caller_line": 20,
+                "caller_symbol": "test_bottle",
+                "target_path": "bottle.py",
+                "target_symbol": "Bottle",
+                "semantics": "graph_recorded",
+            },
+        ),
+        graph_revision="graph-r0",
+    )
+    deliver_next(0)
     runtime.observe_action(
         action_id=1,
         command="rg -n 'Bottle|caller' .",
@@ -242,23 +286,12 @@ def census() -> dict:
         and all(summary["produced_counts"][feature] >= 1 for feature in CENTRAL_FEATURE_IDS)
         and all(row["fresh"] and row["payload"].get("message") for row in summary["receipts"])
         and all(
-            row["model_visible"]
-            == (
-                row["decision"] == "DELIVERED"
-                and row["feature_id"]
-                in {
-                    "covering_red",
-                    "newfile_precedent",
-                    "recovery",
-                    "signature_delta",
-                    "submit_refusal",
-                    "syntax_result",
-                }
-            )
+            row["model_visible"] == _expected_model_visible(row)
             or (
                 not row["model_visible"]
                 and row.get("delivery_status") == "suppressed"
-                and row.get("delivery_reason") == "semantic_duplicate"
+                and row.get("delivery_reason")
+                in {"semantic_duplicate", "not_selected_first_eligible_request"}
             )
             for row in summary["receipts"]
         )
@@ -316,6 +349,52 @@ def census() -> dict:
     summary["all_17_payloads_concrete"] = summary["all_payloads_semantically_grounded"]
     summary["all_17_consumers_applied"] = applied_features >= set(CENTRAL_FEATURE_IDS)
     summary["all_visible_payloads_first_eligible"] = summary["all_guidance_on_time"]
+    applicability = summary["feature_applicability"]
+    summary["all_feature_opportunities_accounted"] = (
+        summary["all_feature_opportunities_accounted"]
+        and set(applicability) == set(CENTRAL_FEATURE_IDS)
+        and all(row["status"] != "missed_trigger" for row in applicability.values())
+    )
+    summary["no_eligible_trigger_misses"] = all(
+        row["status"] != "missed_trigger" for row in applicability.values()
+    )
+    summary["no_false_feature_fires"] = all(
+        row["effect_id"]
+        for row in summary["feature_opportunities"]
+        if row["evidence_status"] == "eligible"
+    ) and all(
+        row["status"] != "fired_when_eligible" or row["eligible"] > 0
+        for row in applicability.values()
+    )
+    summary["no_empty_localization_effects"] = all(
+        bool(row["payload"].get("anchors"))
+        for row in summary["receipts"]
+        if row["feature_id"] == "localization"
+    ) and all(
+        bool(row["payload"].get("selected_anchors"))
+        for row in summary["receipts"]
+        if row["feature_id"] == "GT_LOC_RESLOT"
+    )
+    summary["no_unverified_callers"] = all(
+        all(caller.get("semantics") == "graph_recorded" for caller in row["payload"]["callers"])
+        for row in summary["receipts"]
+        if row["feature_id"] == "caller_contract"
+    )
+    claims_by_id = {
+        row["claim_id"]: row for row in summary["semantic_decisions"]["claims"]
+    }
+    summary["no_duplicate_frame_evidence"] = all(
+        len(frame["claim_ids"]) == len(set(frame["claim_ids"]))
+        and len([claims_by_id[item]["fact"] for item in frame["claim_ids"]])
+        == len({claims_by_id[item]["fact"] for item in frame["claim_ids"]})
+        for frame in summary["semantic_decisions"]["frames"]
+    )
+    summary["repository_substrate"] = verify_repository_substrate()
+    summary["repository_substrate_proven"] = (
+        summary["repository_substrate"].get("status") == "available"
+        and int(summary["repository_substrate"].get("definition_count") or 0) >= 2
+        and int(summary["repository_substrate"].get("call_count") or 0) >= 1
+    )
     summary["no_actions_blocked"] = (
         summary["action_metrics"]["submit_holds"] == 0
         and summary["action_metrics"]["batch_interrupts"] == 0
@@ -378,7 +457,53 @@ def main() -> int:
         if result["all_effects_context_accounted"]
         else "EFFECT_CONTEXT_NOT_ACCOUNTED"
     )
-    return 0 if result["all_17_consumer_paths_proven"] else 1
+    print(
+        "ALL_FEATURE_OPPORTUNITIES_ACCOUNTED"
+        if result["all_feature_opportunities_accounted"]
+        else "FEATURE_OPPORTUNITIES_UNACCOUNTED"
+    )
+    print(
+        "NO_ELIGIBLE_TRIGGER_MISSES"
+        if result["no_eligible_trigger_misses"]
+        else "ELIGIBLE_TRIGGER_MISSES"
+    )
+    print(
+        "NO_FALSE_FEATURE_FIRES"
+        if result["no_false_feature_fires"]
+        else "FALSE_FEATURE_FIRES"
+    )
+    print(
+        "NO_EMPTY_LOCALIZATION_EFFECTS"
+        if result["no_empty_localization_effects"]
+        else "EMPTY_LOCALIZATION_EFFECTS"
+    )
+    print(
+        "NO_UNVERIFIED_CALLERS"
+        if result["no_unverified_callers"]
+        else "UNVERIFIED_CALLERS"
+    )
+    print(
+        "NO_DUPLICATE_FRAME_EVIDENCE"
+        if result["no_duplicate_frame_evidence"]
+        else "DUPLICATE_FRAME_EVIDENCE"
+    )
+    print(
+        "REPOSITORY_SUBSTRATE_PROVEN"
+        if result["repository_substrate_proven"]
+        else "REPOSITORY_SUBSTRATE_FAILED"
+    )
+    return 0 if all(
+        (
+            result["all_17_consumer_paths_proven"],
+            result["all_feature_opportunities_accounted"],
+            result["no_eligible_trigger_misses"],
+            result["no_false_feature_fires"],
+            result["no_empty_localization_effects"],
+            result["no_unverified_callers"],
+            result["no_duplicate_frame_evidence"],
+            result["repository_substrate_proven"],
+        )
+    ) else 1
 
 
 if __name__ == "__main__":

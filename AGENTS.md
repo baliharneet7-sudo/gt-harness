@@ -374,6 +374,40 @@ state-frame characters, not merely 21 delivery receipts. Keep
 `gt_context_chars_added`, `context_state_frame_chars_added`, and
 `total_gt_context_chars_added` distinct.
 
+## Feature-applicability and repository-substrate rule (2026-08-06)
+
+Do not report every absent paid-run feature as an absent task trigger. Classify
+each ID as `fired_when_eligible`, `correct_abstention`, `trigger_absent`,
+`ambiguous_evidence`, `substrate_unavailable`, or `missed_trigger`. Every
+evaluation records a reason code and evidence hash; an eligible event without
+an effect is a release failure, and a fired feature without an eligible event
+is a false fire.
+
+Corrected smoke `31136099371` had 38/38 repository refreshes
+`index_unavailable`. Therefore its absent `caller_contract` and
+`def_partition` were substrate failures, not proven natural abstentions.
+`recovery` and `signature_delta` had no exact repeated-failure/signature-change
+event and were legitimate trigger absences. The same smoke emitted 100
+localization/reslot receipts but only four concrete anchors; do not cite the
+other 96 as useful localization.
+
+The paid workflow must install the vendored GroundTruth wheel, export the
+pinned `GT_INDEX_BINARY`, and run `scripts/verify_gt_index_runtime.py` before
+provider use. Readiness requires actual binary execution, SQLite integrity,
+definition nodes, and a certified directed `CALLS` edge. Import availability
+alone is insufficient.
+
+Search text may produce localization only when typed command scope and output
+anchors are deterministic. It never certifies definitions or callers.
+`def_partition` uses separate graph definition/reference roles;
+`caller_contract` uses only directed `CALLS` edges with confidence >= 0.95,
+`CERTIFIED` trust, and one candidate. Missing or ambiguous evidence abstains.
+
+Provider facts have one delivery window. Compatible facts from action N may be
+coalesced in call N+1; an unselected fact remains controller state and is
+explicitly suppressed from provider delivery. It may not leak into call N+2.
+Each decision frame has unique claim IDs and unique fact text.
+
 ## Regression repair after workflow 31078501162 (2026-08-06)
 
 Workflow `31078501162` is rejected evidence: GT-on resolved 7/10 against the

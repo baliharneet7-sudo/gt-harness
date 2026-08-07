@@ -107,6 +107,40 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
         revision="r0",
         explicit_checks=("pytest -q",),
     )
+    runtime.register_structural_evidence(
+        source_revision="r0",
+        anchors=(
+            {"path": "bottle.py", "line": 10, "symbol": "Bottle"},
+            {"path": "tests/test_bottle.py", "line": 20, "symbol": "test_bottle"},
+        ),
+        definitions=(
+            {
+                "path": "bottle.py",
+                "line": 10,
+                "symbol": "Bottle",
+                "semantics": "graph_definition",
+            },
+        ),
+        references=(
+            {
+                "path": "tests/test_bottle.py",
+                "line": 20,
+                "symbol": "Bottle",
+                "semantics": "graph_call_reference",
+            },
+        ),
+        callers=(
+            {
+                "caller_path": "tests/test_bottle.py",
+                "caller_line": 20,
+                "caller_symbol": "test_bottle",
+                "target_path": "bottle.py",
+                "target_symbol": "Bottle",
+                "semantics": "graph_recorded",
+            },
+        ),
+        graph_revision="graph-r0",
+    )
     runtime.observe_action(
         action_id=1,
         command="rg -n 'Bottle|caller' .",
@@ -188,6 +222,7 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     assert all(item["fresh"] for item in summary["receipts"])
     visible = {item["feature_id"] for item in summary["receipts"] if item["model_visible"]}
     assert visible == {
+        "GT_LOC_RESLOT",
         "covering_red",
         "newfile_precedent",
         "recovery",
@@ -199,7 +234,7 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     by_feature = {item["feature_id"]: item for item in summary["receipts"]}
     assert by_feature["obligations"]["boundary"] == "task_start"
     assert by_feature["def_partition"]["payload"]["definitions"] is True
-    assert by_feature["caller_contract"]["boundary"] == "search_result"
+    assert by_feature["caller_contract"]["boundary"] == "task_start"
     assert by_feature["caller_contract"]["payload"]["callers_verified"] is True
     assert by_feature["signature_delta"]["payload"]["signature_edit"] is True
     assert by_feature["recovery"]["payload"]["repeat_count"] == 2
@@ -643,21 +678,35 @@ def test_all_seventeen_census_proves_producers_and_fails_consumer_proof():
     )
 
 
-def test_signature_delta_is_eligible_but_discarded_by_one_message_selection():
+def test_signature_delta_is_coalesced_into_its_first_eligible_edit_frame():
     result = census()
 
-    # signature_delta is produced at the edit boundary and is model-actionable,
-    # so it is eligible for the single delivery slot...
+    # signature_delta is produced at the edit boundary with concrete evidence,
+    # so it enters the single first-eligible delivery arbitration...
     produced = [
         row for row in result["receipts"] if row["feature_id"] == "signature_delta"
     ]
     assert produced
-    assert all(row["model_visible"] for row in produced)
-    # ...but the one-message arbitration picks syntax_result first, so the
-    # eligible signature_delta fact never reaches a model request.
-    delivered = {row["feature_id"] for row in result["decision_window_audit"]}
-    assert "signature_delta" not in delivered
-    assert "syntax_result" in delivered
+    assert all(feature_payload_grounded("signature_delta", row["payload"]) for row in produced)
+    # Bounded arbitration uses one provider frame, but includes distinct
+    # compatible same-action facts instead of selecting one claim twice or
+    # leaking the impact into a later call.
+    edit_frame = next(
+        row for row in result["decision_window_audit"] if row["feature_id"] == "syntax_result"
+    )
+    assert "signature_delta" in edit_frame["contributing_features"]
+    assert edit_frame["evidence_action"] == 2
+    delivered = next(
+        row for row in result["receipts"] if row["feature_id"] == "signature_delta"
+    )
+    assert delivered["model_visible"] is True
+    assert delivered["delivery_status"] == "delivered"
+    frame = next(
+        row
+        for row in result["semantic_decisions"]["frames"]
+        if len(row["evidence_actions"]) >= 2 and set(row["evidence_actions"]) == {2}
+    )
+    assert len(frame["claim_ids"]) == len(set(frame["claim_ids"]))
 
 
 @pytest.mark.asyncio
@@ -1001,6 +1050,13 @@ def test_documented_direct_census_entrypoint_is_executable():
     assert "ALL_VISIBLE_PAYLOADS_IN_FIRST_ELIGIBLE_REQUEST" in completed.stdout
     assert "NO_ACTIONS_BLOCKED" in completed.stdout
     assert "ALL_EFFECTS_CONTEXT_ACCOUNTED" in completed.stdout
+    assert "ALL_FEATURE_OPPORTUNITIES_ACCOUNTED" in completed.stdout
+    assert "NO_ELIGIBLE_TRIGGER_MISSES" in completed.stdout
+    assert "NO_FALSE_FEATURE_FIRES" in completed.stdout
+    assert "NO_EMPTY_LOCALIZATION_EFFECTS" in completed.stdout
+    assert "NO_UNVERIFIED_CALLERS" in completed.stdout
+    assert "NO_DUPLICATE_FRAME_EVIDENCE" in completed.stdout
+    assert "REPOSITORY_SUBSTRATE_PROVEN" in completed.stdout
 
 
 def test_predecided_actions_are_audited_without_cancellation():

@@ -66,6 +66,17 @@ these trajectories were `caller_contract`, `def_partition`, `recovery`, and
 producer/consumer paths independently. This is 13/17 natural firing, not a
 failure of the 17-feature implementation.
 
+Correction (2026-08-06): the paragraph above combined infrastructure failure
+with genuine trigger absence. A later receipt audit found 38/38 repository
+refreshes were `index_unavailable`. Therefore `caller_contract` and
+`def_partition` were unreachable in this run because the paid workflow lacked
+the repository runtime substrate; only `recovery` and `signature_delta` were
+legitimate exact-event absences. It also found that only four of 100 combined
+localization/reslot receipts carried concrete anchors. The workflow, graph-role
+semantics, applicability receipts, and provider-free gate have since been
+repaired; this archived smoke remains outcome evidence but is not evidence that
+the four missing features all correctly abstained.
+
 ## Matched baseline resource comparison
 
 Baseline values are the frozen `miniswe_tb2_gtoff_20260731/SUMMARY.md` prompt

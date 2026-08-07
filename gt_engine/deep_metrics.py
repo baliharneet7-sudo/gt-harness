@@ -203,7 +203,7 @@ def _payload_anchors(payload: dict[str, Any]) -> list[str]:
         if isinstance(value, list):
             for item in value:
                 if isinstance(item, dict):
-                    path = item.get("path")
+                    path = item.get("caller_path") or item.get("path")
                     if isinstance(path, str) and path.strip():
                         anchors.append(path.strip())
     return list(dict.fromkeys(anchors))
@@ -250,6 +250,67 @@ def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> d
     }
 
 
+def _feature_applicability_metrics(features: dict[str, Any]) -> dict[str, Any]:
+    """Separate natural firing, justified abstention, and implementation misses."""
+
+    applicability = features.get("feature_applicability") or {}
+    produced_counts = features.get("produced_counts") or {}
+    fired_ids = sorted(
+        feature_id for feature_id, count in produced_counts.items() if int(count or 0) > 0
+    )
+    if not applicability:
+        return {
+            "feature_applicability_available": False,
+            "features_fired": len(fired_ids),
+            "feature_ids_fired": fired_ids,
+            "features_correctly_abstained": 0,
+            "feature_ids_correctly_abstained": [],
+            "features_trigger_absent": 0,
+            "feature_ids_trigger_absent": [],
+            "feature_missed_triggers": 0,
+            "feature_ids_missed_triggers": [],
+            "false_feature_fires": 0,
+            "feature_ids_false_fires": [],
+        }
+    correct_abstentions = sorted(
+        feature_id
+        for feature_id, row in applicability.items()
+        if row.get("status") == "correct_abstention"
+    )
+    trigger_absent = sorted(
+        feature_id
+        for feature_id, row in applicability.items()
+        if row.get("status") == "trigger_absent"
+    )
+    missed = sorted(
+        feature_id
+        for feature_id, row in applicability.items()
+        if row.get("status") == "missed_trigger"
+    )
+    false_fires = sorted(
+        feature_id
+        for feature_id in fired_ids
+        if int((applicability.get(feature_id) or {}).get("eligible") or 0) == 0
+    )
+    orphan_eligible = {
+        str(row.get("feature_id") or "")
+        for row in (features.get("feature_opportunities") or [])
+        if row.get("evidence_status") == "eligible" and not row.get("effect_id")
+    }
+    missed = sorted(set(missed) | {item for item in orphan_eligible if item})
+    return {
+        "feature_applicability_available": True,
+        "features_fired": len(fired_ids),
+        "feature_ids_fired": fired_ids,
+        "features_correctly_abstained": len(correct_abstentions),
+        "feature_ids_correctly_abstained": correct_abstentions,
+        "features_trigger_absent": len(trigger_absent),
+        "feature_ids_trigger_absent": trigger_absent,
+        "feature_missed_triggers": len(missed),
+        "feature_ids_missed_triggers": missed,
+        "false_feature_fires": len(false_fires),
+        "feature_ids_false_fires": false_fires,
+    }
 def _lifecycle_metrics(features: dict[str, Any]) -> dict[str, int | None]:
     lifecycle = features.get("lifecycle") or {}
 
@@ -454,6 +515,7 @@ def extract_trajectory(
                 if row.get("command_class") == "recognized_validation"
             )
         result.update(_feature_funnel(receipt, action_rows))
+        result.update(_feature_applicability_metrics(feature_summary))
         result.update(_lifecycle_metrics(feature_summary))
         result.update(
             {

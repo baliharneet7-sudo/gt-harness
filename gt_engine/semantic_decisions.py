@@ -305,8 +305,14 @@ class SemanticDecisionEngine:
                 if claim.active
                 and claim.source_revision == source_revision
                 and claim.kind in need.required_claim_kinds
-                and claim.evidence_action <= need.created_after_action
+                # Provider-visible evidence has one deterministic delivery
+                # window: the first model call after its evidence action.
+                # Older claims remain available as controller state, but must
+                # never leak into a later frame after losing arbitration.
+                and claim.evidence_action == call - 1
+                and need.created_after_action == call - 1
                 and claim.claim_id not in self._exposures
+                and claim.claim_id not in {item.claim_id for item in selected_claims}
             ]
             if not candidates:
                 continue

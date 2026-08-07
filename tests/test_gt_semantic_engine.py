@@ -9,7 +9,7 @@ from gt_engine.semantic_decisions import (
 )
 
 
-def test_pending_claim_survives_an_unrelated_higher_priority_frame():
+def test_pending_claim_never_leaks_past_its_first_eligible_provider_call():
     engine = SemanticDecisionEngine(max_frame_chars=320)
     engine.upsert_claim(
         feature_id="signature_delta",
@@ -48,9 +48,15 @@ def test_pending_claim_survives_an_unrelated_higher_priority_frame():
 
     impact = engine.materialize(call=3, source_revision="r1")
 
-    assert impact is not None
-    assert impact.feature_ids == ("signature_delta",)
-    assert "cli.py" in impact.text
+    # The source-bound impact claim remains in controller state, but call 3 is
+    # one step late for action-1 evidence and therefore cannot expose it.
+    assert impact is None
+    claim = next(
+        row
+        for row in engine.summary()["claims"]
+        if row["feature_id"] == "signature_delta"
+    )
+    assert claim["active"] is True
 
 
 def test_task_start_localization_is_available_before_the_first_model_call():
@@ -62,7 +68,32 @@ def test_task_start_localization_is_available_before_the_first_model_call():
             {"path": "src/app.py", "line": 4, "symbol": "greet"},
             {"path": "tests/test_app.py", "line": 9, "symbol": "test_greet"},
         ),
-        callers=({"path": "src/cli.py", "line": 12, "symbol": "main"},),
+        definitions=(
+            {
+                "path": "src/app.py",
+                "line": 4,
+                "symbol": "greet",
+                "semantics": "graph_definition",
+            },
+        ),
+        references=(
+            {
+                "path": "src/cli.py",
+                "line": 12,
+                "symbol": "greet",
+                "semantics": "graph_call_reference",
+            },
+        ),
+        callers=(
+            {
+                "caller_path": "src/cli.py",
+                "caller_line": 12,
+                "caller_symbol": "main",
+                "target_path": "src/app.py",
+                "target_symbol": "greet",
+                "semantics": "graph_recorded",
+            },
+        ),
         graph_revision="graph-1",
     )
 

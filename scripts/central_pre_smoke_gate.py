@@ -27,6 +27,8 @@ RELEASE_TESTS = (
     "tests/test_harbor_budget.py",
     "tests/test_central_readiness.py",
     "tests/test_gt_central_agent.py::test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effects",
+    "tests/test_gt_feature_applicability_repair.py",
+    "tests/test_gt_repository_intelligence.py",
     "tests/test_gt_central_agent.py::test_grounded_failure_warns_before_submit_without_holding_it",
     "tests/test_gt_central_agent.py::test_syntax_failure_does_not_interrupt_multi_action_batch",
     "tests/test_gt_preflight.py::test_validation_classification_applies_only_to_runner_segment",
@@ -126,6 +128,11 @@ def main() -> int:
         run("strict agent lifecycle tests", sys.executable, "-m", "pytest", *RELEASE_TESTS, "-q"),
         run("documented direct census", sys.executable, "scripts/central_feature_census.py"),
         run("module census", sys.executable, "-m", "scripts.central_feature_census"),
+        run(
+            "repository intelligence substrate",
+            sys.executable,
+            "scripts/verify_gt_index_runtime.py",
+        ),
         run("workflow/readiness audit", sys.executable, "scripts/central_readiness_audit.py"),
     )
     if all(checks):

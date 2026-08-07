@@ -328,6 +328,41 @@ def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
             {
                 "features": {
                     "produced_counts": {"syntax_result": 1},
+                    "feature_applicability": {
+                        "syntax_result": {
+                            "evaluations": 1,
+                            "eligible": 1,
+                            "fired": 1,
+                            "status": "fired_when_eligible",
+                            "reason_codes": ["changed_file_syntax_failure"],
+                        },
+                        "caller_contract": {
+                            "evaluations": 1,
+                            "eligible": 0,
+                            "fired": 0,
+                            "status": "correct_abstention",
+                            "reason_codes": ["no_certified_direct_callers"],
+                        },
+                        "recovery": {
+                            "evaluations": 0,
+                            "eligible": 0,
+                            "fired": 0,
+                            "status": "trigger_absent",
+                            "reason_codes": ["no_lifecycle_evidence_observed"],
+                        },
+                    },
+                    "feature_opportunities": [
+                        {
+                            "feature_id": "syntax_result",
+                            "evidence_status": "eligible",
+                            "effect_id": "effect-1",
+                        },
+                        {
+                            "feature_id": "caller_contract",
+                            "evidence_status": "correct_abstention",
+                            "effect_id": None,
+                        },
+                    ],
                     "guidance_suppressed": 2,
                     "effects": [{"applied_after_action": 1}],
                     "receipts": [
@@ -357,5 +392,13 @@ def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
     assert metrics["guidance_deliveries"] == 1
     assert metrics["guidance_behaviorally_aligned"] == 1
     assert metrics["guidance_suppressed"] == 2
+    assert metrics["features_fired"] == 1
+    assert metrics["feature_ids_fired"] == ["syntax_result"]
+    assert metrics["features_correctly_abstained"] == 1
+    assert metrics["feature_ids_correctly_abstained"] == ["caller_contract"]
+    assert metrics["features_trigger_absent"] == 1
+    assert metrics["feature_ids_trigger_absent"] == ["recovery"]
+    assert metrics["feature_missed_triggers"] == 0
+    assert metrics["false_feature_fires"] == 0
     assert "guidance_l1_delivered" not in metrics
     assert "guidance_l3_acted" not in metrics

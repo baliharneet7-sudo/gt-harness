@@ -272,3 +272,26 @@ provider headroom, stable-prefix/cacheability, bounded-observation, completion,
 and task-progress metrics. This is provider-free proof, not a recovered solve
 claim; another matched smoke still requires authorization and the 89-task run
 remains blocked.
+
+### Feature applicability and graph-runtime repair (2026-08-06)
+
+The corrected smoke's 13/17 statement was incomplete. Across its ten tasks,
+38/38 repository refreshes were `index_unavailable`; `caller_contract` and
+`def_partition` were therefore infrastructure misses. Only `recovery` and
+`signature_delta` were valid exact-trigger absences. Of 100 localization and
+reslot receipts, only four carried concrete anchors.
+
+Current paid workflows install the vendored GroundTruth wheel, export the
+pinned index binary, and execute a real binary-to-SQLite fixture before any
+provider call. Definitions, references, and certified directed callers come
+only from graph roles; grep prose cannot create them. Search filters,
+ambiguous output, unsupported source, and incomplete graph evidence record a
+typed abstention and emit no empty effect.
+
+Every task receipt now reports feature applicability as fired, correct
+abstention, trigger absent, ambiguous, substrate unavailable, or missed. Deep
+metrics expose the corresponding feature IDs plus false fires. Provider facts
+must be coalesced into their first eligible call or remain controller-only;
+they cannot leak one step late. The all-17 census additionally requires zero
+eligible misses, false fires, empty localization, unverified callers, and
+duplicate frame evidence, plus a real repository-substrate proof.

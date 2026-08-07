@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from gt_engine.indexer import IndexBuildStatus
 from gt_engine.repository_intelligence import (
     RepositorySession,
     discover_project_checks,
+    inspect_index,
     inspect_repository,
 )
 
@@ -32,8 +34,20 @@ def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Pat
     assert evidence.available is True
     assert evidence.graph_revision
     assert any(item["path"].endswith("greeter.py") for item in evidence.anchors)
+    assert evidence.definitions
+    assert evidence.references == ()
     assert evidence.callers == ()
     assert evidence.project_checks == ("pytest -q",)
+
+
+def test_non_code_repository_has_explicit_index_abstention(tmp_path: Path):
+    (tmp_path / "README.md").write_text("documentation only")
+
+    receipt = inspect_index(tmp_path, state_dir=tmp_path / ".state")
+
+    assert receipt.status is IndexBuildStatus.NO_SUPPORTED_SOURCE
+    assert receipt.graph_db is None
+    assert receipt.error_type is None
 
 
 def test_repository_intelligence_abstains_for_non_code_repository(tmp_path: Path):

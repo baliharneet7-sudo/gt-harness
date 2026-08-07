@@ -122,6 +122,54 @@ SEARCH_OUTPUT = (
 )
 
 
+def _register_graph_contract(
+    runtime: CentralFeatureRuntime,
+    *,
+    target_path: str = "bottle.py",
+    target_symbol: str = "Bottle",
+    target_line: int = 10,
+    caller_path: str = "tests/test_bottle.py",
+    caller_symbol: str = "test_bottle",
+    caller_line: int = 20,
+) -> None:
+    runtime.register_structural_evidence(
+        source_revision=SR0,
+        anchors=(
+            {"path": target_path, "line": target_line, "symbol": target_symbol},
+            {"path": caller_path, "line": caller_line, "symbol": caller_symbol},
+        ),
+        definitions=(
+            {
+                "path": target_path,
+                "line": target_line,
+                "symbol": target_symbol,
+                "semantics": "graph_definition",
+            },
+        ),
+        references=(
+            {
+                "path": caller_path,
+                "line": caller_line,
+                "symbol": target_symbol,
+                "semantics": "graph_call_reference",
+            },
+        ),
+        callers=(
+            {
+                "caller_path": caller_path,
+                "caller_line": caller_line,
+                "caller_symbol": caller_symbol,
+                "target_path": target_path,
+                "target_symbol": target_symbol,
+                "semantics": "graph_recorded",
+            },
+        ),
+        graph_revision="graph-source-v0",
+    )
+    _consume(runtime, 0, 0)
+    runtime.suppress_task_start_delivery()
+
+
 def test_obligations_consumer_contracts_the_instruction():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task(
@@ -168,16 +216,12 @@ def test_localization_and_gt_loc_reslot_store_anchors_internal_only():
 def test_def_partition_separates_definition_from_reference_anchors():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
-    runtime.observe_action(
-        action_id=1, command="rg -n 'Bottle' .", output=SEARCH_OUTPUT, returncode=0,
-        transition=_transition(1, "rg -n", WR0, WR0), revision=WR0, source_revision=SR0,
-    )
-    _consume(runtime, 1, 1)
+    _register_graph_contract(runtime)
 
     _assert_contract(
         runtime, "def_partition",
         model_visible=False, effect_kind=EffectKind.IMPACT_SET_UPDATE,
-        boundary="search_result", action=1, source_revision=SR0,
+        boundary="task_start", action=0, source_revision=SR0,
     )
     row = _feature_rows(runtime.summary(), "def_partition")[0]
     assert row["payload"]["definition_anchors"][0]["path"] == "bottle.py"
@@ -187,19 +231,15 @@ def test_def_partition_separates_definition_from_reference_anchors():
 def test_caller_contract_stores_verified_caller_anchors():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
-    runtime.observe_action(
-        action_id=1, command="rg -n 'Bottle' .", output=SEARCH_OUTPUT, returncode=0,
-        transition=_transition(1, "rg -n", WR0, WR0), revision=WR0, source_revision=SR0,
-    )
-    _consume(runtime, 1, 1)
+    _register_graph_contract(runtime)
 
     _assert_contract(
         runtime, "caller_contract",
         model_visible=False, effect_kind=EffectKind.IMPACT_SET_UPDATE,
-        boundary="search_result", action=1, source_revision=SR0,
+        boundary="task_start", action=0, source_revision=SR0,
     )
     row = _feature_rows(runtime.summary(), "caller_contract")[0]
-    assert row["payload"]["callers"][0]["path"] == "tests/test_bottle.py"
+    assert row["payload"]["callers"][0]["caller_path"] == "tests/test_bottle.py"
 
 
 def test_newfile_precedent_records_a_concrete_precedent_path():
@@ -440,6 +480,15 @@ def test_signature_delta_uses_source_witness_for_non_sed_edits():
 def test_signature_payload_coalesces_caller_and_patch_consumers():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Change f", revision=WR0, source_revision=SR0)
+    _register_graph_contract(
+        runtime,
+        target_path="app.py",
+        target_symbol="f",
+        target_line=1,
+        caller_path="tests/test_app.py",
+        caller_symbol="test_f",
+        caller_line=3,
+    )
     runtime.observe_action(
         action_id=1,
         command="rg -n 'f' .",
@@ -612,6 +661,7 @@ def test_all_17_positive_scenarios_cover_every_feature_id():
         "Run `pytest -q`.", revision=WR0, source_revision=SR0,
         explicit_checks=("pytest -q",),
     )
+    _register_graph_contract(runtime)
     runtime.observe_action(
         action_id=1, command="rg -n 'Bottle' .", output=SEARCH_OUTPUT, returncode=0,
         transition=_transition(1, "rg -n", WR0, WR0), revision=WR0, source_revision=SR0,
@@ -872,6 +922,15 @@ def test_localization_plus_reslot_changes_context_without_a_model_message():
 def test_signature_delta_plus_caller_contract_schedules_caller_validation():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    _register_graph_contract(
+        runtime,
+        target_path="app.py",
+        target_symbol="f",
+        target_line=1,
+        caller_path="tests/test_app.py",
+        caller_symbol="test_f",
+        caller_line=3,
+    )
     runtime.observe_action(
         action_id=1, command="rg -n 'caller' .", output=SEARCH_OUTPUT, returncode=0,
         transition=_transition(1, "rg -n", WR0, WR0), revision=WR0, source_revision=SR0,

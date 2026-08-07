@@ -81,6 +81,17 @@ def audit() -> dict[str, bool]:
         "stock_litellm_model": type(model) is LitellmModel,
         "stock_bash_tool_only": BASH_TOOL["function"]["name"] == "bash",
         "vendored_groundtruth_runtime_surface": _vendored_runtime_surface_available(),
+        "paid_central_installs_vendored_groundtruth": (
+            workflow.count("vendor/groundtruth_mcp-*.whl") >= 2
+            and workflow.count("chmod +x vendor/gt-index-linux-amd64") >= 2
+        ),
+        "paid_central_exports_index_binary": (
+            workflow.count("GT_INDEX_BINARY:") >= 2
+            and workflow.count("vendor/gt-index-linux-amd64") >= 4
+        ),
+        "paid_central_executes_index_fixture": (
+            workflow.count("python scripts/verify_gt_index_runtime.py") >= 2
+        ),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
         "paid_preflight_is_shadow_only": all(
             "--ak preflight_mode=shadow" in item

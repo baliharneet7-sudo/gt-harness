@@ -113,6 +113,7 @@ class ProposedAction:
     operations: tuple[ObservedOperation, ...] = ()
     target_must_be_absent: bool = False
     shell_segments: tuple[tuple[str, ...], ...] = ()
+    shell_connectors: tuple[str, ...] = ()
     parser_evidence: tuple[str, ...] = ()
 
     @property
@@ -763,6 +764,7 @@ def adapt_proposed_action(
             and "--parents" not in words
         ),
         shell_segments=segments,
+        shell_connectors=connectors,
         parser_evidence=(
             f"head:{head or 'unknown'}",
             f"segments:{len(segments)}",

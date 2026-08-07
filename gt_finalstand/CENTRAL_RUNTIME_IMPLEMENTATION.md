@@ -30,6 +30,29 @@ applied 361 effects; only 36 were model-visible provider payloads. The effect
 trace and summary now distinguish deterministic `engine_internal_state` work
 from actual provider delivery and from genuinely unread private state.
 
+### Feature applicability and repository runtime (2026-08-06)
+
+Natural firing count is no longer the coverage metric. Every feature is now
+classified per task as fired when eligible, correctly abstained, trigger
+absent, ambiguous, substrate unavailable, or an implementation miss. This was
+required after corrected smoke `31136099371`: all 38 repository refreshes were
+`index_unavailable`, so the missing `caller_contract` and `def_partition` were
+not legitimate task-trigger absences. Only `recovery` and `signature_delta`
+lacked their exact lifecycle events.
+
+The workflow now installs the vendored GroundTruth runtime, exports the pinned
+index binary, and proves a real binary-to-SQLite graph before provider spend.
+Task-start structural evidence separates graph definitions, graph references,
+and certified directed callers. Raw grep text supplies localization anchors
+only; it can never certify definition/reference/caller semantics. Ambiguous or
+empty evidence abstains without an empty effect.
+
+Provider evidence is first-window-only. Distinct compatible same-action claims
+are coalesced once; a claim that cannot fit remains controller state and cannot
+appear in a later call. The provider-free gate now rejects eligible trigger
+misses, false fires, empty localization, unverified callers, duplicate frame
+evidence, or an unavailable repository substrate.
+
 ## Deterministic context-compiler repair (2026-08-05)
 
 The regression diagnosis found that the host was central in execution but not

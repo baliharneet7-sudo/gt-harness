@@ -31,6 +31,7 @@ from gt_engine.preflight import (
     PreflightDecision,
     PreflightMode,
     ProposedAction,
+    adapt_proposed_action,
     pass_decision,
     shell_segments,
     shell_structure,
@@ -1208,6 +1209,51 @@ class FeatureReceipt:
     source_epoch: int = 0
 
 
+class SearchScope(StrEnum):
+    WORKSPACE = "workspace"
+    TARGETS = "targets"
+    STDIN_FILTER = "stdin_filter"
+    EXTERNAL = "external"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchObservation:
+    action_id: str
+    query: str
+    scope: SearchScope
+    targets: tuple[str, ...]
+    anchors: tuple[dict[str, Any], ...]
+    output_format: str
+    confidence: float
+    source_revision: str
+    output_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureOpportunityReceipt:
+    feature_id: str
+    boundary: str
+    action_id: int
+    source_revision: str
+    evidence_status: str
+    reason_code: str
+    evidence_sha256: str
+    effect_id: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "feature_id": self.feature_id,
+            "boundary": self.boundary,
+            "action_id": self.action_id,
+            "source_revision": self.source_revision,
+            "evidence_status": self.evidence_status,
+            "reason_code": self.reason_code,
+            "evidence_sha256": self.evidence_sha256,
+            "effect_id": self.effect_id,
+        }
+
+
 @dataclass(slots=True)
 class CentralControllerState:
     """Operational state reduced from feature payloads inside Mini-SWE's loop."""
@@ -1357,6 +1403,7 @@ class CentralFeatureRuntime:
         self._action_cycles: dict[str, ActionCycleReceipt] = {}
         self._structural_evidence: dict[str, Any] = {}
         self._preflight_intervention_keys: set[str] = set()
+        self._feature_opportunities: list[FeatureOpportunityReceipt] = []
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -1373,23 +1420,198 @@ class CentralFeatureRuntime:
         item["observations"] += 1
 
     @staticmethod
-    def _search_anchors(output: str, *, limit: int = 8) -> list[dict[str, Any]]:
-        """Parse ``path:line:text`` anchors from search output."""
+    def _search_anchors(
+        output: str,
+        *,
+        targets: tuple[str, ...] = (),
+        snapshot: WorkspaceSnapshot | None = None,
+        limit: int = 8,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Parse bounded path-qualified or unambiguous single-target anchors."""
         anchors: list[dict[str, Any]] = []
+        output_format = "unsupported"
+        canonical_targets = tuple(
+            dict.fromkeys(_workspace_relative_path(path) for path in targets if path)
+        )
+        known_paths = set(snapshot.entries) if snapshot is not None else set()
+
+        def admitted(path: str) -> str:
+            canonical = _workspace_relative_path(path)
+            if not canonical or canonical.startswith("../") or canonical.startswith("/"):
+                return ""
+            if known_paths and canonical not in known_paths:
+                return ""
+            return canonical
+
         for line in (output or "").splitlines():
             match = re.match(r"^([^:\s][^:]*):(\d+):(.*)$", line)
-            if not match:
-                continue
-            path = match.group(1).strip()
-            try:
-                line_no = int(match.group(2))
-            except ValueError:
-                continue
-            text = match.group(3).strip()
-            anchors.append({"path": path, "line": line_no, "text": text[:80]})
+            if match:
+                path = admitted(match.group(1).strip())
+                if not path:
+                    continue
+                anchors.append(
+                    {
+                        "path": path,
+                        "line": int(match.group(2)),
+                        "text": match.group(3).strip()[:80],
+                    }
+                )
+                output_format = "path_line_text"
+            else:
+                single = re.match(r"^(\d+):(.*)$", line)
+                if single and len(canonical_targets) == 1:
+                    path = admitted(canonical_targets[0])
+                    if path:
+                        anchors.append(
+                            {
+                                "path": path,
+                                "line": int(single.group(1)),
+                                "text": single.group(2).strip()[:80],
+                            }
+                        )
+                        output_format = "line_text_single_target"
+                        if len(anchors) >= limit:
+                            break
+                        continue
+                path = admitted(line.strip())
+                if path and path in known_paths:
+                    anchors.append({"path": path, "line": 0, "text": ""})
+                    output_format = "path_only"
             if len(anchors) >= limit:
                 break
-        return anchors
+        return anchors, output_format
+
+    @staticmethod
+    def _search_observation(
+        proposed: ProposedAction,
+        output: str,
+        *,
+        snapshot: WorkspaceSnapshot | None,
+        source_revision: str,
+    ) -> tuple[SearchObservation | None, str]:
+        search_operations = tuple(
+            operation
+            for operation in proposed.operations
+            if operation.operation == ActionOperation.SEARCH
+        )
+        if not search_operations:
+            return None, "no_typed_repository_search"
+        targets = tuple(
+            dict.fromkeys(
+                target.path
+                for operation in search_operations
+                for target in operation.targets
+                if target.path
+            )
+        )
+        receives_stdin = any(
+            operation.segment_index > 0
+            and operation.segment_index - 1 < len(proposed.shell_connectors)
+            and proposed.shell_connectors[operation.segment_index - 1] == "|"
+            and not operation.targets
+            for operation in search_operations
+        )
+        executables = {operation.executable for operation in search_operations}
+        if receives_stdin:
+            scope = SearchScope.STDIN_FILTER
+            reason = "stdin_filter_not_repository_search"
+        elif targets and all(
+            path.startswith("/") and not path.startswith("/app/") for path in targets
+        ):
+            scope = SearchScope.EXTERNAL
+            reason = "external_search_scope"
+        elif targets:
+            scope = SearchScope.TARGETS
+            reason = "typed_target_search"
+        elif executables <= {"rg", "ack", "ag"}:
+            scope = SearchScope.WORKSPACE
+            reason = "typed_workspace_search"
+        elif executables == {"find"}:
+            scope = SearchScope.AMBIGUOUS
+            reason = "find_scope_unresolved"
+        else:
+            scope = SearchScope.AMBIGUOUS
+            reason = "search_scope_ambiguous"
+        if scope not in {SearchScope.WORKSPACE, SearchScope.TARGETS}:
+            return SearchObservation(
+                action_id=proposed.action_id,
+                query=proposed.raw_command[:240],
+                scope=scope,
+                targets=targets,
+                anchors=(),
+                output_format="not_parsed",
+                confidence=proposed.parser_confidence,
+                source_revision=source_revision,
+                output_sha256=hashlib.sha256(output.encode("utf-8", "replace")).hexdigest(),
+            ), reason
+        anchors, output_format = CentralFeatureRuntime._search_anchors(
+            output,
+            targets=targets,
+            snapshot=snapshot,
+        )
+        return SearchObservation(
+            action_id=proposed.action_id,
+            query=proposed.raw_command[:240],
+            scope=scope,
+            targets=targets,
+            anchors=tuple(anchors),
+            output_format=output_format,
+            confidence=proposed.parser_confidence,
+            source_revision=source_revision,
+            output_sha256=hashlib.sha256(output.encode("utf-8", "replace")).hexdigest(),
+        ), reason
+
+    def _record_feature_opportunity(
+        self,
+        *,
+        feature_id: str,
+        boundary: str,
+        action_id: int,
+        source_revision: str,
+        evidence_status: str,
+        reason_code: str,
+        evidence: Any,
+        effect_id: str | None = None,
+    ) -> None:
+        encoded = json.dumps(
+            evidence,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8", "replace")
+        row = FeatureOpportunityReceipt(
+            feature_id=feature_id,
+            boundary=boundary,
+            action_id=action_id,
+            source_revision=source_revision,
+            evidence_status=evidence_status,
+            reason_code=reason_code,
+            evidence_sha256=hashlib.sha256(encoded).hexdigest(),
+            effect_id=effect_id,
+        )
+        identity = (
+            row.feature_id,
+            row.boundary,
+            row.action_id,
+            row.evidence_status,
+            row.reason_code,
+            row.evidence_sha256,
+        )
+        if any(
+            (
+                item.feature_id,
+                item.boundary,
+                item.action_id,
+                item.evidence_status,
+                item.reason_code,
+                item.evidence_sha256,
+            )
+            == identity
+            for item in self._feature_opportunities
+        ):
+            return
+        self._feature_opportunities.append(row)
 
     @staticmethod
     def _spec(feature_id: str) -> dict[str, str]:
@@ -1423,6 +1645,15 @@ class CentralFeatureRuntime:
             revision=revision,
             fresh=True,
         ):
+            self._record_feature_opportunity(
+                feature_id=feature_id,
+                boundary=boundary,
+                action_id=action_id,
+                source_revision=source_revision if source_revision is not None else revision,
+                evidence_status="ambiguous_evidence",
+                reason_code="invalid_feature_payload",
+                evidence=candidate_payload,
+            )
             return
         self.receipts.append(
             FeatureReceipt(
@@ -1441,6 +1672,16 @@ class CentralFeatureRuntime:
             )
         )
         self._route_effect(self.receipts[-1])
+        self._record_feature_opportunity(
+            feature_id=feature_id,
+            boundary=boundary,
+            action_id=action_id,
+            source_revision=source_revision if source_revision is not None else revision,
+            evidence_status="eligible",
+            reason_code=reason,
+            evidence=candidate_payload,
+            effect_id=(self._effects[-1].receipt_id if self._effects else None),
+        )
         self._register_decision_claim(self.receipts[-1])
 
     def _suppress_receipt_delivery(self, receipt: FeatureReceipt, *, reason: str) -> None:
@@ -1481,6 +1722,32 @@ class CentralFeatureRuntime:
                             delivery_reason=reason,
                         )
                 return
+
+    def _suppress_unselected_first_window(
+        self,
+        *,
+        call: int,
+        selected_items: Iterable[FeatureReceipt] = (),
+    ) -> None:
+        """Make first-window arbitration explicit and prohibit late leakage."""
+
+        selected_keys = {
+            (item.feature_id, item.action_id, item.source_revision)
+            for item in selected_items
+        }
+        evidence_action = max(0, int(call) - 1)
+        for item in tuple(self.receipts):
+            key = (item.feature_id, item.action_id, item.source_revision)
+            if (
+                item.model_visible
+                and item.delivery_status == "pending"
+                and item.action_id == evidence_action
+                and key not in selected_keys
+            ):
+                self._suppress_receipt_delivery(
+                    item,
+                    reason="not_selected_first_eligible_request",
+                )
 
     @staticmethod
     def _payload(feature_id: str, boundary: str, reason: str) -> dict[str, Any]:
@@ -1626,7 +1893,10 @@ class CentralFeatureRuntime:
             symbol = str(payload.get("symbol") or "")
             if symbol:
                 anchors.append(symbol)
-            anchors.extend(str(item.get("path") or "") for item in payload.get("callers") or ())
+            anchors.extend(
+                str(item.get("caller_path") or item.get("path") or "")
+                for item in payload.get("callers") or ()
+            )
         elif feature_id == "newfile_precedent":
             anchors.extend(str(path) for path in payload.get("created_files") or ())
             anchors.append(str(payload.get("precedent_path") or ""))
@@ -1703,6 +1973,8 @@ class CentralFeatureRuntime:
         *,
         source_revision: str,
         anchors: Iterable[dict[str, Any]],
+        definitions: Iterable[dict[str, Any]] = (),
+        references: Iterable[dict[str, Any]] = (),
         callers: Iterable[dict[str, Any]] = (),
         graph_revision: str,
     ) -> None:
@@ -1719,23 +1991,42 @@ class CentralFeatureRuntime:
             selected.append({"path": path, "line": line, "symbol": symbol})
             if len(selected) >= 4:
                 break
-        references: list[dict[str, Any]] = []
-        for item in callers:
+        definition_rows = [
+            dict(item) for item in definitions if str(item.get("path") or "")
+        ][:8]
+        reference_rows: list[dict[str, Any]] = []
+        for item in references:
             path = str(item.get("path") or "").replace("\\", "/")
             line = int(item.get("line") or 0)
             symbol = str(item.get("symbol") or "")
             if not path:
                 continue
-            references.append({"path": path, "line": line, "symbol": symbol})
-            if len(references) >= 8:
+            reference_rows.append(
+                {
+                    "path": path,
+                    "line": line,
+                    "symbol": symbol,
+                    "semantics": str(item.get("semantics") or "graph_reference"),
+                }
+            )
+            if len(reference_rows) >= 8:
                 break
+        caller_rows = [
+            dict(item)
+            for item in callers
+            if str(item.get("caller_path") or "")
+            and str(item.get("target_path") or "")
+            and str(item.get("semantics") or "") == "graph_recorded"
+        ][:8]
         if not selected:
             return
         self._structural_evidence = {
             "source_revision": source_revision,
             "graph_revision": graph_revision,
             "anchors": selected,
-            "callers": references,
+            "definitions": definition_rows,
+            "references": reference_rows,
+            "callers": caller_rows,
             "fresh": True,
         }
         self._current_source_revision = source_revision
@@ -1773,7 +2064,7 @@ class CentralFeatureRuntime:
                 )["message"],
             },
         )
-        if references:
+        if definition_rows and reference_rows:
             self._emit(
                 "def_partition",
                 boundary="task_start",
@@ -1784,14 +2075,29 @@ class CentralFeatureRuntime:
                 payload={
                     "definitions": True,
                     "references": True,
-                    "definition_anchors": selected,
-                    "reference_anchors": references,
+                    "definition_anchors": definition_rows,
+                    "reference_anchors": reference_rows,
                     "graph_revision": graph_revision,
                     "message": self._payload(
                         "def_partition", "task_start", "graph_definition_reference_partition"
                     )["message"],
                 },
             )
+        else:
+            self._record_feature_opportunity(
+                feature_id="def_partition",
+                boundary="task_start",
+                action_id=0,
+                source_revision=source_revision,
+                evidence_status="correct_abstention",
+                reason_code="graph_partition_incomplete",
+                evidence={
+                    "definition_count": len(definition_rows),
+                    "reference_count": len(reference_rows),
+                    "graph_revision": graph_revision,
+                },
+            )
+        if caller_rows:
             self._emit(
                 "caller_contract",
                 boundary="task_start",
@@ -1801,12 +2107,57 @@ class CentralFeatureRuntime:
                 reason="graph_verified_callers",
                 payload={
                     "callers_verified": True,
-                    "callers": references,
+                    "callers": caller_rows,
                     "graph_revision": graph_revision,
                     "message": self._payload(
                         "caller_contract", "task_start", "graph_verified_callers"
                     )["message"],
                 },
+            )
+        else:
+            self._record_feature_opportunity(
+                feature_id="caller_contract",
+                boundary="task_start",
+                action_id=0,
+                source_revision=source_revision,
+                evidence_status="correct_abstention",
+                reason_code="no_certified_direct_callers",
+                evidence={"graph_revision": graph_revision},
+            )
+
+    def record_repository_evidence_status(
+        self,
+        *,
+        source_revision: str,
+        status: str,
+        available: bool,
+    ) -> None:
+        """Account for structural feature applicability before the first model call."""
+
+        if available:
+            return
+        valid_abstentions = {
+            "no_supported_source",
+            "no_task_linked_evidence",
+            "unsupported_language",
+        }
+        evidence_status = (
+            "correct_abstention" if status in valid_abstentions else "substrate_unavailable"
+        )
+        for feature_id in (
+            "localization",
+            "GT_LOC_RESLOT",
+            "def_partition",
+            "caller_contract",
+        ):
+            self._record_feature_opportunity(
+                feature_id=feature_id,
+                boundary="task_start",
+                action_id=0,
+                source_revision=source_revision,
+                evidence_status=evidence_status,
+                reason_code=status or "repository_evidence_unavailable",
+                evidence={"available": False, "status": status},
             )
 
     def suppress_task_start_delivery(self) -> None:
@@ -1832,17 +2183,27 @@ class CentralFeatureRuntime:
         *,
         source_revision: str,
         anchors: Iterable[dict[str, Any]],
+        definitions: Iterable[dict[str, Any]] = (),
+        references: Iterable[dict[str, Any]] = (),
         callers: Iterable[dict[str, Any]] = (),
         graph_revision: str,
     ) -> None:
         """Replace the preflight graph view without replaying task-start effects."""
         selected = tuple(dict(item) for item in anchors if item.get("path"))[:4]
-        references = tuple(dict(item) for item in callers if item.get("path"))[:8]
+        definition_rows = tuple(dict(item) for item in definitions if item.get("path"))[:8]
+        reference_rows = tuple(dict(item) for item in references if item.get("path"))[:8]
+        caller_rows = tuple(
+            dict(item)
+            for item in callers
+            if item.get("caller_path") and item.get("target_path")
+        )[:8]
         if not source_revision or not graph_revision or not selected:
             self._structural_evidence = {
                 "source_revision": source_revision,
                 "graph_revision": graph_revision,
                 "anchors": [],
+                "definitions": [],
+                "references": [],
                 "callers": [],
                 "fresh": False,
             }
@@ -1851,7 +2212,9 @@ class CentralFeatureRuntime:
             "source_revision": source_revision,
             "graph_revision": graph_revision,
             "anchors": [dict(item) for item in selected],
-            "callers": [dict(item) for item in references],
+            "definitions": [dict(item) for item in definition_rows],
+            "references": [dict(item) for item in reference_rows],
+            "callers": [dict(item) for item in caller_rows],
             "fresh": True,
         }
 
@@ -2166,7 +2529,26 @@ class CentralFeatureRuntime:
                 source_revision=source_rev,
                 workspace_revision=revision,
             )
-        is_search = bool(self._SEARCH.search(normalized))
+        if proposed is None:
+            proposed = adapt_proposed_action(
+                {"command": command, "tool_call_id": f"observed-{action_id}"},
+                source_revision=source_rev,
+                workspace_revision=revision,
+                model_call=max(1, action_id),
+                batch_index=0,
+                batch_size=1,
+                validation=classification,
+            )
+        search_observation, search_reason = self._search_observation(
+            proposed,
+            output,
+            snapshot=snapshot,
+            source_revision=source_rev,
+        )
+        is_repository_search = bool(
+            search_observation
+            and search_observation.scope in {SearchScope.WORKSPACE, SearchScope.TARGETS}
+        )
         self._action_metrics["observed_actions"] += 1
         self._action_metrics["successful_actions" if returncode == 0 else "failed_actions"] += 1
         self._action_metrics["command_chars"] += len(command)
@@ -2175,7 +2557,7 @@ class CentralFeatureRuntime:
         self._command_counts[normalized] = command_count
         if command_count > 1:
             self._action_metrics["repeated_commands"] += 1
-        if is_search:
+        if is_repository_search:
             self._action_metrics["search_actions"] += 1
         if proposed is not None:
             output_hash = hashlib.sha256((output or "").encode("utf-8", "replace")).hexdigest()
@@ -2451,10 +2833,54 @@ class CentralFeatureRuntime:
                 self._action_metrics["no_change_actions"] += 1
         else:
             self._action_metrics["no_change_actions"] += 1
-        if is_search and output.strip():
+        anchors: list[dict[str, Any]] = []
+        if search_observation is not None and not is_repository_search:
+            for feature_id in ("localization", "GT_LOC_RESLOT"):
+                self._record_feature_opportunity(
+                    feature_id=feature_id,
+                    boundary="search_result",
+                    action_id=action_id,
+                    source_revision=source_rev,
+                    evidence_status="correct_abstention",
+                    reason_code=search_reason,
+                    evidence={
+                        "scope": search_observation.scope.value,
+                        "targets": search_observation.targets,
+                        "output_sha256": search_observation.output_sha256,
+                    },
+                )
+        elif is_repository_search and not output.strip():
+            for feature_id in ("localization", "GT_LOC_RESLOT"):
+                self._record_feature_opportunity(
+                    feature_id=feature_id,
+                    boundary="search_result",
+                    action_id=action_id,
+                    source_revision=source_rev,
+                    evidence_status="trigger_absent",
+                    reason_code="empty_search_output",
+                    evidence={"scope": search_observation.scope.value},
+                )
+        elif is_repository_search and search_observation is not None:
+            anchors = [dict(item) for item in search_observation.anchors]
+            if not anchors:
+                for feature_id in ("localization", "GT_LOC_RESLOT"):
+                    self._record_feature_opportunity(
+                        feature_id=feature_id,
+                        boundary="search_result",
+                        action_id=action_id,
+                        source_revision=source_rev,
+                        evidence_status="ambiguous_evidence",
+                        reason_code="search_output_unanchored",
+                        evidence={
+                            "scope": search_observation.scope.value,
+                            "output_format": search_observation.output_format,
+                            "output_sha256": search_observation.output_sha256,
+                        },
+                    )
+                anchors = []
+        if is_repository_search and search_observation is not None and anchors:
             self._searched = True
             self._mark_lifecycle("location_anchored", action_id=action_id)
-            anchors = self._search_anchors(output)
             for anchor in anchors:
                 path = str(anchor.get("path") or "")
                 if path:
@@ -2508,7 +2934,7 @@ class CentralFeatureRuntime:
                 payload={
                     "candidate_locations": True,
                     "anchors": anchors,
-                    "query": normalized[:120],
+                    "query": search_observation.query[:120],
                     "message": self._payload(
                         "localization", "search_result", "non_empty_search_result"
                     )["message"],
@@ -2534,65 +2960,6 @@ class CentralFeatureRuntime:
                 kind="ranked_anchors_computed",
                 detail=f"selected={min(4, len(anchors))}; discarded={max(0, len(anchors) - 4)}",
             )
-            definition_anchors = [
-                anchor for anchor in anchors if self._DEFINITION.search(anchor["text"])
-            ]
-            reference_anchors = [
-                anchor for anchor in anchors if not self._DEFINITION.search(anchor["text"])
-            ]
-            if definition_anchors:
-                self.record_producer_event(
-                    feature_id="def_partition",
-                    action_id=action_id,
-                    kind="definition_reference_partitioned",
-                    detail=(
-                        f"definitions={len(definition_anchors)}; "
-                        f"references={len(reference_anchors)}"
-                    ),
-                )
-                self._emit(
-                    "def_partition",
-                    boundary="search_result",
-                    action_id=action_id,
-                    revision=revision,
-                    source_revision=source_rev,
-                    reason="definitions_and_references_present",
-                    payload={
-                        "definitions": True,
-                        "references": True,
-                        "definition_anchors": definition_anchors,
-                        "reference_anchors": reference_anchors,
-                        "message": self._payload(
-                            "def_partition", "search_result", "definitions_and_references_present"
-                        )["message"],
-                    },
-                )
-            callers = reference_anchors
-            if definition_anchors and callers:
-                self._mark_lifecycle("impact_captured", action_id=action_id)
-                self.record_producer_event(
-                    feature_id="caller_contract",
-                    action_id=action_id,
-                    kind="caller_impact_captured",
-                    detail=f"callers={len(callers)}",
-                )
-                self._emit(
-                    "caller_contract",
-                    boundary="search_result",
-                    action_id=action_id,
-                    revision=revision,
-                    source_revision=source_rev,
-                    reason="definition_and_reference_anchors_present",
-                    payload={
-                        "callers_verified": True,
-                        "callers": callers,
-                        "message": self._payload(
-                            "caller_contract",
-                            "search_result",
-                            "definition_and_reference_anchors_present",
-                        )["message"],
-                    },
-                )
 
         failure_kind = classification.failure_kind
         if (
@@ -3543,6 +3910,31 @@ class CentralFeatureRuntime:
             }
             for trace in self._effect_trace
         ]
+        opportunity_rows = [item.as_dict() for item in self._feature_opportunities]
+        feature_applicability: dict[str, dict[str, Any]] = {}
+        for feature_id in CENTRAL_FEATURE_IDS:
+            rows = [row for row in opportunity_rows if row["feature_id"] == feature_id]
+            eligible = [row for row in rows if row["evidence_status"] == "eligible"]
+            status = (
+                "fired_when_eligible"
+                if eligible and by_feature[feature_id] >= len(eligible)
+                else "missed_trigger"
+                if eligible
+                else rows[-1]["evidence_status"]
+                if rows
+                else "trigger_absent"
+            )
+            feature_applicability[feature_id] = {
+                "evaluations": len(rows),
+                "eligible": len(eligible),
+                "fired": by_feature[feature_id],
+                "status": status,
+                "reason_codes": (
+                    list(dict.fromkeys(row["reason_code"] for row in rows))
+                    if rows
+                    else ["no_lifecycle_evidence_observed"]
+                ),
+            }
         return {
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
@@ -3581,6 +3973,22 @@ class CentralFeatureRuntime:
             "declared_check_states": dict(self._declared_check_states),
             "semantic_decisions": self._decisions.summary(),
             "structural_evidence": dict(self._structural_evidence),
+            "feature_opportunities": opportunity_rows,
+            "feature_applicability": feature_applicability,
+            "all_feature_opportunities_accounted": (
+                set(feature_applicability) == set(CENTRAL_FEATURE_IDS)
+                and all(
+                    row["status"]
+                    in {
+                        "fired_when_eligible",
+                        "correct_abstention",
+                        "trigger_absent",
+                        "ambiguous_evidence",
+                        "substrate_unavailable",
+                    }
+                    for row in feature_applicability.values()
+                )
+            ),
             "preflight_receipts": list(self._preflight_receipts),
             "action_cycles": [cycle.as_dict() for cycle in self._action_cycles.values()],
             "receipts": [
@@ -3667,7 +4075,8 @@ class CentralFeatureRuntime:
         if feature_id == "signature_delta":
             paths = ", ".join(payload.get("changed_paths") or ())
             caller_paths = ", ".join(
-                str(item.get("path") or "") for item in payload.get("callers") or ()
+                str(item.get("caller_path") or item.get("path") or "")
+                for item in payload.get("callers") or ()
             )
             caller_fact = f" Known callers: {caller_paths}." if caller_paths else ""
             return (
@@ -3744,6 +4153,7 @@ class CentralFeatureRuntime:
             source_revision=source_revision,
         )
         if frame is None:
+            self._suppress_unselected_first_window(call=call)
             return ""
 
         selected_items: list[FeatureReceipt] = []
@@ -3765,6 +4175,7 @@ class CentralFeatureRuntime:
             if selected is not None:
                 selected_items.append(selected)
         if not selected_items:
+            self._suppress_unselected_first_window(call=call)
             self._guidance_suppressed += 1
             return ""
 
@@ -3780,6 +4191,11 @@ class CentralFeatureRuntime:
                 and item not in selected_items
             ):
                 selected_items.append(item)
+
+        self._suppress_unselected_first_window(
+            call=call,
+            selected_items=selected_items,
+        )
 
         feedback = render_runtime_advisory(frame.text, limit=limit)
         if not feedback:

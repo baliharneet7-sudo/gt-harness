@@ -25,6 +25,7 @@ from gt_engine.preflight import (
     PreflightDecision,
     PreflightMode,
 )
+from gt_engine.repository_intelligence import RepositoryEvidence
 
 
 class _Environment:
@@ -1149,7 +1150,48 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
             submit,
         ]
     )
-    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    class IndexedAllFeatureAgent(MiniSweCentralAgent):
+        async def _start_repository_session(self, environment, instruction, *, source_revision):
+            return (
+                RepositoryEvidence(
+                    available=True,
+                    graph_revision="graph-r0",
+                    anchors=(
+                        {"path": "app.py", "line": 10, "symbol": "f"},
+                        {"path": "tests/test_app.py", "line": 20, "symbol": "test_f"},
+                    ),
+                    definitions=(
+                        {
+                            "path": "app.py",
+                            "line": 10,
+                            "symbol": "f",
+                            "semantics": "graph_definition",
+                        },
+                    ),
+                    references=(
+                        {
+                            "path": "tests/test_app.py",
+                            "line": 20,
+                            "symbol": "f",
+                            "semantics": "graph_call_reference",
+                        },
+                    ),
+                    callers=(
+                        {
+                            "caller_path": "tests/test_app.py",
+                            "caller_line": 20,
+                            "caller_symbol": "test_f",
+                            "target_path": "app.py",
+                            "target_symbol": "f",
+                            "semantics": "graph_recorded",
+                        },
+                    ),
+                    status="available",
+                ),
+                None,
+            )
+
+    agent = IndexedAllFeatureAgent(logs_dir=tmp_path, model_name="test")
     agent._model_factory = lambda: model
 
     await agent.run(
