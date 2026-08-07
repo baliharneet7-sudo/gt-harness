@@ -800,7 +800,9 @@ class MiniSweCentralAgent(BaseAgent):
             and self.runtime_mode == "treatment"
             and self.enable_task_start_advisory
         ):
-            pending_guidance = self._features.model_feedback(deferred=True, for_call=1)
+            pending_guidance = self._features.model_feedback(
+                deferred=True, for_call=1, history=messages
+            )
 
         try:
             while not terminal:
@@ -1782,7 +1784,9 @@ class MiniSweCentralAgent(BaseAgent):
                         break
 
                 if not terminal:
-                    feature_feedback = self._features.model_feedback(deferred=True)
+                    feature_feedback = self._features.model_feedback(
+                        deferred=True, history=messages
+                    )
                     if feature_feedback and self.runtime_mode == "treatment":
                         pending_guidance = feature_feedback
                         pending_prepared_after_call = calls

@@ -3262,7 +3262,11 @@ class CentralFeatureRuntime:
                 source_revision=source_rev,
                 reason="signature-shaped edit on changed path",
                 payload={
-                    "changed_paths": list(transition.changed_paths),
+                    # Signature evidence is source-bound. Workspace sensors
+                    # can report bytecode/cache writes in the same action; do
+                    # not let those derived paths enter the claim or provider
+                    # payload.
+                    "changed_paths": list(source_relevant),
                     "signature_edit": True,
                     "symbol": primary["symbol"],
                     "before_signature": primary["before_signature"],
@@ -4108,12 +4112,71 @@ class CentralFeatureRuntime:
             )
         return ""
 
+    @staticmethod
+    def _history_action_text(history: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+        """Return assistant-authored action/reasoning text for representation checks."""
+        rows: list[str] = []
+        for message in history:
+            if str(message.get("role") or "") != "assistant":
+                continue
+            parts = [str(message.get("content") or "")]
+            for action in (message.get("extra") or {}).get("actions") or ():
+                if isinstance(action, dict):
+                    parts.append(str(action.get("command") or action.get("cmd") or ""))
+            text = " ".join(part for part in parts if part).strip()
+            if text:
+                rows.append(text)
+        return tuple(rows)
+
+    @staticmethod
+    def _anchor_in_text(anchor: str, text: str) -> bool:
+        value = " ".join(str(anchor or "").replace("\\", "/").split()).strip()
+        if not value:
+            return False
+        haystack = " ".join(text.replace("\\", "/").split())
+        variants = {value, value.lstrip("./")}
+        if value.startswith("/app/"):
+            variants.add(value[5:])
+        return any(
+            candidate and candidate.casefold() in haystack.casefold()
+            for candidate in variants
+        )
+
+    @classmethod
+    def _receipt_represented_in_history(
+        cls, receipt: FeatureReceipt, history: Iterable[dict[str, Any]]
+    ) -> bool:
+        """Whether a selected grounded fact is already in model-authored history."""
+        texts = cls._history_action_text(history)
+        if not texts:
+            return False
+        payload = receipt.payload
+        if receipt.feature_id == "newfile_precedent":
+            anchors = [
+                *(payload.get("created_files") or ()),
+                payload.get("precedent_path") or "",
+            ]
+        elif receipt.feature_id == "signature_delta":
+            anchors = [
+                *(payload.get("changed_paths") or ()),
+                payload.get("symbol") or "",
+                payload.get("before_signature") or "",
+                payload.get("after_signature") or "",
+            ]
+        else:
+            return False
+        anchors = [str(anchor) for anchor in anchors if str(anchor).strip()]
+        return bool(anchors) and any(
+            all(cls._anchor_in_text(anchor, text) for anchor in anchors) for text in texts
+        )
+
     def model_feedback(
         self,
         *,
         limit: int = 320,
         deferred: bool = False,
         for_call: int | None = None,
+        history: Iterable[dict[str, Any]] = (),
     ) -> str:
         """Materialize one persistent claim for a current decision need.
 
@@ -4174,6 +4237,15 @@ class CentralFeatureRuntime:
             )
             if selected is not None:
                 selected_items.append(selected)
+        represented_items = [
+            item
+            for item in selected_items
+            if self._receipt_represented_in_history(item, history)
+        ]
+        for item in represented_items:
+            self._suppress_receipt_delivery(item, reason="represented_in_action_history")
+        if represented_items:
+            selected_items = [item for item in selected_items if item not in represented_items]
         if not selected_items:
             self._suppress_unselected_first_window(call=call)
             self._guidance_suppressed += 1

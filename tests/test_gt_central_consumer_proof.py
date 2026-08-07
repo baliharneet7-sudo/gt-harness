@@ -477,6 +477,107 @@ def test_signature_delta_uses_source_witness_for_non_sed_edits():
     assert row["payload"]["after_signature"] == "def f(x, y=0)"
 
 
+def test_signature_delta_payload_excludes_derived_artifact_paths():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Change the API", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="apply_patch",
+        output="Done!",
+        returncode=0,
+        transition=_transition(
+            1,
+            "apply_patch",
+            WR0,
+            SR1,
+            modified=("app.py", "__pycache__/app.cpython-313.pyc"),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={"app.py": "def f(x, y=0):\n    return x + y\n"},
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    row = _feature_rows(runtime.summary(), "signature_delta")[0]
+    payload = row["payload"]
+    assert payload["changed_paths"] == ["app.py"]
+    assert all(
+        "__pycache__" not in anchor
+        for anchor in row["payload"].values()
+        if isinstance(anchor, str)
+    )
+    claims = runtime.summary()["semantic_decisions"]["claims"]
+    assert all(".pyc" not in anchor for claim in claims for anchor in claim["anchors"])
+
+
+def test_newfile_precedent_is_suppressed_when_model_already_used_the_fact():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    command = "cat bottle.py > bottle_new.py  # precedent bottle.py"
+    runtime.observe_action(
+        action_id=1,
+        command=command,
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            command,
+            WR0,
+            SR1,
+            created=("bottle_new.py",),
+            before_contents={"bottle.py": "class Bottle:\n    pass\n"},
+            after_contents={
+                "bottle.py": "class Bottle:\n    pass\n",
+                "bottle_new.py": "class NewBottle:\n    pass\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    history = [
+        {"role": "assistant", "extra": {"actions": [{"command": command}]}, "content": ""}
+    ]
+    assert runtime.model_feedback(history=history, deferred=True) == ""
+    receipt = _feature_rows(runtime.summary(), "newfile_precedent")[0]
+    assert receipt["delivery_status"] == "suppressed"
+    assert receipt["delivery_reason"] == "represented_in_action_history"
+
+
+def test_signature_delta_is_suppressed_when_exact_edit_is_in_action_history():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Change the API", revision=WR0, source_revision=SR0)
+    command = "sed -i 's/def f(x)/def f(x, y=0)/' app.py"
+    runtime.observe_action(
+        action_id=1,
+        command=command,
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            command,
+            WR0,
+            SR1,
+            modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={"app.py": "def f(x, y=0):\n    return x + y\n"},
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    history = [
+        {"role": "assistant", "extra": {"actions": [{"command": command}]}, "content": ""}
+    ]
+    assert runtime.model_feedback(history=history, deferred=True) == ""
+    receipt = _feature_rows(runtime.summary(), "signature_delta")[0]
+    assert receipt["delivery_status"] == "suppressed"
+    assert receipt["delivery_reason"] == "represented_in_action_history"
+
+
 def test_signature_payload_coalesces_caller_and_patch_consumers():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Change f", revision=WR0, source_revision=SR0)
