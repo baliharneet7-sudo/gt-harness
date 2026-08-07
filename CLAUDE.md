@@ -340,3 +340,14 @@ It must not call the provider or change any artifact. The replay CLI now works
 both directly and as a module; both run forms and the comparator are in the
 release gate. Full details:
 `details_done/GT_PROVIDER_FREE_RUN_DIFF_GATE_20260806.md`.
+
+### GT-on smoke 31145623534 (2026-08-07)
+
+Run `31145623534` (`f03cb02`) matched the frozen baseline at 9/10 official
+and uncensored resolves, with no outer censor. It passes engine integrity but
+fails efficiency: the nine common solved tasks were +77,900 total tokens and
++55 API calls. All 330 produced effects were applied; 14/17 IDs fired
+naturally (three exact events absent); six grounded payloads were first-call
+timely with no late/predictive delivery; 456 request hashes and 8,125 facts
+were accounted. The 89-task run remains blocked. See
+`details_done/GT_SMOKE_31145623534_OUTCOME_AND_INTEGRITY_AUDIT_20260807.md`.

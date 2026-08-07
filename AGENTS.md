@@ -499,3 +499,25 @@ must never call a model or modify an artifact. Both direct and module forms of
 `central_replay` are required to work. This gate is in the provider-free and
 pre-smoke suites. See
 `details_done/GT_PROVIDER_FREE_RUN_DIFF_GATE_20260806.md`.
+
+## GT-on smoke 31145623534 (2026-08-07)
+
+Smoke `31145623534` on `f03cb02` is integrity-valid but efficiency-rejected.
+It matched the frozen GT-off outcome at 9/10 official and uncensored resolves
+with no outer Harbor exceptions. The former `schemelike-metacircular-eval`
+loss returned reward 1, although it reached the 100-step cap before a clean
+verifier success; it is uncensored, not a timeout salvage.
+
+All 330 produced effects were applied. Fourteen of 17 feature IDs fired
+naturally; `GT_SS_SUBMIT_RED`, `recovery`, and `submit_refusal` had no exact
+grounded events, with all paths still provider-free proven. Six grounded
+payloads reached their first eligible request (zero late/predictive), all 456
+provider requests and all 8,125 context facts were accounted, and no unique
+Mini-SWE reasoning was removed. Do not call this a 17-feature-fired smoke.
+
+Efficiency failed on the nine common solved tasks: GT-on used 20,422,063
+tokens and 416 API calls, versus GT-off's 20,344,163 and 361 (+77,900 tokens,
++55 calls). The all-ten aggregate is misleading because common-unsolved
+`gpt2-codegolf` happened to be cheaper. Do not start 89; first isolate the
+large LLM-batching and COBOL expansions with a component ablation. Full audit:
+`details_done/GT_SMOKE_31145623534_OUTCOME_AND_INTEGRITY_AUDIT_20260807.md`.
