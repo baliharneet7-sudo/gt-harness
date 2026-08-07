@@ -23,6 +23,7 @@ from gt_engine.central_controls import (
     FeatureEffect,
     consumer_spec_for,
 )
+from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.preflight import (
     ActionCycleReceipt,
     ActionDisposition,
@@ -32,6 +33,7 @@ from gt_engine.preflight import (
     PreflightMode,
     ProposedAction,
     adapt_proposed_action,
+    normalize_executable_invocation,
     pass_decision,
     shell_segments,
     shell_structure,
@@ -586,6 +588,14 @@ class ValidationStatus(StrEnum):
     FAIL = "fail"
 
 
+class ValidationAuthority(StrEnum):
+    NONE = "none"
+    CUSTOM_PROBE = "custom_probe"
+    STANDARD_RUNNER = "standard_runner"
+    DECLARED = "declared"
+    HOST_SYNTAX = "host_syntax"
+
+
 @dataclass(frozen=True, slots=True)
 class ValidationClassification:
     """Single immutable classification of one shell action's validation meaning.
@@ -611,6 +621,9 @@ class ValidationClassification:
     validator_segment_index: int | None = None
     attribution_reason: str = "not_executed"
     shell_connectors: tuple[str, ...] = ()
+    authority: ValidationAuthority = ValidationAuthority.NONE
+    executable: str | None = None
+    requested_timeout_sec: float | None = None
 
     def with_result(
         self,
@@ -691,49 +704,42 @@ def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
     return shell_segments(command)
 
 
-def _recognized_validation(words: tuple[str, ...]) -> bool:
+def _validation_authority(words: tuple[str, ...]) -> ValidationAuthority:
     """Recognize real validator invocations only from executable positions."""
-    if not words:
-        return False
-    index = 0
-    while index < len(words) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[index]):
-        index += 1
-    while index < len(words) and words[index] in {"env", "command", "timeout", "sudo"}:
-        wrapper = words[index]
-        index += 1
-        while index < len(words) and (words[index].startswith("-") or "=" in words[index]):
-            option = words[index]
-            index += 1
-            # These wrappers have a small set of detached option arguments.
-            # Consume them so their values cannot be mistaken for an executable.
-            if (
-                (wrapper == "timeout" and option in {"-k", "-s"})
-                or (wrapper == "env" and option in {"-u", "--unset"})
-                or (
-                    wrapper == "sudo" and option in {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u"}
-                )
-            ) and index < len(words):
-                index += 1
-        if wrapper == "timeout" and index < len(words):
-            # GNU/POSIX timeout syntax places a duration before the command.
-            index += 1
-    if index >= len(words):
-        return False
-    executable = words[index].rsplit("/", 1)[-1].lower()
-    args = words[index + 1 :]
+    invocation = normalize_executable_invocation(words)
+    if invocation.executable is None:
+        return ValidationAuthority.NONE
+    executable = invocation.executable.lower()
+    args = invocation.arguments
     if executable in {"pytest", "py.test", "ctest"}:
-        return True
+        return ValidationAuthority.STANDARD_RUNNER
     if executable in {"npm", "pnpm", "yarn", "mvn", "gradle", "cargo", "go"}:
-        return bool(args and args[0] == "test")
+        return (
+            ValidationAuthority.STANDARD_RUNNER
+            if args and args[0] == "test"
+            else ValidationAuthority.NONE
+        )
     if executable in {"python", "python3", "python3.12", "python3.11"}:
         if len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "unittest"}:
-            return True
+            return ValidationAuthority.STANDARD_RUNNER
         script_name = args[0].rsplit("/", 1)[-1] if args else ""
-        return bool(
+        return (
+            ValidationAuthority.CUSTOM_PROBE
+            if (
             script_name
             and re.fullmatch(r"(?:test|tests|verify)[A-Za-z0-9_.-]*\.py", script_name, re.I)
+            )
+            else ValidationAuthority.NONE
         )
-    return executable in {"unittest", "test"}
+    return (
+        ValidationAuthority.STANDARD_RUNNER
+        if executable in {"unittest", "test"}
+        else ValidationAuthority.NONE
+    )
+
+
+def _recognized_validation(words: tuple[str, ...]) -> bool:
+    return _validation_authority(words) is not ValidationAuthority.NONE
 
 
 def classify_validation_command(
@@ -743,8 +749,10 @@ def classify_validation_command(
     normalized = normalize_command(command)
     segments, connectors = shell_structure(command)
     checks = tuple(dict.fromkeys(normalize_command(item) for item in explicit_checks if item))
+    authorities = tuple(_validation_authority(segment) for segment in segments)
     recognized_indices = [
-        index for index, segment in enumerate(segments) if _recognized_validation(segment)
+        index for index, authority in enumerate(authorities)
+        if authority is not ValidationAuthority.NONE
     ]
     declared_check_id: str | None = None
     declared_segment_index: int | None = None
@@ -759,8 +767,18 @@ def classify_validation_command(
             check_segments = ()
         if len(check_segments) == 1:
             check_words = check_segments[0]
+            check_invocation = normalize_executable_invocation(check_words)
             for index, segment in enumerate(segments):
                 if tuple(segment) == tuple(check_words):
+                    declared_check_id = check
+                    declared_segment_index = index
+                    break
+                segment_invocation = normalize_executable_invocation(segment)
+                if (
+                    check_invocation.confidence == 1.0
+                    and segment_invocation.confidence == 1.0
+                    and check_invocation.words == segment_invocation.words
+                ):
                     declared_check_id = check
                     declared_segment_index = index
                     break
@@ -788,10 +806,22 @@ def classify_validation_command(
     )
     if grounded:
         command_class = "declared_validation"
+        authority = ValidationAuthority.DECLARED
     elif recognized:
         command_class = "recognized_validation"
+        authority = (
+            authorities[validator_segment_index]
+            if validator_segment_index is not None
+            else ValidationAuthority.NONE
+        )
     else:
         command_class = "exploration_or_unknown"
+        authority = ValidationAuthority.NONE
+    invocation = (
+        normalize_executable_invocation(segments[validator_segment_index])
+        if validator_segment_index is not None
+        else None
+    )
     return ValidationClassification(
         command_class=command_class,
         is_validation=grounded or recognized,
@@ -802,6 +832,11 @@ def classify_validation_command(
         declared_check_id=declared_check_id,
         validator_segment_index=validator_segment_index,
         shell_connectors=connectors,
+        authority=authority,
+        executable=invocation.executable if invocation is not None else None,
+        requested_timeout_sec=(
+            invocation.requested_timeout_sec if invocation is not None else None
+        ),
     )
 
 
@@ -1044,14 +1079,28 @@ class WorkspaceSensor:
         *,
         cwd: str,
         previous: WorkspaceSnapshot | None = None,
+        recorder: HostExecutionRecorder | None = None,
+        action_id: int = 0,
+        source_revision: str = "",
     ) -> WorkspaceSnapshot:
         started = time.monotonic()
         try:
-            result = await environment.exec(
-                _MANIFEST_COMMAND,
-                cwd=cwd,
-                env={},
-                timeout_sec=max(1, int(self.max_seconds + 0.999)),
+            kwargs = {
+                "cwd": cwd,
+                "env": {},
+                "timeout_sec": max(1, int(self.max_seconds + 0.999)),
+            }
+            result = (
+                await recorder.exec(
+                    environment,
+                    _MANIFEST_COMMAND,
+                    category=HostExecCategory.WORKSPACE_MANIFEST,
+                    action_id=action_id,
+                    source_revision=source_revision,
+                    **kwargs,
+                )
+                if recorder is not None
+                else await environment.exec(_MANIFEST_COMMAND, **kwargs)
             )
         except Exception as exc:  # task images and transports vary; never block
             return self._degraded(
@@ -1116,7 +1165,19 @@ class WorkspaceSensor:
         if changed:
             command = "sha256sum -- " + " ".join(shlex.quote(path) for path in changed)
             try:
-                hashes = await environment.exec(command, cwd=cwd, env={}, timeout_sec=10)
+                kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
+                hashes = (
+                    await recorder.exec(
+                        environment,
+                        command,
+                        category=HostExecCategory.WORKSPACE_HASH,
+                        action_id=action_id,
+                        source_revision=source_revision,
+                        **kwargs,
+                    )
+                    if recorder is not None
+                    else await environment.exec(command, **kwargs)
+                )
             except Exception as exc:  # hashing is evidence, never task authority
                 return replace(
                     snapshot,
@@ -1150,7 +1211,19 @@ class WorkspaceSensor:
                 + " ".join(shlex.quote(path) for path in capture_paths)
             )
             try:
-                captured = await environment.exec(command, cwd=cwd, env={}, timeout_sec=10)
+                kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
+                captured = (
+                    await recorder.exec(
+                        environment,
+                        command,
+                        category=HostExecCategory.WORKSPACE_CAPTURE,
+                        action_id=action_id,
+                        source_revision=source_revision,
+                        **kwargs,
+                    )
+                    if recorder is not None
+                    else await environment.exec(command, **kwargs)
+                )
                 encoded = json.loads(captured.stdout or "{}") if captured.return_code == 0 else {}
                 for path in capture_paths:
                     value = encoded.get(path)
@@ -2605,6 +2678,7 @@ class CentralFeatureRuntime:
                 "command_class": classification.command_class,
                 "is_validation": classification.is_validation,
                 "grounded": classification.grounded,
+                "validation_authority": classification.authority.value,
                 "declared_check_id": classification.declared_check_id,
                 "failure_kind": classification.failure_kind,
                 "result_code": classification.result_code,
@@ -2995,13 +3069,24 @@ class CentralFeatureRuntime:
                 action_id=action_id,
                 revision=revision,
                 source_revision=source_rev,
-                reason="failed_check_or_failure_output",
+                decision=(
+                    "DELIVERED"
+                    if classification.authority is ValidationAuthority.DECLARED
+                    else "PASS"
+                ),
+                reason=(
+                    "declared_check_failed"
+                    if classification.authority is ValidationAuthority.DECLARED
+                    else "observed_non_authoritative_failure"
+                ),
                 payload={
                     "check_failed": True,
                     "returncode": returncode,
                     "phase": check_phase,
                     "command": classification.normalized_command[:200],
                     "command_class": classification.command_class,
+                    "validation_authority": classification.authority.value,
+                    "declared_check_id": classification.declared_check_id,
                     "failure_kind": failure_kind,
                     "attribution": (
                         classification.declared_check_id or classification.command_class
@@ -3042,7 +3127,7 @@ class CentralFeatureRuntime:
                     action_id=action_id,
                     purpose="repeat_count_for_recovery_eligibility",
                 )
-            blocker = classification.declared_check_id or classification.normalized_command[:200]
+            blocker = classification.declared_check_id
             blockers = [blocker] if blocker else []
             if blockers and bounded_diagnostic and source_rev not in self._submit_risk_revisions:
                 self._submit_risk_revisions.add(source_rev)
@@ -3063,6 +3148,7 @@ class CentralFeatureRuntime:
                         "owner_feature": "submit_refusal",
                         "submission_risk": True,
                         "blockers": blockers,
+                        "declared_check_id": classification.declared_check_id,
                         "failure_fingerprint": failure_fingerprint,
                         "message": "Current source revision retains a failing required check.",
                     },
@@ -3079,6 +3165,7 @@ class CentralFeatureRuntime:
                         "refused": False,
                         "fresh_failure": True,
                         "blockers": blockers,
+                        "declared_check_id": classification.declared_check_id,
                         "message": (
                             "The current source revision still has a failing required check: "
                             + ", ".join(blockers[:2])
@@ -3091,7 +3178,11 @@ class CentralFeatureRuntime:
                     kind="submit_risk_latched",
                     detail=f"blockers={len(blockers)}",
                 )
-            if count >= 2:
+            if (
+                count >= 2
+                and classification.authority
+                in {ValidationAuthority.DECLARED, ValidationAuthority.STANDARD_RUNNER}
+            ):
                 self._emit(
                     "recovery",
                     boundary="test_result",
@@ -3939,6 +4030,19 @@ class CentralFeatureRuntime:
                     else ["no_lifecycle_evidence_observed"]
                 ),
             }
+        required_claims_without_declared_id = sum(
+            1
+            for item in self.receipts
+            if item.feature_id in {"submit_refusal", "GT_SS_SUBMIT_RED"}
+            and item.boundary == "test_result"
+            and not item.payload.get("declared_check_id")
+        )
+        redundant_provider_payloads = sum(
+            1
+            for item in self.receipts
+            if item.delivery_status == "delivered"
+            and item.delivery_reason == "represented_in_action_history"
+        )
         return {
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
@@ -3974,6 +4078,8 @@ class CentralFeatureRuntime:
             "batch_interrupts": list(self._batch_interrupts),
             "source_epoch": self._source_epoch,
             "validation_log": list(self._validation_log),
+            "required_check_claims_without_declared_id": required_claims_without_declared_id,
+            "redundant_provider_payloads": redundant_provider_payloads,
             "declared_check_states": dict(self._declared_check_states),
             "semantic_decisions": self._decisions.summary(),
             "structural_evidence": dict(self._structural_evidence),

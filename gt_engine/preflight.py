@@ -79,6 +79,28 @@ class ActionTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutableInvocation:
+    """One wrapper-normalized executable invocation derived from shell words.
+
+    This is mechanical shell structure, not inferred model intent.  Dynamic
+    timeout expressions and malformed wrappers abstain so callers can PASS.
+    """
+
+    executable: str | None
+    arguments: tuple[str, ...] = ()
+    environment_assignments: tuple[tuple[str, str], ...] = ()
+    wrappers: tuple[str, ...] = ()
+    requested_timeout_sec: float | None = None
+    confidence: float = 0.0
+
+    @property
+    def words(self) -> tuple[str, ...]:
+        if self.executable is None:
+            return ()
+        return (self.executable, *self.arguments)
+
+
+@dataclass(frozen=True, slots=True)
 class ReadSpan:
     """A mechanically observed source range requested by one shell segment."""
 
@@ -121,6 +143,7 @@ class ProposedAction:
     batch_index: int
     batch_size: int
     parser_confidence: float
+    requested_timeout_sec: float | None = None
     operations: tuple[ObservedOperation, ...] = ()
     target_must_be_absent: bool = False
     shell_segments: tuple[tuple[str, ...], ...] = ()
@@ -352,19 +375,123 @@ def shell_structure(
     return _shell_parts(command)
 
 
+_ENV_ASSIGNMENT = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.S)
+_TIMEOUT_DURATION = re.compile(r"(?P<value>(?:\d+(?:\.\d*)?|\.\d+))(?P<unit>[smhd]?)", re.I)
+
+
+def _literal_timeout_seconds(value: str) -> float | None:
+    match = _TIMEOUT_DURATION.fullmatch(value.strip())
+    if match is None:
+        return None
+    amount = float(match.group("value"))
+    multiplier = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}[
+        match.group("unit").lower()
+    ]
+    seconds = amount * multiplier
+    return seconds if seconds > 0 else None
+
+
+def normalize_executable_invocation(words: tuple[str, ...]) -> ExecutableInvocation:
+    """Unwrap literal shell launchers without guessing through dynamic syntax."""
+
+    if not words:
+        return ExecutableInvocation(None)
+    index = 0
+    assignments: list[tuple[str, str]] = []
+    wrappers: list[str] = []
+    requested_timeout: float | None = None
+
+    def consume_assignments() -> None:
+        nonlocal index
+        while index < len(words):
+            match = _ENV_ASSIGNMENT.fullmatch(words[index])
+            if match is None:
+                break
+            assignments.append((match.group(1), match.group(2)))
+            index += 1
+
+    consume_assignments()
+    while index < len(words):
+        wrapper = words[index].rsplit("/", 1)[-1].lower()
+        if wrapper not in {"env", "command", "timeout", "sudo"}:
+            break
+        wrappers.append(wrapper)
+        index += 1
+        if wrapper == "env":
+            while index < len(words) and words[index].startswith("-"):
+                option = words[index]
+                index += 1
+                if option in {"-u", "--unset"}:
+                    if index >= len(words):
+                        return ExecutableInvocation(None, confidence=0.0)
+                    index += 1
+            consume_assignments()
+            continue
+        if wrapper == "command":
+            while index < len(words) and words[index].startswith("-"):
+                index += 1
+            continue
+        if wrapper == "sudo":
+            while index < len(words) and words[index].startswith("-"):
+                option = words[index]
+                index += 1
+                if option in {"-C", "-D", "-g", "-h", "-p", "-r", "-t", "-u"}:
+                    if index >= len(words):
+                        return ExecutableInvocation(None, confidence=0.0)
+                    index += 1
+            consume_assignments()
+            continue
+        while index < len(words) and words[index].startswith("-"):
+            option = words[index]
+            index += 1
+            if option in {"-k", "--kill-after", "-s", "--signal"}:
+                if index >= len(words):
+                    return ExecutableInvocation(None, confidence=0.0)
+                index += 1
+        if index >= len(words):
+            return ExecutableInvocation(None, confidence=0.0)
+        requested_timeout = _literal_timeout_seconds(words[index])
+        if requested_timeout is None:
+            return ExecutableInvocation(None, confidence=0.0)
+        index += 1
+        consume_assignments()
+
+    if index >= len(words):
+        return ExecutableInvocation(None, confidence=0.0)
+    executable = words[index].rsplit("/", 1)[-1]
+    if not executable or any(character in executable for character in "$`(){}"):
+        return ExecutableInvocation(None, confidence=0.0)
+    return ExecutableInvocation(
+        executable=executable,
+        arguments=tuple(words[index + 1 :]),
+        environment_assignments=tuple(assignments),
+        wrappers=tuple(wrappers),
+        requested_timeout_sec=requested_timeout,
+        confidence=1.0,
+    )
+
+
 def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
     signals: list[str] = []
     for words in segments:
         if not words:
             continue
-        head = words[0].rsplit("/", 1)[-1].lower()
+        invocation = normalize_executable_invocation(words)
+        semantic_words = invocation.words
+        if not semantic_words:
+            continue
+        head = semantic_words[0].lower()
         if head in _MUTATING_EXECUTABLES:
             signals.append(f"executable:{head}")
-        if head in {"sed", "perl"} and any(flag in words for flag in ("-i", "-pi")):
+        if head in {"sed", "perl"} and any(flag in semantic_words for flag in ("-i", "-pi")):
             signals.append(f"in_place:{head}")
-        if head == "git" and len(words) > 1 and words[1] in _MUTATING_GIT_SUBCOMMANDS:
-            signals.append(f"git:{words[1]}")
-        if any(token in {">", ">>"} or token.startswith(">>") for token in words):
+        if (
+            head == "git"
+            and len(semantic_words) > 1
+            and semantic_words[1] in _MUTATING_GIT_SUBCOMMANDS
+        ):
+            signals.append(f"git:{semantic_words[1]}")
+        if any(token in {">", ">>"} or token.startswith(">>") for token in semantic_words):
             signals.append("shell_redirection")
     return tuple(dict.fromkeys(signals))
 
@@ -559,9 +686,23 @@ def _classify_operations(
             or connectors[segment_index - 1] != "|"
         ):
             pending_pipeline_read_indices.clear()
-        head = words[0].rsplit("/", 1)[-1].lower()
-        if head == "cd" and len(words) > 1:
-            current_cwd = _resolve_segment_path(words[1], current_cwd)
+        invocation = normalize_executable_invocation(words)
+        semantic_words = invocation.words
+        head = (invocation.executable or "").lower()
+        if not semantic_words:
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    "",
+                    ActionOperation.OTHER,
+                    confidence=0.0,
+                    parser_evidence=("wrapper_normalization_abstained", f"segment:{segment_index}"),
+                    segment_role=SegmentRole.UNKNOWN,
+                )
+            )
+            continue
+        if head == "cd" and len(semantic_words) > 1:
+            current_cwd = _resolve_segment_path(semantic_words[1], current_cwd)
             operations.append(
                 ObservedOperation(
                     segment_index,
@@ -574,8 +715,8 @@ def _classify_operations(
             )
             continue
 
-        operands = _segment_operand_paths(words, current_cwd)
-        redirections = _redirection_targets(words, current_cwd)
+        operands = _segment_operand_paths(semantic_words, current_cwd)
+        redirections = _redirection_targets(semantic_words, current_cwd)
         base_targets = tuple(ActionTarget(path) for path in operands)
         evidence = (f"head:{head or 'unknown'}", f"segment:{segment_index}")
 
@@ -612,19 +753,21 @@ def _classify_operations(
             operation, confidence = ActionOperation.SUBMIT, 1.0
         elif head in _READ_EXECUTABLES:
             operation, confidence = ActionOperation.READ, 0.98
-        elif head == "sed" and "-n" in words and "-i" not in words:
+        elif head == "sed" and "-n" in semantic_words and "-i" not in semantic_words:
             operation, confidence = ActionOperation.READ, 0.95
         elif head == "awk" and not redirections:
             operation, confidence = ActionOperation.READ, 0.85
         elif head in _SEARCH_EXECUTABLES:
             operation, confidence = ActionOperation.SEARCH, 0.95
         elif head in _VALIDATE_EXECUTABLES or (
-            head in {"go", "cargo"} and len(words) > 1 and words[1] == "test"
+            head in {"go", "cargo"}
+            and len(semantic_words) > 1
+            and semantic_words[1] == "test"
         ):
             operation, confidence = ActionOperation.VALIDATE, 0.95
-        elif _segment_is_validation(words, validation):
+        elif _segment_is_validation(semantic_words, validation):
             operation, confidence = ActionOperation.VALIDATE, 1.0
-        elif head in {"sed", "perl"} and any(flag in words for flag in ("-i", "-pi")):
+        elif head in {"sed", "perl"} and any(flag in semantic_words for flag in ("-i", "-pi")):
             operation, confidence = ActionOperation.EDIT, 0.9
         elif head in {
             "apply_patch",
@@ -637,7 +780,11 @@ def _classify_operations(
             "truncate",
         }:
             operation, confidence = ActionOperation.EDIT, 0.95
-        elif head == "git" and len(words) > 1 and words[1] in _MUTATING_GIT_SUBCOMMANDS:
+        elif (
+            head == "git"
+            and len(semantic_words) > 1
+            and semantic_words[1] in _MUTATING_GIT_SUBCOMMANDS
+        ):
             operation, confidence = ActionOperation.EDIT, 0.9
         elif head in {"touch", "mkdir"}:
             operation, confidence = ActionOperation.CREATE, 0.95
@@ -652,7 +799,7 @@ def _classify_operations(
 
         read_spans: tuple[ReadSpan, ...] = ()
         if operation == ActionOperation.READ and operands:
-            start, end = _sed_range(words) if head == "sed" else (None, None)
+            start, end = _sed_range(semantic_words) if head == "sed" else (None, None)
             read_spans = tuple(
                 ReadSpan(
                     path=path,
@@ -685,7 +832,7 @@ def _classify_operations(
         if operation == ActionOperation.READ and read_spans:
             pending_pipeline_read_indices.append(current_index)
         elif head == "sed" and operation == ActionOperation.READ and not operands:
-            start, end = _sed_range(words)
+            start, end = _sed_range(semantic_words)
             if start is not None and pending_pipeline_read_indices:
                 for read_index in pending_pipeline_read_indices:
                     previous = operations[read_index]
@@ -738,8 +885,13 @@ def adapt_proposed_action(
     )
     stripped = command.strip()
     segments, connectors = _shell_parts(stripped)
-    words = list(segments[0]) if len(segments) == 1 else []
-    head = words[0].rsplit("/", 1)[-1] if words else ""
+    invocation = (
+        normalize_executable_invocation(segments[0])
+        if len(segments) == 1
+        else ExecutableInvocation(None)
+    )
+    words = list(invocation.words)
+    head = invocation.executable or ""
     mutation_signals = _mutation_signals(segments)
     operations = _classify_operations(
         command,
@@ -790,6 +942,14 @@ def adapt_proposed_action(
         batch_index=max(0, int(batch_index)),
         batch_size=max(1, int(batch_size)),
         parser_confidence=confidence,
+        requested_timeout_sec=next(
+            (
+                item.requested_timeout_sec
+                for item in (normalize_executable_invocation(segment) for segment in segments)
+                if item.requested_timeout_sec is not None
+            ),
+            None,
+        ),
         operations=operations,
         target_must_be_absent=(
             operation == ActionOperation.CREATE

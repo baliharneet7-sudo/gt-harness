@@ -84,10 +84,17 @@ DIAGNOSTIC_METRICS = (
     "preflight_typed_targets",
     "validation_attributed_results",
     "validation_unattributed_intents",
+    "required_check_claims_without_declared_id",
+    "redundant_provider_payloads",
     "completion_predicate_checks",
     "completion_certificate_evaluations",
     "completion_probe_execs",
     "completion_cache_hits",
+    "effective_task_actions",
+    "actual_environment_execs",
+    "controller_environment_execs",
+    "controller_cached_reads",
+    "sensor_environment_execs",
     "auto_submit_attempts",
     "auto_submits",
     "progress_transitions",
@@ -509,13 +516,21 @@ def extract_trajectory(
             result["check_actions"] = sum(
                 1 for row in validation_log if row.get("is_validation")
             )
-            result["declared_validation_actions"] = sum(
-                1 for row in validation_log if row.get("command_class") == "declared_validation"
-            )
             result["recognized_validation_actions"] = sum(
                 1
                 for row in validation_log
                 if row.get("command_class") == "recognized_validation"
+            )
+            result["declared_validation_actions"] = sum(
+                1 for row in validation_log if row.get("validation_authority") == "declared"
+            )
+            result["standard_runner_validation_actions"] = sum(
+                1
+                for row in validation_log
+                if row.get("validation_authority") == "standard_runner"
+            )
+            result["custom_probe_validation_actions"] = sum(
+                1 for row in validation_log if row.get("validation_authority") == "custom_probe"
             )
         result.update(_feature_funnel(receipt, action_rows))
         result.update(_feature_applicability_metrics(feature_summary))
@@ -525,6 +540,12 @@ def extract_trajectory(
                 "guidance_events": int(feature_summary.get("guidance_events") or 0),
                 "guidance_chars": int(feature_summary.get("guidance_chars") or 0),
                 "guidance_candidates": int(feature_summary.get("guidance_candidates") or 0),
+                "required_check_claims_without_declared_id": int(
+                    feature_summary.get("required_check_claims_without_declared_id") or 0
+                ),
+                "redundant_provider_payloads": int(
+                    feature_summary.get("redundant_provider_payloads") or 0
+                ),
                 "feature_receipts": sum(
                     int(value) for value in (feature_summary.get("produced_counts") or {}).values()
                 ),
@@ -604,6 +625,11 @@ def extract_trajectory(
             "progress_transitions",
             "task_progress_changes",
             "effective_actions",
+            "effective_task_actions",
+            "actual_environment_execs",
+            "controller_environment_execs",
+            "controller_cached_reads",
+            "sensor_environment_execs",
         ):
             result[key] = receipt_metrics.get(key, result.get(key, 0))
         result["total_gt_context_chars_added"] = (
@@ -616,12 +642,13 @@ def extract_trajectory(
 def compare_arms(
     baseline: dict[str, dict[str, Any]], treatment: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    """Apply solve-preservation, censoring, and per-task Pareto gates."""
+    """Apply outcome preservation, aggregate efficiency, and outlier bounds."""
     tasks = sorted(set(baseline) & set(treatment))
     rows: dict[str, Any] = {}
     solve_regressions: list[str] = []
     censored_treatment: list[str] = []
     pareto_failures: list[str] = []
+    per_task_bound_failures: list[str] = []
     comparable_solved: list[str] = []
     outcomes_complete = True
     aggregate_values: dict[str, list[float]] = {
@@ -636,8 +663,13 @@ def compare_arms(
             solve_regressions.append(task)
         if after.get("censored"):
             censored_treatment.append(task)
+        def resource_value(row: dict[str, Any], metric: str) -> float:
+            if metric == "effective_actions" and row.get(metric) is None:
+                return float(row.get("actions", 0) or 0)
+            return float(row.get(metric, 0) or 0)
+
         deltas = {
-            metric: float(after.get(metric, 0) or 0) - float(before.get(metric, 0) or 0)
+            metric: resource_value(after, metric) - resource_value(before, metric)
             for metric in PRIMARY_RESOURCES
         }
         diagnostic_deltas: dict[str, float | None] = {}
@@ -653,6 +685,7 @@ def compare_arms(
         for metric, delta in deltas.items():
             aggregate_values[metric].append(delta)
         pareto = None
+        exceeded_bounds: list[str] = []
         if b_solved is True and a_solved is True:
             comparable_solved.append(task)
             pareto = all(delta <= 0 for delta in deltas.values()) and any(
@@ -660,6 +693,21 @@ def compare_arms(
             )
             if not pareto:
                 pareto_failures.append(task)
+            for metric in ("api_calls", "actions", "effective_actions"):
+                baseline_value = resource_value(before, metric)
+                if deltas[metric] > max(3.0, baseline_value * 0.20):
+                    exceeded_bounds.append(metric)
+            baseline_cost = resource_value(before, "normalized_cost_usd")
+            if deltas["normalized_cost_usd"] > max(0.01, baseline_cost * 0.25):
+                exceeded_bounds.append("normalized_cost_usd")
+            before_wall = before.get("agent_wall_time_seconds")
+            after_wall = after.get("agent_wall_time_seconds")
+            if before_wall is not None and after_wall is not None:
+                wall_delta = float(after_wall) - float(before_wall)
+                if wall_delta > max(60.0, float(before_wall) * 0.20):
+                    exceeded_bounds.append("agent_wall_time_seconds")
+            if len(exceeded_bounds) >= 2:
+                per_task_bound_failures.append(task)
         rows[task] = {
             "baseline_official_solved": before.get(
                 "official_solved", before.get("solved")
@@ -676,11 +724,39 @@ def compare_arms(
             "deltas": deltas,
             "diagnostic_deltas": diagnostic_deltas,
             "strict_pareto": pareto,
+            "exceeded_resource_bounds": exceeded_bounds,
         }
+    aggregate_deltas = {
+        metric: sum(values) if len(values) == len(tasks) else None
+        for metric, values in aggregate_values.items()
+    }
+    aggregate_gate_failures = [
+        metric
+        for metric in (
+            "total_tokens",
+            "api_calls",
+            "effective_actions",
+            "normalized_cost_usd",
+        )
+        if aggregate_deltas.get(metric) is None or aggregate_deltas[metric] >= 0
+    ]
+    if (
+        aggregate_deltas.get("actions") is None
+        or aggregate_deltas["actions"] > 0
+    ):
+        aggregate_gate_failures.append("actions")
+    wall_delta = aggregate_deltas.get("agent_wall_time_seconds")
+    if wall_delta is not None and wall_delta > 0:
+        aggregate_gate_failures.append("agent_wall_time_seconds")
     gate_passed = (
         bool(tasks)
         and outcomes_complete
-        and not (solve_regressions or censored_treatment or pareto_failures)
+        and not (
+            solve_regressions
+            or censored_treatment
+            or per_task_bound_failures
+            or aggregate_gate_failures
+        )
         and bool(comparable_solved)
     )
     return {
@@ -717,10 +793,9 @@ def compare_arms(
         "solve_regressions": solve_regressions,
         "censored_treatment": censored_treatment,
         "pareto_failures": pareto_failures,
-        "aggregate_deltas": {
-            metric: sum(values) if len(values) == len(tasks) else None
-            for metric, values in aggregate_values.items()
-        },
+        "per_task_bound_failures": per_task_bound_failures,
+        "aggregate_gate_failures": aggregate_gate_failures,
+        "aggregate_deltas": aggregate_deltas,
         "gate_passed": gate_passed,
     }
 
@@ -737,6 +812,10 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
         + (", ".join(comparison["censored_treatment"]) or "none"),
         "Strict Pareto failures: "
         + (", ".join(comparison["pareto_failures"]) or "none"),
+        "Per-task bound failures: "
+        + (", ".join(comparison["per_task_bound_failures"]) or "none"),
+        "Aggregate gate failures: "
+        + (", ".join(comparison["aggregate_gate_failures"]) or "none"),
         "",
         "Delta is treatment minus baseline; positive resource deltas are regressions.",
         "",

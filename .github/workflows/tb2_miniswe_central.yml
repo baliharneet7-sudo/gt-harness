@@ -313,6 +313,7 @@ jobs:
                 --ak integration_mode=active
                 --ak preflight_mode=shadow
                 --ak enable_context_compaction=true
+                --ak enable_adaptive_validation_timeout=true
                 --ak enable_completion_controller=true
                 --ak enable_progress_control=true
                 --ak execution_budget_sec="$EXECUTION_BUDGET"
@@ -445,6 +446,11 @@ jobs:
                       "total_tokens": metrics.get("total_tokens"),
                       "api_calls": metrics.get("api_calls"),
                       "actions": metrics.get("actions"),
+                      "effective_task_actions": metrics.get("effective_task_actions"),
+                      "actual_environment_execs": metrics.get("actual_environment_execs"),
+                      "controller_environment_execs": metrics.get("controller_environment_execs"),
+                      "controller_cached_reads": metrics.get("controller_cached_reads"),
+                      "sensor_environment_execs": metrics.get("sensor_environment_execs"),
                       "assistant_steps": metrics.get("assistant_steps"),
                       "trajectory_messages": metrics.get("trajectory_messages"),
                       "guidance_events": metrics.get("guidance_events"),
@@ -492,6 +498,7 @@ jobs:
                       task=task_name,
                       reward=reward,
                       receipt_path=receipt_paths[0] if receipt_paths else None,
+                      harbor_result=got[0] if got else None,
                   )
 
           graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
@@ -529,14 +536,16 @@ jobs:
 
           out += [
               "", "## Central runtime metrics", "",
-              "| task | total tokens | uncached input | calls | actions | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | censored |",
-              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+              "| task | total tokens | uncached input | calls | model actions | effective task execs | controller execs | cached reads | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | censored |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
           ]
           for row in sorted(receipt_metrics, key=lambda x: x["task"]):
               out.append(
                   f"| {row['task']} | {row['total_tokens'] or '-'} | "
                   f"{row['uncached_input_tokens'] or '-'} | {row['api_calls'] or '-'} | "
-                  f"{row['actions'] or '-'} | {row['check_actions'] or 0} | "
+                  f"{row['actions'] or '-'} | {row['effective_task_actions'] or '-'} | "
+                  f"{row['controller_environment_execs'] or 0} | "
+                  f"{row['controller_cached_reads'] or 0} | {row['check_actions'] or 0} | "
                   f"{row['workspace_change_actions'] or 0} | {row['failed_actions'] or 0} | "
                   f"{row['repeated_commands'] or 0} | {row['guidance_events'] or 0}/"
                   f"{row['guidance_candidates'] or 0}/{row['guidance_suppressed'] or 0} | "
@@ -554,7 +563,7 @@ jobs:
               "receipt_metrics": receipt_metrics,
           }, indent=2), encoding="utf-8")
           Path("deep_metrics_${{ inputs.arm }}.json").write_text(json.dumps({
-              "schema": "central-deep-metrics-v1",
+              "schema": "central-deep-metrics-v2",
               "arm": "${{ inputs.arm }}",
               "run_id": "${{ github.run_id }}",
               "tasks": deep_tasks,

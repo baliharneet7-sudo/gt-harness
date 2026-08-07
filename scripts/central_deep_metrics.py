@@ -130,7 +130,7 @@ def main() -> int:
                 receipt_path=receipt_path,
                 harbor_result=harbor_result,
             )
-        output = {"schema": "central-deep-metrics-v1", "arm": args.name, "tasks": tasks}
+        output = {"schema": "central-deep-metrics-v2", "arm": args.name, "tasks": tasks}
         Path(args.output).write_text(json.dumps(output, indent=2), encoding="utf-8")
         return 0 if tasks else 2
 
@@ -147,7 +147,7 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "deep_delta.json").write_text(
-        json.dumps({"schema": "central-deep-delta-v1", **comparisons}, indent=2),
+        json.dumps({"schema": "central-deep-delta-v2", **comparisons}, indent=2),
         encoding="utf-8",
     )
     markdown = "\n".join(

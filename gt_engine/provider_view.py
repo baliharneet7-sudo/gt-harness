@@ -12,7 +12,7 @@ import copy
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -145,6 +145,179 @@ class RequestBudget:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CompactionEpochReceipt:
+    epoch: int
+    trigger_tokens: int
+    original_prefix_hash: str
+    stable_prefix_hash: str
+    tool_chars_elided: int
+    duplicate_turns_removed: int
+    reasoning_messages_removed: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ProviderViewSession:
+    """Maintain one immutable compacted prefix and append new turns to it."""
+
+    epoch: int = 0
+    checkpoint_messages: list[dict[str, Any]] = field(default_factory=list)
+    source_message_count: int = 0
+    source_prefix_hash: str = ""
+    stable_prefix_hash: str = ""
+    source_revision: str = ""
+    receipts: list[CompactionEpochReceipt] = field(default_factory=list)
+
+    @staticmethod
+    def _hash(messages: list[dict[str, Any]]) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                messages,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8", "surrogatepass")
+        ).hexdigest()
+
+    def reset(self) -> None:
+        self.checkpoint_messages.clear()
+        self.source_message_count = 0
+        self.source_prefix_hash = ""
+        self.stable_prefix_hash = ""
+        self.source_revision = ""
+
+    def project(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        active_state: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
+        """Project the durable history without rewriting an established prefix."""
+
+        if not self.checkpoint_messages:
+            return build_provider_view(messages, active_state=active_state, transform=False)
+        if (
+            len(messages) < self.source_message_count
+            or self._hash(messages[: self.source_message_count]) != self.source_prefix_hash
+        ):
+            self.reset()
+            return build_provider_view(messages, active_state=active_state, transform=False)
+
+        tail, preparation = _prepare_provider_history(messages[self.source_message_count :])
+        view = [*copy.deepcopy(self.checkpoint_messages), *tail]
+        facts, duplicate_fact_count = _context_facts(active_state)
+        state_text, selected_ids, compiled_rows = _compile_fact_frame(facts, view)
+        candidate_view, state_frame_message_index = _attach_state_frame(view, state_text)
+        state_frame_over_budget = bool(
+            state_frame_message_index is not None
+            and _chars(candidate_view) >= _chars(messages)
+        )
+        if state_frame_over_budget:
+            state_frame_message_index = None
+        else:
+            view = candidate_view
+        accounting = tuple(
+            {
+                **row,
+                "disposition": (
+                    "selected_state_frame"
+                    if row["disposition"] == "selected_state_frame"
+                    and state_frame_message_index is not None
+                    else "state_frame_budget"
+                    if row["disposition"] == "selected_state_frame"
+                    and state_frame_over_budget
+                    else "no_safe_delivery_surface"
+                    if row["disposition"] == "selected_state_frame"
+                    else row["disposition"]
+                ),
+                "provider_message_indices": (
+                    [state_frame_message_index]
+                    if row["disposition"] == "selected_state_frame"
+                    and state_frame_message_index is not None
+                    else []
+                    if row["disposition"] == "selected_state_frame"
+                    else row["provider_message_indices"]
+                ),
+            }
+            for row in compiled_rows
+        )
+        return view, _provider_metrics(
+            compacted=False,
+            raw_input_chars=_chars(messages),
+            input_chars=_chars(messages),
+            view=view,
+            preserved_recent_messages=len(view),
+            state_text=state_text if state_frame_message_index is not None else "",
+            duplicate_turns_removed=0,
+            duplicate_fact_count=duplicate_fact_count,
+            selected_fact_ids=(selected_ids if state_frame_message_index is not None else ()),
+            accounting=accounting,
+            assistant_reasoning_input_chars=_assistant_reasoning_chars(messages),
+            exact_duplicate_chars_removed=preparation["duplicate_removed"],
+            bounded_observation_count=preparation["bounded_count"],
+            bounded_observation_chars_removed=preparation["bounded_removed"],
+            duplicate_turns_represented=preparation["duplicate_count"],
+            state_frame_message_index=state_frame_message_index,
+        )
+
+    def compact(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        active_state: dict[str, Any],
+        target_chars: int,
+        keep_recent_turns: int,
+        trigger_tokens: int,
+    ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
+        """Start one cache-breaking epoch, then freeze its provider prefix."""
+
+        projected, _projected_metrics = self.project(messages, active_state=active_state)
+        original_hash = self._hash(projected)
+        compacted, metrics = build_provider_view(
+            projected,
+            active_state=active_state,
+            trigger_chars=1,
+            target_chars=target_chars,
+            keep_recent_turns=keep_recent_turns,
+            transform=True,
+            attach_state_frame=False,
+        )
+        self.epoch += 1
+        self.checkpoint_messages = copy.deepcopy(compacted)
+        self.source_message_count = len(messages)
+        self.source_prefix_hash = self._hash(messages)
+        self.stable_prefix_hash = self._hash(compacted)
+        self.source_revision = str(active_state.get("source_revision") or "")
+        self.receipts.append(
+            CompactionEpochReceipt(
+                epoch=self.epoch,
+                trigger_tokens=max(0, int(trigger_tokens)),
+                original_prefix_hash=original_hash,
+                stable_prefix_hash=self.stable_prefix_hash,
+                tool_chars_elided=metrics.elided_chars,
+                duplicate_turns_removed=metrics.duplicate_turns_removed,
+                reasoning_messages_removed=(
+                    0 if metrics.unique_assistant_reasoning_chars_removed == 0 else 1
+                ),
+            )
+        )
+        projected, projected_metrics = self.project(messages, active_state=active_state)
+        return projected, replace(
+            projected_metrics,
+            compacted=True,
+            duplicate_turns_removed=metrics.duplicate_turns_removed,
+            exact_duplicate_chars_removed=metrics.exact_duplicate_chars_removed,
+            bounded_observation_count=metrics.bounded_observation_count,
+            bounded_observation_chars_removed=metrics.bounded_observation_chars_removed,
+            duplicate_turns_represented=metrics.duplicate_turns_represented,
+            old_tool_results_cleared=metrics.old_tool_results_cleared,
+        )
+
+
 def _chars(messages: list[dict[str, Any]]) -> int:
     return sum(
         len(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)) for item in messages
@@ -191,6 +364,20 @@ def provider_request_budget(
         remaining_tokens=hard - effective,
         counter_source=source,
     )
+
+
+def provider_compaction_required(
+    budget: RequestBudget,
+    *,
+    reserve_tokens: int = 131_072,
+) -> bool:
+    """Return whether measured provider headroom has entered the reserve."""
+
+    effective_reserve = min(
+        max(1, int(reserve_tokens)),
+        max(1, budget.hard_prompt_limit // 4),
+    )
+    return budget.remaining_tokens < effective_reserve
 
 
 _FACT_KIND_BY_STATE_KEY = {
@@ -1019,6 +1206,7 @@ def build_provider_view(
     target_chars: int = 60_000,
     keep_recent_turns: int = 2,
     transform: bool = True,
+    attach_state_frame: bool = True,
 ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
     """Return a bounded provider view without mutating the audit trajectory.
 
@@ -1081,8 +1269,17 @@ def build_provider_view(
         )
     state_text, selected_fact_ids, compiled_rows = _compile_fact_frame(facts, view)
     state_frame_message_index: int | None = None
-    if cleared and state_text:
-        view, state_frame_message_index = _attach_state_frame(view, state_text)
+    state_frame_over_budget = False
+    if cleared and state_text and attach_state_frame:
+        candidate_view, state_frame_message_index = _attach_state_frame(view, state_text)
+        state_frame_over_budget = bool(
+            state_frame_message_index is not None
+            and _chars(candidate_view) >= input_chars
+        )
+        if state_frame_over_budget:
+            state_frame_message_index = None
+        else:
+            view = candidate_view
     if state_frame_message_index is not None:
         compiled_rows = [
             {
@@ -1103,6 +1300,16 @@ def build_provider_view(
                     and state_frame_message_index is not None
                 )
                 else "no_safe_delivery_surface"
+                if (
+                    row["disposition"] == "selected_state_frame"
+                    and cleared
+                    and attach_state_frame
+                    and not state_frame_over_budget
+                )
+                else "state_frame_budget"
+                if row["disposition"] == "selected_state_frame"
+                and state_frame_over_budget
+                else "no_compaction_controller_only"
                 if row["disposition"] == "selected_state_frame" and cleared
                 else "no_compaction_controller_only"
                 if row["disposition"] == "selected_state_frame"

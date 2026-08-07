@@ -9,8 +9,11 @@ from gt_engine.central_runtime import (
 )
 from gt_engine.preflight import adapt_proposed_action
 from gt_engine.provider_view import (
+    ProviderViewSession,
+    RequestBudget,
     build_provider_view,
     dedupe_provider_view,
+    provider_compaction_required,
     provider_request_budget,
 )
 
@@ -32,6 +35,99 @@ def _history(*turns) -> list[dict]:
     for index, (command, output) in enumerate(turns):
         messages.extend(_turn(command, output, index=index))
     return messages
+
+
+def test_provider_view_session_is_byte_identical_before_budget_compaction():
+    messages = _history(("cat app.py", "x" * 30_000))
+    session = ProviderViewSession()
+
+    view, metrics = session.project(messages, active_state={"source_revision": "s1"})
+
+    assert view == messages
+    assert metrics.compacted is False
+    assert session.epoch == 0
+
+
+def test_provider_view_session_reuses_an_immutable_compacted_prefix():
+    messages = _history(
+        ("cat old.py", "A" * 30_000),
+        ("cat current.py", "B" * 30_000),
+        ("cat newest.py", "C" * 30_000),
+    )
+    session = ProviderViewSession()
+
+    compacted, metrics = session.compact(
+        messages,
+        active_state={"source_revision": "s1"},
+        target_chars=45_000,
+        keep_recent_turns=1,
+        trigger_tokens=900_000,
+    )
+    stable_checkpoint = [dict(item) for item in session.checkpoint_messages]
+    appended = [*messages, *_turn("cat later.py", "D" * 100, index=4)]
+
+    projected, projected_metrics = session.project(
+        appended,
+        active_state={"source_revision": "s2", "changed_paths": ["later.py"]},
+    )
+
+    assert session.epoch == 1
+    assert session.receipts[0].reasoning_messages_removed == 0
+    assert session.checkpoint_messages == stable_checkpoint
+    assert projected_metrics.compacted is False
+    assert projected[-1]["content"] == "D" * 100
+
+
+def test_provider_view_session_refreshes_current_frame_without_mutating_checkpoint():
+    messages = _history(
+        ("cat old.py", "A" * 30_000),
+        ("cat current.py", "B" * 30_000),
+        ("cat newest.py", "C" * 30_000),
+    )
+    session = ProviderViewSession()
+    first_state = {
+        "source_revision": "s1",
+        "unresolved_failure": {
+            "command": "pytest -q",
+            "diagnostic": "FAILED first_contract",
+            "source_revision": "s1",
+        },
+    }
+
+    first, first_metrics = session.compact(
+        messages,
+        active_state=first_state,
+        target_chars=45_000,
+        keep_recent_turns=1,
+        trigger_tokens=900_000,
+    )
+    checkpoint = [dict(item) for item in session.checkpoint_messages]
+    second_state = {
+        "source_revision": "s2",
+        "unresolved_failure": {
+            "command": "pytest -q",
+            "diagnostic": "FAILED second_contract",
+            "source_revision": "s2",
+        },
+    }
+    second, second_metrics = session.project(messages, active_state=second_state)
+
+    assert first_metrics.selected_fact_count == 1
+    assert "FAILED first_contract" in str(first[first_metrics.state_frame_message_index])
+    assert second_metrics.selected_fact_count == 1
+    assert "FAILED second_contract" in str(second[second_metrics.state_frame_message_index])
+    assert "FAILED first_contract" not in "\n".join(
+        str(item.get("content") or "") for item in second
+    )
+    assert session.checkpoint_messages == checkpoint
+
+
+def test_provider_compaction_trigger_is_based_on_measured_headroom():
+    safe = RequestBudget(1_048_576, 700_000, 700_000, 700_000, 943_718, 243_718, "test")
+    risky = RequestBudget(1_048_576, 850_000, 850_000, 850_000, 943_718, 93_718, "test")
+
+    assert provider_compaction_required(safe, reserve_tokens=131_072) is False
+    assert provider_compaction_required(risky, reserve_tokens=131_072) is True
 
 
 def test_dedupe_drops_identical_duplicate_turns_and_keeps_latest():

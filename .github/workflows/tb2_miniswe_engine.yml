@@ -332,6 +332,7 @@ jobs:
                 --ak integration_mode=active
                 --ak preflight_mode=shadow
                 --ak enable_context_compaction=true
+                --ak enable_adaptive_validation_timeout=true
                 --ak enable_completion_controller=true
                 --ak enable_progress_control=true
                 --ak execution_budget_sec="$EXECUTION_BUDGET"

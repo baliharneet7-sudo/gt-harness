@@ -19,7 +19,45 @@ from gt_engine.preflight import (
     PreflightMode,
     SegmentRole,
     adapt_proposed_action,
+    normalize_executable_invocation,
 )
+
+
+def test_proposal_adapter_unwraps_environment_and_timeout_before_classification():
+    proposal = adapt_proposed_action(
+        {"command": "PYTHONUNBUFFERED=1 timeout 90s python3 -m pytest -q"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert proposal.operation is ActionOperation.VALIDATE
+    assert proposal.requested_timeout_sec == 90.0
+    assert proposal.operations[0].executable == "python3"
+
+
+def test_dynamic_timeout_abstains_without_guessing():
+    invocation = normalize_executable_invocation(("timeout", "$SECONDS", "pytest", "-q"))
+
+    assert invocation.executable is None
+    assert invocation.requested_timeout_sec is None
+    assert invocation.confidence == 0.0
+
+
+def test_wrapped_go_test_uses_normalized_executable_arguments():
+    proposal = adapt_proposed_action(
+        {"command": "env CI=1 timeout 45s go test ./..."},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert proposal.operation is ActionOperation.VALIDATE
+    assert proposal.requested_timeout_sec == 45.0
 
 
 @pytest.mark.parametrize(

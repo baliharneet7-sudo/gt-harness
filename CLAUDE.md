@@ -364,3 +364,43 @@ Shell metrics separate context, output-only, opaque, and genuinely unknown
 segments. The workflow remains ACTIVE + SHADOW, the provider-free census and
 readiness audit pass, and the 89-task run remains blocked pending archived
 replay and an authorized matched smoke.
+
+## Outcome-preserving efficiency boundary (2026-08-07)
+
+Validation recognition is not task-contract authority. Every validation action
+has a typed authority (`NONE`, `CUSTOM_PROBE`, `STANDARD_RUNNER`, `DECLARED`,
+or `HOST_SYNTAX`) derived from the shared normalized executable invocation.
+Only a `DECLARED` check may create model-visible required-check failure text or
+submission debt. Standard-runner failures may update private recovery state;
+custom probes remain private. Every required-check receipt must name its
+`declared_check_id`, and `required_check_claims_without_declared_id` must be
+zero.
+
+Completion is complete-only: a `PARTIAL` plan executes zero private predicates
+and cannot produce a certificate. Adaptive action timeout is active-only and
+may extend the historical 30-second timeout solely for a high-confidence,
+terminal-foreground, literal-timeout `DECLARED` or `STANDARD_RUNNER` command.
+It is capped at 120 seconds, 20% of remaining task time, and the deadline
+reserve. Ambiguity and dynamic shell expressions keep the default timeout.
+
+Compaction is based on the measured provider-prepared request, not raw history
+size. Preserve the exact request while at least 131,072 tokens of reserve
+remain (reserve is also capped at 25% of the hard prompt limit). Once required,
+create one immutable compacted-checkpoint epoch and append later turns. Refresh
+the bounded current-state frame only on a provider-view copy of the latest safe
+tool observation; never mutate the checkpoint or freeze stale state into it.
+Receipt every epoch and never remove distinct assistant reasoning.
+
+All task-environment executions pass through `HostExecutionRecorder`, including
+model actions, sensor manifest/hash/capture calls, syntax and completion probes,
+and auto-submit. `effective_task_actions` is the actual execution count minus
+host system-information calls; cache hits are separate. Never substitute model
+action count for total task work. Deep metrics use schema v2.
+
+Archived replay of run `31190135547` suppresses four non-authoritative visible
+failure receipts on two actions, removes 28 partial-plan probe executions while
+retaining five probes for the complete write-compressor plan, and projects zero
+compaction epochs because reconstructed raw final provider requests retain at
+least 211,100 tokens of headroom after a conservative advisory allowance. This
+is provider-free policy proof, not a live efficiency claim. See
+`details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`.

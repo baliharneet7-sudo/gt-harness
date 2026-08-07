@@ -233,6 +233,97 @@ def test_compare_arms_reports_deep_behavior_context_and_timing_deltas():
     assert "late payloads" in markdown
 
 
+def test_outcome_first_gate_allows_small_per_task_variance_only_when_aggregate_wins():
+    baseline = {
+        task: {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "effective_actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+            "agent_wall_time_seconds": 100,
+        }
+        for task in ("a", "b")
+    }
+    treatment = {
+        "a": {
+            **baseline["a"],
+            "total_tokens": 105,
+            "api_calls": 11,
+            "actions": 11,
+            "effective_actions": 11,
+            "normalized_cost_usd": 1.01,
+        },
+        "b": {
+            **baseline["b"],
+            "total_tokens": 70,
+            "api_calls": 6,
+            "actions": 6,
+            "effective_actions": 6,
+            "normalized_cost_usd": 0.70,
+        },
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert comparison["pareto_failures"] == ["a"]
+    assert comparison["per_task_bound_failures"] == []
+    assert comparison["aggregate_gate_failures"] == []
+    assert comparison["gate_passed"] is True
+
+
+def test_outcome_first_gate_rejects_two_large_per_task_resource_regressions():
+    baseline = {
+        "a": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "effective_actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+        },
+        "b": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 1000,
+            "api_calls": 100,
+            "actions": 100,
+            "effective_actions": 100,
+            "assistant_steps": 100,
+            "normalized_cost_usd": 10.0,
+        },
+    }
+    treatment = {
+        "a": {
+            **baseline["a"],
+            "total_tokens": 150,
+            "api_calls": 15,
+            "actions": 15,
+            "effective_actions": 15,
+            "normalized_cost_usd": 1.40,
+        },
+        "b": {
+            **baseline["b"],
+            "total_tokens": 700,
+            "api_calls": 70,
+            "actions": 70,
+            "effective_actions": 70,
+            "normalized_cost_usd": 7.0,
+        },
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert comparison["aggregate_gate_failures"] == []
+    assert comparison["per_task_bound_failures"] == ["a"]
+    assert comparison["gate_passed"] is False
+
+
 def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     trajectory = tmp_path / "task_trajectory.json"
     trajectory.write_text(
@@ -328,6 +419,8 @@ def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
             {
                 "features": {
                     "produced_counts": {"syntax_result": 1},
+                    "required_check_claims_without_declared_id": 0,
+                    "redundant_provider_payloads": 0,
                     "feature_applicability": {
                         "syntax_result": {
                             "evaluations": 1,
@@ -400,5 +493,7 @@ def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
     assert metrics["feature_ids_trigger_absent"] == ["recovery"]
     assert metrics["feature_missed_triggers"] == 0
     assert metrics["false_feature_fires"] == 0
+    assert metrics["required_check_claims_without_declared_id"] == 0
+    assert metrics["redundant_provider_payloads"] == 0
     assert "guidance_l1_delivered" not in metrics
     assert "guidance_l3_acted" not in metrics

@@ -20,10 +20,12 @@ from eval.gt_central_agent import (
     _message_context_chars,
     _stable_provider_prefix,
 )
+from gt_engine.central_runtime import classify_validation_command
 from gt_engine.preflight import (
     ActionDisposition,
     PreflightDecision,
     PreflightMode,
+    adapt_proposed_action,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence
 
@@ -200,6 +202,96 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     assert delivery["delivered_before_call"] == 1
     assert delivery["one_step_late"] is False
     assert delivery["not_predictive"] is True
+
+
+@pytest.mark.asyncio
+async def test_partial_completion_plan_executes_no_private_predicates(tmp_path):
+    model = _ScriptedModel(
+        [
+            "touch /app/task_file/output_data/plan_b1.jsonl",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    environment = _Environment()
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Produce /app/task_file/output_data/plan_b1.jsonl and satisfy all scheduling constraints.",
+        environment,
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["completion_plan_status"] == "partial"
+    assert receipt["metrics"]["completion_probe_execs"] == 0
+    assert not any(command.startswith("test -s ") for command, _env in environment.commands)
+
+
+@pytest.mark.asyncio
+async def test_custom_probe_failure_is_not_reframed_as_model_guidance(tmp_path):
+    class ProbeEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "python3 /tmp/test_single.py":
+                return ExecResult(
+                    stdout="UnexpectedAlertPresentException: exploit alert fired\n",
+                    return_code=1,
+                )
+            return ExecResult(return_code=0)
+
+    model = _ScriptedModel(
+        ["python3 /tmp/test_single.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run("Demonstrate the browser exploit behavior.", ProbeEnvironment(), AgentContext())
+
+    assert len(model.observed_history) == 2
+    second_request = "\n".join(model.observed_history[1])
+    assert "UnexpectedAlertPresentException" in second_request
+    assert "Validation failed for the current source revision" not in second_request
+    assert "failing required check" not in second_request
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["payload_deliveries"] == 0
+    assert receipt["features"]["required_check_claims_without_declared_id"] == 0
+
+
+@pytest.mark.asyncio
+async def test_context_transform_stays_byte_identical_with_safe_provider_headroom(tmp_path):
+    class LargeReadEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "cat huge.log":
+                return ExecResult(stdout="Z" * 30_000, return_code=0)
+            return ExecResult(return_code=0)
+
+    model = _ScriptedModel(["cat huge.log", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_compaction=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect huge.log and finish.", LargeReadEnvironment(), AgentContext())
+
+    assert "Z" * 30_000 in "\n".join(model.observed_history[1])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["context_compactions"] == 0
+    assert all(
+        not row["provider_compaction_epoch_started"]
+        for row in receipt["model_call_contexts"]
+    )
 
 
 @pytest.mark.asyncio
@@ -816,12 +908,69 @@ def test_shadow_and_treatment_are_both_central_gt_on_arms(tmp_path):
     assert shadow.name() == "miniswe-central-shadow"
 
 
-def test_context_compaction_defaults_to_seventy_percent_then_fifty_percent(tmp_path):
+def test_context_compaction_uses_provider_headroom_reserve_not_only_char_threshold(tmp_path):
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
 
     assert agent.context_capacity_chars == 400_000
     assert agent.context_trigger_chars == 280_000
     assert agent.context_target_chars == 200_000
+    assert agent.provider_context_reserve_tokens == 131_072
+
+
+def test_explicit_foreground_validation_may_receive_bounded_timeout_extension(tmp_path):
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_adaptive_validation_timeout=True,
+    )
+    classification = classify_validation_command(
+        "timeout 90s python3 -m pytest -q"
+    )
+    proposal = adapt_proposed_action(
+        {"command": classification.command},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classification,
+    )
+
+    timeout, reason = agent._select_action_timeout(
+        proposal,
+        classification,
+        remaining_agent_time_sec=500.0,
+    )
+
+    assert timeout == 90.0
+    assert reason == "literal_validation_timeout"
+
+
+def test_timeout_extension_abstains_for_custom_or_dynamic_probes(tmp_path):
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_adaptive_validation_timeout=True,
+    )
+    classification = classify_validation_command("timeout $WAIT python3 /tmp/test_one.py")
+    proposal = adapt_proposed_action(
+        {"command": classification.command},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classification,
+    )
+
+    timeout, reason = agent._select_action_timeout(
+        proposal,
+        classification,
+        remaining_agent_time_sec=500.0,
+    )
+
+    assert timeout == 30.0
+    assert reason == "default_command_timeout"
 
 
 def test_context_accounting_includes_reasoning_and_tool_calls():
@@ -882,6 +1031,7 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--ak integration_mode=active" in workflow
     assert "--ak preflight_mode=shadow" in workflow
     assert "--ak enable_context_compaction=true" in workflow
+    assert "--ak enable_adaptive_validation_timeout=true" in workflow
     assert "--ak enable_completion_controller=true" in workflow
     assert "--ak enable_progress_control=true" in workflow
     assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
@@ -889,6 +1039,7 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--agent-timeout-multiplier 1.0" in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
+    assert "harbor_result=got[0] if got else None" in workflow
 
 
 @pytest.mark.asyncio
@@ -1460,7 +1611,15 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
     assert certificate["auto_submit_eligible"] is True
     assert receipt["completion"]["auto_submit_count"] == 1
     assert receipt["metrics"]["auto_submits"] == 1
-    assert receipt["metrics"]["effective_actions"] == 4
+    assert receipt["metrics"]["actions"] == 1
+    assert receipt["metrics"]["actual_environment_execs"] == 8
+    assert receipt["metrics"]["effective_actions"] == 7
+    assert receipt["metrics"]["sensor_environment_execs"] == 3
+    assert receipt["metrics"]["controller_environment_execs"] == 7
+    assert receipt["metrics"]["effective_actions_schema"] == "actual-task-environment-execs-v2"
+    assert receipt["metrics"]["host_exec_category_counts"]["model_action"] == 1
+    assert receipt["metrics"]["host_exec_category_counts"]["completion_probe"] == 2
+    assert receipt["metrics"]["host_exec_category_counts"]["auto_submit"] == 1
     gt_certificate = next(
         row
         for row in receipt["features"]["receipts"]

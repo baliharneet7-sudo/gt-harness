@@ -5,6 +5,9 @@ This script does not replay the language model and makes no outcome claim. It
 proves that archived task text and provider history now cross the repaired
 task-resource and context-budget boundaries deterministically.
 """
+
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
@@ -24,7 +27,11 @@ if str(ROOT) not in sys.path:
 from eval.gt_central_agent import MiniSweCentralAgent, _provider_request_receipt
 from gt_engine.central_runtime import task_deliverable_paths
 from gt_engine.completion import CompletionStatus, compile_completion_plan
-from gt_engine.provider_view import build_provider_view, provider_request_budget
+from gt_engine.provider_view import (
+    ProviderViewSession,
+    provider_compaction_required,
+    provider_request_budget,
+)
 from gt_engine.task_contract import extract_task_resources
 
 
@@ -111,28 +118,42 @@ def _compressor_witness(
     hard_ratio: float,
 ) -> dict[str, Any]:
     messages = _messages(_trajectory(root, "write-compressor"))
-    view, metrics = build_provider_view(
-        messages,
-        active_state={},
-        trigger_chars=280_000,
-        target_chars=200_000,
-        keep_recent_turns=2,
-        transform=True,
-    )
+    session = ProviderViewSession()
     with tempfile.TemporaryDirectory() as directory:
         model = MiniSweCentralAgent(
             logs_dir=Path(directory), model_name=model_name
         )._build_model()
+        view, metrics = session.project(messages, active_state={})
         provider_messages, _, _, provider_chars = _provider_request_receipt(model, view)
-    budget = provider_request_budget(
-        provider_messages,
-        model_name=model_name,
-        context_limit_tokens=context_limit_tokens,
-        hard_ratio=hard_ratio,
-    )
+        budget = provider_request_budget(
+            provider_messages,
+            model_name=model_name,
+            context_limit_tokens=context_limit_tokens,
+            hard_ratio=hard_ratio,
+        )
+        compaction_required = provider_compaction_required(budget)
+        if compaction_required:
+            view, metrics = session.compact(
+                messages,
+                active_state={},
+                target_chars=200_000,
+                keep_recent_turns=2,
+                trigger_tokens=budget.effective_tokens,
+            )
+            provider_messages, _, _, provider_chars = _provider_request_receipt(model, view)
+            budget = provider_request_budget(
+                provider_messages,
+                model_name=model_name,
+                context_limit_tokens=context_limit_tokens,
+                hard_ratio=hard_ratio,
+            )
     if metrics.unique_assistant_reasoning_chars_removed:
         raise RuntimeError("provider replay removed assistant reasoning")
-    if metrics.bounded_observation_count < 1 and metrics.old_tool_results_cleared < 1:
+    if (
+        compaction_required
+        and metrics.bounded_observation_count < 1
+        and metrics.old_tool_results_cleared < 1
+    ):
         raise RuntimeError(
             "archived provider history was neither bounded nor old-tool compacted"
         )
@@ -142,6 +163,8 @@ def _compressor_witness(
         "raw_history_chars": metrics.raw_input_chars,
         "provider_view_chars": metrics.output_chars,
         "provider_prepared_chars": provider_chars,
+        "compaction_required": compaction_required,
+        "compaction_epochs": len(session.receipts),
         "bounded_observations": metrics.bounded_observation_count,
         "old_tool_results_cleared": metrics.old_tool_results_cleared,
         "bounded_observation_chars_removed": (

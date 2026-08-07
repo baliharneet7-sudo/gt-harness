@@ -26,6 +26,7 @@ from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from eval.gt_central_agent import GTIntegrationMode, MiniSweCentralAgent
 from gt_engine.central_runtime import CentralFeatureRuntime, ValidationClassification
+from gt_engine.host_execution import HostExecutionRecorder
 from gt_engine.preflight import PreflightMode
 from scripts.central_feature_census import census as central_feature_census
 
@@ -116,6 +117,15 @@ def audit() -> dict[str, bool]:
         "paid_deterministic_compaction_enabled": all(
             "--ak enable_context_compaction=true" in item for item in workflows
         ) and "tests/test_provider_view.py" in provider_free_workflow,
+        "paid_adaptive_validation_timeout_is_explicit": all(
+            "--ak enable_adaptive_validation_timeout=true" in item
+            for item in workflows
+        ),
+        "provider_free_gate_covers_execution_accounting": (
+            "tests/test_gt_host_execution.py" in provider_free_workflow
+            and "gt_engine/host_execution.py" in provider_free_workflow
+            and inspect.isclass(HostExecutionRecorder)
+        ),
         "context_compiler_precedes_model_query": (
             0
             <= run_source.find("record_context_compiler_call(")
@@ -132,10 +142,18 @@ def audit() -> dict[str, bool]:
             and "classification.status is ValidationStatus.PASS" in observation_source
             and "classification.status is ValidationStatus.FAIL" in observation_source
         ),
+        "validation_authority_is_explicit": (
+            "authority: ValidationAuthority" in validation_source
+            and "CUSTOM_PROBE"
+            in inspect.getsource(sys.modules[ValidationClassification.__module__])
+        ),
         "typed_proposal_precedes_environment_exec": (
             0
             <= run_source.find("adapt_proposed_action(")
-            < run_source.find("await environment.exec(")
+            < run_source.find("self._host_executions.exec(")
+        ),
+        "workflow_deep_metrics_receive_harbor_result": (
+            "harbor_result=got[0] if got else None" in workflow
         ),
         "task_exec_env_is_empty": "env={}," in source,
         "treatment_workflow_central": (
@@ -175,6 +193,8 @@ def audit() -> dict[str, bool]:
             and "test_over_budget_next_request_does_not_confirm_pending_guidance"
             in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
             and "test_compaction_never_removes_distinct_assistant_reasoning"
+            in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
+            and "test_provider_view_session_reuses_an_immutable_compacted_prefix"
             in (ROOT / "scripts/central_pre_smoke_gate.py").read_text(encoding="utf-8")
             and "tests/test_gt_progress.py" in verification_workflow
         ),

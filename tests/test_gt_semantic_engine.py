@@ -209,7 +209,7 @@ def test_provider_view_compacts_only_tool_bodies_and_accounts_private_state():
     failure_fact = next(
         row for row in metrics.fact_accounting if row["state_key"] == "latest_failure"
     )
-    assert failure_fact["disposition"] == "no_compaction_controller_only"
+    assert failure_fact["disposition"] == "state_frame_budget"
     assert [item["content"] for item in view if item["role"] == "assistant"] == [
         item["content"] for item in messages if item["role"] == "assistant"
     ]

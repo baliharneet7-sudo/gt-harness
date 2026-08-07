@@ -44,6 +44,8 @@ from gt_engine.central_runtime import (
     ChangeOrigin,
     EvidenceLedger,
     InterventionDecision,
+    ValidationAuthority,
+    ValidationClassification,
     WorkspaceSensor,
     classify_change,
     classify_validation_command,
@@ -64,17 +66,24 @@ from gt_engine.completion import (
     compile_completion_plan,
 )
 from gt_engine.deep_metrics import normalized_token_cost
+from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.preflight import (
     PREFLIGHT_FEATURE_PLACEMENT,
     ActionDisposition,
     ActionOperation,
     PreflightMode,
+    ProposedAction,
     SegmentRole,
     adapt_proposed_action,
     pass_decision,
 )
 from gt_engine.progress import ProgressLedger
-from gt_engine.provider_view import build_provider_view, provider_request_budget
+from gt_engine.provider_view import (
+    ProviderViewSession,
+    build_provider_view,
+    provider_compaction_required,
+    provider_request_budget,
+)
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 
 
@@ -241,12 +250,16 @@ class MiniSweCentralAgent(BaseAgent):
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
         completion_check_timeout_sec: float = 10.0,
+        enable_adaptive_validation_timeout: bool = False,
+        max_validation_timeout_sec: float = 120.0,
+        validation_timeout_budget_ratio: float = 0.20,
         enable_progress_control: bool = True,
         context_capacity_chars: int = 400_000,
         context_trigger_chars: int | None = None,
         context_target_chars: int | None = None,
         provider_context_limit_tokens: int = 1_048_576,
         provider_context_hard_ratio: float = 0.90,
+        provider_context_reserve_tokens: int = 131_072,
         integration_mode: str | GTIntegrationMode | None = None,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
@@ -282,10 +295,12 @@ class MiniSweCentralAgent(BaseAgent):
             enable_context_compaction = False
             enable_completion_controller = False
             enable_progress_control = False
+            enable_adaptive_validation_timeout = False
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
             enable_context_compaction = False
             enable_completion_controller = False
+            enable_adaptive_validation_timeout = False
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
@@ -295,6 +310,15 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_completion_controller = enable_completion_controller
         self.completion_check_timeout_sec = max(
             0.05, float(completion_check_timeout_sec)
+        )
+        self.enable_adaptive_validation_timeout = bool(
+            enable_adaptive_validation_timeout
+        )
+        self.max_validation_timeout_sec = max(
+            float(self.command_timeout_sec), float(max_validation_timeout_sec)
+        )
+        self.validation_timeout_budget_ratio = min(
+            1.0, max(0.01, float(validation_timeout_budget_ratio))
         )
         self.enable_progress_control = enable_progress_control
         self.context_capacity_chars = max(10_000, int(context_capacity_chars))
@@ -319,6 +343,9 @@ class MiniSweCentralAgent(BaseAgent):
         self.provider_context_limit_tokens = max(1, int(provider_context_limit_tokens))
         self.provider_context_hard_ratio = min(
             0.99, max(0.50, float(provider_context_hard_ratio))
+        )
+        self.provider_context_reserve_tokens = max(
+            1, int(provider_context_reserve_tokens)
         )
         parsed_preflight_mode = PreflightMode.parse(preflight_mode)
         if enable_preflight is not None:
@@ -352,6 +379,7 @@ class MiniSweCentralAgent(BaseAgent):
         self._completion_cache: dict[tuple[str, str], PredicateObservation] = {}
         self._completion_cache_hits = 0
         self._completion_probe_execs = 0
+        self._host_executions = HostExecutionRecorder()
 
     @staticmethod
     def name() -> str:
@@ -382,8 +410,10 @@ class MiniSweCentralAgent(BaseAgent):
 
     async def _system_information(self, environment: BaseEnvironment) -> dict[str, str]:
         try:
-            result = await environment.exec(
+            result = await self._host_executions.exec(
+                environment,
                 "uname -s; uname -r; uname -v; uname -m",
+                category=HostExecCategory.SYSTEM_INFORMATION,
                 cwd=self.cwd,
                 env={},
                 timeout_sec=5,
@@ -440,6 +470,52 @@ class MiniSweCentralAgent(BaseAgent):
     def _render(template: str, variables: dict[str, Any]) -> str:
         return Template(template, undefined=StrictUndefined).render(**variables)
 
+    def _select_action_timeout(
+        self,
+        proposed: ProposedAction,
+        classification: ValidationClassification,
+        *,
+        remaining_agent_time_sec: float | None,
+    ) -> tuple[float, str]:
+        """Select a bounded host timeout from mechanically parsed validation intent."""
+
+        selected = float(self.command_timeout_sec)
+        reason = "default_command_timeout"
+        validator_is_terminal = (
+            classification.validator_segment_index is not None
+            and classification.validator_segment_index
+            == len(proposed.shell_segments) - 1
+            and not (
+                len(proposed.shell_connectors) > classification.validator_segment_index
+                and "&" in proposed.shell_connectors[classification.validator_segment_index]
+            )
+        )
+        requested = proposed.requested_timeout_sec
+        if (
+            self.enable_adaptive_validation_timeout
+            and proposed.operation is ActionOperation.VALIDATE
+            and proposed.parser_confidence >= 0.95
+            and classification.authority
+            in {ValidationAuthority.DECLARED, ValidationAuthority.STANDARD_RUNNER}
+            and validator_is_terminal
+            and requested is not None
+            and requested > selected
+        ):
+            available_cap = self.max_validation_timeout_sec
+            if remaining_agent_time_sec is not None:
+                available_cap = min(
+                    available_cap,
+                    max(
+                        selected,
+                        remaining_agent_time_sec * self.validation_timeout_budget_ratio,
+                    ),
+                )
+            selected = max(selected, min(float(requested), available_cap))
+            reason = "literal_validation_timeout"
+        if remaining_agent_time_sec is not None:
+            selected = min(selected, max(0.05, remaining_agent_time_sec))
+        return selected, reason
+
     async def _run_lint(
         self,
         environment: BaseEnvironment,
@@ -450,8 +526,12 @@ class MiniSweCentralAgent(BaseAgent):
     ) -> str:
         for path, command in lint_commands(changed_paths):
             try:
-                result = await environment.exec(
+                result = await self._host_executions.exec(
+                    environment,
                     command,
+                    category=HostExecCategory.SYNTAX_PROBE,
+                    action_id=action_id,
+                    source_revision=source_revision,
                     cwd=self.cwd,
                     env={},
                     timeout_sec=10,
@@ -500,6 +580,7 @@ class MiniSweCentralAgent(BaseAgent):
         plan: Any,
         *,
         workspace_revision: str,
+        source_revision: str,
         snapshot: Any | None = None,
         action_id: int,
         timeout_sec: float,
@@ -537,14 +618,24 @@ class MiniSweCentralAgent(BaseAgent):
             cached = self._completion_cache.get(cache_key)
             if cached is not None:
                 self._completion_cache_hits += 1
+                self._host_executions.record_cache_hit(
+                    category=HostExecCategory.COMPLETION_PROBE,
+                    command=predicate.command,
+                    action_id=action_id,
+                    source_revision=source_revision,
+                )
                 observations.append(
                     replace(cached, workspace_revision=workspace_revision)
                 )
                 continue
             try:
                 self._completion_probe_execs += 1
-                result = await environment.exec(
+                result = await self._host_executions.exec(
+                    environment,
                     predicate.command,
+                    category=HostExecCategory.COMPLETION_PROBE,
+                    action_id=action_id,
+                    source_revision=source_revision,
                     cwd=self.cwd,
                     env={},
                     timeout_sec=max(0.05, min(self.completion_check_timeout_sec, timeout_sec)),
@@ -691,6 +782,7 @@ class MiniSweCentralAgent(BaseAgent):
         context: AgentContext,
     ) -> None:
         started = time.monotonic()
+        self._host_executions = HostExecutionRecorder()
         effective_budget = self.execution_budget_sec
         if self.model_loop_timeout_sec is not None:
             legacy_budget = float(self.model_loop_timeout_sec)
@@ -721,7 +813,11 @@ class MiniSweCentralAgent(BaseAgent):
         ]
         explicit_checks = explicit_check_commands(instruction)
         task_deliverables = task_deliverable_paths(instruction)
-        snapshot = await self._sensor.scan(environment, cwd=self.cwd)
+        snapshot = await self._sensor.scan(
+            environment,
+            cwd=self.cwd,
+            recorder=self._host_executions,
+        )
         source_revision = source_revision_of(snapshot, task_deliverables)
         self._features.begin_task(
             instruction,
@@ -793,7 +889,9 @@ class MiniSweCentralAgent(BaseAgent):
         context_chars_elided = 0
         pending_reconsideration_cycle = ""
         deadline_reserve_exits = 0
+        action_timeout_decisions: list[dict[str, Any]] = []
         previous_provider_messages: list[dict[str, Any]] | None = None
+        provider_view_session = ProviderViewSession()
 
         if (
             repository_evidence.available
@@ -865,13 +963,9 @@ class MiniSweCentralAgent(BaseAgent):
                     },
                 }
                 if self.enable_context_compaction:
-                    query_messages, provider_view_metrics = build_provider_view(
+                    query_messages, provider_view_metrics = provider_view_session.project(
                         messages,
                         active_state=active_state,
-                        trigger_chars=self.context_trigger_chars,
-                        target_chars=self.context_target_chars,
-                        keep_recent_turns=2,
-                        transform=True,
                     )
                 else:
                     query_messages, provider_view_metrics = build_provider_view(
@@ -882,9 +976,6 @@ class MiniSweCentralAgent(BaseAgent):
                         keep_recent_turns=2,
                         transform=False,
                     )
-                if provider_view_metrics.compacted:
-                    context_compactions += 1
-                    context_chars_elided += provider_view_metrics.elided_chars
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
@@ -909,6 +1000,51 @@ class MiniSweCentralAgent(BaseAgent):
                     context_limit_tokens=self.provider_context_limit_tokens,
                     hard_ratio=self.provider_context_hard_ratio,
                 )
+                effective_reserve = min(
+                    self.provider_context_reserve_tokens,
+                    max(1, request_budget.hard_prompt_limit // 4),
+                )
+                compaction_epoch_started = False
+                if (
+                    self.enable_context_compaction
+                    and provider_compaction_required(
+                        request_budget,
+                        reserve_tokens=self.provider_context_reserve_tokens,
+                    )
+                ):
+                    query_messages, provider_view_metrics = provider_view_session.compact(
+                        messages,
+                        active_state=active_state,
+                        target_chars=self.context_target_chars,
+                        keep_recent_turns=2,
+                        trigger_tokens=request_budget.effective_tokens,
+                    )
+                    runtime_enrichment_chars = 0
+                    runtime_message_index = None
+                    if pending_guidance:
+                        (
+                            query_messages,
+                            runtime_message_index,
+                            runtime_enrichment_chars,
+                        ) = _inject_runtime_evidence(query_messages, pending_guidance)
+                    logical_messages_sha256 = hashlib.sha256(
+                        _canonical_json(query_messages)
+                    ).hexdigest()
+                    (
+                        provider_messages,
+                        request_payload_sha256,
+                        provider_messages_sha256,
+                        provider_request_chars,
+                    ) = _provider_request_receipt(model, query_messages)
+                    request_budget = provider_request_budget(
+                        provider_messages,
+                        model_name=str(self.model_name or ""),
+                        context_limit_tokens=self.provider_context_limit_tokens,
+                        hard_ratio=self.provider_context_hard_ratio,
+                    )
+                    context_compactions += 1
+                    context_chars_elided += provider_view_metrics.elided_chars
+                    compaction_epoch_started = True
                 (
                     stable_prefix_messages,
                     stable_prefix_chars,
@@ -991,6 +1127,9 @@ class MiniSweCentralAgent(BaseAgent):
                         "request_budget_remaining_tokens": request_budget.remaining_tokens,
                         "runtime_message_index": runtime_message_index,
                         "provider_view_compacted": provider_view_metrics.compacted,
+                        "provider_compaction_epoch": provider_view_session.epoch,
+                        "provider_compaction_epoch_started": compaction_epoch_started,
+                        "provider_context_reserve_tokens": effective_reserve,
                         "provider_view_input_chars": provider_view_metrics.input_chars,
                         "provider_view_output_chars": provider_view_metrics.output_chars,
                         "provider_view_elided_chars": provider_view_metrics.elided_chars,
@@ -1316,19 +1455,37 @@ class MiniSweCentralAgent(BaseAgent):
                         )
 
                     try:
-                        action_timeout = float(self.command_timeout_sec)
-                        if deadline is not None:
-                            action_timeout = min(
-                                action_timeout,
-                                max(
-                                    0.05,
-                                    deadline
-                                    - time.monotonic()
-                                    - self.deadline_reserve_sec,
-                                ),
+                        remaining_for_action = (
+                            None
+                            if deadline is None
+                            else max(
+                                0.05,
+                                deadline
+                                - time.monotonic()
+                                - self.deadline_reserve_sec,
                             )
-                        result = await environment.exec(
+                        )
+                        action_timeout, timeout_reason = self._select_action_timeout(
+                            proposed,
+                            classification,
+                            remaining_agent_time_sec=remaining_for_action,
+                        )
+                        action_timeout_decisions.append(
+                            {
+                                "action": actions_count,
+                                "operation": proposed.operation.value,
+                                "validation_authority": classification.authority.value,
+                                "requested_timeout_sec": proposed.requested_timeout_sec,
+                                "selected_timeout_sec": action_timeout,
+                                "reason": timeout_reason,
+                            }
+                        )
+                        result = await self._host_executions.exec(
+                            environment,
                             command,
+                            category=HostExecCategory.MODEL_ACTION,
+                            action_id=actions_count,
+                            source_revision=source_revision,
                             cwd=self.cwd,
                             env={},
                             timeout_sec=action_timeout,
@@ -1348,7 +1505,14 @@ class MiniSweCentralAgent(BaseAgent):
                         output["output"] += "\n\nPre-execution check: " + " ".join(
                             preflight.evidence
                         )
-                    after = await self._sensor.scan(environment, cwd=self.cwd, previous=snapshot)
+                    after = await self._sensor.scan(
+                        environment,
+                        cwd=self.cwd,
+                        previous=snapshot,
+                        recorder=self._host_executions,
+                        action_id=actions_count,
+                        source_revision=source_revision,
+                    )
                     transition = diff_snapshots(
                         snapshot,
                         after,
@@ -1606,7 +1770,7 @@ class MiniSweCentralAgent(BaseAgent):
                     auto_submitted = False
                     completion_triggered = bool(
                         self.enable_completion_controller
-                        and completion_plan.predicates
+                        and completion_plan.executable
                         and snapshot.healthy
                         and snapshot.revision != last_completion_workspace_revision
                         and (
@@ -1629,6 +1793,7 @@ class MiniSweCentralAgent(BaseAgent):
                             environment,
                             completion_plan,
                             workspace_revision=snapshot.revision,
+                            source_revision=source_revision,
                             snapshot=snapshot,
                             action_id=actions_count,
                             timeout_sec=remaining_for_checks,
@@ -1651,8 +1816,12 @@ class MiniSweCentralAgent(BaseAgent):
                         if certificate.auto_submit_eligible:
                             auto_submit_attempts += 1
                             try:
-                                submit_result = await environment.exec(
+                                submit_result = await self._host_executions.exec(
+                                    environment,
                                     "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                                    category=HostExecCategory.AUTO_SUBMIT,
+                                    action_id=actions_count,
+                                    source_revision=source_revision,
                                     cwd=self.cwd,
                                     env={},
                                     timeout_sec=max(0.05, min(5.0, remaining_for_checks)),
@@ -1855,6 +2024,7 @@ class MiniSweCentralAgent(BaseAgent):
                 and bool(row.get("not_predictive"))
                 for row in guidance_deliveries
             )
+            host_execution = self._host_executions.summary()
             deep_metrics = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -1930,7 +2100,11 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "provider_context_limit_tokens": self.provider_context_limit_tokens,
                 "provider_context_hard_ratio": self.provider_context_hard_ratio,
+                "provider_context_reserve_tokens": self.provider_context_reserve_tokens,
                 "context_compactions": context_compactions,
+                "context_compaction_epochs": [
+                    item.as_dict() for item in provider_view_session.receipts
+                ],
                 "context_chars_elided": context_chars_elided,
                 "context_capacity_chars": self.context_capacity_chars,
                 "context_trigger_chars": self.context_trigger_chars,
@@ -1949,11 +2123,17 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "auto_submit_attempts": auto_submit_attempts,
                 "auto_submits": auto_submit_count,
-                "effective_actions": (
-                    actions_count
-                    + sum(len(item.observations) for item in completion_certificates)
-                    + auto_submit_attempts
-                ),
+                "effective_actions": host_execution["effective_task_actions"],
+                "effective_actions_schema": "actual-task-environment-execs-v2",
+                "effective_task_actions": host_execution["effective_task_actions"],
+                "actual_environment_execs": host_execution["actual_environment_execs"],
+                "controller_environment_execs": host_execution[
+                    "controller_environment_execs"
+                ],
+                "controller_cached_reads": host_execution["controller_cached_reads"],
+                "sensor_environment_execs": host_execution["sensor_environment_execs"],
+                "host_exec_category_counts": host_execution["category_counts"],
+                "host_exec_category_latency": host_execution["category_latency"],
                 "progress_state": self._progress.state,
                 "progress_transitions": len(progress_transitions),
                 "task_progress_changes": task_progress_changes,
@@ -1963,6 +2143,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "execution_budget_sec": effective_budget,
                 "deadline_reserve_sec": self.deadline_reserve_sec,
                 "deadline_reserve_exits": deadline_reserve_exits,
+                "action_timeout_decisions": action_timeout_decisions,
                 "context_compiler_calls": sum(
                     bool(row.get("context_compiler_ran")) for row in model_call_contexts
                 ),
@@ -2320,6 +2501,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "reserve_exits": deadline_reserve_exits,
                         },
                         "metrics": deep_metrics,
+                        "host_execution": host_execution,
                         "features": feature_summary,
                         "interventions": receipts,
                         "guidance_deliveries": guidance_deliveries,

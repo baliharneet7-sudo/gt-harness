@@ -44,6 +44,8 @@ jobs:
             tests/test_central_replay.py \
             tests/test_central_run_diff.py \
             tests/test_provider_view.py \
+            tests/test_gt_host_execution.py \
+            tests/test_central_efficiency_replay.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py -q
@@ -56,13 +58,18 @@ jobs:
           python -m ruff check gt_engine/central_runtime.py \
             gt_engine/central_controls.py \
             gt_engine/preflight.py gt_engine/provider_view.py \
+            gt_engine/host_execution.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             scripts/central_replay.py scripts/central_run_diff.py \
+            scripts/central_efficiency_replay.py \
+            scripts/central_regression_preservation_replay.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
+            tests/test_gt_host_execution.py \
+            tests/test_central_efficiency_replay.py \
             tests/test_central_readiness.py \
             tests/test_central_replay.py tests/test_central_run_diff.py \
             tests/test_gt_deep_metrics.py \

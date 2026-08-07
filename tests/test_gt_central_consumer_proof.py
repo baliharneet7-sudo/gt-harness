@@ -1147,11 +1147,18 @@ def test_submit_risk_and_certification_are_non_blocking_state_updates():
 
 def test_two_actionable_facts_from_one_action_are_both_consumed():
     runtime = CentralFeatureRuntime(model_visible=True)
-    runtime.begin_task("Fix it", revision=WR0, source_revision=SR0)
+    runtime.begin_task(
+        "Fix it and run `pytest -q`.",
+        revision=WR0,
+        source_revision=SR0,
+        explicit_checks=("pytest -q",),
+    )
     runtime.observe_action(
         action_id=1, command="pytest -q", output="1 failed: assert error", returncode=1,
         transition=_transition(1, "pytest -q", WR0, WR0), revision=WR0, source_revision=SR1,
-        validation=_completed("pytest -q", rc=1, output="1 failed: assert error"),
+        validation=_completed(
+            "pytest -q", rc=1, output="1 failed: assert error", checks=("pytest -q",)
+        ),
     )
     effects = runtime.consume_effects(action_id=1, call=1)
 

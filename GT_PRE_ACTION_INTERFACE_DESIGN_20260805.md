@@ -213,3 +213,27 @@ source binding, one-return dedup, and exact receipts. One constructor flag
 `enable_preflight=False` restores the current post-action loop. Git revert of the isolated
 preflight files/wiring is the code rollback. Paid smoke remains blocked until provider-free
 ordered-spy, all-17 census, and full regression gates pass.
+
+## 11. 2026-08-07 outcome-preserving efficiency extension
+
+Preflight and postflight now share a normalized executable invocation that
+unwraps literal environment, command, sudo, and timeout wrappers. The resulting
+validation classification separates executable recognition from task-contract
+authority. Only a task-declared check can create required-check provider text
+or submission debt; custom probes remain private.
+
+Every task-environment call is routed through `HostExecutionRecorder`, so model
+actions, sensor calls, syntax checks, completion probes, and auto-submit appear
+in the same execution ledger. The corrected resource measure is
+`effective_task_actions`, not model action count.
+
+Provider context is preserved exactly until the measured prepared request
+crosses its headroom reserve. Compaction then creates a single immutable
+checkpoint epoch and appends later turns. A fresh bounded state frame is added
+only to a provider-view copy of the latest safe tool surface, not frozen into
+the checkpoint. Partial completion plans execute no probes. Active mode may grant a bounded timeout
+only to a high-confidence terminal declared or standard validation runner.
+
+See
+`details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`
+for implementation and archived replay evidence.

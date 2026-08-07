@@ -13,6 +13,7 @@ from gt_engine.central_runtime import (
     EvidenceLedger,
     FileState,
     InterventionDecision,
+    ValidationAuthority,
     ValidationStatus,
     WorkspaceSensor,
     WorkspaceSnapshot,
@@ -241,9 +242,13 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     assert by_feature["submit_refusal"]["payload"]["refused"] is True
 
 
-def test_model_guidance_is_one_prioritized_advisory_per_action():
+def test_model_guidance_is_one_prioritized_advisory_per_declared_check():
     runtime = CentralFeatureRuntime(model_visible=True)
-    runtime.begin_task("Implement the requested change", revision="r0")
+    runtime.begin_task(
+        "Implement the requested change and run `pytest -q`.",
+        revision="r0",
+        explicit_checks=("pytest -q",),
+    )
     assert runtime.model_feedback() == ""
     runtime.observe_action(
         action_id=1,
@@ -287,7 +292,7 @@ def test_validation_classifier_handles_timeout_without_matching_probes():
     assert classification.is_validation is False
 
 
-def test_covering_red_records_recognized_validation_provenance():
+def test_first_standard_runner_failure_is_controller_only_not_duplicate_guidance():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement the requested change", revision="r0")
     runtime.observe_action(
@@ -303,8 +308,87 @@ def test_covering_red_records_recognized_validation_provenance():
         row for row in runtime.summary()["receipts"] if row["feature_id"] == "covering_red"
     )
     assert receipt["payload"]["command_class"] == "recognized_validation"
+    assert receipt["payload"]["validation_authority"] == "standard_runner"
     assert receipt["payload"]["failure_kind"] == "validation_failure"
-    assert "attributable regression" not in runtime.model_feedback()
+    assert receipt["model_visible"] is False
+    assert runtime.model_feedback() == ""
+
+
+def test_custom_probe_failure_never_claims_required_check_or_reaches_model():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Demonstrate the browser behavior.", revision="r0")
+    command = "python3 /tmp/test_single.py"
+
+    runtime.observe_action(
+        action_id=1,
+        command=command,
+        output="UnexpectedAlertPresentException: alert proved the exploit fired",
+        returncode=1,
+        transition=WorkspaceTransition(1, command, "r0", "r0"),
+        revision="r0",
+    )
+
+    summary = runtime.summary()
+    classification = classify_validation_command(command)
+    assert classification.authority is ValidationAuthority.CUSTOM_PROBE
+    covering = next(
+        row for row in summary["receipts"] if row["feature_id"] == "covering_red"
+    )
+    assert covering["model_visible"] is False
+    assert covering["payload"]["validation_authority"] == "custom_probe"
+    assert summary["produced_counts"]["submit_refusal"] == 0
+    assert summary["produced_counts"]["GT_SS_SUBMIT_RED"] == 0
+    assert summary["required_check_claims_without_declared_id"] == 0
+    assert runtime.model_feedback() == ""
+
+
+def test_declared_check_failure_remains_grounded_and_visible():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",)
+    )
+    classification = classify_validation_command("pytest -q", ("pytest -q",))
+    assert classification.authority is ValidationAuthority.DECLARED
+
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 failed: assertion error",
+        returncode=1,
+        transition=WorkspaceTransition(1, "pytest -q", "r0", "r0"),
+        revision="r0",
+    )
+
+    summary = runtime.summary()
+    covering = next(
+        row for row in summary["receipts"] if row["feature_id"] == "covering_red"
+    )
+    assert covering["model_visible"] is True
+    assert covering["payload"]["validation_authority"] == "declared"
+    assert covering["payload"]["declared_check_id"] == "pytest -q"
+    required_claims = [
+        row
+        for row in summary["receipts"]
+        if row["feature_id"] in {"submit_refusal", "GT_SS_SUBMIT_RED"}
+    ]
+    assert required_claims
+    assert all(row["payload"]["declared_check_id"] == "pytest -q" for row in required_claims)
+    assert summary["produced_counts"]["submit_refusal"] == 1
+    assert summary["required_check_claims_without_declared_id"] == 0
+    assert summary["redundant_provider_payloads"] == 0
+    assert "Validation failed" in runtime.model_feedback()
+
+
+def test_literal_timeout_wrapper_preserves_declared_check_authority():
+    classification = classify_validation_command(
+        "env CI=1 timeout 90s pytest -q",
+        ("pytest -q",),
+    )
+
+    assert classification.authority is ValidationAuthority.DECLARED
+    assert classification.declared_check_id == "pytest -q"
+    assert classification.executable == "pytest"
+    assert classification.requested_timeout_sec == 90.0
 
 
 def test_recovery_requires_the_same_validation_command_and_failure():
@@ -501,6 +585,17 @@ def test_terminal_validator_owns_the_action_result():
     assert classification.status is ValidationStatus.PASS
     assert classification.status_attributed is True
     assert classification.validator_segment_index == 0
+
+
+def test_wrapped_validator_has_one_normalized_invocation_and_literal_timeout():
+    classification = classify_validation_command(
+        "PYTHONUNBUFFERED=1 timeout 90s python3 -m pytest -q"
+    )
+
+    assert classification.is_validation is True
+    assert classification.authority is ValidationAuthority.STANDARD_RUNNER
+    assert classification.executable == "python3"
+    assert classification.requested_timeout_sec == 90.0
 
 
 def test_explicit_check_parser_keeps_contract_named_build_and_pipe_commands():
