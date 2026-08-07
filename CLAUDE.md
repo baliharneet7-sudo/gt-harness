@@ -295,3 +295,21 @@ must be coalesced into their first eligible call or remain controller-only;
 they cannot leak one step late. The all-17 census additionally requires zero
 eligible misses, false fires, empty localization, unverified callers, and
 duplicate frame evidence, plus a real repository-substrate proof.
+
+### Latest outcome gate — workflow 31142998081 (2026-08-06)
+
+The post-repair matched smoke at `5c92a6a` is **rejected**: 8/10 rewards
+against the frozen GT-off 9/10. `schemelike-metacircular-eval` newly lost at
+the internal step cap, with no outer Harbor censor. Do not aggregate its token
+drop into an efficiency claim and do not start the 89-task run.
+
+The failure is not a missing-feature or timing failure: all ten tasks enabled
+17 features; 304/304 effects applied; 15 IDs fired naturally; the remaining
+two had no eligible exact trigger; all 459 shadow preflights passed without
+execution changes; and five payloads were grounded, first-eligible, timely,
+and non-predictive. The lost task's initial provider request was byte-identical
+to GT-off, but its temperature-1 first action already differed. This rules out
+a direct first-turn GT delivery cause, not later bounded compaction or the
+single action-71 validation payload. Read
+`details_done/GT_SMOKE_31142998081_OUTCOME_AUDIT_20260806.md` before changing
+features or funding another run.

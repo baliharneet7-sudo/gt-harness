@@ -448,3 +448,22 @@ append-stable provider-prefix metrics, completion probes, and task-progress
 changes. These repairs are provider-free implementation proof only. They do
 not restore the 9/10 baseline until an authorized matched smoke passes; the
 89-task run remains blocked.
+
+## Latest outcome gate — workflow 31142998081 (2026-08-06)
+
+Workflow `31142998081` at `5c92a6a` is rejected as an outcome-preserving
+treatment: 8/10 verifier rewards versus the frozen GT-off baseline's 9/10.
+`schemelike-metacircular-eval` is a new uncensored step-cap loss; the known
+GT-off-unsolved `gpt2-codegolf` also remained unsolved. Never call the green
+workflow or its aggregate token reduction an improvement.
+
+The integration audit itself passed: every task enabled all 17 features,
+304/304 effects were applied, 15 IDs fired naturally, the other two were
+legitimate trigger absences, all 459 shadow preflights were PASS, and all five
+model-visible payloads were grounded, first-eligible, timely, and
+non-predictive. The exact first provider request in the lost task was byte
+identical to GT-off, while the temperature-1 first response already differed.
+That rules out a first-turn GT payload cause but does not clear the later
+bounded context transform as a contributor. Use the archived audit
+`details_done/GT_SMOKE_31142998081_OUTCOME_AUDIT_20260806.md`; do a request
+diff/replay and a separately authorized ablation before another paid smoke.
