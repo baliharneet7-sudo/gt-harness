@@ -565,6 +565,13 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 	if name == "" {
 		name = extractFirstIdentifier(node, src)
 	}
+	// Verilog's grammar wraps function/task identifiers in a
+	// function_identifier/task_identifier node and exposes no named fields.
+	// Keep the fallback grammar-scoped so other languages do not acquire a
+	// speculative recursive name search.
+	if name == "" && sf.Language == "verilog" {
+		name = verilogDeclarationName(node, src)
+	}
 	// JS/TS: arrow functions AND function expressions assigned to variables have no name
 	// field — it lives on the parent variable_declarator (`const h = (req,res)=>{}`,
 	// `const f = function(){}`). (B2 FIX1 folded into the B1-#5 helper.)
@@ -581,6 +588,38 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 		name = assignedFunctionExpressionName(node, sf, src)
 	}
 	return name
+}
+
+// verilogDeclarationName unwraps the grammar's identifier wrapper nodes.  It
+// is deliberately limited to declaration nodes and identifier wrappers; it
+// never scans arbitrary source text or diagnostics for a name.
+func verilogDeclarationName(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	switch node.Type() {
+	case "simple_identifier", "escaped_identifier":
+		return node.Content(src)
+	case "function_identifier", "task_identifier":
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if name := verilogDeclarationName(node.Child(i), src); name != "" {
+				return name
+			}
+		}
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "simple_identifier" || child.Type() == "escaped_identifier" ||
+			child.Type() == "function_identifier" || child.Type() == "task_identifier" {
+			if name := verilogDeclarationName(child, src); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // _testAnnotationNodeTypes: cross-language attribute/annotation/decorator node types that
@@ -939,6 +978,19 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		if name == "" {
 			name = extractFirstIdentifier(node, src)
 		}
+		if name == "" && sf.Language == "verilog" && nodeType == "module_declaration" {
+			// module_declaration contains a module_header; the header owns the
+			// actual simple_identifier while the declaration owns the body.
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child != nil && child.Type() == "module_header" {
+					name = verilogDeclarationName(child, src)
+					if name != "" {
+						break
+					}
+				}
+			}
+		}
 		// Go fix: type_declaration wraps type_spec children.
 		// The "name" field lives on type_spec, not type_declaration.
 		if name == "" && nodeType == "type_declaration" {
@@ -1043,6 +1095,12 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			}
 			if classBody != nil {
 				extractClassFields(classBody, src, result, idx)
+			}
+			// Verilog module_declaration has no named body field.  Treat the
+			// declaration subtree as the module body so module instantiations are
+			// attributed to the containing module node instead of being lost.
+			if sf.Language == "verilog" && nodeType == "module_declaration" {
+				extractCalls(node, sf, src, result, idx)
 			}
 
 			// Recurse into class body to find methods

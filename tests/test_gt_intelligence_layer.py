@@ -71,6 +71,7 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".proto",
             ".py",
             ".pyi",
+            ".r",
             ".rake",
             ".rb",
             ".rs",
@@ -85,6 +86,7 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".toml",
             ".ts",
             ".tsx",
+            ".v",
             ".yaml",
             ".yml",
             ".cpy",
@@ -130,7 +132,7 @@ def test_racket_remains_explicitly_unsupported(tmp_path: Path):
 
 
 def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Path):
-    """Known TB2 languages without a certified parser must fail closed."""
+    """Certified R/Verilog index; Redcode/POV-Ray still fail closed."""
     for suffix in (".r", ".v", ".red", ".pov"):
         path = tmp_path / f"fixture{suffix}"
         path.write_text("source fixture\n")
@@ -138,9 +140,9 @@ def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Pa
     coverage = inspect_source_coverage(tmp_path)
 
     assert coverage.source_files == 4
-    assert coverage.indexable_files == 0
-    assert coverage.unsupported_suffixes == (".pov", ".r", ".red", ".v")
-    assert coverage.status is IndexBuildStatus.UNSUPPORTED_LANGUAGE
+    assert coverage.indexable_files == 2
+    assert coverage.unsupported_suffixes == (".pov", ".red")
+    assert coverage.status is IndexBuildStatus.INCOMPLETE_COVERAGE
 
 
 def _graph_with_duplicate_fts_surfaces(path: Path) -> None:

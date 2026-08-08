@@ -47,3 +47,28 @@ func TestCertifiedSchemeGrammarEmitsDefinitionsAndCalls(t *testing.T) {
 	}
 }
 
+func TestCertifiedRGrammarEmitsDefinitionsAndCalls(t *testing.T) {
+	tree := parseCertified(t, ForExtension(".r"),
+		"target <- function(value) { value + 1 }\n"+
+		"caller <- function() { target(1) }\n")
+	for _, nodeType := range []string{"function_definition", "call"} {
+		if !strings.Contains(tree, nodeType) {
+			t.Fatalf("R tree missing %q: %s", nodeType, tree)
+		}
+	}
+}
+
+func TestCertifiedVerilogGrammarEmitsModulesAndInstantiation(t *testing.T) {
+	tree := parseCertified(t, ForExtension(".v"),
+		"module target(input value, output out);\n"+
+		"  assign out = value;\n"+
+		"endmodule\n"+
+		"module caller(input value, output out);\n"+
+		"  target instance(.value(value), .out(out));\n"+
+		"endmodule\n")
+	for _, nodeType := range []string{"module_declaration", "module_instantiation"} {
+		if !strings.Contains(tree, nodeType) {
+			t.Fatalf("Verilog tree missing %q: %s", nodeType, tree)
+		}
+	}
+}

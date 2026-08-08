@@ -356,6 +356,22 @@ The efficiency acceptance gate failed despite preserving verifier reward 9/10.
 strict per-task Pareto, and aggregate normalized token cost increased 13.33%.
 The 89-task run remains blocked.
 
+## Native R/Verilog language stage (2026-08-08)
+
+The current branch stages parser-backed R (`.r`) and Verilog (`.v`) support
+using pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0`
+and `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog
+name unwrapping, module-instantiation attribution, and provider-free fixtures
+are checked in. Redcode (`.red`) and POV-Ray (`.pov`) remain explicit
+fail-closed capabilities; no regex parser may claim graph support for them.
+
+This stage is not certified until the Linux provider-free workflow compiles
+the cgo bindings and `verify_gt_index_runtime.py` proves R/Verilog definitions,
+directed edges, SQLite integrity, and complete source/file-hash coverage. Do
+not start a paid smoke from an unverified descendant. A green parser build is
+substrate evidence only; regression approval still requires the existing
+central census, readiness gate, archived replay, and matched outcome smoke.
+
 Never infer censoring only from `central_receipt.json`: Harbor can terminate the
 agent after the last receipt. Shared metrics must consume the adjacent trial
 result or frozen merged result and report outer exception type plus agent wall

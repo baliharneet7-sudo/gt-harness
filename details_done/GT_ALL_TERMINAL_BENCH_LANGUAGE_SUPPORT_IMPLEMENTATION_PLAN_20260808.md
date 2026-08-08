@@ -30,10 +30,10 @@ The Terminal-Bench 2 repository visibly contains source-like files in:
 - structured/configuration formats such as Markdown, TOML, YAML, JSON, SQL,
   XML, HTML, protobuf, and data artifacts.
 
-The vendored `gt-index` currently has 32 registered parser specs, including
-certified COBOL and Scheme. The Python registry now matches those parser
-suffixes. R, Verilog, Red, and POV-Ray are recognized as validation-relevant
-but currently fail closed; they are no longer invisible.
+The vendored `gt-index` now has 34 registered parser specs after the native R
+and Verilog bindings were staged, including certified COBOL and Scheme. The
+Python registry matches those parser suffixes. Redcode and POV-Ray remain
+validation-relevant but fail closed; they are no longer invisible.
 
 The official Tree-sitter parser inventory lists a Verilog grammar, and the
 Posit/R community publishes a Tree-sitter R grammar. I found no comparable
@@ -94,20 +94,23 @@ binary spec is not represented in the host registry. Shell's canonical graph
 name (`bash`) must be represented as an explicit host alias (`shell`) rather
 than relying on an accidental string mismatch.
 
-## Phase 2 — R and Verilog native parsers
+## Phase 2 — R and Verilog native parsers (implementation staged; CI certification pending)
 
 ### R
 
-1. Pin the R grammar revision and verify its license/provenance.
-2. Add `internal/specs/r.go` and register `.r`/`.R` case-insensitively.
-3. Map function definitions, assignments that define callable closures, calls,
+1. Pin the R grammar revision (`github.com/r-lib/tree-sitter-r v1.3.0`) and
+   verify its license/provenance.
+2. Add `internal/specs/r.go` and register `.r` (the host suffix matcher is
+   case-insensitive).
+3. Map function definitions, assignment-bound callable closures, and calls,
    namespace imports, and source locations into the existing graph schema.
 4. Add fixtures for a function, caller, namespace call, and syntax error.
 5. Add incremental refresh and source-revision tests.
 
 ### Verilog
 
-1. Pin a maintained Verilog grammar and ABI-compatible generated C parser.
+1. Pin `github.com/tree-sitter/tree-sitter-verilog v1.0.3` and its
+   ABI-compatible generated C parser.
 2. Add `internal/specs/verilog.go` for `.v` and, only if observed in the
    dataset, `.sv`/`.svh`.
 3. Model modules, tasks, functions, instantiations, and module references as
@@ -117,9 +120,12 @@ than relying on an accidental string mismatch.
    malformed syntax.
 5. Verify graph edges against a small hand-checked Verilog oracle.
 
-Exit gate for both: binary fixture produces expected language rows, positive
+Implementation now includes the bindings, grammar-scoped Verilog name
+unwrapping, module-instantiation attribution, and provider-free R/Verilog
+fixtures. Exit gate remains pending: Linux CI must compile both cgo bindings
+and the binary fixture must produce expected language rows, positive
 definitions, and at least one certified directed edge where the fixture has a
-call/instantiation.
+call/instantiation. Until that gate is green, the branch is not promoted.
 
 ## Phase 3 — Redcode and POV-Ray decision
 

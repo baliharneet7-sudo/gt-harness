@@ -49,6 +49,20 @@ def verify() -> dict[str, object]:
             "           DISPLAY \"ok\".\n",
             encoding="utf-8",
         )
+        (root / "fixture.r").write_text(
+            "target <- function(value) { value + 1 }\n"
+            "caller <- function() { target(1) }\n",
+            encoding="utf-8",
+        )
+        (root / "fixture.v").write_text(
+            "module target(input value, output out);\n"
+            "  assign out = value;\n"
+            "endmodule\n"
+            "module caller(input value, output out);\n"
+            "  target instance(.value(value), .out(out));\n"
+            "endmodule\n",
+            encoding="utf-8",
+        )
         # Exercise every parser that the host registry advertises.  These
         # files are deliberately separate from the semantic Python/COBOL/
         # Scheme fixtures above: file_hashes proves binary language dispatch,
@@ -108,6 +122,8 @@ def verify() -> dict[str, object]:
             )
             cobol_count = int(language_counts.get("cobol", 0))
             scheme_count = int(language_counts.get("scheme", 0))
+            r_count = int(language_counts.get("r", 0))
+            verilog_count = int(language_counts.get("verilog", 0))
             call_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM edges e "
@@ -132,6 +148,11 @@ def verify() -> dict[str, object]:
             raise RuntimeError(
                 "certified language parser coverage missing: "
                 f"cobol={cobol_count} scheme={scheme_count}"
+            )
+        if r_count < 2 or verilog_count < 2:
+            raise RuntimeError(
+                "native language parser coverage missing: "
+                f"r={r_count} verilog={verilog_count}"
             )
         expected_languages = {
             "bash" if capability.name == "shell" else capability.name
