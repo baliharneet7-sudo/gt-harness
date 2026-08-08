@@ -129,3 +129,32 @@ def test_repository_session_invalidates_when_changed_source_was_not_captured(tmp
     assert session.fresh is False
     assert session.evidence.available is False
     assert session.evidence.status == "mirror_incomplete"
+
+
+def test_current_graph_with_empty_retrieval_is_healthy_substrate(tmp_path: Path):
+    (tmp_path / "decomp.c").write_text(
+        "int decode(void) { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    evidence = inspect_repository(
+        tmp_path,
+        "Create data.comp containing the requested artifact.",
+        state_dir=tmp_path / ".state",
+        source_revision="s1",
+    )
+    session = RepositorySession(
+        root=tmp_path,
+        state_dir=tmp_path / ".session-state",
+        instruction="Create data.comp containing the requested artifact.",
+    )
+    refreshed = session.refresh(source_revision="s1")
+
+    assert evidence.index is not None and evidence.index.schema_valid is True
+    assert evidence.index.node_count > 0
+    assert evidence.retrieval_disposition == "empty"
+    assert evidence.substrate_ready is True
+    assert graph_gate_failures(evidence) == ()
+    assert refreshed.substrate_ready is True
+    assert refreshed.index_current is True
+    assert graph_gate_failures(refreshed) == ()

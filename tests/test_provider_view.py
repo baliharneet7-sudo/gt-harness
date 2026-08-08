@@ -37,14 +37,18 @@ def _history(*turns) -> list[dict]:
     return messages
 
 
-def test_provider_view_session_is_byte_identical_before_budget_compaction():
+def test_provider_view_session_bounds_oversized_observation_before_compaction_epoch():
     messages = _history(("cat app.py", "x" * 30_000))
     session = ProviderViewSession()
 
     view, metrics = session.project(messages, active_state={"source_revision": "s1"})
 
-    assert view == messages
-    assert metrics.compacted is False
+    assert view != messages
+    tool = next(item for item in view if item.get("role") == "tool")
+    assert len(tool["content"]) <= 20_000
+    assert metrics.bounded_observation_count == 1
+    assert metrics.bounded_observations[0]["operation"] == "other"
+    assert metrics.bounded_observations[0]["original_chars"] == 30_000
     assert session.epoch == 0
 
 
@@ -595,6 +599,64 @@ def test_recent_oversized_observation_is_bounded_even_when_it_is_the_only_turn()
     assert "Tool output bounded by host" in tool["content"]
     assert "sha256=" in tool["content"]
     assert metrics.output_chars < 200_000
+
+
+def test_typed_operation_selects_observation_budget_without_reparsing_command():
+    messages = _history(("custom-wrapper --query x", "R" * 30_000))
+    tool = next(item for item in messages if item.get("role") == "tool")
+    tool["extra"] = {
+        "operation": "search",
+        "observation_index": 2,
+        "returncode": 0,
+    }
+
+    view, metrics = ProviderViewSession().project(
+        messages, active_state={"source_revision": "s1"}
+    )
+
+    bounded = next(item for item in view if item.get("role") == "tool")
+    assert len(bounded["content"]) <= 8_000
+    assert metrics.bounded_observations == (
+        {
+            **metrics.bounded_observations[0],
+            "operation": "search",
+            "observation_index": 2,
+            "limit_chars": 8_000,
+        },
+    )
+
+
+def test_bounded_read_preserves_deterministic_interior_samples_not_only_head_tail():
+    content = (
+        "HEAD\n"
+        + ("A" * 20_000)
+        + "\nQUARTER_SENTINEL\n"
+        + ("B" * 20_000)
+        + "\nMIDDLE_SENTINEL\n"
+        + ("C" * 20_000)
+        + "\nTHREE_QUARTER_SENTINEL\n"
+        + ("D" * 20_000)
+        + "\nTAIL"
+    )
+    messages = _history(("cat large.py", content))
+    tool = next(item for item in messages if item.get("role") == "tool")
+    tool["extra"] = {
+        "operation": "read",
+        "observation_index": 2,
+        "returncode": 0,
+    }
+
+    view, metrics = ProviderViewSession().project(
+        messages, active_state={"source_revision": "s1"}
+    )
+
+    bounded = str(next(item for item in view if item.get("role") == "tool")["content"])
+    assert len(bounded) <= 12_000
+    assert "HEAD" in bounded
+    assert "MIDDLE_SENTINEL" in bounded
+    assert "TAIL" in bounded
+    assert "full_chars=" in bounded and "sha256=" in bounded
+    assert metrics.bounded_observation_count == 1
 
 
 def test_duplicate_turn_is_represented_append_only_instead_of_deleting_history():

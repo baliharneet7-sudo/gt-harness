@@ -179,7 +179,7 @@ The active Mini-SWE treatment adds a host-owned deterministic intelligence
 path around the stock model loop:
 
 ```text
-task container --bounded mirror transfer--> RepositorySession
+task container --source-only bounded mirror--> RepositorySession
   -> certified graph.db + manifest at source revision S
   -> task-linked structural retrieval
   -> ContextFrontierCompiler(history, S)
@@ -202,7 +202,10 @@ symbols. COBOL and Scheme are certified parser-backed extensions in the
 vendored source, and every workflow builds that source before the graph
 fixture; Racket and other unshipped grammars remain fail-closed.
 
-The repository frontier is selective retrieval, not a task-start dump. It
+The mirror transfers authored source and bounded project metadata only;
+checkpoints, datasets, binaries, build outputs, caches, and task deliverables
+never enter the host index. The repository frontier is selective retrieval,
+not a task-start dump. It
 compares certified graph facts with the exact provider view and emits the
 smallest new decision frame: no more than three facts, 1,200 characters per
 call, or 6,000 characters per task. Facts require a concrete path, positive
@@ -211,6 +214,12 @@ relevance. Definitions precede callers/references; already represented,
 duplicate, stale, low-precision, unhealthy, or over-budget facts receive an
 explicit non-delivery disposition. Complete facts are omitted rather than
 truncated.
+
+Semantic certainty and task retrieval relevance are independent. A certified
+graph node can still be irrelevant to the task, and generic symbols are not
+made visible by graph confidence alone. Semantic claim IDs deduplicate the same
+fact across revisions while versioned fact IDs retain the exact source/graph
+evidence for replay.
 
 This architecture follows three established results: interface design changes
 software-agent behavior ([SWE-agent](https://arxiv.org/abs/2405.15793));
@@ -224,17 +233,24 @@ papers motivate the interface; they do not prove this implementation improves
 the current benchmark.
 
 Operational failure and experimental validity are deliberately separate. A
-graph failure does not block the model from executing commands. It does mark
-the active treatment invalid. Likewise, a task with zero incremental visible
-repository facts is not counted as a healthy GT task, even if private feature
-receipts exist. The merged paid workflow reports this per task and fails the
-promotion gate while still uploading every trajectory and receipt.
+graph failure records a degraded fallback and does not block the model from
+executing commands; the merged treatment still fails promotion. Healthy empty
+retrieval and facts already represented in Mini-SWE history are accounted
+abstentions, not graph failures. This distinction prevents both failure modes:
+destroying a baseline solve with a controller bug, and forcing generic context
+merely to make visibility nonzero.
 
-The paid workflow additionally enables a pre-provider graph gate. Before the
-first model call, `require_graph_ready=true` requires a current, schema-valid,
-non-empty graph with complete authored-source coverage and matching source and
-graph certification. Missing or invalid substrate exits with
-`RepositoryGraphGateFailed` and zero provider calls; the receipt retains the
-failure reasons. This is the early guard against accidentally measuring a
-graph-less sidecar. The later merge audit remains necessary for frontier
-visibility, payload correctness, timing, and outcome preservation.
+Provider-view control begins at each typed tool observation. Operation-specific
+bounds reduce pathological read/search replay while preserving every distinct
+assistant content and reasoning field. Large successful reads retain head,
+three evenly spaced interior windows, and tail. Soft checkpoint compaction is considered
+at 120,000 provider characters toward an 80,000-character target only when the
+exact projection saves at least 20,000 characters and 10% of the view; smaller
+changes are deferred to preserve a stable provider-cache prefix. Hard prompt
+headroom remains a separate fail-before-query invariant.
+
+`require_graph_ready=true` therefore means analytically fail closed and
+operationally fail open. The receipt contains substrate reasons, fallback state,
+retrieval disposition, provider exposure, and request hashes. The later merge
+audit remains authoritative for intelligence validity, payload correctness,
+timing, outcome preservation, and efficiency.

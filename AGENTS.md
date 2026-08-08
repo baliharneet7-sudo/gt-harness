@@ -592,15 +592,17 @@ least 211,100 tokens of headroom after a conservative advisory allowance. This
 is provider-free policy proof, not a live efficiency claim. See
 `details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`.
 
-## Repository-intelligence layer contract (2026-08-07)
+## Repository-intelligence regression boundary (2026-08-08)
 
 GT is the deterministic repository-intelligence layer inside Mini-SWE, not a
 sidecar that may be counted as healthy merely because feature receipts exist.
-For an active treatment coding task, a usable current graph and at least one
-new model-visible repository frontier are release requirements. A task with
-zero incremental visible GT context is an invalid treatment, even when the
-model solves it and aggregate resources look favorable. Mini-SWE still fails
-open operationally; the experiment fails closed analytically.
+Keep substrate health, retrieval outcome, and provider delivery separate. A
+certified current graph is a release requirement. A healthy graph may return
+`EMPTY` because no new task-linked fact clears the precision threshold, or
+`REPRESENTED` because Mini-SWE history already contains the fact. Those are
+accounted abstentions, not substrate failures and not permission to force
+generic text. Mini-SWE fails open operationally on a real graph failure so GT
+cannot erase a baseline solve; the experiment still fails closed analytically.
 
 `graph.db` is certified evidence, not a boolean file-presence check. Every
 build/refresh receipt records source coverage, unsupported suffixes, schema
@@ -611,14 +613,17 @@ match the vendored `gt-index` specs. Authored languages without a shipped
 parser are `unsupported_language` or `incomplete_source_coverage`; they are
 never relabeled as no source and never approximated with regex symbols.
 
-The task-scoped repository mirror performs one certified full build, uses the
-indexer's real `-file` incremental path plus closure rebuild for changed
-indexable source, atomically publishes the graph and manifest, and reuses a
-graph only at the identical validation-relevant source revision. Deletes,
-unsafe paths, missing captured source, sensor degradation, schema failure,
-empty retrieval, stale revision, or low-precision evidence invalidate the
-intelligence treatment. Derived artifacts and task deliverables do not advance
-the source revision.
+The task-scoped repository mirror transfers only validation-relevant authored
+source plus bounded project metadata before the certified full build. It never
+copies checkpoints, datasets, binaries, build products, caches, or task
+deliverables into the host index. The indexer uses its real `-file`
+incremental path plus closure rebuild, atomically publishes graph and manifest,
+and reuses a graph only at the identical validation-relevant source revision.
+Deletes, unsafe paths, incomplete transfer, sensor degradation, schema failure,
+stale revision, or incomplete authored-language coverage invalidate the
+substrate. Healthy empty retrieval and low-relevance candidates instead produce
+explicit retrieval dispositions. Derived artifacts and deliverables never
+advance source revision.
 
 Before every provider call, the deterministic context frontier advances beyond
 facts already represented in durable Mini-SWE history. It emits only certified
@@ -629,6 +634,13 @@ predicts the model's action, duplicates a delivered fact, or emits on stale or
 unhealthy evidence. Candidate count must equal accounted count. Provider hash,
 message index, source/graph revisions, fact IDs, timing, and exact characters
 are receipted.
+
+Semantic certainty and task retrieval relevance are independent. A structurally
+valid graph node is not automatically relevant to the task. Generic anchors
+such as `app`, `url`, or `repr` cannot become visible merely because they have a
+high graph confidence. Frontier claim identity is semantic and stable across
+source revisions; revision-bound fact IDs remain available for audit, while a
+claim already delivered is not resent after an unrelated revision change.
 
 Preflight mutation certainty is `PROVEN_READ_ONLY`, `PROVEN_MUTATION`, or
 `MAY_MUTATE`, with parser coverage and opaque/unknown segment flags. A workspace
@@ -651,15 +663,29 @@ intelligence-health, timing, payload, and efficiency gates. A matched slice
 containing authored COBOL or Scheme source is now eligible for the parser gate:
 the pinned Tree-sitter grammars are compiled into the checked-out `gt-index`
 binary and the runtime fixture must observe nonzero COBOL and Scheme nodes.
-Racket and the other explicitly unsupported suffixes remain fail-closed; an
-unsupported language is never silently dropped.
+Racket and the other explicitly unsupported suffixes remain analytically
+fail-closed; an unsupported language is never silently dropped.
 
-The paid treatment also enables `require_graph_ready=true`. This is a
-pre-provider fail-closed gate: before the first model call, GT requires a
-current graph with a certified schema, nonzero nodes, complete authored-source
-coverage, graph/source revisions, and `intelligence_valid`. A missing, stale,
-empty, incomplete, or invalid graph exits with `RepositoryGraphGateFailed` and
-zero provider calls. This is stronger than the later merge audit: a task cannot
-spend paid tokens while running as a graph-less sidecar. The gate is recorded
-in the receipt and covered by
-`test_strict_graph_gate_stops_active_task_before_provider_call`.
+`require_graph_ready=true` is an experimental validity requirement, not a
+pre-provider execution kill switch. Missing, stale, empty, incomplete, or
+schema-invalid substrate records `graph_degraded_fallback=true`, preserves the
+ordinary Mini-SWE provider loop, suppresses uncertified graph payloads, and
+causes the merged treatment gate to fail. This prevents a graph bug from
+destroying a baseline solve while preventing a graph-less run from being
+promoted as valid GT evidence.
+
+Provider-view efficiency is governed at the observation boundary. Typed
+read/search/edit/validate operations receive deterministic per-observation
+bounds before the provider call; a successful large read retains head, three
+evenly spaced interior windows, and tail so bounding is not head/tail-blind.
+Distinct assistant content and reasoning are never removed. Soft checkpoint compaction is considered at 120,000 provider
+characters with an 80,000-character target, but it is applied only when the
+exact projected view saves at least 20,000 characters and 10% of the current
+view. Otherwise it is explicitly deferred so a negligible reduction does not
+break the provider's stable cache prefix. Hard provider-budget headroom remains
+authoritative and fails before `model.query()` rather than sending overflow.
+
+The top-down repair is provider-free implementation evidence only. It requires
+the checked-out Linux `gt-index` build, all-17 census, readiness audit, archived
+replay, and then a separately authorized matched smoke before promotion. The
+89-task run remains blocked.

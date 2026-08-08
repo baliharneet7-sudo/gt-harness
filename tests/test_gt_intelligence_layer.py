@@ -197,6 +197,7 @@ def test_frontier_advances_from_represented_file_to_definition():
     evidence = {
         "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
         "available": True,
+        "substrate_ready": True,
         "index_current": True,
         "intelligence_valid": True,
         "source_revision": "s1",
@@ -261,6 +262,7 @@ def test_frontier_budget_omits_complete_fact_instead_of_truncating_it():
     evidence = {
         "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
         "available": True,
+        "substrate_ready": True,
         "index_current": True,
         "intelligence_valid": True,
         "source_revision": "s1",
@@ -270,7 +272,8 @@ def test_frontier_budget_omits_complete_fact_instead_of_truncating_it():
                 "path": "src/greeter.py",
                 "line": 7,
                 "symbol": "greet",
-                "confidence": 1.0,
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
             },
         ),
         "definitions": (
@@ -280,6 +283,7 @@ def test_frontier_budget_omits_complete_fact_instead_of_truncating_it():
                 "symbol": "greet",
                 "signature": "def greet(name: str) -> str",
                 "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
             },
         ),
         "references": (),
@@ -304,6 +308,7 @@ def test_stale_repository_revision_is_rejected_before_delivery():
         {
             "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
             "available": True,
+            "substrate_ready": True,
             "index_current": True,
             "intelligence_valid": True,
             "graph_revision": "g1",
@@ -315,3 +320,87 @@ def test_stale_repository_revision_is_rejected_before_delivery():
 
     assert decision.disposition is FrontierDisposition.STALE_SOURCE_REVISION
     assert decision.rendered == ""
+
+
+def test_frontier_claim_identity_is_stable_across_source_revisions():
+    def evidence(revision: str):
+        return {
+            "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+            "available": True,
+            "substrate_ready": True,
+            "index_current": True,
+            "intelligence_valid": True,
+            "source_revision": revision,
+            "graph_revision": f"g-{revision}",
+            "anchors": (
+                {
+                    "path": "src/greeter.py",
+                    "line": 7,
+                    "symbol": "greet",
+                    "retrieval_relevance": 1.0,
+                    "semantic_certainty": 1.0,
+                },
+            ),
+            "definitions": (
+                {
+                    "path": "src/greeter.py",
+                    "line": 7,
+                    "symbol": "greet",
+                    "signature": "def greet(name: str) -> str",
+                    "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
+                },
+            ),
+        }
+
+    first = compile_incremental_frontier(
+        evidence("s1"), [{"role": "user", "content": "Fix greeting."}], source_revision="s1"
+    )
+    second = compile_incremental_frontier(
+        evidence("s2"),
+        [{"role": "user", "content": "Fix greeting."}],
+        source_revision="s2",
+        delivered_claim_ids=frozenset({first.facts[0].claim_id}),
+    )
+
+    assert first.facts[0].claim_id
+    assert second.disposition is FrontierDisposition.REPRESENTED_MESSAGE
+    assert second.accounting[0]["claim_id"] == first.facts[0].claim_id
+
+
+def test_frontier_rejects_out_of_range_relevance_instead_of_delivering():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (
+            {
+                "path": "bottle.py",
+                "line": 10,
+                "symbol": "app",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 3.5,
+            },
+        ),
+        "definitions": (
+            {
+                "path": "bottle.py",
+                "line": 10,
+                "symbol": "app",
+                "signature": "def app(self):",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 3.5,
+            },
+        ),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence, [{"role": "user", "content": "Fix header validation."}], source_revision="s1"
+    )
+
+    assert decision.disposition is FrontierDisposition.LOW_PRECISION
+    assert decision.accounting[0]["disposition"] == "invalid_relevance"

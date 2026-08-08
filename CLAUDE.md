@@ -405,16 +405,16 @@ least 211,100 tokens of headroom after a conservative advisory allowance. This
 is provider-free policy proof, not a live efficiency claim. See
 `details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`.
 
-## Repository-intelligence finalization (2026-08-07)
+## Repository-intelligence regression boundary (2026-08-08)
 
 Treat GT as Mini-SWE's deterministic repository-intelligence layer. Feature
-receipts alone do not satisfy that contract. In the active treatment, every
-coding task must have a certified current repository substrate and at least one
-new bounded repository fact visible in an exact provider request. Zero
-incremental visible GT context is an invalid experiment arm, not successful
-silence. Execution remains fail-open so GT cannot destroy the model's work;
-evaluation and promotion fail closed so a dead graph cannot hide behind model
-luck or favorable aggregate tokens.
+receipts alone do not satisfy that contract. Every active coding task requires
+a certified current repository substrate, but substrate health is separate from
+retrieval outcome and provider delivery. A healthy `EMPTY` result or a fact
+already `REPRESENTED` in Mini-SWE history is a correct accounted abstention,
+not a reason to fabricate visible context. Execution fails open on substrate
+failure so GT cannot destroy the model's work; evaluation and promotion fail
+closed so a dead graph cannot hide behind model luck or favorable tokens.
 
 The single language registry drives source revision, workspace capture, syntax
 probes, indexing, and both Mini-SWE bridges. Structural support matches the
@@ -424,12 +424,14 @@ coverage appear green.
 
 `graph.db` health requires a certified schema, FTS surface, current source
 revision, binary hash, graph hash, and recorded node/edge/source counts. The
-task mirror uses a full initial build, real per-file incremental refresh plus
-closure rebuild, atomic graph/manifest publication, and exact-revision cache
-hits. Missing captured content, unsafe paths, deletes requiring rebuild,
-sensor degradation, stale revision, incomplete language coverage, empty
-retrieval, or invalid schema must be visible in the receipt and invalidate the
-treatment.
+task mirror transfers only authored source and bounded project metadata before
+the full build; checkpoints, datasets, binaries, caches, build outputs, and
+task deliverables are excluded. The indexer uses real per-file incremental
+refresh plus closure rebuild, atomic graph/manifest publication, and
+exact-revision cache hits. Missing source, unsafe paths, incomplete transfer,
+sensor degradation, stale revision, incomplete language coverage, or invalid
+schema invalidate the substrate. Empty or low-relevance retrieval receives an
+explicit non-delivery disposition without invalidating a healthy graph.
 
 The context frontier runs before each model query and advances beyond provider
 history. It may select only concrete source-backed definitions, signatures,
@@ -439,6 +441,11 @@ facts/1,200 characters per call and 6,000 characters per task. Every candidate
 has one disposition; facts are never truncated, duplicated, predicted, or sent
 from stale evidence. The exact request hash and provider message index prove
 visibility; later action alignment remains only a behavioral proxy.
+
+Semantic certainty and retrieval relevance are independent gates. Graph
+confidence cannot promote a generic or task-unrelated symbol. Semantic claim
+IDs remain stable across source revisions for delivery deduplication; versioned
+fact IDs preserve the exact graph/source evidence used in each receipt.
 
 Workspace scanning is skipped only for a parser-certified read-only proposal.
 Opaque interpreters, unsupported syntax, shell uncertainty, and partial parse
@@ -452,18 +459,22 @@ cost, model work, outcomes, and censoring per task. Frontier text is part of
 task whose intelligence status is not `passed` fails the merged treatment gate
 while preserving artifacts for audit.
 
-The all-17 census, repository binary-to-SQLite fixture, context-frontier proof,
-readiness audit, and provider-free tests pass for this implementation. That is
-implementation proof only. No paid smoke has been run after this change, and
-the 89-task run remains blocked. COBOL and Scheme now have pinned,
-parser-backed structural coverage; the runtime fixture fails closed unless the
-actual checked-out binary emits nonzero nodes for both languages. Racket and
-the other explicitly unsupported suffixes remain a guardrail failure, never a
-silent drop.
+`require_graph_ready=true` is an analytical treatment gate, not a provider-loop
+kill switch. Substrate failure records a degraded fallback, permits ordinary
+Mini-SWE execution without graph payloads, and fails the merged experiment.
+This preserves potential baseline solves without allowing a graph-less run to
+count as valid GT evidence.
 
-The paid workflow now passes `require_graph_ready=true`. Before any provider
-call, the active treatment fails closed with `RepositoryGraphGateFailed` when
-the graph is missing, stale, empty, schema-invalid, or has incomplete authored
-source coverage. The receipt records the reasons and provider calls remain
-zero. This prevents a graph-less task from being counted as a GT treatment;
-the provider-free pre-smoke gate and strict agent test cover it.
+Typed tool observations are bounded before provider use. Successful large
+reads retain deterministic head, three interior windows, and tail rather than
+discarding the entire middle. Soft checkpoint
+compaction is considered at 120,000 provider characters toward an 80,000 target
+only when the projected view saves at least 20,000 characters and 10%; smaller
+changes are receipted and deferred to preserve the stable cache prefix. No
+distinct assistant content or reasoning is removed. Hard provider-budget
+headroom remains fail-before-query.
+
+This repair is provider-free implementation evidence only. The checked-out
+Linux binary must still pass the repository fixture, all-17 census, readiness
+audit, and archived replay. No post-repair paid smoke has run; the 89-task run
+remains blocked pending a separately authorized matched smoke.

@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 
 from gt_engine.graph_context import GraphProjection, GraphSemanticFact
-from gt_engine.task_contract import TaskContract, significant_tokens
+from gt_engine.task_contract import TaskContract, TaskResourceRole, significant_tokens
 
 _SURFACE_ACTION = {
     "nodes_fts": "inspect the ranked definition",
@@ -40,6 +40,7 @@ class EvidenceNeed:
     unresolved_obligation_ids: tuple[str, ...]
     anchors: tuple[str, ...]
     active_paths: tuple[str, ...]
+    task_paths: tuple[str, ...]
     recent_red: bool
     graph_revision: str
 
@@ -52,6 +53,9 @@ class GraphEvidence:
     line: int
     claim: str
     confidence: float
+    semantic_certainty: float
+    retrieval_relevance: float
+    relevance_reason_codes: tuple[str, ...]
     revision: str
     obligation_ids: tuple[str, ...]
     active_target_linked: bool
@@ -79,6 +83,20 @@ def build_evidence_need(
     for item in unresolved:
         anchors.extend(significant_tokens(item.text))
         anchors.extend(subject.lower() for subject in item.subjects)
+    task_paths = tuple(
+        dict.fromkeys(
+            str(item.path).replace("\\", "/").lower()
+            for item in contract.resources
+            if item.confidence >= 0.8
+            and item.role
+            in {
+                TaskResourceRole.INPUT,
+                TaskResourceRole.REFERENCE,
+                TaskResourceRole.EXECUTABLE,
+            }
+        )
+    )
+    anchors.extend(task_paths)
     return EvidenceNeed(
         role=contract.role,
         boundary=str(boundary or "unknown"),
@@ -89,6 +107,7 @@ def build_evidence_need(
         active_paths=tuple(dict.fromkeys(
             str(path).replace("\\", "/") for path in active_paths if path
         )),
+        task_paths=task_paths,
         recent_red=bool(recent_red),
         graph_revision=projection.revision,
     )
@@ -118,7 +137,26 @@ def rank_graph_evidence(
     active = {
         str(path).replace("\\", "/").lower() for path in need.active_paths
     }
-    scored: list[tuple[tuple[float, ...], GraphSemanticFact, tuple[str, ...]]] = []
+    generic_symbols = {
+        "app",
+        "url",
+        "run",
+        "main",
+        "model",
+        "repr",
+        "str",
+        "init",
+    }
+    task_paths = set(need.task_paths)
+    scored: list[
+        tuple[
+            tuple[float, ...],
+            GraphSemanticFact,
+            tuple[str, ...],
+            float,
+            tuple[str, ...],
+        ]
+    ] = []
     for position, fact in enumerate(projection.semantic_facts):
         keys = _fact_keys(fact)
         linked: list[tuple[str, float]] = []
@@ -141,24 +179,74 @@ def rank_graph_evidence(
         path_active = fact.file_path.lower() in active
         if not links and not path_active:
             continue
+        normalized_path = fact.file_path.replace("\\", "/").lower()
+        path_task = normalized_path in task_paths
+        fact_symbol = _key(fact.symbol)
+        distinctive_subject = any(
+            len(subject) >= 4
+            and subject not in generic_symbols
+            and subject in keys
+            for _obligation_id, (_lexical, subjects) in obligations.items()
+            for subject in subjects
+        )
+        distinctive_symbol = bool(
+            len(fact_symbol) >= 4
+            and fact_symbol not in generic_symbols
+            and any(
+                fact_symbol in lexical or fact_symbol in subjects
+                for lexical, subjects in obligations.values()
+            )
+        )
+        reasons: list[str] = []
+        if path_active:
+            relevance = 1.0
+            reasons.append("exact_active_path")
+        elif path_task:
+            relevance = 1.0
+            reasons.append("exact_task_resource_path")
+        elif distinctive_subject or distinctive_symbol:
+            relevance = 0.95
+            reasons.append(
+                "exact_distinctive_subject"
+                if distinctive_subject
+                else "exact_distinctive_symbol"
+            )
+        else:
+            relevance = 0.85
+            reasons.append("distinctive_lexical_overlap")
+        semantic_certainty = max(
+            0.0,
+            min(
+                1.0,
+                float(fact.semantic_certainty or 0.0),
+            ),
+        )
         score = (
             float(bool(path_active)),
+            float(bool(path_task)),
+            relevance,
             strongest_link,
-            float(fact.confidence),
+            semantic_certainty,
             float(-len(links)),
             float(-position),
         )
-        scored.append((score, fact, links))
+        scored.append((score, fact, links, relevance, tuple(reasons)))
     scored.sort(key=lambda row: row[0], reverse=True)
     out: list[GraphEvidence] = []
-    for rank, (_score, fact, links) in enumerate(scored[: max(1, limit)], 1):
+    for rank, (_score, fact, links, relevance, reasons) in enumerate(
+        scored[: max(1, limit)], 1
+    ):
+        semantic_certainty = max(0.0, min(1.0, float(fact.semantic_certainty or 0.0)))
         out.append(GraphEvidence(
             surface=fact.surface,
             file_path=fact.file_path,
             symbol=fact.symbol,
             line=fact.line,
             claim=f"{fact.kind}: {fact.value}"[:500],
-            confidence=fact.confidence,
+            confidence=semantic_certainty,
+            semantic_certainty=semantic_certainty,
+            retrieval_relevance=max(0.0, min(1.0, relevance)),
+            relevance_reason_codes=reasons,
             revision=fact.revision,
             obligation_ids=links,
             active_target_linked=bool(

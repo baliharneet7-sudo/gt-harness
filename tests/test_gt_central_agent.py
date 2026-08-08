@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import json
+import tarfile
 import time
 from pathlib import Path
 
@@ -283,7 +285,6 @@ async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_i
     intelligence = receipt["repository_intelligence"]
     assert intelligence["status"] == "failed"
     assert "no_supported_source" in intelligence["failures"]
-    assert "zero_visible_incremental_frontier" in intelligence["failures"]
     assert intelligence["frontier_deliveries"] == []
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
@@ -291,14 +292,14 @@ async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_i
 
 
 @pytest.mark.asyncio
-async def test_strict_graph_gate_stops_active_task_before_provider_call(tmp_path):
+async def test_task_graph_failure_degrades_but_preserves_provider_loop(tmp_path):
     class TransferEnvironment(_Environment):
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
             Path(target_dir, "README.md").write_text(
                 "the task has no structurally indexable source\n"
             )
 
-    model = _ScriptedModel(["echo SHOULD_NOT_RUN"])
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
@@ -310,12 +311,70 @@ async def test_strict_graph_gate_stops_active_task_before_provider_call(tmp_path
     await agent.run("Fix the repository implementation.", TransferEnvironment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert model.observed_history == []
-    assert receipt["calls"] == 0
+    assert len(model.observed_history) == 1
+    assert receipt["calls"] == 1
     assert receipt["metrics"]["repository_graph_gate_enabled"] == 1
-    assert receipt["metrics"]["repository_graph_gate_blocked"] == 1
+    assert receipt["metrics"]["repository_graph_gate_blocked"] == 0
+    assert receipt["metrics"]["repository_graph_degraded_fallback"] == 1
     assert "no_supported_source" in receipt["metrics"]["repository_graph_gate_failures"]
-    assert receipt["metrics"]["api_calls"] == 0
+    assert receipt["metrics"]["api_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paid_environment_path_transfers_only_selected_source_files(tmp_path):
+    class SourceArchiveEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(
+                    stdout=(
+                        "f\t40\t1.0\t1.0\tapp.py\t\n"
+                        "f\t498000000\t1.0\t1.0\tgpt2-124M.ckpt\t\n"
+                        "f\t1000000\t1.0\t1.0\tvocab.bpe\t\n"
+                    ),
+                    return_code=0,
+                )
+            if command.startswith("sha256sum"):
+                return ExecResult(stdout=("a" * 64) + "  app.py\n", return_code=0)
+            return ExecResult(stdout="", return_code=0)
+
+        async def download_file(self, source_path, target_path):
+            payload = b"def solve():\n    return 1\n"
+            with tarfile.open(target_path, "w:gz") as archive:
+                member = tarfile.TarInfo("app.py")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_frontier=False,
+        require_graph_ready=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Fix solve in app.py.", SourceArchiveEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    plan = next(
+        row for row in receipt["repository_work_receipts"]
+        if row["kind"] == "source_mirror_plan"
+    )
+    transfer = next(
+        row for row in receipt["repository_work_receipts"]
+        if row["kind"] == "mirror_transfer"
+    )
+    assert plan["paths"] == ["app.py"]
+    assert plan["excluded_artifacts"] == 2
+    assert transfer["transfer_mode"] == "source_only_archive"
+    assert receipt["metrics"]["repository_mirror_files"] == 1
+    assert (
+        receipt["host_execution"]["category_counts"]["repository_transfer"]
+        >= 2
+    )
 
 
 @pytest.mark.asyncio
@@ -473,7 +532,7 @@ async def test_custom_probe_failure_is_not_reframed_as_model_guidance(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_context_transform_stays_byte_identical_with_safe_provider_headroom(tmp_path):
+async def test_context_transform_bounds_oversized_read_before_budget_pressure(tmp_path):
     class LargeReadEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -495,11 +554,104 @@ async def test_context_transform_stays_byte_identical_with_safe_provider_headroo
 
     await agent.run("Inspect huge.log and finish.", LargeReadEnvironment(), AgentContext())
 
-    assert "Z" * 30_000 in "\n".join(model.observed_history[1])
+    second_request = "\n".join(model.observed_history[1])
+    assert "Z" * 30_000 not in second_request
+    assert "Tool output bounded by host" in second_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     assert receipt["metrics"]["context_compactions"] == 0
+    compiler = receipt["model_call_contexts"][1]["context_compiler"]
+    assert compiler["bounded_observation_count"] == 1
+    assert compiler["bounded_observations"][0]["operation"] == "read"
     assert all(
         not row["provider_compaction_epoch_started"] for row in receipt["model_call_contexts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_soft_limit_starts_one_reasoning_preserving_compaction_epoch(tmp_path):
+    class LargeReadEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command.startswith("cat huge"):
+                return ExecResult(stdout=command[-5:] * 5_000, return_code=0)
+            return ExecResult(return_code=0)
+
+    model = _ScriptedModel(
+        [
+            "cat huge1.log",
+            "cat huge2.log",
+            "cat huge3.log",
+            "cat huge4.log",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_compaction=True,
+        context_trigger_chars=20_000,
+        context_target_chars=12_000,
+        context_min_compaction_savings_chars=1,
+        context_min_compaction_savings_ratio=0.0,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["context_compactions"] == 1
+    epoch = receipt["metrics"]["context_compaction_epochs"][0]
+    assert epoch["trigger_kind"] == "provider_view_chars"
+    assert epoch["trigger_chars"] > 20_000
+    assert epoch["reasoning_messages_removed"] == 0
+    assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
+    assert receipt["metrics"]["context_bounded_observations"] == 4
+    assert receipt["metrics"]["context_bounded_observation_applications"] >= 4
+
+
+@pytest.mark.asyncio
+async def test_soft_compaction_defers_when_cache_break_savings_are_too_small(tmp_path):
+    class LargeReadEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command.startswith("cat huge"):
+                return ExecResult(stdout=command[-5:] * 5_000, return_code=0)
+            return ExecResult(return_code=0)
+
+    model = _ScriptedModel(
+        [
+            "cat huge1.log",
+            "cat huge2.log",
+            "cat huge3.log",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_compaction=True,
+        context_trigger_chars=20_000,
+        context_target_chars=12_000,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
+
+    metrics = json.loads((tmp_path / "central_receipt.json").read_text())["metrics"]
+    assert metrics["context_compactions"] == 0
+    assert metrics["context_compaction_deferral_count"] > 0
+    assert all(
+        row["projected_savings_chars"] < 20_000
+        or row["projected_savings_ratio"] < 0.10
+        for row in metrics["context_compaction_deferrals"]
     )
 
 
@@ -1113,8 +1265,8 @@ def test_context_compaction_uses_provider_headroom_reserve_not_only_char_thresho
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
 
     assert agent.context_capacity_chars == 400_000
-    assert agent.context_trigger_chars == 280_000
-    assert agent.context_target_chars == 200_000
+    assert agent.context_trigger_chars == 120_000
+    assert agent.context_target_chars == 80_000
     assert agent.provider_context_reserve_tokens == 131_072
 
 
@@ -1496,7 +1648,15 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
     )
 
     class IndexedAllFeatureAgent(MiniSweCentralAgent):
-        async def _start_repository_session(self, environment, instruction, *, source_revision):
+        async def _start_repository_session(
+            self,
+            environment,
+            instruction,
+            *,
+            snapshot,
+            source_revision,
+            task_deliverables=frozenset(),
+        ):
             return (
                 RepositoryEvidence(
                     available=True,

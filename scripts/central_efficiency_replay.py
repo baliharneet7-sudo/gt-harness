@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 import tempfile
@@ -25,8 +26,15 @@ from gt_engine.central_runtime import (
     classify_validation_command,
     explicit_check_commands,
 )
+from gt_engine.preflight import adapt_proposed_action
 from gt_engine.provider_view import (
+    DEFAULT_MIN_COMPACTION_SAVINGS_CHARS,
+    DEFAULT_MIN_COMPACTION_SAVINGS_RATIO,
+    DEFAULT_SOFT_COMPACTION_TARGET_CHARS,
+    DEFAULT_SOFT_COMPACTION_TRIGGER_CHARS,
+    ProviderViewSession,
     RequestBudget,
+    build_provider_view,
     provider_compaction_required,
     provider_request_budget,
 )
@@ -71,6 +79,123 @@ def _last_model_request(messages: list[dict[str, Any]]) -> list[dict[str, Any]] 
     return latest
 
 
+def _annotate_replay_operations(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reconstruct runtime-private typed observation metadata on a copy."""
+
+    annotated = copy.deepcopy(messages)
+    call = 0
+    for index, message in enumerate(annotated):
+        if message.get("role") != "assistant":
+            continue
+        call += 1
+        actions = tuple((message.get("extra") or {}).get("actions") or ())
+        proposals = tuple(
+            adapt_proposed_action(
+                action,
+                source_revision="replay",
+                workspace_revision="replay",
+                model_call=call,
+                batch_index=batch_index,
+                batch_size=len(actions),
+            )
+            for batch_index, action in enumerate(actions)
+        )
+        tool_indices: list[int] = []
+        cursor = index + 1
+        while cursor < len(annotated) and annotated[cursor].get("role") == "tool":
+            tool_indices.append(cursor)
+            cursor += 1
+        for tool_index, proposed in zip(tool_indices, proposals, strict=False):
+            tool = annotated[tool_index]
+            extra = dict(tool.get("extra") or {})
+            extra.update(
+                {
+                    "operation": proposed.operation.value,
+                    "action_id": proposed.action_id,
+                    "observation_index": tool_index,
+                }
+            )
+            tool["extra"] = extra
+    return annotated
+
+
+def _replay_provider_view(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    annotated = _annotate_replay_operations(messages)
+    session = ProviderViewSession()
+    raw_chars = 0
+    provider_chars = 0
+    call_count = 0
+    bounded: dict[tuple[int, str], dict[str, Any]] = {}
+    final_view: list[dict[str, Any]] | None = None
+    unique_reasoning_removed = 0
+    compaction_deferrals = 0
+    for index, message in enumerate(annotated):
+        if message.get("role") != "assistant":
+            continue
+        call_count += 1
+        prefix = annotated[:index]
+        view, metrics = session.project(prefix, active_state={})
+        if (
+            session.epoch == 0
+            and metrics.output_chars > DEFAULT_SOFT_COMPACTION_TRIGGER_CHARS
+        ):
+            _preview, preview_metrics = build_provider_view(
+                view,
+                active_state={},
+                trigger_chars=1,
+                target_chars=DEFAULT_SOFT_COMPACTION_TARGET_CHARS,
+                keep_recent_turns=2,
+                transform=True,
+                attach_state_frame=False,
+            )
+            savings = max(0, metrics.output_chars - preview_metrics.output_chars)
+            ratio = savings / metrics.output_chars if metrics.output_chars else 0.0
+            if (
+                savings >= DEFAULT_MIN_COMPACTION_SAVINGS_CHARS
+                and ratio >= DEFAULT_MIN_COMPACTION_SAVINGS_RATIO
+            ):
+                view, metrics = session.compact(
+                    prefix,
+                    active_state={},
+                    target_chars=DEFAULT_SOFT_COMPACTION_TARGET_CHARS,
+                    keep_recent_turns=2,
+                    trigger_tokens=0,
+                    trigger_kind="provider_view_chars",
+                    trigger_chars=metrics.output_chars,
+                )
+            else:
+                compaction_deferrals += 1
+        raw_chars += metrics.raw_input_chars
+        provider_chars += metrics.output_chars
+        unique_reasoning_removed += metrics.unique_assistant_reasoning_chars_removed
+        final_view = view
+        for row in metrics.bounded_observations:
+            identity = (
+                int(row.get("observation_index") or 0),
+                str(row.get("full_sha256") or ""),
+            )
+            bounded.setdefault(identity, dict(row))
+    return {
+        "model_calls_replayed": call_count,
+        "raw_provider_view_chars_cumulative": raw_chars,
+        "projected_provider_view_chars_cumulative": provider_chars,
+        "projected_provider_view_chars_avoided": max(0, raw_chars - provider_chars),
+        "projected_provider_view_reduction_ratio": (
+            round((raw_chars - provider_chars) / raw_chars, 6) if raw_chars else 0.0
+        ),
+        "bounded_unique_observations": len(bounded),
+        "bounded_unique_observation_chars_removed": sum(
+            int(row.get("omitted_chars") or 0) for row in bounded.values()
+        ),
+        "projected_compaction_epochs": session.epoch,
+        "compaction_deferrals": compaction_deferrals,
+        "assistant_reasoning_chars_removed": unique_reasoning_removed,
+        "final_provider_view": final_view,
+    }
+
+
 def replay_run(
     root: Path,
     *,
@@ -87,6 +212,9 @@ def replay_run(
     avoided_partial_execs = 0
     projected_partial_execs = 0
     projected_epochs = 0
+    raw_provider_chars = 0
+    projected_provider_chars = 0
+    bounded_unique_observations = 0
 
     for trajectory_path in sorted(root.rglob("miniswe_trajectory.json")):
         receipt_path = trajectory_path.with_name("central_receipt.json")
@@ -96,6 +224,16 @@ def replay_run(
         trajectory = _load(trajectory_path)
         receipt = _load(receipt_path)
         messages = list(trajectory.get("messages") or ())
+        provider_view_replay = _replay_provider_view(messages)
+        raw_provider_chars += int(
+            provider_view_replay["raw_provider_view_chars_cumulative"]
+        )
+        projected_provider_chars += int(
+            provider_view_replay["projected_provider_view_chars_cumulative"]
+        )
+        bounded_unique_observations += int(
+            provider_view_replay["bounded_unique_observations"]
+        )
         instruction = next(
             (
                 str(message.get("content") or "")
@@ -141,7 +279,9 @@ def replay_run(
         call_contexts = list(receipt.get("model_call_contexts") or ())
         budget_source = "recorded_transformed_request"
         budgets: list[RequestBudget] = []
-        last_request = _last_model_request(messages)
+        last_request = provider_view_replay.pop("final_provider_view") or _last_model_request(
+            messages
+        )
         if model is not None and last_request is not None:
             provider_messages, _, _, _ = _provider_request_receipt(model, last_request)
             raw_budget = provider_request_budget(
@@ -190,6 +330,7 @@ def replay_run(
             ),
             "provider_budget_evidence": budget_source,
             "projected_compaction_epoch": needs_epoch,
+            "provider_view_replay": provider_view_replay,
         }
 
     return {
@@ -201,6 +342,32 @@ def replay_run(
         "avoided_partial_completion_probe_execs": avoided_partial_execs,
         "projected_partial_completion_probe_execs": projected_partial_execs,
         "projected_compaction_epochs": projected_epochs,
+        "provider_view_replay_compaction_epochs": sum(
+            int(row["provider_view_replay"]["projected_compaction_epochs"])
+            for row in tasks.values()
+        ),
+        "provider_view_compaction_deferrals": sum(
+            int(row["provider_view_replay"]["compaction_deferrals"])
+            for row in tasks.values()
+        ),
+        "provider_view_assistant_reasoning_chars_removed": sum(
+            int(row["provider_view_replay"]["assistant_reasoning_chars_removed"])
+            for row in tasks.values()
+        ),
+        "raw_provider_view_chars_cumulative": raw_provider_chars,
+        "projected_provider_view_chars_cumulative": projected_provider_chars,
+        "projected_provider_view_chars_avoided": max(
+            0, raw_provider_chars - projected_provider_chars
+        ),
+        "projected_provider_view_reduction_ratio": (
+            round(
+                (raw_provider_chars - projected_provider_chars) / raw_provider_chars,
+                6,
+            )
+            if raw_provider_chars
+            else 0.0
+        ),
+        "bounded_unique_observations": bounded_unique_observations,
     }
 
 

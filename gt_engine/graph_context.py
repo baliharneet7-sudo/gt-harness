@@ -7,7 +7,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 
-from gt_engine.task_contract import TaskContract, significant_tokens
+from gt_engine.task_contract import TaskContract, TaskResourceRole, significant_tokens
 
 GRAPH_SURFACES = (
     "nodes",
@@ -114,6 +114,20 @@ def graph_query_terms(
     """Return decision anchors in specificity order, never alphabetic order."""
     subjects: list[str] = []
     tokens: list[str] = []
+    resource_terms: list[str] = []
+    for resource in contract.resources:
+        if resource.confidence < 0.8 or resource.role not in {
+            TaskResourceRole.INPUT,
+            TaskResourceRole.REFERENCE,
+            TaskResourceRole.EXECUTABLE,
+        }:
+            continue
+        path = str(resource.path or "").replace("\\", "/").strip("/").lower()
+        if not path:
+            continue
+        basename = path.rsplit("/", 1)[-1]
+        stem = basename.rsplit(".", 1)[0]
+        resource_terms.extend((path, basename, stem))
     for item in contract.obligations:
         tokens.extend(significant_tokens(item.text))
         subjects.extend(s.lower() for s in item.subjects)
@@ -126,7 +140,7 @@ def graph_query_terms(
     # repeated obligation coverage and specificity (longer identifiers) while
     # retaining first occurrence as a deterministic final tie-break.
     ordered: list[str] = []
-    for value in subjects:
+    for value in (*resource_terms, *subjects):
         value = clean(value)
         if value and value not in ordered:
             ordered.append(value)

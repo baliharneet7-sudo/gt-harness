@@ -91,3 +91,49 @@ def test_archived_replay_projects_custom_failures_private_and_partial_probes_zer
         row["provider_budget_evidence"] == "recorded_transformed_request"
         for row in result["tasks"].values()
     )
+
+
+def test_archived_replay_measures_unique_observation_and_cumulative_view_savings(tmp_path):
+    agent = tmp_path / "large-read__trial" / "agent"
+    agent.mkdir(parents=True)
+    messages = [{"role": "user", "content": "Inspect the logs."}]
+    for index in range(4):
+        tool_id = f"call-{index}"
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": f"reasoning-{index}",
+                    "extra": {
+                        "actions": [
+                            {"command": f"cat huge{index}.log", "tool_call_id": tool_id}
+                        ]
+                    },
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_id,
+                    "content": str(index) * 30_000,
+                },
+            ]
+        )
+    (agent / "miniswe_trajectory.json").write_text(
+        json.dumps({"messages": messages}), encoding="utf-8"
+    )
+    (agent / "central_receipt.json").write_text(
+        json.dumps({"features": {}, "metrics": {}, "model_call_contexts": []}),
+        encoding="utf-8",
+    )
+
+    result = replay_run(tmp_path)
+    replay = result["tasks"]["large-read"]["provider_view_replay"]
+
+    # The fourth observation has no following provider call and therefore is
+    # correctly outside the replay exposure window.
+    assert replay["model_calls_replayed"] == 4
+    assert replay["bounded_unique_observations"] == 3
+    assert replay["projected_provider_view_chars_avoided"] > 0
+    assert replay["assistant_reasoning_chars_removed"] == 0
+    assert result["projected_provider_view_chars_avoided"] > 0
+    assert result["provider_view_assistant_reasoning_chars_removed"] == 0
+    assert result["provider_view_compaction_deferrals"] >= 0

@@ -9,9 +9,11 @@ whose output is never added to model context.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
+import tarfile
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -84,6 +86,10 @@ from gt_engine.preflight import (
 )
 from gt_engine.progress import ProgressLedger
 from gt_engine.provider_view import (
+    DEFAULT_MIN_COMPACTION_SAVINGS_CHARS,
+    DEFAULT_MIN_COMPACTION_SAVINGS_RATIO,
+    DEFAULT_SOFT_COMPACTION_TARGET_CHARS,
+    DEFAULT_SOFT_COMPACTION_TRIGGER_CHARS,
     ProviderViewSession,
     build_provider_view,
     provider_compaction_required,
@@ -95,6 +101,7 @@ from gt_engine.repository_intelligence import (
     RepositorySession,
     graph_gate_failures,
 )
+from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -267,6 +274,12 @@ class MiniSweCentralAgent(BaseAgent):
         context_capacity_chars: int = 400_000,
         context_trigger_chars: int | None = None,
         context_target_chars: int | None = None,
+        context_min_compaction_savings_chars: int = (
+            DEFAULT_MIN_COMPACTION_SAVINGS_CHARS
+        ),
+        context_min_compaction_savings_ratio: float = (
+            DEFAULT_MIN_COMPACTION_SAVINGS_RATIO
+        ),
         provider_context_limit_tokens: int = 1_048_576,
         provider_context_hard_ratio: float = 0.90,
         provider_context_reserve_tokens: int = 131_072,
@@ -337,7 +350,10 @@ class MiniSweCentralAgent(BaseAgent):
             int(
                 context_trigger_chars
                 if context_trigger_chars is not None
-                else self.context_capacity_chars * 0.70
+                else min(
+                    self.context_capacity_chars * 0.70,
+                    DEFAULT_SOFT_COMPACTION_TRIGGER_CHARS,
+                )
             ),
         )
         self.context_target_chars = max(
@@ -345,11 +361,20 @@ class MiniSweCentralAgent(BaseAgent):
             int(
                 context_target_chars
                 if context_target_chars is not None
-                else self.context_capacity_chars * 0.50
+                else min(
+                    self.context_capacity_chars * 0.50,
+                    DEFAULT_SOFT_COMPACTION_TARGET_CHARS,
+                )
             ),
         )
         if self.context_target_chars >= self.context_trigger_chars:
             raise ValueError("context_target_chars must be smaller than context_trigger_chars")
+        self.context_min_compaction_savings_chars = max(
+            0, int(context_min_compaction_savings_chars)
+        )
+        self.context_min_compaction_savings_ratio = min(
+            1.0, max(0.0, float(context_min_compaction_savings_ratio))
+        )
         self.provider_context_limit_tokens = max(1, int(provider_context_limit_tokens))
         self.provider_context_hard_ratio = min(0.99, max(0.50, float(provider_context_hard_ratio)))
         self.provider_context_reserve_tokens = max(1, int(provider_context_reserve_tokens))
@@ -438,13 +463,13 @@ class MiniSweCentralAgent(BaseAgent):
         environment: BaseEnvironment,
         instruction: str,
         *,
+        snapshot: Any,
         source_revision: str,
+        task_deliverables: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[RepositoryEvidence, RepositorySession | None]:
         """Mirror, index, and rank the repository on the host before call one."""
         started = time.perf_counter()
-        if not self.enable_repository_intelligence or not hasattr(
-            environment, "download_dir_with_exclusions"
-        ):
+        if not self.enable_repository_intelligence:
             self._repository_work_receipts.append(
                 {
                     "kind": "mirror_transfer",
@@ -462,23 +487,105 @@ class MiniSweCentralAgent(BaseAgent):
         session = RepositorySession.temporary(instruction=instruction)
         stage = "mirror_transfer"
         try:
-            await asyncio.wait_for(
-                environment.download_dir_with_exclusions(
-                    source_dir=self.cwd,
-                    target_dir=str(session.root),
-                    exclude=[
-                        ".git",
-                        ".gt",
-                        "node_modules",
-                        "__pycache__",
-                        ".pytest_cache",
-                        "target",
-                        "dist",
-                        "build",
-                    ],
-                ),
-                timeout=20,
-            )
+            transfer_mode = "legacy_directory"
+            mirror_plan: SourceMirrorPlan | None = None
+            if callable(getattr(environment, "download_file", None)):
+                transfer_mode = "source_only_archive"
+                mirror_plan = plan_source_mirror(
+                    snapshot,
+                    excluded_paths=frozenset(task_deliverables),
+                )
+                self._repository_work_receipts.append(
+                    {"kind": "source_mirror_plan", **mirror_plan.as_dict()}
+                )
+                if not mirror_plan.complete:
+                    raise RuntimeError("SourceMirrorIncomplete")
+                manifest_bytes = b"".join(
+                    path.encode("utf-8", "surrogateescape") + b"\0"
+                    for path in mirror_plan.paths
+                )
+                remote_manifest = "/tmp/gt-source-paths.nul"
+                remote_archive = "/tmp/gt-source-mirror.tar.gz"
+                init = await self._host_executions.exec(
+                    environment,
+                    f"umask 077; : > {remote_manifest}",
+                    category=HostExecCategory.REPOSITORY_TRANSFER,
+                    source_revision=source_revision,
+                    cwd=self.cwd,
+                    env={},
+                    timeout_sec=5,
+                )
+                if init.return_code != 0:
+                    raise RuntimeError("SourceMirrorManifestInitFailed")
+                # Keep each host command bounded even for a large source tree.
+                raw_chunk_bytes = 24_000
+                for offset in range(0, len(manifest_bytes), raw_chunk_bytes):
+                    encoded = base64.b64encode(
+                        manifest_bytes[offset : offset + raw_chunk_bytes]
+                    ).decode("ascii")
+                    appended = await self._host_executions.exec(
+                        environment,
+                        f"printf '%s' '{encoded}' | base64 -d >> {remote_manifest}",
+                        category=HostExecCategory.REPOSITORY_TRANSFER,
+                        source_revision=source_revision,
+                        cwd=self.cwd,
+                        env={},
+                        timeout_sec=5,
+                    )
+                    if appended.return_code != 0:
+                        raise RuntimeError("SourceMirrorManifestWriteFailed")
+                archived = await self._host_executions.exec(
+                    environment,
+                    (
+                        "tar --null --verbatim-files-from -czf "
+                        f"{remote_archive} -C {self.cwd} -T {remote_manifest}"
+                    ),
+                    category=HostExecCategory.REPOSITORY_TRANSFER,
+                    source_revision=source_revision,
+                    cwd=self.cwd,
+                    env={},
+                    timeout_sec=20,
+                )
+                if archived.return_code != 0:
+                    raise RuntimeError("SourceMirrorArchiveFailed")
+                local_archive = session.state_dir / "source-mirror.tar.gz"
+                await asyncio.wait_for(
+                    environment.download_file(remote_archive, local_archive),
+                    timeout=20,
+                )
+                with tarfile.open(local_archive, mode="r:gz") as archive:
+                    for member in archive.getmembers():
+                        target = (session.root / member.name).resolve()
+                        try:
+                            target.relative_to(session.root)
+                        except ValueError as exc:
+                            raise RuntimeError("UnsafeSourceMirrorArchive") from exc
+                        if not (member.isfile() or member.isdir()):
+                            raise RuntimeError("UnsafeSourceMirrorMember")
+                    archive.extractall(session.root, filter="data")
+            elif callable(getattr(environment, "download_dir_with_exclusions", None)):
+                # Compatibility for provider-free fakes.  Paid Harbor
+                # environments implement download_file and must use the
+                # bounded source-only path above.
+                await asyncio.wait_for(
+                    environment.download_dir_with_exclusions(
+                        source_dir=self.cwd,
+                        target_dir=str(session.root),
+                        exclude=[
+                            ".git",
+                            ".gt",
+                            "node_modules",
+                            "__pycache__",
+                            ".pytest_cache",
+                            "target",
+                            "dist",
+                            "build",
+                        ],
+                    ),
+                    timeout=20,
+                )
+            else:
+                raise RuntimeError("EnvironmentTransferUnavailable")
             transferred = [path for path in session.root.rglob("*") if path.is_file()]
             self._repository_work_receipts.append(
                 {
@@ -487,6 +594,10 @@ class MiniSweCentralAgent(BaseAgent):
                     "duration_ms": round((time.perf_counter() - started) * 1000, 3),
                     "files": len(transferred),
                     "bytes": sum(path.stat().st_size for path in transferred),
+                    "transfer_mode": transfer_mode,
+                    "selected_manifest_sha256": (
+                        mirror_plan.manifest_sha256 if mirror_plan is not None else ""
+                    ),
                 }
             )
             stage = "initial_index"
@@ -898,12 +1009,16 @@ class MiniSweCentralAgent(BaseAgent):
         repository_evidence, repository_session = await self._start_repository_session(
             environment,
             instruction,
+            snapshot=snapshot,
             source_revision=source_revision,
+            task_deliverables=frozenset(task_deliverables),
         )
         self._features.record_repository_evidence_status(
             source_revision=source_revision,
             status=repository_evidence.status,
             available=repository_evidence.available,
+            substrate_ready=repository_evidence.substrate_ready,
+            retrieval_disposition=repository_evidence.retrieval_disposition,
         )
         if repository_evidence.available:
             self._features.register_structural_evidence(
@@ -929,13 +1044,12 @@ class MiniSweCentralAgent(BaseAgent):
             )
             else ()
         )
-        graph_gate_blocked = bool(graph_gate_reasons)
-        if graph_gate_blocked:
-            # Fail before the first provider call.  Running a paid active task
-            # without a certified, current graph would be a sidecar run, not
-            # the treatment being evaluated.
-            terminal = "RepositoryGraphGateFailed"
-            solver_exhausted_reason = "repository_graph_gate"
+        # Repository failures invalidate the GT treatment analytically, but
+        # they must not erase the underlying Mini-SWE solve.  Operationally
+        # fail open; the run-level acceptance gate still fails closed on the
+        # recorded substrate failure.
+        graph_degraded_fallback = bool(graph_gate_reasons)
+        graph_gate_blocked = False
         calls = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -945,6 +1059,7 @@ class MiniSweCentralAgent(BaseAgent):
         frontier_decisions: list[dict[str, Any]] = []
         frontier_deliveries: list[dict[str, Any]] = []
         delivered_frontier_fact_ids: set[str] = set()
+        delivered_frontier_claim_ids: set[str] = set()
         frontier_chars_delivered = 0
         model_call_contexts: list[dict[str, Any]] = []
         pending_guidance = ""
@@ -955,6 +1070,7 @@ class MiniSweCentralAgent(BaseAgent):
         censored_reason = ""
         context_compactions = 0
         context_chars_elided = 0
+        context_compaction_deferrals: list[dict[str, Any]] = []
         pending_reconsideration_cycle = ""
         deadline_reserve_exits = 0
         action_timeout_decisions: list[dict[str, Any]] = []
@@ -1043,6 +1159,57 @@ class MiniSweCentralAgent(BaseAgent):
                         keep_recent_turns=2,
                         transform=False,
                     )
+                compaction_epoch_started = False
+                if (
+                    self.enable_context_compaction
+                    and provider_view_session.epoch == 0
+                    and provider_view_metrics.output_chars > self.context_trigger_chars
+                ):
+                    _preview_view, preview_metrics = build_provider_view(
+                        query_messages,
+                        active_state=active_state,
+                        trigger_chars=1,
+                        target_chars=self.context_target_chars,
+                        keep_recent_turns=2,
+                        transform=True,
+                        attach_state_frame=False,
+                    )
+                    projected_savings = max(
+                        0,
+                        provider_view_metrics.output_chars - preview_metrics.output_chars,
+                    )
+                    projected_ratio = (
+                        projected_savings / provider_view_metrics.output_chars
+                        if provider_view_metrics.output_chars
+                        else 0.0
+                    )
+                    if (
+                        projected_savings >= self.context_min_compaction_savings_chars
+                        and projected_ratio >= self.context_min_compaction_savings_ratio
+                    ):
+                        query_messages, provider_view_metrics = provider_view_session.compact(
+                            messages,
+                            active_state=active_state,
+                            target_chars=self.context_target_chars,
+                            keep_recent_turns=2,
+                            trigger_tokens=0,
+                            trigger_kind="provider_view_chars",
+                            trigger_chars=provider_view_metrics.output_chars,
+                        )
+                        context_compactions += 1
+                        context_chars_elided += provider_view_metrics.elided_chars
+                        compaction_epoch_started = True
+                    else:
+                        context_compaction_deferrals.append(
+                            {
+                                "call": calls,
+                                "input_chars": provider_view_metrics.output_chars,
+                                "projected_output_chars": preview_metrics.output_chars,
+                                "projected_savings_chars": projected_savings,
+                                "projected_savings_ratio": round(projected_ratio, 6),
+                                "reason": "insufficient_cache_break_benefit",
+                            }
+                        )
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
@@ -1051,6 +1218,7 @@ class MiniSweCentralAgent(BaseAgent):
                     query_messages,
                     source_revision=source_revision,
                     delivered_fact_ids=frozenset(delivered_frontier_fact_ids),
+                    delivered_claim_ids=frozenset(delivered_frontier_claim_ids),
                     max_chars=min(
                         1_200,
                         max(
@@ -1106,10 +1274,13 @@ class MiniSweCentralAgent(BaseAgent):
                     self.provider_context_reserve_tokens,
                     max(1, request_budget.hard_prompt_limit // 4),
                 )
-                compaction_epoch_started = False
-                if self.enable_context_compaction and provider_compaction_required(
-                    request_budget,
-                    reserve_tokens=self.provider_context_reserve_tokens,
+                if (
+                    self.enable_context_compaction
+                    and not compaction_epoch_started
+                    and provider_compaction_required(
+                        request_budget,
+                        reserve_tokens=self.provider_context_reserve_tokens,
+                    )
                 ):
                     query_messages, provider_view_metrics = provider_view_session.compact(
                         messages,
@@ -1117,6 +1288,8 @@ class MiniSweCentralAgent(BaseAgent):
                         target_chars=self.context_target_chars,
                         keep_recent_turns=2,
                         trigger_tokens=request_budget.effective_tokens,
+                        trigger_kind="provider_budget",
+                        trigger_chars=provider_view_metrics.output_chars,
                     )
                     runtime_enrichment_chars = 0
                     runtime_message_index = None
@@ -1167,7 +1340,9 @@ class MiniSweCentralAgent(BaseAgent):
                     and frontier_payload
                 ):
                     fact_ids = [fact.fact_id for fact in frontier_decision.facts]
+                    claim_ids = [fact.claim_id for fact in frontier_decision.facts]
                     delivered_frontier_fact_ids.update(fact_ids)
+                    delivered_frontier_claim_ids.update(claim_ids)
                     frontier_chars_delivered += len(frontier_payload)
                     frontier_deliveries.append(
                         {
@@ -1179,6 +1354,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 else ""
                             ),
                             "fact_ids": fact_ids,
+                            "claim_ids": claim_ids,
                             "facts": [fact.as_dict() for fact in frontier_decision.facts],
                             "message_index": runtime_message_index,
                             "request_payload_sha256": request_payload_sha256,
@@ -2082,7 +2258,27 @@ class MiniSweCentralAgent(BaseAgent):
                     if feature_feedback and self.runtime_mode == "treatment":
                         pending_guidance = feature_feedback
                         pending_prepared_after_call = calls
-                messages.extend(model.format_observation_messages(message, outputs, variables))
+                observation_messages = list(
+                    model.format_observation_messages(message, outputs, variables)
+                )
+                observation_start_index = len(messages)
+                for observation_offset, (observation, proposed, output) in enumerate(
+                    zip(observation_messages, proposed_actions, outputs, strict=True)
+                ):
+                    # Private typed metadata lets the provider-view governor
+                    # reuse the single preflight classification.  Mini-SWE's
+                    # provider adapter strips ``extra`` before model.query.
+                    private_extra = dict(observation.get("extra") or {})
+                    private_extra.update(
+                        {
+                            "operation": proposed.operation.value,
+                            "action_id": proposed.action_id,
+                            "observation_index": observation_start_index + observation_offset,
+                            "returncode": int(output.get("returncode") or 0),
+                        }
+                    )
+                    observation["extra"] = private_extra
+                messages.extend(observation_messages)
 
         except Exception as exc:
             terminal = type(exc).__name__
@@ -2155,7 +2351,7 @@ class MiniSweCentralAgent(BaseAgent):
             )
             frontier_required = bool(repository_required and self.enable_context_frontier)
             intelligence_failures: list[str] = []
-            if repository_required and not repository_evidence.intelligence_valid:
+            if repository_required and not repository_evidence.substrate_ready:
                 intelligence_failures.append(
                     repository_evidence.status or "repository_intelligence_invalid"
                 )
@@ -2188,10 +2384,37 @@ class MiniSweCentralAgent(BaseAgent):
                 ]
                 if len(delivered_ids) != len(set(delivered_ids)):
                     intelligence_failures.append("duplicate_frontier_fact_delivery")
+                delivered_claims = [
+                    str(claim_id)
+                    for row in frontier_deliveries
+                    for claim_id in row.get("claim_ids") or ()
+                ]
+                if len(delivered_claims) != len(set(delivered_claims)):
+                    intelligence_failures.append("duplicate_frontier_claim_delivery")
                 if frontier_chars_delivered > self.context_frontier_task_budget_chars:
                     intelligence_failures.append("frontier_task_budget_exceeded")
-            if frontier_required and not frontier_deliveries:
-                intelligence_failures.append("zero_visible_incremental_frontier")
+            frontier_material_undelivered = bool(
+                frontier_required
+                and not frontier_deliveries
+                and any(
+                    row.get("disposition") == FrontierDisposition.SELECTED_FRONTIER.value
+                    for row in frontier_decisions
+                )
+            )
+            if frontier_material_undelivered:
+                intelligence_failures.append("material_frontier_not_delivered")
+            frontier_coverage = (
+                "delivered"
+                if frontier_deliveries
+                else "represented_in_provider_history"
+                if any(
+                    row.get("disposition") == FrontierDisposition.REPRESENTED_MESSAGE.value
+                    for row in frontier_decisions
+                )
+                else "no_certified_incremental_fact"
+                if frontier_decisions
+                else "no_provider_call"
+            )
             intelligence_failures = list(dict.fromkeys(intelligence_failures))
             intelligence_status = (
                 "disabled"
@@ -2203,6 +2426,32 @@ class MiniSweCentralAgent(BaseAgent):
                 if intelligence_failures
                 else "passed"
             )
+            bounded_observation_applications = [
+                dict(observation)
+                for call_row in model_call_contexts
+                for observation in (
+                    (call_row.get("context_compiler") or {}).get("bounded_observations") or ()
+                )
+            ]
+            unique_bounded_observations: dict[tuple[int, str], dict[str, Any]] = {}
+            for observation in bounded_observation_applications:
+                key = (
+                    int(observation.get("observation_index") or 0),
+                    str(observation.get("full_sha256") or ""),
+                )
+                unique_bounded_observations.setdefault(key, observation)
+            bounded_operation_counts: dict[str, int] = {}
+            for observation in unique_bounded_observations.values():
+                operation = str(observation.get("operation") or "other")
+                bounded_operation_counts[operation] = (
+                    bounded_operation_counts.get(operation, 0) + 1
+                )
+            mirror_plan_rows = [
+                row
+                for row in self._repository_work_receipts
+                if row.get("kind") == "source_mirror_plan"
+            ]
+            mirror_plan = mirror_plan_rows[-1] if mirror_plan_rows else {}
             deep_metrics = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -2280,10 +2529,20 @@ class MiniSweCentralAgent(BaseAgent):
                 "context_compaction_epochs": [
                     item.as_dict() for item in provider_view_session.receipts
                 ],
+                "context_compaction_deferrals": context_compaction_deferrals,
+                "context_compaction_deferral_count": len(
+                    context_compaction_deferrals
+                ),
                 "context_chars_elided": context_chars_elided,
                 "context_capacity_chars": self.context_capacity_chars,
                 "context_trigger_chars": self.context_trigger_chars,
                 "context_target_chars": self.context_target_chars,
+                "context_min_compaction_savings_chars": (
+                    self.context_min_compaction_savings_chars
+                ),
+                "context_min_compaction_savings_ratio": (
+                    self.context_min_compaction_savings_ratio
+                ),
                 "completion_plan_status": completion_plan.status.value,
                 "completion_predicates": len(completion_plan.predicates),
                 "completion_certificate_evaluations": len(completion_certificates),
@@ -2361,7 +2620,12 @@ class MiniSweCentralAgent(BaseAgent):
                     sum(len(row.get("fact_ids") or ()) for row in frontier_deliveries)
                     - len(delivered_frontier_fact_ids)
                 ),
+                "context_frontier_duplicate_claims": (
+                    sum(len(row.get("claim_ids") or ()) for row in frontier_deliveries)
+                    - len(delivered_frontier_claim_ids)
+                ),
                 "context_frontier_zero_tasks": int(frontier_required and not frontier_deliveries),
+                "context_frontier_coverage": frontier_coverage,
                 "repository_intelligence_status": intelligence_status,
                 "repository_intelligence_failures": list(intelligence_failures),
                 "repository_intelligence_valid": int(
@@ -2369,6 +2633,7 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "repository_graph_gate_enabled": int(self.require_graph_ready),
                 "repository_graph_gate_blocked": int(graph_gate_blocked),
+                "repository_graph_degraded_fallback": int(graph_degraded_fallback),
                 "repository_graph_gate_failures": list(graph_gate_reasons),
                 "repository_graph_schema_valid": int(
                     bool(repository_evidence.index and repository_evidence.index.schema_valid)
@@ -2419,6 +2684,24 @@ class MiniSweCentralAgent(BaseAgent):
                     for row in self._repository_work_receipts
                     if row.get("kind") == "mirror_transfer"
                 ),
+                "repository_mirror_selected_source_files": int(
+                    mirror_plan.get("source_files") or 0
+                ),
+                "repository_mirror_selected_metadata_files": int(
+                    mirror_plan.get("metadata_files") or 0
+                ),
+                "repository_mirror_excluded_artifacts": int(
+                    mirror_plan.get("excluded_artifacts") or 0
+                ),
+                "repository_mirror_excluded_deliverables": int(
+                    mirror_plan.get("excluded_deliverables") or 0
+                ),
+                "repository_mirror_excluded_oversize": int(
+                    mirror_plan.get("excluded_oversize") or 0
+                ),
+                "repository_mirror_excluded_budget": int(
+                    mirror_plan.get("excluded_budget") or 0
+                ),
                 "repository_index_refresh_ms": round(
                     sum(
                         float(row.get("elapsed_ms") or 0.0)
@@ -2468,17 +2751,15 @@ class MiniSweCentralAgent(BaseAgent):
                     int(row.get("context_unique_reasoning_chars_removed") or 0)
                     for row in model_call_contexts
                 ),
-                "context_bounded_observations": sum(
-                    int((row.get("context_compiler") or {}).get("bounded_observation_count") or 0)
-                    for row in model_call_contexts
+                "context_bounded_observations": len(unique_bounded_observations),
+                "context_bounded_observation_applications": len(
+                    bounded_observation_applications
                 ),
                 "context_bounded_observation_chars_removed": sum(
-                    int(
-                        (row.get("context_compiler") or {}).get("bounded_observation_chars_removed")
-                        or 0
-                    )
-                    for row in model_call_contexts
+                    int(row.get("omitted_chars") or 0)
+                    for row in unique_bounded_observations.values()
                 ),
+                "context_bounded_observation_operation_counts": bounded_operation_counts,
                 "context_duplicate_turns_represented": sum(
                     int((row.get("context_compiler") or {}).get("duplicate_turns_represented") or 0)
                     for row in model_call_contexts
@@ -2813,6 +3094,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "graph_gate": {
                                 "enabled": bool(self.require_graph_ready),
                                 "blocked": graph_gate_blocked,
+                                "degraded_fallback": graph_degraded_fallback,
                                 "failures": list(graph_gate_reasons),
                             },
                         },

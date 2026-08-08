@@ -2181,18 +2181,23 @@ class CentralFeatureRuntime:
         source_revision: str,
         status: str,
         available: bool,
+        substrate_ready: bool = False,
+        retrieval_disposition: str = "",
     ) -> None:
         """Account for structural feature applicability before the first model call."""
 
         if available:
             return
-        valid_abstentions = {
-            "no_supported_source",
-            "no_task_linked_evidence",
-            "unsupported_language",
-        }
+        valid_abstentions = {"no_supported_source", "no_task_linked_evidence"}
         evidence_status = (
-            "correct_abstention" if status in valid_abstentions else "substrate_unavailable"
+            "correct_abstention"
+            if substrate_ready or status in valid_abstentions
+            else "substrate_unavailable"
+        )
+        reason_code = (
+            retrieval_disposition
+            if substrate_ready and retrieval_disposition
+            else status or "repository_evidence_unavailable"
         )
         for feature_id in (
             "localization",
@@ -2206,8 +2211,13 @@ class CentralFeatureRuntime:
                 action_id=0,
                 source_revision=source_revision,
                 evidence_status=evidence_status,
-                reason_code=status or "repository_evidence_unavailable",
-                evidence={"available": False, "status": status},
+                reason_code=reason_code,
+                evidence={
+                    "available": False,
+                    "status": status,
+                    "substrate_ready": bool(substrate_ready),
+                    "retrieval_disposition": retrieval_disposition,
+                },
             )
 
     def suppress_task_start_delivery(self) -> None:

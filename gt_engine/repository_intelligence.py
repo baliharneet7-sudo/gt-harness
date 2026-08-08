@@ -43,8 +43,32 @@ class RepositoryIntelligenceStatus(StrEnum):
     SENSOR_DEGRADED = "sensor_degraded"
 
 
+class RepositorySubstrateStatus(StrEnum):
+    """Health of the graph substrate, independent of task retrieval quality."""
+
+    HEALTHY_CURRENT = "healthy_current"
+    NOT_APPLICABLE = "not_applicable"
+    UNAVAILABLE = "unavailable"
+    STALE = "stale"
+    INCOMPLETE = "incomplete"
+    INVALID = "invalid"
+
+
+class RetrievalDisposition(StrEnum):
+    """Outcome of task-conditioned retrieval from a usable substrate."""
+
+    NOT_EVALUATED = "not_evaluated"
+    MATCHED = "matched"
+    REPRESENTED_IN_TASK = "represented_in_task"
+    EMPTY = "empty"
+    LOW_PRECISION = "low_precision"
+    STALE = "stale"
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryEvidence:
+    # Compatibility: ``available`` means task-linked structural evidence is
+    # available.  It must not be used as a proxy for graph substrate health.
     available: bool = False
     graph_revision: str = ""
     anchors: tuple[dict[str, Any], ...] = ()
@@ -57,23 +81,26 @@ class RepositoryEvidence:
     source_revision: str = ""
     index_current: bool = False
     intelligence_valid: bool = False
+    substrate_ready: bool = False
+    substrate_status: str = RepositorySubstrateStatus.UNAVAILABLE.value
+    retrieval_disposition: str = RetrievalDisposition.NOT_EVALUATED.value
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 def graph_gate_failures(evidence: RepositoryEvidence) -> tuple[str, ...]:
-    """Return fail-closed reasons for an active task graph gate.
+    """Return analytical treatment failures for the graph substrate.
 
     This is intentionally a substrate gate, not a retrieval-quality oracle.
-    A task may still have no task-linked frontier fact, but GT must never enter
-    a paid active loop when the graph itself is absent, stale, incomplete, or
-    structurally uncertified.
+    The host records these reasons and runs Mini-SWE without uncertified graph
+    payloads; promotion fails closed later.  Healthy empty retrieval is not a
+    substrate failure.
     """
 
     failures: list[str] = []
     index = evidence.index
-    if not evidence.available:
+    if not evidence.substrate_ready:
         failures.append(evidence.status or "repository_unavailable")
     if index is None or not index.graph_db:
         failures.append("graph_missing")
@@ -248,9 +275,9 @@ class RepositorySession:
         evidence = replace(
             evidence,
             source_revision=source_revision,
-            index_current=bool(evidence.available and source_revision),
+            index_current=bool(evidence.substrate_ready and source_revision),
             intelligence_valid=bool(
-                evidence.available
+                evidence.substrate_ready
                 and evidence.status == RepositoryIntelligenceStatus.HEALTHY_CURRENT.value
                 and source_revision
             ),
@@ -331,6 +358,7 @@ def _graph_structural_roles(
     references: list[dict[str, Any]] = []
     callers: list[dict[str, Any]] = []
     target_ids: list[int] = []
+    target_scores: dict[int, tuple[float, float]] = {}
     connection = sqlite3.connect(f"file:{Path(graph_db).resolve().as_posix()}?mode=ro", uri=True)
     try:
         for anchor in anchors:
@@ -358,6 +386,12 @@ def _graph_structural_roles(
                     "signature": str(row[6]),
                     "language": str(row[7]),
                     "semantics": "graph_definition",
+                    "semantic_certainty": float(
+                        anchor.get("semantic_certainty") or 0.0
+                    ),
+                    "retrieval_relevance": float(
+                        anchor.get("retrieval_relevance") or 0.0
+                    ),
                 }
                 key = (definition["path"], definition["line"], definition["symbol"])
                 if not any(
@@ -365,11 +399,18 @@ def _graph_structural_roles(
                 ):
                     definitions.append(definition)
                     target_ids.append(node_id)
+                    target_scores[node_id] = (
+                        float(anchor.get("semantic_certainty") or 0.0),
+                        float(anchor.get("retrieval_relevance") or 0.0),
+                    )
                 if len(definitions) >= limit:
                     break
             if len(definitions) >= limit:
                 break
         for target_id in dict.fromkeys(target_ids):
+            target_certainty, target_relevance = target_scores.get(
+                target_id, (0.0, 0.0)
+            )
             rows = connection.execute(
                 "SELECT src.name,src.file_path,COALESCE(e.source_line,src.start_line,0),"
                 "tgt.name,tgt.file_path,COALESCE(e.resolution_method,''),"
@@ -390,6 +431,8 @@ def _graph_structural_roles(
                     "line": int(row[2]),
                     "symbol": str(row[3]),
                     "semantics": "graph_call_reference",
+                    "semantic_certainty": min(target_certainty, float(row[6])),
+                    "retrieval_relevance": target_relevance,
                 }
                 caller = {
                     "caller": str(row[0]),
@@ -403,6 +446,8 @@ def _graph_structural_roles(
                     "candidate_count": int(row[8]),
                     "evidence_type": str(row[9]),
                     "semantics": "graph_recorded",
+                    "semantic_certainty": min(target_certainty, float(row[6])),
+                    "retrieval_relevance": target_relevance,
                 }
                 if reference not in references:
                     references.append(reference)
@@ -459,6 +504,17 @@ def inspect_repository(
                 project_checks=checks,
                 status=status,
                 index=index_receipt,
+                substrate_status=(
+                    RepositorySubstrateStatus.NOT_APPLICABLE.value
+                    if index_receipt.status is IndexBuildStatus.NO_SUPPORTED_SOURCE
+                    else RepositorySubstrateStatus.INCOMPLETE.value
+                    if index_receipt.status
+                    in {
+                        IndexBuildStatus.UNSUPPORTED_LANGUAGE,
+                        IndexBuildStatus.INCOMPLETE_COVERAGE,
+                    }
+                    else RepositorySubstrateStatus.INVALID.value
+                ),
             )
         if not index_receipt.schema_valid:
             return RepositoryEvidence(
@@ -466,6 +522,7 @@ def inspect_repository(
                 project_checks=checks,
                 status=RepositoryIntelligenceStatus.SCHEMA_INVALID.value,
                 index=index_receipt,
+                substrate_status=RepositorySubstrateStatus.INVALID.value,
             )
         if index_receipt.status is IndexBuildStatus.INCOMPLETE_COVERAGE:
             return RepositoryEvidence(
@@ -473,6 +530,7 @@ def inspect_repository(
                 project_checks=checks,
                 status=RepositoryIntelligenceStatus.INCOMPLETE_COVERAGE.value,
                 index=index_receipt,
+                substrate_status=RepositorySubstrateStatus.INCOMPLETE.value,
             )
         contract = extract_task_contract(instruction)
         if not contract.obligations and instruction.strip():
@@ -501,7 +559,8 @@ def inspect_repository(
                 not item.file_path
                 or not item.symbol
                 or int(item.line) <= 0
-                or float(item.confidence) < 0.95
+                or float(item.semantic_certainty) < 0.95
+                or float(item.retrieval_relevance) < 0.95
             ):
                 continue
             anchor = {
@@ -509,9 +568,12 @@ def inspect_repository(
                 "line": int(item.line),
                 "symbol": item.symbol,
                 "surface": item.surface,
-                "confidence": float(item.confidence),
-                "retrieval_relevance": float(item.confidence),
-                "semantic_certainty": 1.0,
+                # These are independent axes.  Extractor certainty must not
+                # inflate task-conditioned retrieval relevance.
+                "confidence": float(item.semantic_certainty),
+                "retrieval_relevance": float(item.retrieval_relevance),
+                "semantic_certainty": float(item.semantic_certainty),
+                "relevance_reason_codes": list(item.relevance_reason_codes),
             }
             key = (anchor["path"], anchor["line"], anchor["symbol"])
             if any((row["path"], row["line"], row["symbol"]) == key for row in anchors):
@@ -523,8 +585,14 @@ def inspect_repository(
             return RepositoryEvidence(
                 graph_revision=projection.revision,
                 project_checks=checks,
-                status=RepositoryIntelligenceStatus.EMPTY_RETRIEVAL.value,
+                status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
                 index=index_receipt,
+                source_revision=source_revision,
+                index_current=bool(source_revision),
+                intelligence_valid=bool(source_revision),
+                substrate_ready=True,
+                substrate_status=RepositorySubstrateStatus.HEALTHY_CURRENT.value,
+                retrieval_disposition=RetrievalDisposition.EMPTY.value,
             )
         definitions, references, callers = _graph_structural_roles(
             graph_db,
@@ -541,14 +609,33 @@ def inspect_repository(
             project_checks=checks,
             status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
             index=index_receipt,
-            intelligence_valid=True,
+            source_revision=source_revision,
+            index_current=bool(source_revision),
+            intelligence_valid=bool(source_revision),
+            substrate_ready=True,
+            substrate_status=RepositorySubstrateStatus.HEALTHY_CURRENT.value,
+            retrieval_disposition=RetrievalDisposition.MATCHED.value,
         )
     except Exception as exc:
         return RepositoryEvidence(
             project_checks=checks,
             status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+            substrate_status=RepositorySubstrateStatus.INVALID.value,
             index=IndexBuildReceipt(
                 IndexBuildStatus.BUILD_FAILED,
                 error_type=type(exc).__name__,
             ),
         )
+
+
+__all__ = [
+    "RepositoryEvidence",
+    "RepositoryIntelligenceStatus",
+    "RepositorySession",
+    "RepositorySubstrateStatus",
+    "RetrievalDisposition",
+    "discover_project_checks",
+    "graph_gate_failures",
+    "inspect_index",
+    "inspect_repository",
+]

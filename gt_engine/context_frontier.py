@@ -33,6 +33,7 @@ class FrontierDisposition(StrEnum):
     SUBSTRATE_FAILURE = "substrate_failure"
     STALE_SOURCE_REVISION = "stale_source_revision"
     LOW_PRECISION = "low_precision"
+    INVALID_RELEVANCE = "invalid_relevance"
     FRONTIER_BUDGET = "frontier_budget"
     NO_FRONTIER = "no_frontier"
 
@@ -40,6 +41,7 @@ class FrontierDisposition(StrEnum):
 @dataclass(frozen=True, slots=True)
 class ContextFrontierFact:
     fact_id: str
+    claim_id: str
     kind: ContextFrontierKind
     path: str
     line: int = 0
@@ -92,8 +94,51 @@ def _provider_text(messages: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(pieces).replace("\\", "/")
 
 
-def _fact_id(*values: object) -> str:
+def _digest(*values: object) -> str:
     return hashlib.sha256("\0".join(map(str, values)).encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def _claim_id(
+    kind: ContextFrontierKind,
+    path: str,
+    line: int,
+    symbol: str,
+    value: str,
+    relation: str,
+) -> str:
+    """Semantic identity independent of graph/source refresh versions."""
+
+    return _digest(kind.value, path, line, symbol, value, relation)
+
+
+def _frontier_fact(
+    *,
+    kind: ContextFrontierKind,
+    path: str,
+    line: int,
+    symbol: str,
+    value: str,
+    relation: str,
+    source_revision: str,
+    graph_revision: str,
+    semantic_certainty: float,
+    retrieval_relevance: float,
+) -> ContextFrontierFact:
+    claim_id = _claim_id(kind, path, line, symbol, value, relation)
+    return ContextFrontierFact(
+        fact_id=_digest(claim_id, source_revision, graph_revision),
+        claim_id=claim_id,
+        kind=kind,
+        path=path,
+        line=line,
+        symbol=symbol,
+        value=value,
+        relation=relation,
+        source_revision=source_revision,
+        graph_revision=graph_revision,
+        semantic_certainty=semantic_certainty,
+        retrieval_relevance=retrieval_relevance,
+    )
 
 
 def _definition_candidates(
@@ -115,25 +160,26 @@ def _definition_candidates(
         signature = str(item.get("signature") or "")
         anchor = anchors.get((path, symbol), {})
         certainty = float(item.get("semantic_certainty") or (1.0 if line > 0 else 0.0))
+        # Relevance is a task-conditioned retrieval score.  Extractor
+        # confidence is a separate semantic-certainty axis and is never a
+        # fallback for relevance.
         relevance = float(
             item.get("retrieval_relevance")
-            or anchor.get("retrieval_relevance")
-            or anchor.get("confidence")
-            or 0.0
+            if item.get("retrieval_relevance") is not None
+            else anchor.get("retrieval_relevance") or 0.0
         )
         candidates.append(
-            ContextFrontierFact(
-                _fact_id("definition", path, line, symbol, signature, source_revision),
-                ContextFrontierKind.DEFINITION,
-                path,
-                line,
-                symbol,
-                signature,
-                "defines",
-                source_revision,
-                graph_revision,
-                certainty,
-                relevance,
+            _frontier_fact(
+                kind=ContextFrontierKind.DEFINITION,
+                path=path,
+                line=line,
+                symbol=symbol,
+                value=signature,
+                relation="defines",
+                source_revision=source_revision,
+                graph_revision=graph_revision,
+                semantic_certainty=certainty,
+                retrieval_relevance=relevance,
             )
         )
     return candidates
@@ -154,19 +200,19 @@ def _caller_candidates(
         certainty = float(item.get("confidence") or item.get("semantic_certainty") or 0.0)
         if str(item.get("semantics") or "") == "graph_recorded" and not certainty:
             certainty = 1.0
+        relevance = float(item.get("retrieval_relevance") or 0.0)
         candidates.append(
-            ContextFrontierFact(
-                _fact_id("caller", path, line, symbol, target, source_revision),
-                ContextFrontierKind.CALLER,
-                path,
-                line,
-                symbol,
-                target,
-                "calls",
-                source_revision,
-                graph_revision,
-                certainty,
-                1.0,
+            _frontier_fact(
+                kind=ContextFrontierKind.CALLER,
+                path=path,
+                line=line,
+                symbol=symbol,
+                value=target,
+                relation="calls",
+                source_revision=source_revision,
+                graph_revision=graph_revision,
+                semantic_certainty=certainty,
+                retrieval_relevance=relevance,
             )
         )
     return candidates
@@ -190,18 +236,17 @@ def _reference_candidates(
             else ContextFrontierKind.REFERENCE
         )
         candidates.append(
-            ContextFrontierFact(
-                _fact_id(kind.value, path, line, symbol, source_revision),
-                kind,
-                path,
-                line,
-                symbol,
-                str(item.get("target") or ""),
-                "references",
-                source_revision,
-                graph_revision,
-                certainty,
-                float(item.get("retrieval_relevance") or 1.0),
+            _frontier_fact(
+                kind=kind,
+                path=path,
+                line=line,
+                symbol=symbol,
+                value=str(item.get("target") or ""),
+                relation="references",
+                source_revision=source_revision,
+                graph_revision=graph_revision,
+                semantic_certainty=certainty,
+                retrieval_relevance=float(item.get("retrieval_relevance") or 0.0),
             )
         )
     return candidates
@@ -232,6 +277,7 @@ def compile_incremental_frontier(
     *,
     source_revision: str,
     delivered_fact_ids: frozenset[str] = frozenset(),
+    delivered_claim_ids: frozenset[str] = frozenset(),
     max_facts: int = 3,
     max_chars: int = 1_200,
     certainty_threshold: float = 0.95,
@@ -248,7 +294,10 @@ def compile_incremental_frontier(
                 status or "repository_intelligence_unavailable",
                 status == RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
             ),
-            ("repository_evidence_unavailable", bool(row.get("available"))),
+            (
+                "repository_substrate_unavailable",
+                bool(row.get("substrate_ready", row.get("available"))),
+            ),
             ("repository_index_not_current", bool(row.get("index_current"))),
             ("repository_intelligence_not_valid", bool(row.get("intelligence_valid"))),
             ("repository_graph_revision_missing", bool(row.get("graph_revision"))),
@@ -277,7 +326,17 @@ def compile_incremental_frontier(
     accounting: list[dict[str, Any]] = []
     rendered_lines = [f"Repository intelligence at source revision {source_revision[:12]}:"]
     for fact in candidates:
-        if fact.fact_id in delivered_fact_ids or _represented(fact, provider_text):
+        valid_relevance = 0.0 <= fact.retrieval_relevance <= 1.0
+        valid_certainty = 0.0 <= fact.semantic_certainty <= 1.0
+        if not valid_relevance:
+            disposition = FrontierDisposition.INVALID_RELEVANCE
+        elif not valid_certainty:
+            disposition = FrontierDisposition.LOW_PRECISION
+        elif (
+            fact.fact_id in delivered_fact_ids
+            or fact.claim_id in delivered_claim_ids
+            or _represented(fact, provider_text)
+        ):
             disposition = FrontierDisposition.REPRESENTED_MESSAGE
         elif (
             fact.semantic_certainty < certainty_threshold
@@ -299,6 +358,7 @@ def compile_incremental_frontier(
         accounting.append(
             {
                 "fact_id": fact.fact_id,
+                "claim_id": fact.claim_id,
                 "kind": fact.kind.value,
                 "path": fact.path,
                 "line": fact.line,

@@ -72,7 +72,9 @@ DIAGNOSTIC_METRICS = (
     "context_frontier_facts_delivered",
     "context_frontier_zero_tasks",
     "context_frontier_duplicate_facts",
+    "context_frontier_duplicate_claims",
     "repository_intelligence_valid",
+    "repository_graph_degraded_fallback",
     "repository_graph_schema_valid",
     "repository_graph_nodes",
     "repository_graph_edges",
@@ -82,6 +84,12 @@ DIAGNOSTIC_METRICS = (
     "repository_mirror_transfer_ms",
     "repository_mirror_files",
     "repository_mirror_bytes",
+    "repository_mirror_selected_source_files",
+    "repository_mirror_selected_metadata_files",
+    "repository_mirror_excluded_artifacts",
+    "repository_mirror_excluded_deliverables",
+    "repository_mirror_excluded_oversize",
+    "repository_mirror_excluded_budget",
     "repository_index_refresh_ms",
     "repository_full_refreshes",
     "repository_incremental_refreshes",
@@ -89,10 +97,12 @@ DIAGNOSTIC_METRICS = (
     "context_exact_duplicate_chars_removed",
     "context_unique_reasoning_chars_removed",
     "context_bounded_observations",
+    "context_bounded_observation_applications",
     "context_bounded_observation_chars_removed",
     "context_duplicate_turns_represented",
     "context_old_tool_results_cleared",
     "context_compactions",
+    "context_compaction_deferral_count",
     "context_chars_elided",
     "context_state_frame_calls",
     "context_provider_view_changed_calls",
@@ -621,7 +631,9 @@ def extract_trajectory(
             "context_frontier_chars_added",
             "context_frontier_zero_tasks",
             "context_frontier_duplicate_facts",
+            "context_frontier_duplicate_claims",
             "repository_intelligence_valid",
+            "repository_graph_degraded_fallback",
             "repository_graph_schema_valid",
             "repository_graph_nodes",
             "repository_graph_edges",
@@ -631,6 +643,12 @@ def extract_trajectory(
             "repository_mirror_transfer_ms",
             "repository_mirror_files",
             "repository_mirror_bytes",
+            "repository_mirror_selected_source_files",
+            "repository_mirror_selected_metadata_files",
+            "repository_mirror_excluded_artifacts",
+            "repository_mirror_excluded_deliverables",
+            "repository_mirror_excluded_oversize",
+            "repository_mirror_excluded_budget",
             "repository_index_refresh_ms",
             "repository_full_refreshes",
             "repository_incremental_refreshes",
@@ -655,10 +673,12 @@ def extract_trajectory(
             "context_state_frame_calls",
             "context_provider_view_changed_calls",
             "context_bounded_observations",
+            "context_bounded_observation_applications",
             "context_bounded_observation_chars_removed",
             "context_duplicate_turns_represented",
             "context_old_tool_results_cleared",
             "context_compactions",
+            "context_compaction_deferral_count",
             "context_chars_elided",
             "validation_attributed_results",
             "validation_unattributed_intents",
@@ -683,6 +703,12 @@ def extract_trajectory(
         )
         result["repository_intelligence_status"] = str(
             repository_intelligence.get("status") or "unreported"
+        )
+        result["context_frontier_coverage"] = str(
+            receipt_metrics.get("context_frontier_coverage") or "unreported"
+        )
+        result["context_bounded_observation_operation_counts"] = dict(
+            receipt_metrics.get("context_bounded_observation_operation_counts") or {}
         )
         result["repository_intelligence_required"] = bool(repository_intelligence.get("required"))
         result["repository_intelligence_failures"] = list(

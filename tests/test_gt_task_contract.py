@@ -4,6 +4,8 @@ import os
 
 import pytest
 
+from gt_engine.task_contract import TaskResourceRole, extract_task_resources
+
 try:
     import groundtruth  # noqa: F401
 
@@ -13,6 +15,38 @@ except ImportError:
 
 
 requires_gt = pytest.mark.skipif(not HAVE_GT, reason="groundtruth not installed")
+
+
+def test_task_resources_use_clause_local_roles_for_artifact_task():
+    resources = {
+        item.path: item
+        for item in extract_task_resources(
+            "I have a decompressor in /app/decomp.c. It reads compressed data "
+            "from stdin. I also have /app/data.txt. Write me /app/data.comp so "
+            "that cat data.comp | /app/decomp gives exactly data.txt."
+        )
+    }
+
+    assert resources["decomp.c"].role is TaskResourceRole.REFERENCE
+    assert resources["decomp.c"].mutable is False
+    assert resources["data.txt"].role is TaskResourceRole.INPUT
+    assert resources["data.comp"].role is TaskResourceRole.OUTPUT
+    assert resources["decomp"].role is TaskResourceRole.EXECUTABLE
+
+
+def test_task_resources_recognize_greenfield_source_and_large_inputs():
+    resources = {
+        item.path: item
+        for item in extract_task_resources(
+            "Write /app/gpt2.c. Compile it to /app/a.out. It must read "
+            "/app/gpt2-124M.ckpt and /app/vocab.bpe."
+        )
+    }
+
+    assert resources["gpt2.c"].role is TaskResourceRole.OUTPUT
+    assert resources["a.out"].role is TaskResourceRole.EXECUTABLE
+    assert resources["gpt2-124M.ckpt"].role is TaskResourceRole.INPUT
+    assert resources["vocab.bpe"].role is TaskResourceRole.INPUT
 
 
 SANITIZE_TASK = """\

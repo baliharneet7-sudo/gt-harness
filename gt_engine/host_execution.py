@@ -17,6 +17,7 @@ class HostExecCategory(StrEnum):
     COMPLETION_PROBE = "completion_probe"
     AUTO_SUBMIT = "auto_submit"
     SYSTEM_INFORMATION = "system_information"
+    REPOSITORY_TRANSFER = "repository_transfer"
 
 
 _TASK_ACTION_CATEGORIES = frozenset(HostExecCategory) - {

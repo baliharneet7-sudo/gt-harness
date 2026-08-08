@@ -15,6 +15,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from gt_engine.language_registry import is_validation_source
+
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<text>.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _DIRECTIVE_RE = re.compile(
@@ -165,7 +167,8 @@ class TaskContract:
 _RESOURCE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:/app/)?(?:[A-Za-z0-9_.-]+/)*"
     r"[A-Za-z0-9_.-]+\.(?:jsonl?|csv|txt|md|out|comp|py|c|cc|cpp|h|hpp|"
-    r"js|jsx|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml)\b"
+    r"js|jsx|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml|cbl|cob|cpy|"
+    r"dat|ckpt|bpe)\b"
 )
 _ABSOLUTE_RESOURCE_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])/app/[A-Za-z0-9_./-]+"
@@ -210,6 +213,18 @@ def _direct_output_score(prefix: str, path: str) -> int:
     if cue and not re.search(r"[.!?]\s", tail[cue[-1].end() :]):
         return 90
     return 0
+
+
+def _resource_clause(line: str, offset: int) -> tuple[str, int]:
+    """Return the punctuation-bounded clause containing one path occurrence."""
+
+    boundaries = [
+        match.end()
+        for match in re.finditer(r"[.!?;](?:\s+|$)", line or "")
+    ]
+    start = max((boundary for boundary in boundaries if boundary <= offset), default=0)
+    end = min((boundary for boundary in boundaries if boundary > offset), default=len(line))
+    return line[start:end].strip(), max(0, offset - start)
 
 
 def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
@@ -260,19 +275,30 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
                 order.append(path)
             row = scores[path]
             normalized = path.lower()
-            prefix = raw[: offset + len(path)]
+            clause, clause_offset = _resource_clause(raw, offset)
+            prefix = clause[: clause_offset + len(path)]
             basename = re.escape(path.rsplit("/", 1)[-1])
+            clause_output = bool(_OUTPUT_CUE_RE.search(clause))
+            clause_input = bool(_INPUT_CUE_RE.search(clause))
 
-            def add(role: TaskResourceRole, score: int) -> None:
-                row[role] = max(score, row.get(role, 0))
+            def add(
+                role: TaskResourceRole,
+                score: int,
+                target: dict[TaskResourceRole, int] = row,
+            ) -> None:
+                target[role] = max(score, target.get(role, 0))
 
             if "/input_data/" in f"/{normalized}" or normalized.startswith("input_data/"):
                 add(TaskResourceRole.INPUT, 100)
             if "/output_data/" in f"/{normalized}" or normalized.startswith("output_data/"):
                 add(TaskResourceRole.OUTPUT, 100)
-            if re.search(rf"(?i)\bgives\s+exactly\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b", raw):
+            if re.search(rf"(?i)\bgives\s+exactly\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b", clause):
                 add(TaskResourceRole.INPUT, 95)
-            if re.search(rf"(?i)\bkeep\b[^.\n]{{0,100}}{basename}[^.\n]{{0,60}}\bunchanged\b", raw):
+            if re.search(
+                rf"(?i)\bkeep\b[^.\n]{{0,100}}{basename}"
+                rf"[^.\n]{{0,60}}\bunchanged\b",
+                clause,
+            ):
                 add(TaskResourceRole.INPUT, 100)
             direct_output = _direct_output_score(prefix, path)
             if direct_output:
@@ -283,16 +309,49 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
                 prefix[-220:],
             ):
                 add(TaskResourceRole.INPUT, 80)
+            if is_validation_source(path) and re.search(
+                rf"(?i)\b(?:have|given|provided|existing|located)\b[^.\n]{{0,100}}"
+                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
+                clause,
+            ):
+                add(TaskResourceRole.REFERENCE, 90)
+            if re.search(
+                rf"(?i)\bcompile\b[^.\n]{{0,80}}\b(?:to|as)\s+"
+                rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",
+                clause,
+            ):
+                add(TaskResourceRole.EXECUTABLE, 95)
             if re.search(
                 rf"(?i)\b(?:executable|decompressor|compiler|interpreter)\b"
                 rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b",
                 prefix[-220:],
             ):
-                add(TaskResourceRole.EXECUTABLE, 85)
+                add(
+                    TaskResourceRole.REFERENCE
+                    if is_validation_source(path)
+                    else TaskResourceRole.EXECUTABLE,
+                    85,
+                )
+            if not re.search(r"\.[A-Za-z0-9]+$", path) and re.search(
+                rf"(?i)(?:\brun(?:ning)?\b|\|)\s+(?:/app/)?(?:[\w.-]+/)*{basename}\b",
+                clause,
+            ):
+                # Shell position is mechanically stronger than a prose cue
+                # earlier in the same clause (for example ``Write data.comp
+                # ... | /app/decomp``).  It must win instead of tying the
+                # output score and degrading to UNKNOWN.
+                add(TaskResourceRole.EXECUTABLE, 100)
             if section_role is not TaskResourceRole.UNKNOWN:
                 add(section_role, 60)
-            if flow_role is not TaskResourceRole.UNKNOWN:
-                add(flow_role, 50)
+            local_flow = (
+                TaskResourceRole.OUTPUT
+                if clause_output
+                else TaskResourceRole.INPUT
+                if clause_input
+                else flow_role
+            )
+            if local_flow is not TaskResourceRole.UNKNOWN:
+                add(local_flow, 50)
             if not row:
                 add(TaskResourceRole.UNKNOWN, 1)
 

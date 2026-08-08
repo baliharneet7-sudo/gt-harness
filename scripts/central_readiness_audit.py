@@ -117,8 +117,10 @@ def audit() -> dict[str, bool]:
         "provider_free_gate_covers_repository_intelligence": (
             "tests/test_gt_intelligence_layer.py" in provider_free_workflow
             and "tests/test_gt_repository_intelligence.py" in provider_free_workflow
+            and "tests/test_gt_repository_mirror.py" in provider_free_workflow
             and "gt_engine/context_frontier.py" in provider_free_workflow
             and "gt_engine/language_registry.py" in provider_free_workflow
+            and "gt_engine/repository_mirror.py" in provider_free_workflow
         ),
         "paid_context_frontier_is_explicit": all(
             "--ak enable_context_frontier=true" in item for item in workflows
@@ -127,7 +129,8 @@ def audit() -> dict[str, bool]:
             "--ak require_graph_ready=true" in item for item in workflows
         )
         and "graph_gate_failures" in run_source
-        and "RepositoryGraphGateFailed" in run_source,
+        and "graph_degraded_fallback" in run_source
+        and "graph_gate_blocked = False" in run_source,
         "paid_deterministic_compaction_enabled": all(
             "--ak enable_context_compaction=true" in item for item in workflows
         )
@@ -156,9 +159,16 @@ def audit() -> dict[str, bool]:
             < run_source.find("model.query, query_messages")
         ),
         "repository_intelligence_failure_is_receipted": (
-            "zero_visible_incremental_frontier" in run_source
+            "material_frontier_not_delivered" in run_source
+            and "context_frontier_coverage" in run_source
             and "repository_intelligence_valid" in run_source
             and "frontier_fact_accounting_incomplete" in run_source
+        ),
+        "repository_mirror_is_source_only_and_bounded": (
+            "plan_source_mirror" in source
+            and "SourceMirrorIncomplete" in source
+            and "source_only_archive" in source
+            and "REPOSITORY_TRANSFER" in source
         ),
         "repository_intelligence_failure_blocks_outcome_gate": (
             "invalid_treatments" in deep_metrics_source

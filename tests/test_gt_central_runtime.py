@@ -93,6 +93,28 @@ def test_degraded_sensor_disables_hard_decisions():
     )
 
 
+def test_healthy_empty_repository_retrieval_is_not_recorded_as_substrate_failure():
+    runtime = CentralFeatureRuntime(model_visible=True)
+
+    runtime.record_repository_evidence_status(
+        source_revision="s1",
+        status="source_backed",
+        available=False,
+        substrate_ready=True,
+        retrieval_disposition="empty",
+    )
+
+    applicability = runtime.summary()["feature_applicability"]
+    for feature_id in (
+        "localization",
+        "GT_LOC_RESLOT",
+        "def_partition",
+        "caller_contract",
+    ):
+        assert applicability[feature_id]["status"] == "correct_abstention"
+        assert applicability[feature_id]["reason_codes"] == ["empty"]
+
+
 def test_feedback_is_concise_and_contains_no_private_runtime_identifier():
     text = render_runtime_feedback("x" * 1_000)
 

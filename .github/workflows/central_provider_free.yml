@@ -57,6 +57,8 @@ jobs:
             tests/test_gt_preflight.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
+            tests/test_gt_repository_mirror.py \
+            tests/test_gt_task_contract.py \
             tests/test_central_readiness.py \
             tests/test_central_replay.py \
             tests/test_central_run_diff.py \
@@ -77,7 +79,9 @@ jobs:
             gt_engine/preflight.py gt_engine/provider_view.py \
             gt_engine/host_execution.py gt_engine/context_frontier.py \
             gt_engine/language_registry.py gt_engine/repository_intelligence.py \
-            gt_engine/indexer.py gt_engine/graph_context.py \
+            gt_engine/repository_mirror.py gt_engine/graph_evidence.py \
+            gt_engine/graph_context.py gt_engine/task_contract.py \
+            gt_engine/indexer.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
@@ -89,6 +93,8 @@ jobs:
             tests/test_gt_preflight.py tests/test_provider_view.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
+            tests/test_gt_repository_mirror.py \
+            tests/test_gt_task_contract.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
             tests/test_central_readiness.py \

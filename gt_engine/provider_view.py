@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
+DEFAULT_SOFT_COMPACTION_TRIGGER_CHARS = 120_000
+DEFAULT_SOFT_COMPACTION_TARGET_CHARS = 80_000
+DEFAULT_MIN_COMPACTION_SAVINGS_CHARS = 20_000
+DEFAULT_MIN_COMPACTION_SAVINGS_RATIO = 0.10
+
 
 class ContextFactKind(StrEnum):
     REQUIREMENT = "requirement"
@@ -85,6 +90,7 @@ class ProviderViewMetrics:
     frame_sha256: str = ""
     bounded_observation_count: int = 0
     bounded_observation_chars_removed: int = 0
+    bounded_observations: tuple[dict[str, Any], ...] = ()
     duplicate_turns_represented: int = 0
     old_tool_results_cleared: int = 0
     state_frame_message_index: int | None = None
@@ -118,6 +124,7 @@ class ProviderViewMetrics:
             "frame_sha256": self.frame_sha256,
             "bounded_observation_count": self.bounded_observation_count,
             "bounded_observation_chars_removed": self.bounded_observation_chars_removed,
+            "bounded_observations": [dict(row) for row in self.bounded_observations],
             "duplicate_turns_represented": self.duplicate_turns_represented,
             "old_tool_results_cleared": self.old_tool_results_cleared,
             "state_frame_message_index": self.state_frame_message_index,
@@ -149,6 +156,8 @@ class RequestBudget:
 class CompactionEpochReceipt:
     epoch: int
     trigger_tokens: int
+    trigger_kind: str
+    trigger_chars: int
     original_prefix_hash: str
     stable_prefix_hash: str
     tool_chars_elided: int
@@ -199,13 +208,30 @@ class ProviderViewSession:
         """Project the durable history without rewriting an established prefix."""
 
         if not self.checkpoint_messages:
-            return build_provider_view(messages, active_state=active_state, transform=False)
+            # Active compaction mode always applies the per-observation
+            # governor.  It does not clear historical tool bodies or attach a
+            # state frame until an explicit compaction epoch begins.
+            return build_provider_view(
+                messages,
+                active_state=active_state,
+                trigger_chars=10**18,
+                target_chars=10**18,
+                transform=True,
+                attach_state_frame=False,
+            )
         if (
             len(messages) < self.source_message_count
             or self._hash(messages[: self.source_message_count]) != self.source_prefix_hash
         ):
             self.reset()
-            return build_provider_view(messages, active_state=active_state, transform=False)
+            return build_provider_view(
+                messages,
+                active_state=active_state,
+                trigger_chars=10**18,
+                target_chars=10**18,
+                transform=True,
+                attach_state_frame=False,
+            )
 
         tail, preparation = _prepare_provider_history(messages[self.source_message_count :])
         view = [*copy.deepcopy(self.checkpoint_messages), *tail]
@@ -260,6 +286,7 @@ class ProviderViewSession:
             exact_duplicate_chars_removed=preparation["duplicate_removed"],
             bounded_observation_count=preparation["bounded_count"],
             bounded_observation_chars_removed=preparation["bounded_removed"],
+            bounded_observations=tuple(preparation["bounded_observations"]),
             duplicate_turns_represented=preparation["duplicate_count"],
             state_frame_message_index=state_frame_message_index,
         )
@@ -272,10 +299,14 @@ class ProviderViewSession:
         target_chars: int,
         keep_recent_turns: int,
         trigger_tokens: int,
+        trigger_kind: str = "provider_budget",
+        trigger_chars: int = 0,
     ) -> tuple[list[dict[str, Any]], ProviderViewMetrics]:
         """Start one cache-breaking epoch, then freeze its provider prefix."""
 
-        projected, _projected_metrics = self.project(messages, active_state=active_state)
+        projected, initial_projection_metrics = self.project(
+            messages, active_state=active_state
+        )
         original_hash = self._hash(projected)
         compacted, metrics = build_provider_view(
             projected,
@@ -296,6 +327,8 @@ class ProviderViewSession:
             CompactionEpochReceipt(
                 epoch=self.epoch,
                 trigger_tokens=max(0, int(trigger_tokens)),
+                trigger_kind=str(trigger_kind or "provider_budget"),
+                trigger_chars=max(0, int(trigger_chars)),
                 original_prefix_hash=original_hash,
                 stable_prefix_hash=self.stable_prefix_hash,
                 tool_chars_elided=metrics.elided_chars,
@@ -306,14 +339,37 @@ class ProviderViewSession:
             )
         )
         projected, projected_metrics = self.project(messages, active_state=active_state)
+        bounded_by_identity: dict[tuple[int, str], dict[str, Any]] = {}
+        for receipt in (
+            *initial_projection_metrics.bounded_observations,
+            *metrics.bounded_observations,
+            *projected_metrics.bounded_observations,
+        ):
+            identity = (
+                int(receipt.get("observation_index") or 0),
+                str(receipt.get("full_sha256") or ""),
+            )
+            bounded_by_identity.setdefault(identity, dict(receipt))
         return projected, replace(
             projected_metrics,
             compacted=True,
             duplicate_turns_removed=metrics.duplicate_turns_removed,
-            exact_duplicate_chars_removed=metrics.exact_duplicate_chars_removed,
-            bounded_observation_count=metrics.bounded_observation_count,
-            bounded_observation_chars_removed=metrics.bounded_observation_chars_removed,
-            duplicate_turns_represented=metrics.duplicate_turns_represented,
+            exact_duplicate_chars_removed=max(
+                initial_projection_metrics.exact_duplicate_chars_removed,
+                metrics.exact_duplicate_chars_removed,
+                projected_metrics.exact_duplicate_chars_removed,
+            ),
+            bounded_observation_count=len(bounded_by_identity),
+            bounded_observation_chars_removed=sum(
+                int(row.get("omitted_chars") or 0)
+                for row in bounded_by_identity.values()
+            ),
+            bounded_observations=tuple(bounded_by_identity.values()),
+            duplicate_turns_represented=max(
+                initial_projection_metrics.duplicate_turns_represented,
+                metrics.duplicate_turns_represented,
+                projected_metrics.duplicate_turns_represented,
+            ),
             old_tool_results_cleared=metrics.old_tool_results_cleared,
         )
 
@@ -586,10 +642,52 @@ def _tool_return_code(message: dict[str, Any]) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _sample_read_content(content: str, *, budget: int) -> tuple[str, int]:
+    """Retain deterministic coverage across a large successful read.
+
+    Head/tail-only truncation can erase the exact middle region the model
+    intentionally read.  Large read observations therefore retain three
+    evenly spaced interior windows.  The durable trajectory still owns the
+    full body; this is only the bounded provider projection.
+    """
+
+    if len(content) <= budget:
+        return content, 0
+    labels = (
+        "\n[Retained read sample near 25%]\n",
+        "\n[Retained read sample near 50%]\n",
+        "\n[Retained read sample near 75%]\n",
+        "\n[Retained read tail]\n",
+    )
+    raw_budget = max(1_000, budget - sum(map(len, labels)))
+    head_chars = max(500, int(raw_budget * 0.30))
+    tail_chars = max(500, int(raw_budget * 0.25))
+    middle_chars = max(1, (raw_budget - head_chars - tail_chars) // 3)
+    pieces = [content[:head_chars]]
+    for label, fraction in zip(labels[:3], (0.25, 0.50, 0.75), strict=True):
+        center = int(len(content) * fraction)
+        start = max(head_chars, center - middle_chars // 2)
+        end = min(len(content) - tail_chars, start + middle_chars)
+        start = max(head_chars, end - middle_chars)
+        pieces.extend((label, content[start:end]))
+    pieces.extend((labels[3], content[-tail_chars:]))
+    sampled = "".join(pieces)
+    if len(sampled) > budget:
+        sampled = sampled[:budget]
+    # Intervals are non-overlapping for the large observations this path is
+    # designed for.  Report source omission independently from provider
+    # framing characters.
+    retained_source_chars = min(
+        len(content), head_chars + tail_chars + (3 * middle_chars)
+    )
+    return sampled, max(0, len(content) - retained_source_chars)
+
+
 def _bound_tool_content(
     content: str,
     *,
     return_code: int | None,
+    operation: str = "other",
     max_chars: int = 20_000,
 ) -> tuple[str, int]:
     """Create a deterministic head/diagnostic/tail provider observation."""
@@ -602,7 +700,10 @@ def _bound_tool_content(
         f"full_chars={len(content)} omitted_chars={{omitted}} sha256={digest}; "
         "use a narrower command if omitted detail is required.]\n"
     )
-    payload_budget = max(2_000, max_chars - len(notice.format(omitted=0)))
+    payload_budget = max(
+        2_000,
+        max_chars - len(notice.format(omitted=len(content))),
+    )
     diagnostics = ""
     if return_code not in (None, 0):
         selected: list[str] = []
@@ -620,6 +721,16 @@ def _bound_tool_content(
             used += addition
         if selected:
             diagnostics = "\n[Selected diagnostic lines]\n" + "\n".join(selected) + "\n"
+    if operation == "read" and not diagnostics and len(content) >= max_chars * 2:
+        sampled, source_omitted = _sample_read_content(
+            content,
+            budget=payload_budget,
+        )
+        bounded = sampled + notice.format(omitted=source_omitted)
+        if len(bounded) > max_chars:
+            bounded = bounded[:max_chars]
+        return bounded, max(0, len(content) - len(bounded))
+
     remaining = max(1_000, payload_budget - len(diagnostics))
     head_chars = min(8_000 if not diagnostics else 6_000, remaining // 2)
     tail_chars = max(1, remaining - head_chars)
@@ -635,29 +746,79 @@ def _bound_tool_content(
     return bounded, max(0, len(content) - len(bounded))
 
 
+_OPERATION_OBSERVATION_LIMITS = {
+    "read": 12_000,
+    "search": 8_000,
+    "edit": 8_000,
+    "create": 8_000,
+    "delete": 4_000,
+    "validate": 16_000,
+    "submit": 4_000,
+    "install": 12_000,
+    # Parser abstention is fail-open: preserve the historical generic bound.
+    "other": 20_000,
+}
+
+
+def _observation_limit(message: dict[str, Any], default: int) -> tuple[str, int]:
+    extra = message.get("extra")
+    operation = (
+        str(extra.get("operation") or "other").lower()
+        if isinstance(extra, dict)
+        else "other"
+    )
+    limit = _OPERATION_OBSERVATION_LIMITS.get(operation, max(2_000, int(default)))
+    return operation, min(max(2_000, int(default)), limit)
+
+
 def _prepare_provider_history(
     messages: list[dict[str, Any]],
     *,
     observation_limit_chars: int = 20_000,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Bound tool bodies and represent later exact duplicates append-only."""
 
     prepared = copy.deepcopy(messages)
     bounded_count = 0
     bounded_removed = 0
-    for item in prepared:
+    bounded_observations: list[dict[str, Any]] = []
+    for message_index, item in enumerate(prepared):
         if item.get("role") != "tool":
             continue
         original = str(item.get("content") or "")
+        operation, limit = _observation_limit(item, observation_limit_chars)
+        return_code = _tool_return_code(item)
         bounded, omitted = _bound_tool_content(
             original,
-            return_code=_tool_return_code(item),
-            max_chars=max(2_000, int(observation_limit_chars)),
+            return_code=return_code,
+            operation=operation,
+            max_chars=limit,
         )
         if omitted:
             item["content"] = bounded
             bounded_count += 1
             bounded_removed += omitted
+            bounded_observations.append(
+                {
+                    "message_index": message_index,
+                    "tool_call_id": str(item.get("tool_call_id") or ""),
+                    "observation_index": (
+                        int((item.get("extra") or {}).get("observation_index"))
+                        if isinstance(item.get("extra"), dict)
+                        and (item.get("extra") or {}).get("observation_index") is not None
+                        else message_index
+                    ),
+                    "operation": operation,
+                    "return_code": return_code,
+                    "limit_chars": limit,
+                    "original_chars": len(original),
+                    "provider_chars": len(bounded),
+                    "omitted_chars": omitted,
+                    "full_sha256": hashlib.sha256(
+                        original.encode("utf-8", "surrogatepass")
+                    ).hexdigest(),
+                }
+            )
 
     duplicate_count = 0
     duplicate_removed = 0
@@ -692,6 +853,7 @@ def _prepare_provider_history(
         "bounded_removed": bounded_removed,
         "duplicate_count": duplicate_count,
         "duplicate_removed": duplicate_removed,
+        "bounded_observations": bounded_observations,
     }
 
 
@@ -1120,6 +1282,7 @@ def _provider_metrics(
     exact_duplicate_chars_removed: int = 0,
     bounded_observation_count: int = 0,
     bounded_observation_chars_removed: int = 0,
+    bounded_observations: tuple[dict[str, Any], ...] = (),
     duplicate_turns_represented: int = 0,
     old_tool_results_cleared: int = 0,
     state_frame_message_index: int | None = None,
@@ -1167,6 +1330,7 @@ def _provider_metrics(
         ),
         bounded_observation_count=bounded_observation_count,
         bounded_observation_chars_removed=bounded_observation_chars_removed,
+        bounded_observations=bounded_observations,
         duplicate_turns_represented=duplicate_turns_represented,
         old_tool_results_cleared=old_tool_results_cleared,
         state_frame_message_index=state_frame_message_index,
@@ -1341,6 +1505,7 @@ def build_provider_view(
         exact_duplicate_chars_removed=preparation["duplicate_removed"],
         bounded_observation_count=preparation["bounded_count"],
         bounded_observation_chars_removed=preparation["bounded_removed"],
+        bounded_observations=tuple(preparation["bounded_observations"]),
         duplicate_turns_represented=preparation["duplicate_count"],
         old_tool_results_cleared=cleared,
         state_frame_message_index=state_frame_message_index,
