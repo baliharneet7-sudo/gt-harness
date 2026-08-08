@@ -27,6 +27,27 @@ def verify() -> dict[str, object]:
             "    return target(1)\n",
             encoding="utf-8",
         )
+        # These two fixtures certify the parser-backed languages that are easy
+        # to accidentally advertise in the host registry while leaving the
+        # shipped gt-index binary unable to produce symbols.  Keep them small,
+        # source-only, and deterministic: the graph gate must prove the actual
+        # binary, not just the Python capability table.
+        (root / "fixture.scm").write_text(
+            "(define (target value) (+ value 1))\n"
+            "(define (caller) (target 1))\n",
+            encoding="utf-8",
+        )
+        (root / "fixture.cbl").write_text(
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. FIXTURE.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       MAIN-PARA.\n"
+            "           PERFORM HELPER-PARA.\n"
+            "           STOP RUN.\n"
+            "       HELPER-PARA.\n"
+            "           DISPLAY \"ok\".\n",
+            encoding="utf-8",
+        )
         source_revision = "fixture-source-r0"
         evidence = inspect_repository(
             root,
@@ -59,6 +80,13 @@ def verify() -> dict[str, object]:
                     "SELECT COUNT(*) FROM nodes WHERE name IN ('target','caller')"
                 ).fetchone()[0]
             )
+            language_counts = dict(
+                connection.execute(
+                    "SELECT language, COUNT(*) FROM nodes GROUP BY language"
+                ).fetchall()
+            )
+            cobol_count = int(language_counts.get("cobol", 0))
+            scheme_count = int(language_counts.get("scheme", 0))
             call_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM edges e "
@@ -77,8 +105,13 @@ def verify() -> dict[str, object]:
             raise RuntimeError(f"directed CALLS edge missing: {call_count}")
         if not receipt.schema_valid or receipt.node_count < 2:
             raise RuntimeError("index receipt did not certify the graph schema/nodes")
-        if receipt.source_files != receipt.indexable_files or receipt.source_files != 1:
+        if receipt.source_files != receipt.indexable_files or receipt.source_files != 3:
             raise RuntimeError("fixture source coverage was not complete")
+        if cobol_count < 1 or scheme_count < 2:
+            raise RuntimeError(
+                "certified language parser coverage missing: "
+                f"cobol={cobol_count} scheme={scheme_count}"
+            )
         return {
             "status": receipt.status.value,
             "graph_revision": receipt.graph_revision,
@@ -92,6 +125,7 @@ def verify() -> dict[str, object]:
             "fts_tables": list(receipt.fts_tables),
             "definition_count": definition_count,
             "call_count": call_count,
+            "language_counts": language_counts,
             "source_revision": source_revision,
             "frontier_anchors": len(evidence.anchors),
         }

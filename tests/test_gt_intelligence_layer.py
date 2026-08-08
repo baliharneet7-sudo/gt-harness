@@ -20,24 +20,26 @@ from gt_engine.repository_intelligence import RepositoryIntelligenceStatus
 from gt_engine.task_contract import extract_task_contract
 
 
-def test_one_language_registry_distinguishes_source_from_structural_support():
+def test_certified_language_registry_exposes_structural_support():
     cobol = capability_for_path("src/main.cob")
     python = capability_for_path("src/main.py")
 
     assert cobol is not None and cobol.validation_relevant is True
-    assert cobol.structural_index is False
+    assert cobol.structural_index is True
     assert python is not None and python.structural_index is True
     assert ".cob" in VALIDATION_SOURCE_SUFFIXES
-    assert ".cob" not in INDEXABLE_SOURCE_SUFFIXES
+    assert ".cob" in INDEXABLE_SOURCE_SUFFIXES
 
 
 def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
     assert INDEXABLE_SOURCE_SUFFIXES == frozenset(
         {
             ".bash",
+            ".cbl",
             ".c",
             ".cc",
             ".cpp",
+            ".cob",
             ".cs",
             ".css",
             ".cue",
@@ -72,6 +74,7 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".rake",
             ".rb",
             ".rs",
+            ".scm",
             ".sc",
             ".scala",
             ".sh",
@@ -84,22 +87,24 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".tsx",
             ".yaml",
             ".yml",
+            ".cpy",
+            ".ss",
         }
     )
 
 
-def test_index_coverage_reports_unsupported_code_as_failure_not_no_source(tmp_path: Path):
+def test_index_coverage_reports_certified_cobol_as_indexable(tmp_path: Path):
     (tmp_path / "main.cob").write_text("IDENTIFICATION DIVISION.\nPROGRAM-ID. HELLO.\n")
 
     coverage = inspect_source_coverage(tmp_path)
 
     assert coverage.source_files == 1
-    assert coverage.indexable_files == 0
-    assert coverage.unsupported_suffixes == (".cob",)
-    assert coverage.status is IndexBuildStatus.UNSUPPORTED_LANGUAGE
+    assert coverage.indexable_files == 1
+    assert coverage.unsupported_suffixes == ()
+    assert coverage.status is IndexBuildStatus.AVAILABLE
 
 
-def test_mixed_supported_and_unsupported_source_is_incomplete_not_green(tmp_path: Path):
+def test_mixed_python_and_certified_cobol_source_is_complete(tmp_path: Path):
     (tmp_path / "app.py").write_text("def app():\n    return 1\n")
     (tmp_path / "legacy.cob").write_text(
         "IDENTIFICATION DIVISION.\nPROGRAM-ID. LEGACY.\n"
@@ -108,9 +113,20 @@ def test_mixed_supported_and_unsupported_source_is_incomplete_not_green(tmp_path
     coverage = inspect_source_coverage(tmp_path)
 
     assert coverage.source_files == 2
-    assert coverage.indexable_files == 1
-    assert coverage.unsupported_suffixes == (".cob",)
-    assert coverage.status is IndexBuildStatus.INCOMPLETE_COVERAGE
+    assert coverage.indexable_files == 2
+    assert coverage.unsupported_suffixes == ()
+    assert coverage.status is IndexBuildStatus.AVAILABLE
+
+
+def test_racket_remains_explicitly_unsupported(tmp_path: Path):
+    (tmp_path / "main.rkt").write_text("#lang racket\n(displayln \"hi\")\n")
+
+    coverage = inspect_source_coverage(tmp_path)
+
+    assert coverage.source_files == 1
+    assert coverage.indexable_files == 0
+    assert coverage.unsupported_suffixes == (".rkt",)
+    assert coverage.status is IndexBuildStatus.UNSUPPORTED_LANGUAGE
 
 
 def _graph_with_duplicate_fts_surfaces(path: Path) -> None:

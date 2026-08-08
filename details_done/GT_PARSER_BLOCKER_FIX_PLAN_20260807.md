@@ -220,3 +220,31 @@ paid smoke was started.
 - no task-ID-specific parser rules;
 - no full-file injection or generic advice stream;
 - no paid smoke or 89-task run while parser coverage is uncertified.
+
+## Parser certification completed (2026-08-07, provider-free)
+
+The preferred single-binary implementation is now in place for COBOL and
+Scheme. Pinned upstream Tree-sitter generated sources are vendored under
+`vendor/gt-index-src/internal/specs/cobol` and `.../scheme`, with matching
+`Spec` registrations. COBOL indexes procedure paragraphs/sections and
+`PERFORM`/`CALL` constructs when the grammar exposes them; Scheme indexes
+`define` bindings and direct procedure calls. Racket remains explicitly
+unsupported because its available grammar was not certified for the required
+definition/call contract.
+
+The runtime verifier now builds a three-language fixture (Python, COBOL,
+Scheme) and checks the actual binary's SQLite graph: complete source coverage,
+schema/FTS health, Python caller-to-target edge, and nonzero COBOL/Scheme node
+counts. With the rebuilt Windows binary, the proof returned
+`source_files=3`, `indexable_files=3`, `language_counts={'cobol': 2,
+'python': 2, 'scheme': 2}`, and two verified call edges. The Go parser/spec
+packages and Linux-style `sqlite_fts5` build both pass. The walker now
+canonicalizes case-insensitive extensions so `.CBL` is not silently omitted.
+
+The central provider-free and paid workflows build `gt-index` from the checked-
+out vendored source with Go before installing the runtime, and export that
+fresh binary through `GT_INDEX_BINARY`; they no longer rely on a stale committed
+binary for certification. The exact pre-smoke gate must be rerun on the pushed
+commit. No paid smoke was started during this repair. Parser certification is
+not outcome or efficiency evidence; the 10-task smoke remains the next
+authorized step only after `SMOKE_APPROVED` on the rebuilt-binary commit.

@@ -648,9 +648,11 @@ This proves deterministic integration and accounting, not a solve-rate or
 efficiency gain. No new paid smoke has run for this implementation; the
 89-task run remains blocked until an authorized matched smoke passes outcome,
 intelligence-health, timing, payload, and efficiency gates. A matched slice
-that contains authored COBOL/Scheme-family source is also blocked until a
-certified parser exists; explicit `unsupported_language` is correct behavior,
-not smoke readiness.
+containing authored COBOL or Scheme source is now eligible for the parser gate:
+the pinned Tree-sitter grammars are compiled into the checked-out `gt-index`
+binary and the runtime fixture must observe nonzero COBOL and Scheme nodes.
+Racket and the other explicitly unsupported suffixes remain fail-closed; an
+unsupported language is never silently dropped.
 
 The paid treatment also enables `require_graph_ready=true`. This is a
 pre-provider fail-closed gate: before the first model call, GT requires a

@@ -90,7 +90,11 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 		}
 
 		// Check if file has a registered language spec
-		ext := filepath.Ext(path)
+		// Source suffixes are canonicalized by the host registry.  Preserve that
+		// contract for repositories containing conventional upper-case COBOL
+		// extensions (for example .CBL) instead of silently omitting them from
+		// the structural graph.
+		ext := strings.ToLower(filepath.Ext(path))
 		spec := specs.ForExtension(ext)
 		if spec == nil {
 			return nil

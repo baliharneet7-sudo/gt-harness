@@ -455,10 +455,11 @@ while preserving artifacts for audit.
 The all-17 census, repository binary-to-SQLite fixture, context-frontier proof,
 readiness audit, and provider-free tests pass for this implementation. That is
 implementation proof only. No paid smoke has been run after this change, and
-the 89-task run remains blocked. Do not fund a matched smoke containing
-authored COBOL/Scheme-family source until those suffixes have certified
-structural parser coverage; the explicit unsupported-language failure is a
-guardrail, not a completed treatment for that task.
+the 89-task run remains blocked. COBOL and Scheme now have pinned,
+parser-backed structural coverage; the runtime fixture fails closed unless the
+actual checked-out binary emits nonzero nodes for both languages. Racket and
+the other explicitly unsupported suffixes remain a guardrail failure, never a
+silent drop.
 
 The paid workflow now passes `require_graph_ready=true`. Before any provider
 call, the active treatment fails closed with `RepositoryGraphGateFailed` when

@@ -198,7 +198,9 @@ are certified. Supported index suffixes come from the same language registry
 used by workspace capture and source revision. A language can be authored
 source without being structurally supported; that state is an explicit
 unsupported/incomplete-coverage failure, never a license to manufacture regex
-symbols.
+symbols. COBOL and Scheme are certified parser-backed extensions in the
+vendored source, and every workflow builds that source before the graph
+fixture; Racket and other unshipped grammars remain fail-closed.
 
 The repository frontier is selective retrieval, not a task-start dump. It
 compares certified graph facts with the exact provider view and emits the

@@ -81,24 +81,17 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
         symbol_support=False,
         caller_support=False,
     ),
-    # These are authored source and affect validation revisions.  The shipped
-    # gt-index binary has no certified structural parser for them yet, so GT
-    # must report unsupported structural coverage rather than pretend that no
-    # code exists or manufacture symbols with regexes.
+    # These are authored source and affect validation revisions. COBOL and
+    # Scheme have pinned parser-backed gt-index grammars; the remaining
+    # entries stay fail-closed until an equivalent certified grammar ships.
     LanguageCapability(
         "cobol",
-        (".cob", ".cbl"),
-        structural_index=False,
-        symbol_support=False,
-        caller_support=False,
+        (".cob", ".cbl", ".cpy"),
         syntax_probe="cobc",
     ),
     LanguageCapability(
         "scheme",
         (".scm", ".ss"),
-        structural_index=False,
-        symbol_support=False,
-        caller_support=False,
     ),
     LanguageCapability(
         "racket",
