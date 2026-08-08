@@ -129,6 +129,20 @@ def test_racket_remains_explicitly_unsupported(tmp_path: Path):
     assert coverage.status is IndexBuildStatus.UNSUPPORTED_LANGUAGE
 
 
+def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Path):
+    """Known TB2 languages without a certified parser must fail closed."""
+    for suffix in (".r", ".v", ".red", ".pov"):
+        path = tmp_path / f"fixture{suffix}"
+        path.write_text("source fixture\n")
+
+    coverage = inspect_source_coverage(tmp_path)
+
+    assert coverage.source_files == 4
+    assert coverage.indexable_files == 0
+    assert coverage.unsupported_suffixes == (".pov", ".r", ".red", ".v")
+    assert coverage.status is IndexBuildStatus.UNSUPPORTED_LANGUAGE
+
+
 def _graph_with_duplicate_fts_surfaces(path: Path) -> None:
     connection = sqlite3.connect(path)
     try:

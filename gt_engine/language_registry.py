@@ -93,6 +93,38 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
         "scheme",
         (".scm", ".ss"),
     ),
+    # Terminal-Bench contains code-like inputs in these languages.  The
+    # shipped gt-index binary has no certified grammars for them yet, so they
+    # are validation-relevant but deliberately fail closed instead of being
+    # silently omitted from source revision and graph coverage.
+    LanguageCapability(
+        "r",
+        (".r",),
+        structural_index=False,
+        symbol_support=False,
+        caller_support=False,
+    ),
+    LanguageCapability(
+        "verilog",
+        (".v",),
+        structural_index=False,
+        symbol_support=False,
+        caller_support=False,
+    ),
+    LanguageCapability(
+        "red",
+        (".red",),
+        structural_index=False,
+        symbol_support=False,
+        caller_support=False,
+    ),
+    LanguageCapability(
+        "povray",
+        (".pov",),
+        structural_index=False,
+        symbol_support=False,
+        caller_support=False,
+    ),
     LanguageCapability(
         "racket",
         (".rkt",),

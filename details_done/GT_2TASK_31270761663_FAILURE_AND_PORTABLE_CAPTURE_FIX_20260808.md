@@ -116,8 +116,11 @@ Our registry currently has structural support for Python, JavaScript,
 TypeScript, Go, Rust, Ruby, Java, Kotlin, C#, PHP, Swift, Scala, C/C++, Lua,
 Elixir, OCaml, shell, CSS, CUE, Elm, Groovy, HCL, HTML, protobuf, SQL, and
 Svelte, plus certified COBOL and Scheme. Racket, Objective-C, Erlang, Haskell,
-Clojure, Dart, Zig, Perl, F#, and Visual Basic remain explicit fail-closed
-unsupported languages. That is the correct behavior until a certified parser
+Clojure, Dart, Zig, Perl, F#, Visual Basic, R, Verilog, Red, and POV-Ray remain
+explicit fail-closed unsupported languages. The four code-like TB2 suffixes
+are now recognized as validation-relevant, so their presence cannot silently
+disappear from source coverage; they still require certified parsers before
+graph-backed intelligence can be claimed. That is the correct behavior until a certified parser
 and graph gate exists; silently dropping them would make GT appear healthy while
 providing no repository intelligence.
 

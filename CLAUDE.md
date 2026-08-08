@@ -422,6 +422,11 @@ vendored `gt-index` spec extensions. Unsupported authored languages are
 explicit substrate failures. Never fabricate regex definitions/callers to make
 coverage appear green.
 
+Terminal-Bench code-like `.r`, `.v`, `.red`, and `.pov` inputs are recognized
+as validation-relevant but remain graph-unsupported until certified grammars
+and fixtures are shipped; they now fail closed rather than disappearing from
+source coverage.
+
 `graph.db` health requires a certified schema, FTS surface, current source
 revision, binary hash, graph hash, and recorded node/edge/source counts. The
 task mirror transfers only authored source and bounded project metadata before

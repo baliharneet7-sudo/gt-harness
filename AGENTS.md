@@ -670,8 +670,11 @@ intelligence-health, timing, payload, and efficiency gates. A matched slice
 containing authored COBOL or Scheme source is now eligible for the parser gate:
 the pinned Tree-sitter grammars are compiled into the checked-out `gt-index`
 binary and the runtime fixture must observe nonzero COBOL and Scheme nodes.
-Racket and the other explicitly unsupported suffixes remain analytically
-fail-closed; an unsupported language is never silently dropped.
+R, Verilog, Red, POV-Ray, Racket, and the other explicitly unsupported suffixes
+remain analytically fail-closed; an unsupported language is never silently
+dropped. These four Terminal-Bench code-like suffixes are now recognized as
+validation-relevant source, but they are not claimed as graph-supported until
+a certified parser is shipped.
 
 `central_provider_free.yml` must run `central_pre_smoke_gate.py` and print
 `SMOKE_APPROVED` on the exact pushed commit intended for a paid smoke. Passing
