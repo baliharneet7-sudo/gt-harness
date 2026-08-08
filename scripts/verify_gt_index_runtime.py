@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gt_engine.indexer import IndexBuildStatus  # noqa: E402
+from gt_engine.language_registry import LANGUAGE_CAPABILITIES  # noqa: E402
 from gt_engine.repository_intelligence import inspect_repository  # noqa: E402
 
 
@@ -48,6 +49,21 @@ def verify() -> dict[str, object]:
             "           DISPLAY \"ok\".\n",
             encoding="utf-8",
         )
+        # Exercise every parser that the host registry advertises.  These
+        # files are deliberately separate from the semantic Python/COBOL/
+        # Scheme fixtures above: file_hashes proves binary language dispatch,
+        # while the named fixtures prove definitions and CALLS edges.
+        language_root = root / "language_fixtures"
+        for capability in LANGUAGE_CAPABILITIES:
+            if not capability.structural_index:
+                continue
+            suffix = capability.suffixes[0]
+            (language_root / f"fixture_{capability.name}{suffix}").parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            (language_root / f"fixture_{capability.name}{suffix}").write_text(
+                "/* parser coverage fixture */\n", encoding="utf-8"
+            )
         source_revision = "fixture-source-r0"
         evidence = inspect_repository(
             root,
@@ -85,6 +101,11 @@ def verify() -> dict[str, object]:
                     "SELECT language, COUNT(*) FROM nodes GROUP BY language"
                 ).fetchall()
             )
+            language_file_counts = dict(
+                connection.execute(
+                    "SELECT language, COUNT(*) FROM file_hashes GROUP BY language"
+                ).fetchall()
+            )
             cobol_count = int(language_counts.get("cobol", 0))
             scheme_count = int(language_counts.get("scheme", 0))
             call_count = int(
@@ -105,12 +126,23 @@ def verify() -> dict[str, object]:
             raise RuntimeError(f"directed CALLS edge missing: {call_count}")
         if not receipt.schema_valid or receipt.node_count < 2:
             raise RuntimeError("index receipt did not certify the graph schema/nodes")
-        if receipt.source_files != receipt.indexable_files or receipt.source_files != 3:
+        if receipt.source_files != receipt.indexable_files:
             raise RuntimeError("fixture source coverage was not complete")
         if cobol_count < 1 or scheme_count < 2:
             raise RuntimeError(
                 "certified language parser coverage missing: "
                 f"cobol={cobol_count} scheme={scheme_count}"
+            )
+        expected_languages = {
+            "bash" if capability.name == "shell" else capability.name
+            for capability in LANGUAGE_CAPABILITIES
+            if capability.structural_index
+        }
+        missing_languages = sorted(expected_languages - set(language_file_counts))
+        if missing_languages:
+            raise RuntimeError(
+                "registered parser languages missing from binary: "
+                + ", ".join(missing_languages)
             )
         return {
             "status": receipt.status.value,
@@ -126,6 +158,7 @@ def verify() -> dict[str, object]:
             "definition_count": definition_count,
             "call_count": call_count,
             "language_counts": language_counts,
+            "language_file_counts": language_file_counts,
             "source_revision": source_revision,
             "frontier_anchors": len(evidence.anchors),
         }

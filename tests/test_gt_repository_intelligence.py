@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from gt_engine.indexer import IndexBuildStatus
+from gt_engine.language_registry import LANGUAGE_CAPABILITIES
 from gt_engine.repository_intelligence import (
     RepositorySession,
     discover_project_checks,
@@ -12,6 +13,7 @@ from gt_engine.repository_intelligence import (
     inspect_index,
     inspect_repository,
 )
+from scripts.verify_gt_index_runtime import verify as verify_gt_index_runtime
 
 
 def test_project_checks_are_repository_backed_not_guessed(tmp_path: Path):
@@ -19,6 +21,17 @@ def test_project_checks_are_repository_backed_not_guessed(tmp_path: Path):
     (tmp_path / "go.mod").write_text("module example.test/demo\n")
 
     assert discover_project_checks(tmp_path) == ("pytest -q", "go test ./...")
+
+
+def test_shipped_index_fixture_covers_every_registered_parser_language():
+    result = verify_gt_index_runtime()
+    expected = {
+        "bash" if capability.name == "shell" else capability.name
+        for capability in LANGUAGE_CAPABILITIES
+        if capability.structural_index
+    }
+
+    assert expected <= set(result["language_file_counts"])
 
 
 def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Path):
