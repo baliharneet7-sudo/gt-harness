@@ -85,6 +85,7 @@ jobs:
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
+            scripts/central_feature_census.py \
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \

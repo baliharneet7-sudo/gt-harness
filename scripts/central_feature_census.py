@@ -397,6 +397,7 @@ def census() -> dict:
         {
             "status": "source_backed",
             "available": True,
+            "substrate_ready": True,
             "index_current": True,
             "intelligence_valid": True,
             "source_revision": "r0",
@@ -407,6 +408,8 @@ def census() -> dict:
                     "line": 10,
                     "symbol": "Bottle",
                     "confidence": 1.0,
+                    "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
                 },
             ),
             "definitions": (
@@ -416,6 +419,7 @@ def census() -> dict:
                     "symbol": "Bottle",
                     "signature": "class Bottle:",
                     "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
                 },
             ),
             "references": (),
