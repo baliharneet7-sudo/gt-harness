@@ -708,6 +708,12 @@ test and implementation now protect this boundary. Do not start a paid rerun
 until provider-free gates pass on the pushed commit and a matched smoke is
 separately authorized.
 
+The staged language-completeness implementation is recorded in
+`details_done/GT_ALL_TERMINAL_BENCH_LANGUAGE_SUPPORT_IMPLEMENTATION_PLAN_20260808.md`.
+Phase 0 inventory/fail-closed accounting and all-registered-parser binary
+parity are implemented; R/Verilog native grammar work and Red/POV structural
+support remain required before claiming full Terminal-Bench language coverage.
+
 Provider-view efficiency is governed at the observation boundary. Typed
 read/search/edit/validate operations receive deterministic per-observation
 bounds before the provider call; a successful large read retains head, three

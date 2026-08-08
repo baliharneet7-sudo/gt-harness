@@ -509,6 +509,12 @@ the task image reported `python3: command not found`, so graph health was
 evidence. The portable fallback is provider-free fixed and requires a new
 authorized matched smoke before any outcome claim.
 
+The staged language-completeness implementation is recorded in
+`details_done/GT_ALL_TERMINAL_BENCH_LANGUAGE_SUPPORT_IMPLEMENTATION_PLAN_20260808.md`.
+Phase 0 inventory/fail-closed accounting and all-registered-parser binary
+parity are implemented; R/Verilog native grammar work and Red/POV structural
+support remain required before claiming full Terminal-Bench language coverage.
+
 This repair is provider-free certified on exact implementation commit
 `e6ce41f` by workflow `31244088870`. The checked-out Linux binary passed the
 COBOL/Python/Scheme repository fixture; 311 workflow-scope tests, all-17 census
