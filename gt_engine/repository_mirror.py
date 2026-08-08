@@ -57,6 +57,7 @@ _IGNORED_PARTS = frozenset(
         "venv",
     }
 )
+_EXTERNAL_MIRROR_ROOTS = ("/etc/nginx/", "/var/log/nginx/")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,8 @@ def _safe_relative(path: str) -> str:
         normalized = normalized[4:]
     if normalized.startswith("/app/"):
         normalized = normalized[5:]
+    if normalized.startswith(_EXTERNAL_MIRROR_ROOTS):
+        normalized = "__external__" + normalized
     candidate = PurePosixPath(normalized)
     if (
         not normalized
@@ -149,7 +152,7 @@ def plan_source_mirror(
             excluded_artifacts += 1
             continue
         is_metadata = PurePosixPath(path).name.lower() in _METADATA_NAMES
-        is_source = is_validation_source(path) and not is_metadata
+        is_source = is_validation_source(path, state.content) and not is_metadata
         if not is_source and not is_metadata:
             excluded_artifacts += 1
             continue

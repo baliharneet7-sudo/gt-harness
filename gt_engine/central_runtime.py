@@ -55,6 +55,7 @@ _MANIFEST_COMMAND = (
     "-printf '%y\\t%s\\t%T@\\t%C@\\t%P\\t%l\\n' 2>/dev/null "
     "| LC_ALL=C sort | head -n 50001"
 )
+_EXTERNAL_ROOTS = ("/etc/nginx/", "/var/log/nginx/")
 _PRIVATE_TERMS = re.compile(r"groundtruth|gt_[a-z0-9_]*", re.IGNORECASE)
 _MISSING_EXECUTABLE = re.compile(
     r"(?:command not found|not found|no such file or directory|cannot execute)", re.IGNORECASE
@@ -212,6 +213,7 @@ def classify_change(
     *,
     kind: str = "f",
     task_deliverables: Iterable[str] = (),
+    content: str | bytes | None = None,
 ) -> ClassifiedChange:
     """Classify one changed path against the source-revision model.
 
@@ -234,7 +236,7 @@ def classify_change(
         path,
         kind,
         ChangeOrigin.MODEL_AUTHORED,
-        is_validation_source(path),
+        is_validation_source(path, content),
     )
 
 
@@ -249,7 +251,10 @@ def source_revision_of(
         if item.kind != "f":
             continue
         if not classify_change(
-            path, kind=item.kind, task_deliverables=deliverables
+            path,
+            kind=item.kind,
+            task_deliverables=deliverables,
+            content=item.content,
         ).validation_relevant:
             continue
         digest.update(path.encode("utf-8", "surrogateescape"))
@@ -277,6 +282,36 @@ def _workspace_relative_path(path: str) -> str:
     if normalized.startswith("./"):
         return normalized[2:]
     return normalized
+
+
+def _safe_external_path(path: str) -> str:
+    """Accept only explicit service paths, never an arbitrary root scan."""
+
+    normalized = str(path or "").strip().replace("\\", "/")
+    if (
+        not normalized.startswith(_EXTERNAL_ROOTS)
+        or ".." in normalized.split("/")
+        or any(ord(char) < 32 for char in normalized)
+        or normalized.endswith("/")
+    ):
+        return ""
+    return normalized
+
+
+def _extensionless_candidate(path: str) -> bool:
+    """Bounded discovery candidate; content still has to prove a shebang."""
+
+    name = str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(name and "." not in name and name not in {"", ".", ".."})
+
+
+def _external_manifest_command(paths: Iterable[str]) -> str:
+    quoted = " ".join(shlex.quote(path) for path in paths)
+    return (
+        "find "
+        + quoted
+        + " -xdev -maxdepth 0 -type f -printf '%y\\t%s\\t%T@\\t%C@\\t%p\\t%l\\n' 2>/dev/null"
+    )
 
 
 def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
@@ -1069,10 +1104,17 @@ class WorkspaceSensor:
         action_id: int = 0,
         source_revision: str = "",
         tracked_paths: Iterable[str] = (),
+        external_paths: Iterable[str] = (),
+        shebang_paths: Iterable[str] = (),
     ) -> WorkspaceSnapshot:
         started = time.monotonic()
         tracked = {
             _workspace_relative_path(path) for path in tracked_paths if str(path or "").strip()
+        }
+        shebang_candidates = {
+            _workspace_relative_path(path)
+            for path in shebang_paths
+            if str(path or "").strip()
         }
         try:
             kwargs = {
@@ -1102,6 +1144,47 @@ class WorkspaceSensor:
         if result.return_code != 0:
             return self._degraded(previous, "manifest command failed", elapsed)
         raw = result.stdout or ""
+        external = tuple(
+            sorted(
+                {
+                    path
+                    for raw_path in external_paths
+                    if (path := _safe_external_path(raw_path))
+                }
+            )
+        )
+        if external:
+            try:
+                external_result = (
+                    await recorder.exec(
+                        environment,
+                        _external_manifest_command(external),
+                        category=HostExecCategory.WORKSPACE_MANIFEST,
+                        action_id=action_id,
+                        source_revision=source_revision,
+                        cwd=cwd,
+                        env={},
+                        timeout_sec=max(1, int(self.max_seconds + 0.999)),
+                    )
+                    if recorder is not None
+                    else await environment.exec(
+                        _external_manifest_command(external),
+                        cwd=cwd,
+                        env={},
+                        timeout_sec=max(1, int(self.max_seconds + 0.999)),
+                    )
+                )
+            except Exception as exc:
+                return self._degraded(
+                    previous,
+                    f"external manifest command error: {type(exc).__name__}",
+                    time.monotonic() - started,
+                )
+            if external_result.return_code != 0:
+                return self._degraded(
+                    previous, "external manifest command failed", time.monotonic() - started
+                )
+            raw += external_result.stdout or ""
         if raw.count("\n") > self.max_entries:
             return self._degraded(previous, "workspace entry limit exceeded", elapsed)
         snapshot = parse_manifest(raw, elapsed_seconds=elapsed)
@@ -1117,7 +1200,11 @@ class WorkspaceSensor:
                 path
                 for path, state in sorted(snapshot.entries.items())
                 if state.kind == "f"
-                and (is_validation_source(path) or _workspace_relative_path(path) in tracked)
+                and (
+                    is_validation_source(path)
+                    or _workspace_relative_path(path) in tracked
+                    or _workspace_relative_path(path) in shebang_candidates
+                )
                 and state.size <= _MAX_SOURCE_CAPTURE_BYTES
             ]
             changed = []
@@ -1133,7 +1220,11 @@ class WorkspaceSensor:
                 path
                 for path, state in snapshot.entries.items()
                 if state.kind == "f"
-                and (is_validation_source(path) or _workspace_relative_path(path) in tracked)
+                and (
+                    is_validation_source(path)
+                    or _workspace_relative_path(path) in tracked
+                    or _workspace_relative_path(path) in shebang_candidates
+                )
                 and (
                     previous.entries.get(path) is None
                     or not _same_metadata(previous.entries[path], state)
@@ -1186,7 +1277,10 @@ class WorkspaceSensor:
         capture_paths = [
             path
             for path in changed
-            if is_validation_source(path)
+            if (
+                is_validation_source(path)
+                or _workspace_relative_path(path) in shebang_candidates
+            )
             and entries[path].size <= _MAX_SOURCE_CAPTURE_BYTES
         ][:8]
         if capture_paths:

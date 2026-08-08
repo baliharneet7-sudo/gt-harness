@@ -84,12 +84,14 @@ runtime fixture must execute the FTS-enabled binary, validate SQLite, observe
 each structural language in `file_hashes`, produce concrete graph nodes, and
 report zero parser failures.
 
-This closes the in-workspace language-substrate gap only. It does not prove
-retrieval relevance, provider delivery, solve preservation, or efficiency.
-Files outside the task workspace, including task-owned configuration under
-`/etc`, are still outside the current mirror and need a separate safe,
-allowlisted resource-monitoring boundary before full-benchmark graph coverage
-can be claimed.
+This closes the language-substrate gap for the workspace plus the explicitly
+allowlisted external service paths. `/etc/nginx/**` and
+`/var/log/nginx/**` are captured only when named by the task, revision-tracked,
+and authored Nginx configuration is mirrored under `__external__/` for graph
+health accounting. Extensionless files are bounded shebang candidates and are
+source-backed only after content proves a supported interpreter. No broad
+external scan is permitted. This still does not prove retrieval relevance,
+provider delivery, solve preservation, or efficiency.
 
 ## Deterministic context-compiler repair (2026-08-05)
 

@@ -725,10 +725,12 @@ R, Verilog, Coq, Stan, SPARQL, Turtle, LaTeX, Vim, Nginx, G-code, Red, and
 POV-Ray now have provider-free graph fixtures. An unsupported or ambiguous
 language remains analytically fail-closed and is never silently dropped. This
 is source-substrate proof, not proof of provider usefulness, solves, or
-efficiency. Runtime paths outside the task workspace (for example task-owned
-configuration under `/etc`) are not captured merely because the language is
-supported; external-resource monitoring requires a separate safe allowlisted
-design and remains a benchmark-readiness gap.
+efficiency. Runtime paths outside the task workspace are captured only through
+the explicit allowlist: named `/etc/nginx/**` and `/var/log/nginx/**` paths use
+bounded metadata/content probes, and authored Nginx configuration is mirrored
+under `__external__/`. Extensionless files are bounded shebang candidates and
+must prove their interpreter from captured content. No broad external scan is
+allowed.
 
 `central_provider_free.yml` must run `central_pre_smoke_gate.py` and print
 `SMOKE_APPROVED` on the exact pushed commit intended for a paid smoke. Passing

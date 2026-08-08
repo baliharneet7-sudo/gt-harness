@@ -169,6 +169,8 @@ class RepositorySession:
 
     def _target(self, relative_path: str) -> Path | None:
         normalized = str(relative_path or "").replace("\\", "/")
+        if normalized.startswith(("/etc/nginx/", "/var/log/nginx/")):
+            normalized = "__external__" + normalized
         if normalized.startswith("./"):
             normalized = normalized[2:]
         if not normalized or normalized.startswith("/") or ".." in Path(normalized).parts:
@@ -224,7 +226,10 @@ class RepositorySession:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             if is_indexable_source(path):
-                self._pending_index_paths.add(str(path).replace("\\", "/"))
+                normalized = str(path).replace("\\", "/")
+                if normalized.startswith(("/etc/nginx/", "/var/log/nginx/")):
+                    normalized = "__external__" + normalized
+                self._pending_index_paths.add(normalized)
         self.source_revision = source_revision
         self.fresh = False
         return True

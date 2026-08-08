@@ -546,8 +546,15 @@ def capability_for_path(
     return resolve_language(path, content_prefix).capability
 
 
-def is_validation_source(path: str | os.PathLike[str]) -> bool:
-    return any(capability.validation_relevant for capability in candidate_capabilities(path))
+def is_validation_source(
+    path: str | os.PathLike[str], content_prefix: str | bytes | None = None
+) -> bool:
+    if content_prefix is None:
+        # An ambiguous shared suffix is still authored validation-relevant
+        # source.  Capture it, then let bounded content resolve or abstain.
+        return any(capability.validation_relevant for capability in candidate_capabilities(path))
+    resolution = resolve_language(path, content_prefix)
+    return bool(resolution.capability and resolution.capability.validation_relevant)
 
 
 def is_indexable_source(

@@ -102,6 +102,7 @@ from gt_engine.repository_intelligence import (
     graph_gate_failures,
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
+from gt_engine.task_contract import task_external_paths, task_shebang_paths
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -500,9 +501,17 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 if not mirror_plan.complete:
                     raise RuntimeError("SourceMirrorIncomplete")
+                archive_members = tuple(
+                    (
+                        path[len("__external__/") :]
+                        if path.startswith("__external__/")
+                        else "app/" + path
+                    )
+                    for path in mirror_plan.paths
+                )
                 manifest_bytes = b"".join(
                     path.encode("utf-8", "surrogateescape") + b"\0"
-                    for path in mirror_plan.paths
+                    for path in archive_members
                 )
                 remote_manifest = "/tmp/gt-source-paths.nul"
                 remote_archive = "/tmp/gt-source-mirror.tar.gz"
@@ -537,8 +546,10 @@ class MiniSweCentralAgent(BaseAgent):
                 archived = await self._host_executions.exec(
                     environment,
                     (
-                        "tar --null --verbatim-files-from -czf "
-                        f"{remote_archive} -C {self.cwd} -T {remote_manifest}"
+                        "tar --null --verbatim-files-from --transform='s,^app/,,' "
+                        "--transform='s,^etc/,__external__/etc/,' "
+                        "--transform='s,^var/,__external__/var/,' -czf "
+                        f"{remote_archive} -C / -T {remote_manifest}"
                     ),
                     category=HostExecCategory.REPOSITORY_TRANSFER,
                     source_revision=source_revision,
@@ -970,11 +981,15 @@ class MiniSweCentralAgent(BaseAgent):
         ]
         explicit_checks = explicit_check_commands(instruction)
         task_deliverables = task_deliverable_paths(instruction)
+        external_paths = task_external_paths(instruction)
+        shebang_paths = task_shebang_paths(instruction)
         snapshot = await self._sensor.scan(
             environment,
             cwd=self.cwd,
             recorder=self._host_executions,
             tracked_paths=task_deliverables,
+            external_paths=external_paths,
+            shebang_paths=shebang_paths,
         )
         source_revision = source_revision_of(snapshot, task_deliverables)
         self._features.begin_task(
@@ -1827,6 +1842,8 @@ class MiniSweCentralAgent(BaseAgent):
                             action_id=actions_count,
                             source_revision=source_revision,
                             tracked_paths=task_deliverables,
+                            external_paths=external_paths,
+                            shebang_paths=shebang_paths,
                         )
                     transition = diff_snapshots(
                         snapshot,

@@ -29,6 +29,7 @@ from gt_engine.central_runtime import (
     source_revision_of,
     task_deliverable_paths,
 )
+from gt_engine.task_contract import task_external_paths, task_shebang_paths
 from scripts.central_feature_census import census
 
 
@@ -883,6 +884,74 @@ async def test_sensor_captures_source_when_task_image_has_no_python():
 
 
 @pytest.mark.asyncio
+async def test_sensor_captures_allowlisted_external_source_path():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    source = "http {\n    include /etc/nginx/mime.types;\n}\n"
+    encoded = base64.b64encode(source.encode()).decode()
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if "find . -xdev" in command:
+                return Result("")
+            if command.startswith("find /etc/nginx/nginx.conf"):
+                return Result("f\t48\t2.0\t2.0\t/etc/nginx/nginx.conf\t\n")
+            if command.startswith("sha256sum"):
+                return Result(("c" * 64) + "  /etc/nginx/nginx.conf\n")
+            if command.startswith("python3 -c"):
+                return Result("bash: python3: command not found\n", 127)
+            if "base64" in command:
+                return Result(f"/etc/nginx/nginx.conf\t{encoded}\n")
+            raise AssertionError(command)
+
+    snapshot = await WorkspaceSensor().scan(
+        Environment(), cwd="/app", external_paths=("/etc/nginx/nginx.conf",)
+    )
+
+    assert snapshot.healthy is True
+    assert snapshot.entries["/etc/nginx/nginx.conf"].content == source
+
+
+@pytest.mark.asyncio
+async def test_sensor_discovers_bounded_extensionless_shebang_source():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    source = "#!/usr/bin/env python3\nprint('ok')\n"
+    encoded = base64.b64encode(source.encode()).decode()
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if command.startswith("sha256sum"):
+                return Result(("d" * 64) + "  run-script\n")
+            if command.startswith("python3 -c"):
+                return Result(f"{{\"run-script\":\"{encoded}\"}}\n")
+            if "base64" in command:
+                return Result(f"run-script\t{encoded}\n")
+            return Result("f\t36\t2.0\t2.0\trun-script\t\n")
+
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app")
+
+    assert snapshot.healthy is True
+    assert snapshot.entries["run-script"].content is None
+
+    snapshot = await WorkspaceSensor().scan(
+        Environment(), cwd="/app", shebang_paths=("run-script",)
+    )
+
+    assert snapshot.entries["run-script"].content == source
+
+
+@pytest.mark.asyncio
 async def test_sensor_exception_fails_open_and_preserves_last_known_revision():
     class Environment:
         async def exec(self, command, **kwargs):
@@ -950,6 +1019,27 @@ def test_task_deliverable_paths_does_not_conflate_compressor_input_and_output():
     )
 
     assert task_deliverable_paths(instruction) == ("data.comp",)
+
+
+def test_task_external_paths_is_allowlisted_and_deduplicated():
+    instruction = (
+        "Put the server config in /etc/nginx/conf.d/benchmark-site.conf and "
+        "the limit zone in /etc/nginx/nginx.conf. Logs go to "
+        "/var/log/nginx/benchmark-access.log. Do not scan /etc/passwd."
+    )
+
+    assert task_external_paths(instruction) == (
+        "/etc/nginx/conf.d/benchmark-site.conf",
+        "/etc/nginx/nginx.conf",
+        "/var/log/nginx/benchmark-access.log",
+    )
+
+
+def test_task_shebang_paths_requires_explicit_script_path():
+    assert task_shebang_paths(
+        "Run the Python script at /app/tools/run-check and inspect it."
+    ) == ("tools/run-check",)
+    assert task_shebang_paths("Run /app/decomp against the input file.") == ()
 
 
 def test_classify_change_never_advances_source_for_artifacts():

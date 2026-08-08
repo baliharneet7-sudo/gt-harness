@@ -173,6 +173,14 @@ _RESOURCE_PATH_RE = re.compile(
 _ABSOLUTE_RESOURCE_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])/app/[A-Za-z0-9_./-]+"
 )
+_EXTERNAL_RESOURCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])/(?:(?:etc/nginx)|(?:var/log/nginx))/"
+    r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*"
+)
+_SHEBANG_RESOURCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:(?:/app/)|(?:[A-Za-z0-9_.-]+/))+"
+    r"[A-Za-z0-9_-]+(?!\.[A-Za-z0-9_-]+)"
+)
 _OUTPUT_CUE_RE = re.compile(
     r"(?i)\b(?:write|create|produce|generate|save|emit|deliver|output)\b"
 )
@@ -192,12 +200,47 @@ def _resource_path(raw: str) -> str:
 
 def _resource_occurrences(line: str) -> list[tuple[int, str]]:
     found: dict[tuple[int, str], None] = {}
-    for pattern in (_RESOURCE_PATH_RE, _ABSOLUTE_RESOURCE_RE):
+    for pattern in (_RESOURCE_PATH_RE, _ABSOLUTE_RESOURCE_RE, _EXTERNAL_RESOURCE_RE):
         for match in pattern.finditer(line or ""):
             cleaned = _resource_path(match.group(0))
             if cleaned and " " not in cleaned:
                 found[(match.start(), cleaned)] = None
     return sorted(found, key=lambda item: item[0])
+
+
+def task_external_paths(issue_text: str) -> tuple[str, ...]:
+    """Return explicitly named, allowlisted paths outside ``/app``.
+
+    Only the known service roots are eligible.  A missing or malformed path
+    remains absent rather than turning the sensor into a broad filesystem
+    crawler.
+    """
+
+    core = _task_issue_core(issue_text)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for match in _EXTERNAL_RESOURCE_RE.finditer(core):
+        path = match.group(0).rstrip(".,:;()[]{}'\"")
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return tuple(paths)
+
+
+def task_shebang_paths(issue_text: str) -> tuple[str, ...]:
+    """Return explicitly described extensionless script paths only."""
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for line in _task_issue_core(issue_text).splitlines():
+        if not re.search(r"(?i)\b(?:script|shebang|interpreter|python|ruby|bash)\b", line):
+            continue
+        for match in _SHEBANG_RESOURCE_RE.finditer(line):
+            path = _resource_path(match.group(0))
+            if path and path not in seen and "." not in path.rsplit("/", 1)[-1]:
+                seen.add(path)
+                paths.append(path)
+    return tuple(paths)
 
 
 def _direct_output_score(prefix: str, path: str) -> int:

@@ -453,11 +453,13 @@ self-parity is not accepted as benchmark completeness. This proves language
 resolution and graph construction only. It does not prove that retrieved facts
 are relevant, model-visible, outcome-improving, or efficient.
 
-Language support does not expand the workspace trust boundary. Task-owned
-files outside `/app`, such as Nginx configuration under `/etc`, are not
-mirrored or indexed by the current sensor. Supporting those requires a
-separate allowlisted external-resource monitor. Do not call the complete
-benchmark graph-covered until that boundary is implemented and proven.
+Language support does not expand the workspace trust boundary. The sensor now
+supports only explicitly named `/etc/nginx/**` and `/var/log/nginx/**` paths;
+it records them with bounded metadata/content probes and mirrors authored Nginx
+configuration under a safe `__external__/` graph prefix. It also probes a
+bounded set of extensionless regular files and accepts one only when its
+content proves a supported shebang. No arbitrary external or filesystem-wide
+scan is allowed.
 
 `graph.db` health requires a certified schema, FTS surface, current source
 revision, binary hash, graph hash, and recorded node/edge/source counts. The

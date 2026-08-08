@@ -217,21 +217,19 @@ paid outcome or efficiency result.
 
 1. **Exact-commit CI:** the provider-free GitHub workflow must pass after the
    implementation commit is pushed. A local binary is not the release gate.
-2. **External task resources:** the central workspace sensor mirrors `/app`.
-   A task such as Nginx may author required state below `/etc`. Parser support
-   does not make that external file visible. A separate allowlisted,
-   read-bounded, revision-tracked resource monitor is required before claiming
-   every task's authored state is graph-covered.
-3. **Extensionless runtime discovery:** exact build basenames are integrated.
-   The resolver and native walker support shebang scripts, but the central
-   sensor does not proactively classify every arbitrary extensionless file
-   unless that path is already captured. This requires a bounded discovery
-   rule, not an unrestricted full-filesystem scan.
-4. **Matched paid evidence:** after separate authorization, a matched smoke
+2. **Matched paid evidence:** after separate authorization, a matched smoke
    must prove repository health per task, correct retrieval/delivery, outcome
    preservation, and efficiency. Parser success alone does none of those.
-5. **Full 89:** remains blocked until the matched gate passes. It must not be
+3. **Full 89:** remains blocked until the matched gate passes. It must not be
    started from this implementation proof.
+
+The two previously identified capture gaps are now implemented. The sensor
+accepts only explicitly named `/etc/nginx/**` and `/var/log/nginx/**` paths,
+records them in the source/workspace revision, and mirrors authored Nginx
+configuration under a safe `__external__/` graph prefix. It also probes a
+bounded number of extensionless regular files and promotes one only when its
+captured content proves a recognized shebang language. No arbitrary `/etc`,
+`/var`, or filesystem-wide scan is enabled.
 
 ## Risks and rollback
 

@@ -117,3 +117,21 @@ def test_declared_json_deliverable_is_excluded_while_project_json_source_remains
     assert plan.paths == ("config.json",)
     assert plan.excluded_deliverables == 1
     assert plan.complete is True
+
+
+def test_allowlisted_external_nginx_source_is_mirrored_under_safe_prefix():
+    snapshot = WorkspaceSnapshot(
+        revision="w1",
+        healthy=True,
+        entries={
+            "/etc/nginx/nginx.conf": FileState(
+                "f", 120, "1", "1", "", content="events {}\n"
+            ),
+            "/var/log/nginx/access.log": _file(40),
+        },
+    )
+
+    plan = plan_source_mirror(snapshot)
+
+    assert plan.paths == ("__external__/etc/nginx/nginx.conf",)
+    assert plan.source_files == 1
