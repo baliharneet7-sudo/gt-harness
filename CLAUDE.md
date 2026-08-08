@@ -540,7 +540,7 @@ graph inference is prohibited.
 
 Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
 proved R/Verilog definitions, directed edges, SQLite integrity, and complete
-The expanded provider-free workflow `31273897329` at `89bd3e4` also passed the
+The expanded provider-free workflow `31274090882` at `2cdc8f2` also passed the
 adapter build and fixture gate: R=2, Verilog=2, Redcode=1, POV-Ray=1,
 42/42 source/file-hash coverage, SQLite integrity, six graph edges, central
 census, readiness, static checks, and exact pre-smoke. This remains substrate

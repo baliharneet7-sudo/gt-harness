@@ -2,7 +2,7 @@
 
 Date: 2026-08-08  
 Branch: `inline-engine`  
-Current head: `89bd3e4`
+Current head: `2cdc8f2`
 
 ## Objective
 
@@ -125,7 +125,7 @@ Implementation includes the bindings, grammar-scoped Verilog name unwrapping,
 module-instantiation attribution, and provider-free R/Verilog fixtures. The
 Linux provider-free workflow `31273427487` at `d2ae8d7` compiled both cgo
 bindings and passed the initial exit gate. The later adapter workflow
-`31273897329` at `89bd3e4` passed the expanded gate: `r=2`, `verilog=2`,
+`31274090882` at `2cdc8f2` passed the expanded gate: `r=2`, `verilog=2`,
 `red=1`, `povray=1`, 42/42 source/file-hash coverage, SQLite integrity, six
 graph edges, all central tests, readiness, static, census, and exact
 pre-smoke gates.
