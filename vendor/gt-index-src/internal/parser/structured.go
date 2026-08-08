@@ -160,6 +160,10 @@ func parsePOVRay(sf walker.SourceFile, source string, isTest bool) *ParseResult 
 		})
 	}
 	for lineNo, raw := range strings.Split(clean, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "#macro") || strings.HasPrefix(trimmed, "#declare") {
+			continue
+		}
 		tokens := povIdentifiers(raw)
 		for i := 0; i+1 < len(tokens); i++ {
 			if tokens[i+1] != "(" {
