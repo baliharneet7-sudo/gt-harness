@@ -123,7 +123,7 @@ the vendored/certified runtime in CI as well as focused unit tests.
 
 ## Implementation and validation result
 
-Implemented in commit `544dd93` and pushed to `inline-engine`.
+Implemented in commits `544dd93` and `5042a3a`, pushed to `inline-engine`.
 
 - Recovered refresh/frontier failures are retained under
   `repository_intelligence.transient_failures` but no longer poison a healthy
@@ -139,7 +139,7 @@ Implemented in commit `544dd93` and pushed to `inline-engine`.
   failures.
 - Focused tests and lint pass.
 - Archived replay of all ten `31279355854` trajectories returned `REPLAY_OK`.
-- GitHub provider-free certification `31281358217` passed the certified index,
+- GitHub provider-free certification `31281512977` passed the certified index,
   all feature gates, readiness audit, and exact pre-smoke gate (`READY`,
   `SMOKE_APPROVED`).
 
