@@ -305,9 +305,9 @@ The implementation is not promoted until these gates pass in order:
 2. **Passed:** `central_provider_free.yml` on exact commit `e6ce41f`. The real
    Linux binary fixture, all-17 census coverage, readiness audit, 311 tests,
    and Ruff all passed in workflow `31244088870`.
-3. Run `python scripts/central_pre_smoke_gate.py` on the intended exact pushed
-   smoke commit and
-   require `SMOKE_APPROVED`.
+3. The provider-free workflow now runs
+   `python scripts/central_pre_smoke_gate.py`. Require `SMOKE_APPROVED` on the
+   intended exact pushed smoke commit; a green parent commit is insufficient.
 4. With separate authorization, run one matched ten-task GT-on smoke against
    the existing frozen GT-off baseline. Do not rerun baseline.
 5. Audit outcomes first: at least 9/10 official and uncensored resolved, no new

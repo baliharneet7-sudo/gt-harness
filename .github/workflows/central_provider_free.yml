@@ -72,6 +72,9 @@ jobs:
       - name: Structural readiness audit
         run: python scripts/central_readiness_audit.py
 
+      - name: Exact pre-smoke release gate
+        run: python scripts/central_pre_smoke_gate.py
+
       - name: Static checks
         run: |
           python -m ruff check gt_engine/central_runtime.py \

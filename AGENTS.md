@@ -666,6 +666,10 @@ binary and the runtime fixture must observe nonzero COBOL and Scheme nodes.
 Racket and the other explicitly unsupported suffixes remain analytically
 fail-closed; an unsupported language is never silently dropped.
 
+`central_provider_free.yml` must run `central_pre_smoke_gate.py` and print
+`SMOKE_APPROVED` on the exact pushed commit intended for a paid smoke. Passing
+the component tests on a parent commit is not sufficient.
+
 `require_graph_ready=true` is an experimental validity requirement, not a
 pre-provider execution kill switch. Missing, stale, empty, incomplete, or
 schema-invalid substrate records `graph_degraded_fallback=true`, preserves the

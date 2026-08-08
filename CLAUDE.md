@@ -481,3 +481,7 @@ coverage, readiness, archived replay, and Ruff passed. This proves the
 deterministic integration, not live outcome or efficiency. No post-repair paid
 smoke has run; the 89-task run remains blocked pending a separately authorized
 matched smoke.
+
+The provider-free workflow also runs `central_pre_smoke_gate.py`; the exact
+pushed commit intended for a paid smoke must print `SMOKE_APPROVED`. A green
+parent commit cannot authorize a descendant.
