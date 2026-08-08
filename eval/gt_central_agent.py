@@ -99,6 +99,7 @@ from gt_engine.repository_intelligence import (
     RepositoryEvidence,
     RepositoryIntelligenceStatus,
     RepositorySession,
+    classify_repository_applicability,
     graph_gate_failures,
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
@@ -131,6 +132,36 @@ def _canonical_json(value: Any) -> bytes:
         separators=(",", ":"),
         default=str,
     ).encode("utf-8")
+
+
+def _partition_recovered_repository_failures(
+    rows: list[dict[str, Any]],
+    *,
+    current_source_revision: str,
+    failure_values: frozenset[str],
+    prefix: str,
+) -> tuple[list[str], list[str]]:
+    """Separate current fail-closed errors from recovered historical errors."""
+
+    failures = [
+        row
+        for row in rows
+        if str(row.get("status") or row.get("disposition") or "") in failure_values
+    ]
+    latest_by_revision: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        revision = str(row.get("source_revision") or "")
+        latest_by_revision[revision] = row
+    current: list[str] = []
+    transient: list[str] = []
+    for row in failures:
+        revision = str(row.get("source_revision") or "")
+        reason = f"{prefix}:{row.get('status') or row.get('disposition') or 'unknown'}"
+        if revision == current_source_revision and latest_by_revision.get(revision) is row:
+            current.append(reason)
+        else:
+            transient.append(reason)
+    return list(dict.fromkeys(current)), list(dict.fromkeys(transient))
 
 
 def _provider_request_receipt(
@@ -2367,28 +2398,47 @@ class MiniSweCentralAgent(BaseAgent):
                 and self.runtime_mode == "treatment"
             )
             frontier_required = bool(repository_required and self.enable_context_frontier)
+            repository_applicability = classify_repository_applicability(repository_evidence)
             intelligence_failures: list[str] = []
+            transient_intelligence_failures: list[str] = []
             if repository_required and not repository_evidence.substrate_ready:
                 intelligence_failures.append(
                     repository_evidence.status or "repository_intelligence_invalid"
                 )
             intelligence_failures.extend(graph_gate_reasons)
             if repository_required and repository_session is not None:
-                intelligence_failures.extend(
-                    f"repository_refresh:{row.get('status') or 'unknown'}"
-                    for row in repository_session.refresh_log
-                    if row.get("status") != RepositoryIntelligenceStatus.HEALTHY_CURRENT.value
+                refresh_current, refresh_transient = _partition_recovered_repository_failures(
+                    repository_session.refresh_log,
+                    current_source_revision=str(
+                        repository_session.source_revision or repository_evidence.source_revision
+                    ),
+                    failure_values=frozenset(
+                        status.value
+                        for status in RepositoryIntelligenceStatus
+                        if status is not RepositoryIntelligenceStatus.HEALTHY_CURRENT
+                    ),
+                    prefix="repository_refresh",
                 )
+                intelligence_failures.extend(refresh_current)
+                transient_intelligence_failures.extend(refresh_transient)
             if frontier_required:
-                intelligence_failures.extend(
-                    f"frontier:{row.get('disposition') or 'unknown'}"
-                    for row in frontier_decisions
-                    if row.get("disposition")
-                    in {
-                        FrontierDisposition.SUBSTRATE_FAILURE.value,
-                        FrontierDisposition.STALE_SOURCE_REVISION.value,
-                    }
+                frontier_current, frontier_transient = _partition_recovered_repository_failures(
+                    frontier_decisions,
+                    current_source_revision=str(
+                        repository_session.source_revision
+                        if repository_session is not None
+                        else repository_evidence.source_revision
+                    ),
+                    failure_values=frozenset(
+                        {
+                            FrontierDisposition.SUBSTRATE_FAILURE.value,
+                            FrontierDisposition.STALE_SOURCE_REVISION.value,
+                        }
+                    ),
+                    prefix="frontier",
                 )
+                intelligence_failures.extend(frontier_current)
+                transient_intelligence_failures.extend(frontier_transient)
                 if any(
                     int(row.get("candidate_count") or 0) != int(row.get("accounted_count") or 0)
                     for row in frontier_decisions
@@ -2433,12 +2483,16 @@ class MiniSweCentralAgent(BaseAgent):
                 else "no_provider_call"
             )
             intelligence_failures = list(dict.fromkeys(intelligence_failures))
+            transient_intelligence_failures = list(dict.fromkeys(transient_intelligence_failures))
             intelligence_status = (
                 "disabled"
                 if not self.enable_repository_intelligence
                 else "shadow"
                 if self.integration_mode is not GTIntegrationMode.ACTIVE
                 or self.runtime_mode != "treatment"
+                else "not_applicable"
+                if repository_applicability
+                == "not_applicable_no_supported_source"
                 else "failed"
                 if intelligence_failures
                 else "passed"
@@ -3166,7 +3220,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "status": intelligence_status,
                             "required": repository_required,
                             "frontier_required": frontier_required,
+                            "applicability": repository_applicability,
+                            "denominator_excluded": repository_applicability
+                            == "not_applicable_no_supported_source",
                             "failures": list(intelligence_failures),
+                            "transient_failures": list(transient_intelligence_failures),
                             "frontier_decisions": frontier_decisions,
                             "frontier_deliveries": frontier_deliveries,
                             "graph_gate": {

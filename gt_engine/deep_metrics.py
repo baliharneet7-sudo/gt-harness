@@ -725,6 +725,15 @@ def extract_trajectory(
             receipt_metrics.get("context_bounded_observation_operation_counts") or {}
         )
         result["repository_intelligence_required"] = bool(repository_intelligence.get("required"))
+        result["repository_intelligence_applicability"] = str(
+            repository_intelligence.get("applicability") or "unreported"
+        )
+        result["repository_intelligence_denominator_excluded"] = bool(
+            repository_intelligence.get("denominator_excluded")
+        )
+        result["repository_intelligence_transient_failures"] = list(
+            repository_intelligence.get("transient_failures") or ()
+        )
         result["repository_intelligence_failures"] = list(
             repository_intelligence.get("failures") or ()
         )
@@ -756,9 +765,13 @@ def compare_arms(
             solve_regressions.append(task)
         if after.get("censored"):
             censored_treatment.append(task)
-        if after.get("repository_intelligence_required") and (
-            after.get("repository_intelligence_status") != "passed"
-            or not bool(after.get("repository_intelligence_valid"))
+        if (
+            after.get("repository_intelligence_required")
+            and not after.get("repository_intelligence_denominator_excluded")
+            and (
+                after.get("repository_intelligence_status") != "passed"
+                or not bool(after.get("repository_intelligence_valid"))
+            )
         ):
             invalid_treatments.append(task)
 

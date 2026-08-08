@@ -20,6 +20,7 @@ from eval.gt_central_agent import (
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
     _message_context_chars,
+    _partition_recovered_repository_failures,
     _stable_provider_prefix,
 )
 from gt_engine.central_runtime import classify_validation_command
@@ -30,6 +31,59 @@ from gt_engine.preflight import (
     adapt_proposed_action,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence
+
+
+def test_recovered_frontier_failure_is_receipted_but_not_current_failure():
+    current, transient = _partition_recovered_repository_failures(
+        [
+            {
+                "source_revision": "r1",
+                "disposition": "substrate_failure",
+            },
+            {
+                "source_revision": "r1",
+                "disposition": "no_frontier",
+            },
+        ],
+        current_source_revision="r1",
+        failure_values=frozenset({"substrate_failure", "stale_source_revision"}),
+        prefix="frontier",
+    )
+
+    assert current == []
+    assert transient == ["frontier:substrate_failure"]
+
+
+def test_current_frontier_failure_remains_fail_closed():
+    current, transient = _partition_recovered_repository_failures(
+        [
+            {
+                "source_revision": "r1",
+                "disposition": "substrate_failure",
+            }
+        ],
+        current_source_revision="r1",
+        failure_values=frozenset({"substrate_failure", "stale_source_revision"}),
+        prefix="frontier",
+    )
+
+    assert current == ["frontier:substrate_failure"]
+    assert transient == []
+
+
+def test_recovered_refresh_failure_is_not_current_failure():
+    current, transient = _partition_recovered_repository_failures(
+        [
+            {"source_revision": "r1", "status": "sensor_degraded"},
+            {"source_revision": "r1", "status": "source_backed"},
+        ],
+        current_source_revision="r1",
+        failure_values=frozenset({"sensor_degraded", "index_unavailable"}),
+        prefix="repository_refresh",
+    )
+
+    assert current == []
+    assert transient == ["repository_refresh:sensor_degraded"]
 
 
 class _Environment:
@@ -333,7 +387,9 @@ async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_i
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     intelligence = receipt["repository_intelligence"]
-    assert intelligence["status"] == "failed"
+    assert intelligence["status"] == "not_applicable"
+    assert intelligence["applicability"] == "not_applicable_no_supported_source"
+    assert intelligence["denominator_excluded"] is True
     assert "no_supported_source" in intelligence["failures"]
     assert intelligence["frontier_deliveries"] == []
     assert receipt["metrics"]["repository_intelligence_valid"] == 0

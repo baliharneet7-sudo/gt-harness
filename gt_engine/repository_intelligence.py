@@ -65,6 +65,14 @@ class RetrievalDisposition(StrEnum):
     STALE = "stale"
 
 
+class RepositoryApplicability(StrEnum):
+    """Whether repository intelligence is applicable to this task."""
+
+    SOURCE_BACKED = "source_backed"
+    NOT_APPLICABLE_NO_SUPPORTED_SOURCE = "not_applicable_no_supported_source"
+    SUBSTRATE_FAILURE = "substrate_failure"
+
+
 @dataclass(frozen=True, slots=True)
 class RepositoryEvidence:
     # Compatibility: ``available`` means task-linked structural evidence is
@@ -124,6 +132,29 @@ def graph_gate_failures(evidence: RepositoryEvidence) -> tuple[str, ...]:
     if not evidence.intelligence_valid:
         failures.append("repository_intelligence_invalid")
     return tuple(dict.fromkeys(failures))
+
+
+def classify_repository_applicability(evidence: RepositoryEvidence) -> str:
+    """Classify graph applicability without weakening source-backed gates.
+
+    A source-less task is not a healthy graph and must never receive invented
+    facts.  It is nevertheless different from a failed index for a task that
+    contains supported source.
+    """
+
+    if (
+        evidence.status == RepositoryIntelligenceStatus.NO_SUPPORTED_SOURCE.value
+        and evidence.substrate_status == RepositorySubstrateStatus.NOT_APPLICABLE.value
+    ):
+        return RepositoryApplicability.NOT_APPLICABLE_NO_SUPPORTED_SOURCE.value
+    if (
+        evidence.status == RepositoryIntelligenceStatus.HEALTHY_CURRENT.value
+        and evidence.substrate_ready
+        and evidence.index_current
+        and evidence.intelligence_valid
+    ):
+        return RepositoryApplicability.SOURCE_BACKED.value
+    return RepositoryApplicability.SUBSTRATE_FAILURE.value
 
 
 class RepositorySession:
@@ -638,6 +669,7 @@ def inspect_repository(
 
 
 __all__ = [
+    "RepositoryApplicability",
     "RepositoryEvidence",
     "RepositoryIntelligenceStatus",
     "RepositorySession",
@@ -645,6 +677,7 @@ __all__ = [
     "RetrievalDisposition",
     "discover_project_checks",
     "graph_gate_failures",
+    "classify_repository_applicability",
     "inspect_index",
     "inspect_repository",
 ]

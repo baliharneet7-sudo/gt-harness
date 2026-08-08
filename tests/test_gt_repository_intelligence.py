@@ -7,13 +7,47 @@ from types import SimpleNamespace
 from gt_engine.indexer import IndexBuildStatus
 from gt_engine.language_registry import LANGUAGE_CAPABILITIES
 from gt_engine.repository_intelligence import (
+    RepositoryApplicability,
+    RepositoryEvidence,
+    RepositoryIntelligenceStatus,
     RepositorySession,
+    RepositorySubstrateStatus,
+    classify_repository_applicability,
     discover_project_checks,
     graph_gate_failures,
     inspect_index,
     inspect_repository,
 )
 from scripts.verify_gt_index_runtime import verify as verify_gt_index_runtime
+
+
+def test_source_less_repository_is_explicitly_not_applicable():
+    evidence = RepositoryEvidence(
+        status=RepositoryIntelligenceStatus.NO_SUPPORTED_SOURCE.value,
+        substrate_status=RepositorySubstrateStatus.NOT_APPLICABLE.value,
+    )
+
+    assert (
+        classify_repository_applicability(evidence)
+        == RepositoryApplicability.NOT_APPLICABLE_NO_SUPPORTED_SOURCE.value
+    )
+
+
+def test_source_backed_empty_retrieval_remains_applicable():
+    evidence = RepositoryEvidence(
+        status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        source_revision="r1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+        substrate_status=RepositorySubstrateStatus.HEALTHY_CURRENT.value,
+        retrieval_disposition="empty",
+    )
+
+    assert (
+        classify_repository_applicability(evidence)
+        == RepositoryApplicability.SOURCE_BACKED.value
+    )
 
 
 def test_project_checks_are_repository_backed_not_guessed(tmp_path: Path):

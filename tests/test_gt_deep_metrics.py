@@ -359,6 +359,40 @@ def test_outcome_gate_rejects_repository_intelligence_failure_even_if_resources_
     assert comparison["gate_passed"] is False
 
 
+def test_source_less_repository_is_excluded_from_intelligence_invalidity():
+    baseline = {
+        "task": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "effective_actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+        }
+    }
+    treatment = {
+        "task": {
+            **baseline["task"],
+            "total_tokens": 50,
+            "api_calls": 5,
+            "actions": 5,
+            "effective_actions": 5,
+            "assistant_steps": 5,
+            "normalized_cost_usd": 0.5,
+            "repository_intelligence_required": True,
+            "repository_intelligence_status": "not_applicable",
+            "repository_intelligence_valid": 0,
+            "repository_intelligence_denominator_excluded": True,
+        }
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert comparison["invalid_treatments"] == []
+
+
 def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     trajectory = tmp_path / "task_trajectory.json"
     trajectory.write_text(
