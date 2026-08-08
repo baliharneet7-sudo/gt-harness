@@ -2,7 +2,7 @@
 
 Date: 2026-08-08  
 Branch: `inline-engine`  
-Current head: `4fdda8e`
+Current head: `d2ae8d7`
 
 ## Objective
 
@@ -94,7 +94,7 @@ binary spec is not represented in the host registry. Shell's canonical graph
 name (`bash`) must be represented as an explicit host alias (`shell`) rather
 than relying on an accidental string mismatch.
 
-## Phase 2 — R and Verilog native parsers (implementation staged; CI certification pending)
+## Phase 2 — R and Verilog native parsers (provider-free certified)
 
 ### R
 
@@ -120,12 +120,16 @@ than relying on an accidental string mismatch.
    malformed syntax.
 5. Verify graph edges against a small hand-checked Verilog oracle.
 
-Implementation now includes the bindings, grammar-scoped Verilog name
-unwrapping, module-instantiation attribution, and provider-free R/Verilog
-fixtures. Exit gate remains pending: Linux CI must compile both cgo bindings
-and the binary fixture must produce expected language rows, positive
-definitions, and at least one certified directed edge where the fixture has a
-call/instantiation. Until that gate is green, the branch is not promoted.
+Implementation includes the bindings, grammar-scoped Verilog name unwrapping,
+module-instantiation attribution, and provider-free R/Verilog fixtures. The
+Linux provider-free workflow `31273427487` at `d2ae8d7` compiled both cgo
+bindings and passed the exit gate: `r=2`, `verilog=2`, 38/38 source/file-hash
+coverage, SQLite integrity, and directed edge coverage. The full central test,
+readiness, static, census, and exact pre-smoke gates also passed.
+
+This certifies deterministic repository substrate support only. It does not
+claim solve-rate, token, timing, or efficiency improvement. Redcode/POV-Ray
+remain explicitly blocked pending a grammar/structured-text decision.
 
 ## Phase 3 — Redcode and POV-Ray decision
 

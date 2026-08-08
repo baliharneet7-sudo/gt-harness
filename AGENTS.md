@@ -358,19 +358,20 @@ The 89-task run remains blocked.
 
 ## Native R/Verilog language stage (2026-08-08)
 
-The current branch stages parser-backed R (`.r`) and Verilog (`.v`) support
+The current branch includes parser-backed R (`.r`) and Verilog (`.v`) support
 using pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0`
 and `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog
 name unwrapping, module-instantiation attribution, and provider-free fixtures
 are checked in. Redcode (`.red`) and POV-Ray (`.pov`) remain explicit
 fail-closed capabilities; no regex parser may claim graph support for them.
 
-This stage is not certified until the Linux provider-free workflow compiles
-the cgo bindings and `verify_gt_index_runtime.py` proves R/Verilog definitions,
-directed edges, SQLite integrity, and complete source/file-hash coverage. Do
-not start a paid smoke from an unverified descendant. A green parser build is
-substrate evidence only; regression approval still requires the existing
-central census, readiness gate, archived replay, and matched outcome smoke.
+Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
+proved R/Verilog definitions, directed edges, SQLite integrity, and complete
+38/38 source/file-hash coverage; the central census, readiness, static checks,
+and exact pre-smoke gate passed. This is substrate evidence only, not a
+solve-rate or efficiency claim. Do not start a paid smoke without separate
+authorization; regression approval still requires the archived replay and
+matched outcome smoke. Redcode/POV-Ray remain fail-closed.
 
 Never infer censoring only from `central_receipt.json`: Harbor can terminate the
 agent after the last receipt. Shared metrics must consume the adjacent trial

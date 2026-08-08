@@ -529,16 +529,17 @@ parent commit cannot authorize a descendant.
 
 ## Native R/Verilog language stage (2026-08-08)
 
-The branch now stages parser-backed R (`.r`) and Verilog (`.v`) support through
+The branch now includes parser-backed R (`.r`) and Verilog (`.v`) support through
 pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0` and
 `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog name
 unwrapping, module-instantiation attribution, and provider-free fixtures are
 included. Redcode (`.red`) and POV-Ray (`.pov`) remain explicit fail-closed
 capabilities; regex parsing is prohibited.
 
-The stage is unapproved until Linux CI compiles the cgo bindings and the
-repository substrate verifier proves R/Verilog definitions, directed edges,
-SQLite integrity, and complete source/file-hash coverage. A parser build is
-not an efficiency or solve-rate claim; retain the central census, readiness,
-archived replay, and matched-smoke regression gates. The 89-task run remains
+Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
+proved R/Verilog definitions, directed edges, SQLite integrity, and complete
+38/38 source/file-hash coverage; central census, readiness, static checks, and
+the exact pre-smoke gate passed. This is substrate evidence only, not an
+efficiency or solve-rate claim. Retain the archived replay and matched-smoke
+regression gates; Redcode/POV-Ray remain fail-closed and the 89-task run stays
 blocked.
