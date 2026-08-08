@@ -121,6 +121,30 @@ runtime. The local untracked graph/binary artifacts must not be staged or used
 as certification evidence. The implementation must therefore validate against
 the vendored/certified runtime in CI as well as focused unit tests.
 
+## Implementation and validation result
+
+Implemented in commit `544dd93` and pushed to `inline-engine`.
+
+- Recovered refresh/frontier failures are retained under
+  `repository_intelligence.transient_failures` but no longer poison a healthy
+  final source revision.
+- Current final failures remain fail-closed.
+- Source-less tasks report
+  `not_applicable_no_supported_source` and are excluded only from the
+  repository-intelligence invalidity denominator; they remain in outcome
+  results and never receive fabricated graph facts.
+- Deep metrics now expose applicability, denominator exclusion, and transient
+  failures.
+- Focused tests and lint pass.
+- Archived replay of all ten `31279355854` trajectories returned `REPLAY_OK`.
+- GitHub provider-free certification `31281358217` passed the certified index,
+  all feature gates, readiness audit, and exact pre-smoke gate (`READY`,
+  `SMOKE_APPROVED`).
+
+The local census still fails against the untracked stale graph fixture, but
+the certified CI runtime passes the complete language/index contract. No paid
+rerun or 89-task run has been started after this repair.
+
 ## Non-goals and rollback
 
 - Do not fabricate graph facts for source-less tasks.
@@ -130,4 +154,3 @@ the vendored/certified runtime in CI as well as focused unit tests.
 - Do not enable assistive preflight or start the 89-task run.
 - Rollback is a single host integration commit; receipt schema additions are
   additive and can be ignored by older readers.
-
