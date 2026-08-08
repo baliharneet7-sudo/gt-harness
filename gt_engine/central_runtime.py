@@ -24,6 +24,11 @@ from gt_engine.central_controls import (
     consumer_spec_for,
 )
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
+from gt_engine.language_registry import (
+    VALIDATION_SOURCE_SUFFIXES,
+    is_validation_source,
+    syntax_probe_command,
+)
 from gt_engine.preflight import (
     ActionCycleReceipt,
     ActionDisposition,
@@ -134,35 +139,7 @@ _BACKGROUND_ARTIFACT_NAMES = frozenset(
     {"benchmark_out.txt", "callback-test.txt", "a.out", "data.comp"}
 )
 _DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
-_SOURCE_CAPTURE_SUFFIXES = frozenset(
-    {
-        ".py",
-        ".js",
-        ".mjs",
-        ".cjs",
-        ".ts",
-        ".tsx",
-        ".jsx",
-        ".java",
-        ".go",
-        ".rs",
-        ".rb",
-        ".php",
-        ".c",
-        ".h",
-        ".cc",
-        ".cpp",
-        ".hpp",
-        ".cs",
-        ".sh",
-        ".bash",
-        ".cob",
-        ".cbl",
-        ".scm",
-        ".ss",
-        ".rkt",
-    }
-)
+_SOURCE_CAPTURE_SUFFIXES = VALIDATION_SOURCE_SUFFIXES
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
 
 
@@ -254,7 +231,12 @@ def classify_change(
         return ClassifiedChange(path, kind, ChangeOrigin.VALIDATOR_DERIVED, False)
     if any(name in path for name in _BACKGROUND_ARTIFACT_NAMES):
         return ClassifiedChange(path, kind, ChangeOrigin.BACKGROUND_DERIVED, False)
-    return ClassifiedChange(path, kind, ChangeOrigin.MODEL_AUTHORED, True)
+    return ClassifiedChange(
+        path,
+        kind,
+        ChangeOrigin.MODEL_AUTHORED,
+        is_validation_source(path),
+    )
 
 
 def source_revision_of(
@@ -726,8 +708,8 @@ def _validation_authority(words: tuple[str, ...]) -> ValidationAuthority:
         return (
             ValidationAuthority.CUSTOM_PROBE
             if (
-            script_name
-            and re.fullmatch(r"(?:test|tests|verify)[A-Za-z0-9_.-]*\.py", script_name, re.I)
+                script_name
+                and re.fullmatch(r"(?:test|tests|verify)[A-Za-z0-9_.-]*\.py", script_name, re.I)
             )
             else ValidationAuthority.NONE
         )
@@ -751,7 +733,8 @@ def classify_validation_command(
     checks = tuple(dict.fromkeys(normalize_command(item) for item in explicit_checks if item))
     authorities = tuple(_validation_authority(segment) for segment in segments)
     recognized_indices = [
-        index for index, authority in enumerate(authorities)
+        index
+        for index, authority in enumerate(authorities)
         if authority is not ValidationAuthority.NONE
     ]
     declared_check_id: str | None = None
@@ -959,8 +942,12 @@ class EvidenceLedger:
                 # Intent without an attributable foreground result is not a
                 # certificate and cannot create or clear a submit blocker.
                 return
-            effective_returncode = 0 if classification.status is ValidationStatus.PASS else (
-                classification.result_code if classification.result_code not in {None, 0} else 1
+            effective_returncode = (
+                0
+                if classification.status is ValidationStatus.PASS
+                else (
+                    classification.result_code if classification.result_code not in {None, 0} else 1
+                )
             )
         evidence = CheckEvidence(
             command=key,
@@ -1082,8 +1069,12 @@ class WorkspaceSensor:
         recorder: HostExecutionRecorder | None = None,
         action_id: int = 0,
         source_revision: str = "",
+        tracked_paths: Iterable[str] = (),
     ) -> WorkspaceSnapshot:
         started = time.monotonic()
+        tracked = {
+            _workspace_relative_path(path) for path in tracked_paths if str(path or "").strip()
+        }
         try:
             kwargs = {
                 "cwd": cwd,
@@ -1127,7 +1118,7 @@ class WorkspaceSensor:
                 path
                 for path, state in sorted(snapshot.entries.items())
                 if state.kind == "f"
-                and any(path.lower().endswith(suffix) for suffix in _SOURCE_CAPTURE_SUFFIXES)
+                and (is_validation_source(path) or _workspace_relative_path(path) in tracked)
                 and state.size <= _MAX_SOURCE_CAPTURE_BYTES
             ]
             changed = []
@@ -1143,6 +1134,7 @@ class WorkspaceSensor:
                 path
                 for path, state in snapshot.entries.items()
                 if state.kind == "f"
+                and (is_validation_source(path) or _workspace_relative_path(path) in tracked)
                 and (
                     previous.entries.get(path) is None
                     or not _same_metadata(previous.entries[path], state)
@@ -1240,25 +1232,13 @@ class WorkspaceSensor:
 def lint_commands(paths: Iterable[str]) -> tuple[tuple[str, str], ...]:
     """Return conservative, no-artifact syntax probes for changed files."""
     commands: list[tuple[str, str]] = []
-    for path in sorted(set(paths))[:4]:
-        quoted = shlex.quote(path)
-        suffix = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-        if suffix == "py":
-            command = (
-                "command -v python3 >/dev/null 2>&1 || exit 0; "
-                f"PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile -- {quoted}"
-            )
-        elif suffix in {"js", "mjs", "cjs"}:
-            command = f"command -v node >/dev/null 2>&1 || exit 0; node --check -- {quoted}"
-        elif suffix in {"sh", "bash"}:
-            command = f"command -v bash >/dev/null 2>&1 || exit 0; bash -n -- {quoted}"
-        elif suffix == "rb":
-            command = f"command -v ruby >/dev/null 2>&1 || exit 0; ruby -c -- {quoted}"
-        elif suffix in {"cob", "cbl"}:
-            command = f"command -v cobc >/dev/null 2>&1 || exit 0; cobc -fsyntax-only -- {quoted}"
-        else:
+    for path in sorted(set(paths)):
+        command = syntax_probe_command(path)
+        if command is None:
             continue
         commands.append((path, command))
+        if len(commands) >= 4:
+            break
     return tuple(commands)
 
 
@@ -1805,8 +1785,7 @@ class CentralFeatureRuntime:
         """Make first-window arbitration explicit and prohibit late leakage."""
 
         selected_keys = {
-            (item.feature_id, item.action_id, item.source_revision)
-            for item in selected_items
+            (item.feature_id, item.action_id, item.source_revision) for item in selected_items
         }
         evidence_action = max(0, int(call) - 1)
         for item in tuple(self.receipts):
@@ -2064,9 +2043,7 @@ class CentralFeatureRuntime:
             selected.append({"path": path, "line": line, "symbol": symbol})
             if len(selected) >= 4:
                 break
-        definition_rows = [
-            dict(item) for item in definitions if str(item.get("path") or "")
-        ][:8]
+        definition_rows = [dict(item) for item in definitions if str(item.get("path") or "")][:8]
         reference_rows: list[dict[str, Any]] = []
         for item in references:
             path = str(item.get("path") or "").replace("\\", "/")
@@ -2266,9 +2243,7 @@ class CentralFeatureRuntime:
         definition_rows = tuple(dict(item) for item in definitions if item.get("path"))[:8]
         reference_rows = tuple(dict(item) for item in references if item.get("path"))[:8]
         caller_rows = tuple(
-            dict(item)
-            for item in callers
-            if item.get("caller_path") and item.get("target_path")
+            dict(item) for item in callers if item.get("caller_path") and item.get("target_path")
         )[:8]
         if not source_revision or not graph_revision or not selected:
             self._structural_evidence = {
@@ -2715,16 +2690,12 @@ class CentralFeatureRuntime:
                     phase,
                     action_id=action_id,
                     status=(
-                        "passed"
-                        if classification.status is ValidationStatus.PASS
-                        else "failed"
+                        "passed" if classification.status is ValidationStatus.PASS else "failed"
                     ),
                 )
             if classification.declared_check_id:
                 self._declared_check_states[classification.declared_check_id] = (
-                    "passed"
-                    if classification.status is ValidationStatus.PASS
-                    else "failed"
+                    "passed" if classification.status is ValidationStatus.PASS else "failed"
                 )
             if classification.status is ValidationStatus.PASS:
                 self._unvalidated_material_edits = 0
@@ -3036,10 +3007,7 @@ class CentralFeatureRuntime:
             )
 
         failure_kind = classification.failure_kind
-        if (
-            classification.status is ValidationStatus.FAIL
-            and failure_kind == "validation_failure"
-        ):
+        if classification.status is ValidationStatus.FAIL and failure_kind == "validation_failure":
             check_phase = "post_edit" if self._workspace_edited else "reproduction"
             self.record_existing_consumer_read(
                 feature_id="GT_CHANGE_SURFACE",
@@ -3178,11 +3146,10 @@ class CentralFeatureRuntime:
                     kind="submit_risk_latched",
                     detail=f"blockers={len(blockers)}",
                 )
-            if (
-                count >= 2
-                and classification.authority
-                in {ValidationAuthority.DECLARED, ValidationAuthority.STANDARD_RUNNER}
-            ):
+            if count >= 2 and classification.authority in {
+                ValidationAuthority.DECLARED,
+                ValidationAuthority.STANDARD_RUNNER,
+            }:
                 self._emit(
                     "recovery",
                     boundary="test_result",
@@ -3911,9 +3878,7 @@ class CentralFeatureRuntime:
 
         self._last_context_compiler_call = max(self._last_context_compiler_call, call)
         facts_by_effect = {
-            str(row.get("effect_id") or ""): row
-            for row in fact_accounting
-            if row.get("effect_id")
+            str(row.get("effect_id") or ""): row for row in fact_accounting if row.get("effect_id")
         }
         latest_by_feature: dict[str, str] = {}
         for trace in self._effect_trace:
@@ -3961,9 +3926,7 @@ class CentralFeatureRuntime:
         working memory: the latest source edit, the latest validation result,
         the unresolved failure, distinct read/search targets, and changed paths.
         """
-        declared = {
-            check: state for check, state in self._declared_check_states.items()
-        }
+        declared = {check: state for check, state in self._declared_check_states.items()}
         return {
             "last_edit": self._last_edit,
             "latest_validation": self._latest_validation,
@@ -4244,8 +4207,7 @@ class CentralFeatureRuntime:
         if value.startswith("/app/"):
             variants.add(value[5:])
         return any(
-            candidate and candidate.casefold() in haystack.casefold()
-            for candidate in variants
+            candidate and candidate.casefold() in haystack.casefold() for candidate in variants
         )
 
     @classmethod
@@ -4344,9 +4306,7 @@ class CentralFeatureRuntime:
             if selected is not None:
                 selected_items.append(selected)
         represented_items = [
-            item
-            for item in selected_items
-            if self._receipt_represented_in_history(item, history)
+            item for item in selected_items if self._receipt_represented_in_history(item, history)
         ]
         for item in represented_items:
             self._suppress_receipt_delivery(item, reason="represented_in_action_history")

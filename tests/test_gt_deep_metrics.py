@@ -324,6 +324,41 @@ def test_outcome_first_gate_rejects_two_large_per_task_resource_regressions():
     assert comparison["gate_passed"] is False
 
 
+def test_outcome_gate_rejects_repository_intelligence_failure_even_if_resources_win():
+    baseline = {
+        "task": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "effective_actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+        }
+    }
+    treatment = {
+        "task": {
+            **baseline["task"],
+            "total_tokens": 50,
+            "api_calls": 5,
+            "actions": 5,
+            "effective_actions": 5,
+            "assistant_steps": 5,
+            "normalized_cost_usd": 0.5,
+            "repository_intelligence_required": True,
+            "repository_intelligence_status": "failed",
+            "repository_intelligence_valid": 0,
+        }
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert comparison["invalid_treatments"] == ["task"]
+    assert comparison["aggregate_gate_failures"] == []
+    assert comparison["gate_passed"] is False
+
+
 def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     trajectory = tmp_path / "task_trajectory.json"
     trajectory.write_text(
@@ -356,6 +391,9 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                     "context_duplicate_turns_represented": 2,
                     "context_old_tool_results_cleared": 12,
                     "task_progress_changes": 3,
+                    "repository_mirror_transfer_ms": 12.5,
+                    "repository_index_refresh_ms": 4.25,
+                    "repository_incremental_refreshes": 2,
                 },
                 "model_call_contexts": [
                     {
@@ -367,6 +405,7 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                     {
                         "stock_context_chars": 150,
                         "runtime_advisory_chars": 80,
+                        "context_frontier_chars": 25,
                         "context_chars": 230,
                         "context_compiler": {"active_state_chars": 30},
                     },
@@ -379,7 +418,8 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
 
     assert metrics["runtime_advisory_context_chars"] == 80
     assert metrics["context_state_frame_chars_added"] == 50
-    assert metrics["total_gt_context_chars_added"] == 130
+    assert metrics["context_frontier_chars_added"] == 25
+    assert metrics["total_gt_context_chars_added"] == 155
     assert metrics["stock_context_chars_from_receipt"] == 250
     assert metrics["max_context_chars_from_receipt"] == 230
     assert metrics["context_compiler_calls"] == 2
@@ -398,6 +438,9 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["context_duplicate_turns_represented"] == 2
     assert metrics["context_old_tool_results_cleared"] == 12
     assert metrics["task_progress_changes"] == 3
+    assert metrics["repository_mirror_transfer_ms"] == 12.5
+    assert metrics["repository_index_refresh_ms"] == 4.25
+    assert metrics["repository_incremental_refreshes"] == 2
 
 
 def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
@@ -470,9 +513,7 @@ def test_feature_funnel_counts_deliveries_and_alignment(tmp_path):
                         }
                     ],
                 },
-                "guidance_deliveries": [
-                    {"feature_id": "syntax_result", "evidence_action": 1}
-                ],
+                "guidance_deliveries": [{"feature_id": "syntax_result", "evidence_action": 1}],
             }
         )
     )

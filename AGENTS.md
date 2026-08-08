@@ -591,3 +591,73 @@ compaction epochs because reconstructed raw final provider requests retain at
 least 211,100 tokens of headroom after a conservative advisory allowance. This
 is provider-free policy proof, not a live efficiency claim. See
 `details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`.
+
+## Repository-intelligence layer contract (2026-08-07)
+
+GT is the deterministic repository-intelligence layer inside Mini-SWE, not a
+sidecar that may be counted as healthy merely because feature receipts exist.
+For an active treatment coding task, a usable current graph and at least one
+new model-visible repository frontier are release requirements. A task with
+zero incremental visible GT context is an invalid treatment, even when the
+model solves it and aggregate resources look favorable. Mini-SWE still fails
+open operationally; the experiment fails closed analytically.
+
+`graph.db` is certified evidence, not a boolean file-presence check. Every
+build/refresh receipt records source coverage, unsupported suffixes, schema
+validity, node/edge counts, FTS tables, binary hash, graph revision, latency,
+and error type. The language registry is the one authority used by the sensor,
+source revision, syntax probes, indexer, and bridges. Its structural suffixes
+match the vendored `gt-index` specs. Authored languages without a shipped
+parser are `unsupported_language` or `incomplete_source_coverage`; they are
+never relabeled as no source and never approximated with regex symbols.
+
+The task-scoped repository mirror performs one certified full build, uses the
+indexer's real `-file` incremental path plus closure rebuild for changed
+indexable source, atomically publishes the graph and manifest, and reuses a
+graph only at the identical validation-relevant source revision. Deletes,
+unsafe paths, missing captured source, sensor degradation, schema failure,
+empty retrieval, stale revision, or low-precision evidence invalidate the
+intelligence treatment. Derived artifacts and task deliverables do not advance
+the source revision.
+
+Before every provider call, the deterministic context frontier advances beyond
+facts already represented in durable Mini-SWE history. It emits only certified
+definition, signature, caller, reference, or test facts with concrete
+path/line/symbol anchors, at most three facts and 1,200 characters per call and
+6,000 characters per task. It never truncates a fact, invents an anchor,
+predicts the model's action, duplicates a delivered fact, or emits on stale or
+unhealthy evidence. Candidate count must equal accounted count. Provider hash,
+message index, source/graph revisions, fact IDs, timing, and exact characters
+are receipted.
+
+Preflight mutation certainty is `PROVEN_READ_ONLY`, `PROVEN_MUTATION`, or
+`MAY_MUTATE`, with parser coverage and opaque/unknown segment flags. A workspace
+rescan may be skipped only for `PROVEN_READ_ONLY`; ambiguity remains fail-open
+and is scanned. This optimization changes no model command.
+
+Deep metrics must include frontier characters in total GT context and report
+per task: intelligence status/failures, schema health, source/indexable counts,
+nodes/edges, refreshes, frontier candidates/accounting/deliveries/facts/chars,
+duplicates, provider hashes, model/API work, controller work, tokens, and
+outcome/censoring. The paid merge fails when any required task is not
+`repository_intelligence.status=passed`, but still uploads artifacts.
+
+Provider-free proof now requires `REPOSITORY_SUBSTRATE_PROVEN` and
+`CONTEXT_FRONTIER_PROVEN` in addition to the permanent all-17 census lines.
+This proves deterministic integration and accounting, not a solve-rate or
+efficiency gain. No new paid smoke has run for this implementation; the
+89-task run remains blocked until an authorized matched smoke passes outcome,
+intelligence-health, timing, payload, and efficiency gates. A matched slice
+that contains authored COBOL/Scheme-family source is also blocked until a
+certified parser exists; explicit `unsupported_language` is correct behavior,
+not smoke readiness.
+
+The paid treatment also enables `require_graph_ready=true`. This is a
+pre-provider fail-closed gate: before the first model call, GT requires a
+current graph with a certified schema, nonzero nodes, complete authored-source
+coverage, graph/source revisions, and `intelligence_valid`. A missing, stale,
+empty, incomplete, or invalid graph exits with `RepositoryGraphGateFailed` and
+zero provider calls. This is stronger than the later merge audit: a task cannot
+spend paid tokens while running as a graph-less sidecar. The gate is recorded
+in the receipt and covered by
+`test_strict_graph_gate_stops_active_task_before_provider_call`.

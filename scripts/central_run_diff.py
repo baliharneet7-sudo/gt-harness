@@ -94,6 +94,13 @@ def _first_visible_call(receipt: dict[str, Any]) -> int | None:
         call = item.get("delivered_before_call") or item.get("first_eligible_call")
         if isinstance(call, int) and call > 0:
             calls.append(call)
+    intelligence = receipt.get("repository_intelligence") or {}
+    for item in intelligence.get("frontier_deliveries") or []:
+        if not isinstance(item, dict):
+            continue
+        call = item.get("delivered_before_call") or item.get("first_eligible_call")
+        if isinstance(call, int) and call > 0:
+            calls.append(call)
     return min(calls) if calls else None
 
 
@@ -125,6 +132,11 @@ def _context_summary(receipt: dict[str, Any]) -> dict[str, Any]:
         "compactions": int(metrics.get("context_compactions") or 0),
         "chars_elided": int(metrics.get("context_chars_elided") or 0),
         "gt_context_chars_added": int(metrics.get("total_gt_context_chars_added") or 0),
+        "context_frontier_chars_added": int(metrics.get("context_frontier_chars_added") or 0),
+        "context_frontier_deliveries": int(metrics.get("context_frontier_deliveries") or 0),
+        "repository_intelligence_status": str(
+            metrics.get("repository_intelligence_status") or "unreported"
+        ),
         "effective_actions": int(metrics.get("effective_actions") or 0),
         "preflight_calls": int(metrics.get("preflight_calls") or 0),
         "preflight_dispositions": dict(metrics.get("preflight_applied_dispositions") or {}),
@@ -172,8 +184,7 @@ def _compare_task(
         "first_divergent_model_call": first_call,
         "first_divergent_actions": first_detail,
         "first_divergence_precedes_visible_evidence": bool(
-            first_call is not None
-            and (earliest_visible is None or first_call < earliest_visible)
+            first_call is not None and (earliest_visible is None or first_call < earliest_visible)
         ),
         "request_differences": _request_differences(left_contexts, right_contexts),
         "guidance": {

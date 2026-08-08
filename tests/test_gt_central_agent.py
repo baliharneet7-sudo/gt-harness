@@ -151,9 +151,7 @@ class _ObservedMutationEnvironment(_Environment):
         if command.startswith("uname "):
             return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
         if "-printf" in command:
-            return ExecResult(
-                stdout=self.manifest_after if self.changed else "", return_code=0
-            )
+            return ExecResult(stdout=self.manifest_after if self.changed else "", return_code=0)
         if command.startswith("sha256sum"):
             paths = [word for word in command.split() if word.endswith(".py")]
             return ExecResult(
@@ -183,6 +181,7 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
         logs_dir=tmp_path,
         model_name="test",
         enable_task_start_advisory=True,
+        enable_context_frontier=False,
     )
     agent._model_factory = lambda: model
 
@@ -202,6 +201,217 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     assert delivery["delivered_before_call"] == 1
     assert delivery["one_step_late"] is False
     assert delivery["not_predictive"] is True
+
+
+@pytest.mark.asyncio
+async def test_context_frontier_advances_repository_intelligence_without_feature_advisory(
+    tmp_path,
+):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname='demo'\n")
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_task_start_advisory=False,
+        enable_context_frontier=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Ensure greet returns an uppercase greeting.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    first_request = "\n".join(model.observed_history[0])
+    assert "Repository intelligence" in first_request
+    assert "src/greeter.py" in first_request
+    assert "def greet(name: str) -> str" in first_request
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    intelligence = receipt["repository_intelligence"]
+    assert intelligence["status"] == "passed"
+    assert len(intelligence["frontier_deliveries"]) == 1
+    delivery = intelligence["frontier_deliveries"][0]
+    assert delivery["delivered_before_call"] == 1
+    assert (
+        delivery["request_payload_sha256"]
+        == receipt["model_call_contexts"][0]["request_payload_sha256"]
+    )
+    assert receipt["metrics"]["repository_intelligence_valid"] == 1
+    assert receipt["metrics"]["repository_graph_schema_valid"] == 1
+    assert receipt["metrics"]["repository_graph_nodes"] > 0
+    assert receipt["metrics"]["context_frontier_chars_added"] > 0
+    assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
+    assert receipt["metrics"]["repository_mirror_files"] == 2
+    assert receipt["metrics"]["repository_mirror_bytes"] > 0
+    assert receipt["metrics"]["repository_mirror_transfer_ms"] >= 0
+    assert receipt["metrics"]["repository_index_refresh_ms"] > 0
+    assert receipt["metrics"]["repository_full_refreshes"] == 1
+    assert [row["kind"] for row in receipt["repository_work_receipts"]] == [
+        "mirror_transfer",
+        "initial_index",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_idle(
+    tmp_path,
+):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            Path(target_dir, "README.md").write_text("no structurally supported source\n")
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_frontier=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Fix the repository implementation.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    intelligence = receipt["repository_intelligence"]
+    assert intelligence["status"] == "failed"
+    assert "no_supported_source" in intelligence["failures"]
+    assert "zero_visible_incremental_frontier" in intelligence["failures"]
+    assert intelligence["frontier_deliveries"] == []
+    assert receipt["metrics"]["repository_intelligence_valid"] == 0
+    assert receipt["metrics"]["repository_graph_schema_valid"] == 0
+    assert receipt["metrics"]["context_frontier_zero_tasks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_graph_gate_stops_active_task_before_provider_call(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            Path(target_dir, "README.md").write_text(
+                "the task has no structurally indexable source\n"
+            )
+
+    model = _ScriptedModel(["echo SHOULD_NOT_RUN"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_frontier=True,
+        require_graph_ready=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Fix the repository implementation.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert model.observed_history == []
+    assert receipt["calls"] == 0
+    assert receipt["metrics"]["repository_graph_gate_enabled"] == 1
+    assert receipt["metrics"]["repository_graph_gate_blocked"] == 1
+    assert "no_supported_source" in receipt["metrics"]["repository_graph_gate_failures"]
+    assert receipt["metrics"]["api_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_strict_graph_gate_allows_current_certified_graph(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "app.py").write_text(
+                "def target(value):\n    return value + 1\n\n"
+                "def caller():\n    return target(1)\n",
+                encoding="utf-8",
+            )
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_frontier=True,
+        require_graph_ready=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Change target to return the requested value.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert len(model.observed_history) == 1
+    assert receipt["metrics"]["repository_graph_gate_enabled"] == 1
+    assert receipt["metrics"]["repository_graph_gate_blocked"] == 0
+    assert receipt["metrics"]["repository_graph_source_revision"]
+
+
+@pytest.mark.asyncio
+async def test_frontier_fact_is_one_shot_and_task_budget_is_receipted(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+
+    model = _ScriptedModel(["cat src/greeter.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_frontier=True,
+        context_frontier_task_budget_chars=400,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Ensure greet returns an uppercase greeting.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    deliveries = receipt["repository_intelligence"]["frontier_deliveries"]
+    delivered_ids = [fact for row in deliveries for fact in row["fact_ids"]]
+    assert len(delivered_ids) == len(set(delivered_ids))
+    assert receipt["metrics"]["context_frontier_duplicate_facts"] == 0
+    assert receipt["metrics"]["context_frontier_chars_added"] <= 400
+    assert receipt["metrics"]["context_frontier_task_budget_chars"] == 400
+
+
+@pytest.mark.asyncio
+async def test_proven_read_only_action_reuses_workspace_snapshot_without_rescan(tmp_path):
+    model = _ScriptedModel(["cat src/greeter.py", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_repository_intelligence=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the file and finish.", environment, AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    manifest_execs = [
+        row
+        for row in receipt["host_execution"]["receipts"]
+        if row["category"] == "workspace_manifest" and not row["cache_hit"]
+    ]
+    manifest_cache_hits = [
+        row
+        for row in receipt["host_execution"]["receipts"]
+        if row["category"] == "workspace_manifest" and row["cache_hit"]
+    ]
+    assert len(manifest_execs) == 2  # initial snapshot plus submit postflight
+    assert len(manifest_cache_hits) == 1
+    assert manifest_cache_hits[0]["action_id"] == 1
 
 
 @pytest.mark.asyncio
@@ -289,8 +499,7 @@ async def test_context_transform_stays_byte_identical_with_safe_provider_headroo
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     assert receipt["metrics"]["context_compactions"] == 0
     assert all(
-        not row["provider_compaction_epoch_started"]
-        for row in receipt["model_call_contexts"]
+        not row["provider_compaction_epoch_started"] for row in receipt["model_call_contexts"]
     )
 
 
@@ -303,9 +512,7 @@ async def test_disabled_task_start_advisory_never_leaks_into_call_two(tmp_path):
             (root / "pyproject.toml").write_text("[project]\nname='demo'\n")
             (root / "src" / "greeter.py").write_text("def greet(): return 'hello'\n")
 
-    model = _ScriptedModel(
-        ["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
-    )
+    model = _ScriptedModel(["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
@@ -317,15 +524,10 @@ async def test_disabled_task_start_advisory_never_leaks_into_call_two(tmp_path):
 
     assert len(model.observed_history) == 2
     assert not any(
-        "src/greeter.py" in item
-        for history in model.observed_history
-        for item in history
+        "src/greeter.py" in item for history in model.observed_history for item in history
     )
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert not any(
-        row["feature_id"] == "GT_LOC_RESLOT"
-        for row in receipt["guidance_deliveries"]
-    )
+    assert not any(row["feature_id"] == "GT_LOC_RESLOT" for row in receipt["guidance_deliveries"])
 
 
 @pytest.mark.asyncio
@@ -348,9 +550,7 @@ async def test_receipt_hashes_the_provider_prepared_messages_not_private_extra(t
             self.raw_history.append(json.loads(json.dumps(messages)))
             return super().query(messages)
 
-    model = PreparedModel(
-        ["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
-    )
+    model = PreparedModel(["echo inspect", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
     agent._model_factory = lambda: model
 
@@ -485,14 +685,14 @@ async def test_missing_edit_passes_to_shell_then_postflight_keeps_loop_live(tmp_
             self.edited = False
 
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
-            Path(target_dir, "app.py").write_text("x = 1\n")
+            Path(target_dir, "app.py").write_text("def x():\n    return 1\n")
 
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
             if command.startswith("uname "):
                 return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
             if "-printf" in command:
-                size = 6
+                size = 22
                 stamp = "2.0" if self.edited else "1.0"
                 return ExecResult(
                     stdout=f"f\t{size}\t{stamp}\t{stamp}\tapp.py\t\n",
@@ -502,7 +702,11 @@ async def test_missing_edit_passes_to_shell_then_postflight_keeps_loop_live(tmp_
                 digest = "b" if self.edited else "a"
                 return ExecResult(stdout=(digest * 64) + "  app.py\n", return_code=0)
             if command.startswith("python3 -c"):
-                encoded = "eCA9IDIK" if self.edited else "eCA9IDEK"
+                encoded = (
+                    "ZGVmIHkoKToKICAgIHJldHVybiAyCg=="
+                    if self.edited
+                    else "ZGVmIHgoKToKICAgIHJldHVybiAxCg=="
+                )
                 return ExecResult(stdout=f'{{"app.py":"{encoded}"}}\n', return_code=0)
             if command.startswith("sed -i"):
                 self.executed_edits.append(command)
@@ -540,6 +744,7 @@ async def test_missing_edit_passes_to_shell_then_postflight_keeps_loop_live(tmp_
     assert session["fresh"] is True
     assert len(session["refresh_log"]) == 2
     assert session["source_revision"] == receipt["source_revision"]
+    assert receipt["metrics"]["repository_incremental_refreshes"] == 1
     assert receipt["metrics"]["preflight_commands_returned_to_model"] == 0
     assert receipt["metrics"]["preflight_commands_changed_after_return"] == 0
 
@@ -617,9 +822,7 @@ async def test_off_and_shadow_dispatch_identical_model_commands(tmp_path):
     assert len(shadow_receipt["features"]["action_cycles"]) == 2
     assert off_receipt["integration_mode"] == "off"
     assert shadow_receipt["integration_mode"] == "audit"
-    assert [
-        row["provider_messages_sha256"] for row in off_receipt["model_call_contexts"]
-    ] == [
+    assert [row["provider_messages_sha256"] for row in off_receipt["model_call_contexts"]] == [
         row["provider_messages_sha256"] for row in shadow_receipt["model_call_contexts"]
     ]
 
@@ -804,9 +1007,7 @@ async def test_unclassified_exploration_failure_alone_does_not_split_batch(tmp_p
 async def test_assistive_safe_breaks_mutating_batch_before_stale_second_action(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
     model = _BatchModel([["touch app.py", "rm app.py"], [submit]])
-    environment = _ObservedMutationEnvironment(
-        "touch app.py", "f\t6\t2.0\t2.0\tapp.py\t\n"
-    )
+    environment = _ObservedMutationEnvironment("touch app.py", "f\t6\t2.0\t2.0\tapp.py\t\n")
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
@@ -923,9 +1124,7 @@ def test_explicit_foreground_validation_may_receive_bounded_timeout_extension(tm
         model_name="test",
         enable_adaptive_validation_timeout=True,
     )
-    classification = classify_validation_command(
-        "timeout 90s python3 -m pytest -q"
-    )
+    classification = classify_validation_command("timeout 90s python3 -m pytest -q")
     proposal = adapt_proposed_action(
         {"command": classification.command},
         source_revision="s1",
@@ -1020,14 +1219,11 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
 
 def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     workflow = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "tb2_miniswe_central.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_central.yml"
     ).read_text(encoding="utf-8")
 
     assert 'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
-    assert "--agent-import-path \"$AGENT\"" in workflow
+    assert '--agent-import-path "$AGENT"' in workflow
     assert "--ak integration_mode=active" in workflow
     assert "--ak preflight_mode=shadow" in workflow
     assert "--ak enable_context_compaction=true" in workflow
@@ -1218,10 +1414,7 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert metrics["context_unique_reasoning_chars_removed"] == 0
     assert metrics["context_compiler_effects_unaccounted"] == 0
     assert all(row["context_compiler_ran"] for row in contexts)
-    assert all(
-        row["context_facts_accounted"] == row["context_fact_candidates"]
-        for row in contexts
-    )
+    assert all(row["context_facts_accounted"] == row["context_fact_candidates"] for row in contexts)
     assert all(
         row["context_compiler"]["accounted_fact_count"]
         == row["context_compiler"]["candidate_fact_count"]
@@ -1301,6 +1494,7 @@ async def test_actual_agent_loop_routes_all_17_features_with_nonpredictive_effec
             submit,
         ]
     )
+
     class IndexedAllFeatureAgent(MiniSweCentralAgent):
         async def _start_repository_session(self, environment, instruction, *, source_revision):
             return (
@@ -1526,9 +1720,7 @@ async def test_over_budget_next_request_does_not_confirm_pending_guidance(tmp_pa
                 )
             raise AssertionError(command)
 
-    model = _ScriptedModel(
-        ["pytest -q", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
-    )
+    model = _ScriptedModel(["pytest -q", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
@@ -1574,10 +1766,7 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
             if command.startswith("uname "):
                 return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
             if "-printf" in command:
-                manifest = (
-                    "f\t100\t1.0\t1.0\tdata.txt\t\n"
-                    "f\t100\t1.0\t1.0\tdecomp\t\n"
-                )
+                manifest = "f\t100\t1.0\t1.0\tdata.txt\t\nf\t100\t1.0\t1.0\tdecomp\t\n"
                 if self.created:
                     manifest += "f\t2372\t2.0\t2.0\tdata.comp\t\n"
                 return ExecResult(stdout=manifest, return_code=0)
@@ -1621,9 +1810,7 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
     assert receipt["metrics"]["host_exec_category_counts"]["completion_probe"] == 2
     assert receipt["metrics"]["host_exec_category_counts"]["auto_submit"] == 1
     gt_certificate = next(
-        row
-        for row in receipt["features"]["receipts"]
-        if row["feature_id"] == "GT_CERT_DELIVERY"
+        row for row in receipt["features"]["receipts"] if row["feature_id"] == "GT_CERT_DELIVERY"
     )
     assert gt_certificate["payload"]["check_count"] == 2
     assert gt_certificate["payload"]["passing_checks"] == 2

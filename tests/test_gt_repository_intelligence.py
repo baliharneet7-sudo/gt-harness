@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from gt_engine.indexer import IndexBuildStatus
 from gt_engine.repository_intelligence import (
     RepositorySession,
     discover_project_checks,
+    graph_gate_failures,
     inspect_index,
     inspect_repository,
 )
@@ -38,6 +40,10 @@ def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Pat
     assert evidence.references == ()
     assert evidence.callers == ()
     assert evidence.project_checks == ("pytest -q",)
+    assert evidence.index is not None
+    assert evidence.index.schema_valid is True
+    assert evidence.index.node_count > 0
+    assert "nodes_fts" in evidence.index.fts_tables
 
 
 def test_non_code_repository_has_explicit_index_abstention(tmp_path: Path):
@@ -72,6 +78,7 @@ def test_repository_session_persists_and_refreshes_captured_source(tmp_path: Pat
 
     first = session.refresh(source_revision="s1")
     assert first.available is True
+    first_graph_revision = first.graph_revision
     transition = SimpleNamespace(
         changed_paths=("src/greeter.py",),
         deleted=(),
@@ -82,9 +89,23 @@ def test_repository_session_persists_and_refreshes_captured_source(tmp_path: Pat
     second = session.refresh(source_revision="s2")
 
     assert second.available is True
+    assert second.graph_revision != first_graph_revision
     assert session.source_revision == "s2"
     assert "'HI'" in (mirror / "src" / "greeter.py").read_text()
     assert [row["source_revision"] for row in session.refresh_log] == ["s1", "s2"]
+    assert [row["mode"] for row in session.refresh_log] == ["full", "incremental"]
+    assert second.index is not None and second.index.graph_db
+    assert second.index.source_revision == "s2"
+    assert graph_gate_failures(second) == ()
+    manifest = json.loads(Path(second.index.graph_db).with_suffix(".manifest.json").read_text())
+    assert manifest["refresh_mode"] == "incremental"
+    assert manifest["changed_paths"] == ["src/greeter.py"]
+    assert manifest["source_revision"] == "s2"
+
+    cached = session.refresh(source_revision="s2")
+    assert cached.graph_revision == second.graph_revision
+    assert session.refresh_log[-1]["mode"] == "revision_cache_hit"
+    assert session.refresh_log[-1]["elapsed_ms"] == 0.0
 
 
 def test_repository_session_invalidates_when_changed_source_was_not_captured(tmp_path: Path):

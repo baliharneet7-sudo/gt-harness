@@ -318,6 +318,8 @@ jobs:
                 --ak enable_progress_control=true
                 --ak execution_budget_sec="$EXECUTION_BUDGET"
                 --ak enable_task_start_advisory=false
+                --ak enable_context_frontier=true
+                --ak require_graph_ready=true
               )
               ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
@@ -415,7 +417,7 @@ jobs:
           EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
         run: |
           python - <<'EOF'
-          import json, os
+          import json, os, sys
           from pathlib import Path
 
           from gt_engine.deep_metrics import extract_trajectory
@@ -435,6 +437,7 @@ jobs:
               if receipt_paths:
                   receipt = json.loads(receipt_paths[0].read_text(encoding="utf-8"))
                   metrics = receipt.get("metrics") or {}
+                  intelligence = receipt.get("repository_intelligence") or {}
                   receipt_metrics.append({
                       "task": task_name,
                       "feature_count": (receipt.get("features") or {}).get("feature_count"),
@@ -466,6 +469,16 @@ jobs:
                       "repeated_commands": metrics.get("repeated_commands"),
                       "censored": metrics.get("censored"),
                       "censored_reason": metrics.get("censored_reason"),
+                      "repository_intelligence_status": intelligence.get("status"),
+                      "repository_intelligence_required": intelligence.get("required"),
+                      "repository_intelligence_failures": intelligence.get("failures") or [],
+                      "repository_graph_schema_valid": metrics.get("repository_graph_schema_valid"),
+                      "repository_graph_nodes": metrics.get("repository_graph_nodes"),
+                      "repository_graph_edges": metrics.get("repository_graph_edges"),
+                      "repository_mirror_transfer_ms": metrics.get("repository_mirror_transfer_ms"),
+                      "repository_index_refresh_ms": metrics.get("repository_index_refresh_ms"),
+                      "context_frontier_deliveries": metrics.get("context_frontier_deliveries"),
+                      "context_frontier_chars_added": metrics.get("context_frontier_chars_added"),
                   })
               results = list(task_dir.rglob("result.json"))
               if not results:
@@ -505,6 +518,12 @@ jobs:
           errored = [t for t in trials if t.get("exception_info")]
           n_solved = sum(1 for t in graded if solved(t))
           n_expected = len(expected) if expected else 0
+          invalid_intelligence = [
+              row["task"]
+              for row in receipt_metrics
+              if row["repository_intelligence_required"]
+              and row["repository_intelligence_status"] != "passed"
+          ]
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
           out.append("- arm: **${{ inputs.arm }}**")
@@ -526,6 +545,11 @@ jobs:
           if n_expected:
               out.append(f"- **solved of planned: {n_solved}/{n_expected} "
                          f"({100 * n_solved / n_expected:.1f}%)**")
+          if invalid_intelligence:
+              out.append(
+                  f"> **INVALID GT TREATMENT**: repository intelligence failed for "
+                  f"{len(invalid_intelligence)} task(s): {', '.join(invalid_intelligence)}."
+              )
           out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
           for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
               name = (t.get("task_name") or t.get("trial_name", "?")).split("__")[0]
@@ -536,8 +560,8 @@ jobs:
 
           out += [
               "", "## Central runtime metrics", "",
-              "| task | total tokens | uncached input | calls | model actions | effective task execs | controller execs | cached reads | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | censored |",
-              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+              "| task | total tokens | uncached input | calls | model actions | effective task execs | controller execs | cached reads | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | frontier deliveries/chars | graph nodes/edges | mirror/index ms | intelligence | censored |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
           ]
           for row in sorted(receipt_metrics, key=lambda x: x["task"]):
               out.append(
@@ -549,6 +573,13 @@ jobs:
                   f"{row['workspace_change_actions'] or 0} | {row['failed_actions'] or 0} | "
                   f"{row['repeated_commands'] or 0} | {row['guidance_events'] or 0}/"
                   f"{row['guidance_candidates'] or 0}/{row['guidance_suppressed'] or 0} | "
+                  f"{row['context_frontier_deliveries'] or 0}/"
+                  f"{row['context_frontier_chars_added'] or 0} | "
+                  f"{row['repository_graph_nodes'] or 0}/"
+                  f"{row['repository_graph_edges'] or 0} | "
+                  f"{row['repository_mirror_transfer_ms'] or 0}/"
+                  f"{row['repository_index_refresh_ms'] or 0} | "
+                  f"{row['repository_intelligence_status'] or 'unreported'} | "
                   f"{row['censored'] or False} |"
               )
 
@@ -559,6 +590,7 @@ jobs:
               "n_graded": len(graded),
               "n_errored": len(errored),
               "n_solved": n_solved,
+              "invalid_repository_intelligence_tasks": invalid_intelligence,
               "trial_results": trials,
               "receipt_metrics": receipt_metrics,
           }, indent=2), encoding="utf-8")
@@ -574,6 +606,8 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write(body)
           print(body[:4000])
+          if invalid_intelligence:
+              sys.exit(2)
           EOF
 
       - name: Upload merged result

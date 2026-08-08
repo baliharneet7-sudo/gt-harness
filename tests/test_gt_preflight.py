@@ -194,6 +194,31 @@ def test_inline_interpreter_program_is_opaque_to_target_extraction():
     assert proposal.targets == ()
 
 
+def test_shell_control_words_are_structure_not_fake_executables():
+    proposal = adapt_proposed_action(
+        {
+            "command": (
+                "if test -f src/app.py; then\n"
+                "  cat src/app.py\n"
+                "else\n"
+                "  rg -n target src\n"
+                "fi"
+            )
+        },
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert not ({"if", "then", "else", "fi"} & {item.executable for item in proposal.operations})
+    assert {item.operation for item in proposal.operations} >= {
+        ActionOperation.READ,
+        ActionOperation.SEARCH,
+    }
+
+
 def test_validation_classification_applies_only_to_runner_segment():
     command = "cd /app && python -m pytest -q; echo EXIT:$?"
     classification = classify_validation_command(command, (command,))

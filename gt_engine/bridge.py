@@ -66,6 +66,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from gt_engine.language_registry import VALIDATION_SOURCE_SUFFIXES
+
 # Budget for one delivered delta (chars). Matches the adapter default.
 MAX_DELTA_CHARS = 4000
 
@@ -283,12 +285,7 @@ _MAX_BRIDGE_FILE_BYTES = 1_000_000  # production's snapshot bound
 
 # Broad source-extension gate (production `_has_source_ext`: broad by design,
 # /tmp staging included for DETECTION; scratch exclusion is a credit concern).
-_SRC_EXTS = (
-    ".py", ".pyi", ".go", ".rs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-    ".rb", ".java", ".kt", ".kts", ".cs", ".php", ".swift", ".scala",
-    ".c", ".h", ".cc", ".hh", ".cpp", ".hpp", ".m", ".mm", ".lua", ".ex",
-    ".exs", ".erl", ".hs", ".ml", ".clj", ".dart", ".zig", ".sh",
-)
+_SRC_EXTS = tuple(sorted(VALIDATION_SOURCE_SUFFIXES))
 
 # Repo-confined structured artifacts are also legitimate task outputs. They do
 # not feed the source graph or syntax checker, but tracking their mutation lets

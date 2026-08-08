@@ -43,6 +43,7 @@ DIAGNOSTIC_METRICS = (
     "steps_to_submit",
     "gt_context_chars_added",
     "context_state_frame_chars_added",
+    "context_frontier_chars_added",
     "total_gt_context_chars_added",
     "effects_produced",
     "effects_applied",
@@ -64,6 +65,27 @@ DIAGNOSTIC_METRICS = (
     "context_facts_controller_only",
     "context_facts_omitted",
     "context_facts_accounted",
+    "context_frontier_calls",
+    "context_frontier_candidates",
+    "context_frontier_accounted",
+    "context_frontier_deliveries",
+    "context_frontier_facts_delivered",
+    "context_frontier_zero_tasks",
+    "context_frontier_duplicate_facts",
+    "repository_intelligence_valid",
+    "repository_graph_schema_valid",
+    "repository_graph_nodes",
+    "repository_graph_edges",
+    "repository_source_files",
+    "repository_indexable_files",
+    "repository_refreshes",
+    "repository_mirror_transfer_ms",
+    "repository_mirror_files",
+    "repository_mirror_bytes",
+    "repository_index_refresh_ms",
+    "repository_full_refreshes",
+    "repository_incremental_refreshes",
+    "repository_revision_cache_hits",
     "context_exact_duplicate_chars_removed",
     "context_unique_reasoning_chars_removed",
     "context_bounded_observations",
@@ -321,6 +343,8 @@ def _feature_applicability_metrics(features: dict[str, Any]) -> dict[str, Any]:
         "false_feature_fires": len(false_fires),
         "feature_ids_false_fires": false_fires,
     }
+
+
 def _lifecycle_metrics(features: dict[str, Any]) -> dict[str, int | None]:
     lifecycle = features.get("lifecycle") or {}
 
@@ -507,27 +531,22 @@ def extract_trajectory(
     if receipt_path and receipt_path.exists():
         receipt = _load_json(receipt_path)
         receipt_metrics = receipt.get("metrics") or {}
+        repository_intelligence = receipt.get("repository_intelligence") or {}
         feature_summary = receipt.get("features") or {}
         call_contexts = receipt.get("model_call_contexts") or []
         validation_log = feature_summary.get("validation_log") or []
         if validation_log:
             # Unified classification is authoritative when present; never
             # reparse commands in a way that can disagree with the runtime.
-            result["check_actions"] = sum(
-                1 for row in validation_log if row.get("is_validation")
-            )
+            result["check_actions"] = sum(1 for row in validation_log if row.get("is_validation"))
             result["recognized_validation_actions"] = sum(
-                1
-                for row in validation_log
-                if row.get("command_class") == "recognized_validation"
+                1 for row in validation_log if row.get("command_class") == "recognized_validation"
             )
             result["declared_validation_actions"] = sum(
                 1 for row in validation_log if row.get("validation_authority") == "declared"
             )
             result["standard_runner_validation_actions"] = sum(
-                1
-                for row in validation_log
-                if row.get("validation_authority") == "standard_runner"
+                1 for row in validation_log if row.get("validation_authority") == "standard_runner"
             )
             result["custom_probe_validation_actions"] = sum(
                 1 for row in validation_log if row.get("validation_authority") == "custom_probe"
@@ -560,6 +579,9 @@ def extract_trajectory(
                     int((item.get("context_compiler") or {}).get("active_state_chars") or 0)
                     for item in call_contexts
                 ),
+                "context_frontier_chars_added": sum(
+                    int(item.get("context_frontier_chars") or 0) for item in call_contexts
+                ),
                 "stock_context_chars_from_receipt": sum(
                     int(item.get("stock_context_chars") or 0) for item in call_contexts
                 ),
@@ -591,6 +613,28 @@ def extract_trajectory(
             "context_facts_controller_only",
             "context_facts_omitted",
             "context_facts_accounted",
+            "context_frontier_calls",
+            "context_frontier_candidates",
+            "context_frontier_accounted",
+            "context_frontier_deliveries",
+            "context_frontier_facts_delivered",
+            "context_frontier_chars_added",
+            "context_frontier_zero_tasks",
+            "context_frontier_duplicate_facts",
+            "repository_intelligence_valid",
+            "repository_graph_schema_valid",
+            "repository_graph_nodes",
+            "repository_graph_edges",
+            "repository_source_files",
+            "repository_indexable_files",
+            "repository_refreshes",
+            "repository_mirror_transfer_ms",
+            "repository_mirror_files",
+            "repository_mirror_bytes",
+            "repository_index_refresh_ms",
+            "repository_full_refreshes",
+            "repository_incremental_refreshes",
+            "repository_revision_cache_hits",
             "context_exact_duplicate_chars_removed",
             "context_unique_reasoning_chars_removed",
             "context_selected_facts_action_measurable",
@@ -634,7 +678,15 @@ def extract_trajectory(
             result[key] = receipt_metrics.get(key, result.get(key, 0))
         result["total_gt_context_chars_added"] = (
             int(result.get("gt_context_chars_added") or 0)
+            + int(result.get("context_frontier_chars_added") or 0)
             + int(result.get("context_state_frame_chars_added") or 0)
+        )
+        result["repository_intelligence_status"] = str(
+            repository_intelligence.get("status") or "unreported"
+        )
+        result["repository_intelligence_required"] = bool(repository_intelligence.get("required"))
+        result["repository_intelligence_failures"] = list(
+            repository_intelligence.get("failures") or ()
         )
     return result
 
@@ -647,6 +699,7 @@ def compare_arms(
     rows: dict[str, Any] = {}
     solve_regressions: list[str] = []
     censored_treatment: list[str] = []
+    invalid_treatments: list[str] = []
     pareto_failures: list[str] = []
     per_task_bound_failures: list[str] = []
     comparable_solved: list[str] = []
@@ -663,6 +716,12 @@ def compare_arms(
             solve_regressions.append(task)
         if after.get("censored"):
             censored_treatment.append(task)
+        if after.get("repository_intelligence_required") and (
+            after.get("repository_intelligence_status") != "passed"
+            or not bool(after.get("repository_intelligence_valid"))
+        ):
+            invalid_treatments.append(task)
+
         def resource_value(row: dict[str, Any], metric: str) -> float:
             if metric == "effective_actions" and row.get(metric) is None:
                 return float(row.get("actions", 0) or 0)
@@ -709,12 +768,8 @@ def compare_arms(
             if len(exceeded_bounds) >= 2:
                 per_task_bound_failures.append(task)
         rows[task] = {
-            "baseline_official_solved": before.get(
-                "official_solved", before.get("solved")
-            ),
-            "treatment_official_solved": after.get(
-                "official_solved", after.get("solved")
-            ),
+            "baseline_official_solved": before.get("official_solved", before.get("solved")),
+            "treatment_official_solved": after.get("official_solved", after.get("solved")),
             "baseline_solved": b_solved,
             "treatment_solved": a_solved,
             "baseline_censored": bool(before.get("censored")),
@@ -740,10 +795,7 @@ def compare_arms(
         )
         if aggregate_deltas.get(metric) is None or aggregate_deltas[metric] >= 0
     ]
-    if (
-        aggregate_deltas.get("actions") is None
-        or aggregate_deltas["actions"] > 0
-    ):
+    if aggregate_deltas.get("actions") is None or aggregate_deltas["actions"] > 0:
         aggregate_gate_failures.append("actions")
     wall_delta = aggregate_deltas.get("agent_wall_time_seconds")
     if wall_delta is not None and wall_delta > 0:
@@ -754,6 +806,7 @@ def compare_arms(
         and not (
             solve_regressions
             or censored_treatment
+            or invalid_treatments
             or per_task_bound_failures
             or aggregate_gate_failures
         )
@@ -764,27 +817,19 @@ def compare_arms(
         "task_count": len(tasks),
         "outcomes": {
             "baseline_official_resolved": sum(
-                baseline[task].get("official_solved", baseline[task].get("solved"))
-                is True
+                baseline[task].get("official_solved", baseline[task].get("solved")) is True
                 for task in tasks
             ),
             "treatment_official_resolved": sum(
-                treatment[task].get("official_solved", treatment[task].get("solved"))
-                is True
+                treatment[task].get("official_solved", treatment[task].get("solved")) is True
                 for task in tasks
             ),
             "baseline_uncensored_resolved": sum(
-                baseline[task].get(
-                    "uncensored_resolved", baseline[task].get("solved")
-                )
-                is True
+                baseline[task].get("uncensored_resolved", baseline[task].get("solved")) is True
                 for task in tasks
             ),
             "treatment_uncensored_resolved": sum(
-                treatment[task].get(
-                    "uncensored_resolved", treatment[task].get("solved")
-                )
-                is True
+                treatment[task].get("uncensored_resolved", treatment[task].get("solved")) is True
                 for task in tasks
             ),
         },
@@ -792,6 +837,7 @@ def compare_arms(
         "comparable_solved": comparable_solved,
         "solve_regressions": solve_regressions,
         "censored_treatment": censored_treatment,
+        "invalid_treatments": invalid_treatments,
         "pareto_failures": pareto_failures,
         "per_task_bound_failures": per_task_bound_failures,
         "aggregate_gate_failures": aggregate_gate_failures,
@@ -806,16 +852,13 @@ def render_delta_markdown(name: str, comparison: dict[str, Any]) -> str:
         "",
         f"Gate: **{'PASS' if comparison['gate_passed'] else 'FAIL'}**",
         "",
-        "Solve regressions: "
-        + (", ".join(comparison["solve_regressions"]) or "none"),
-        "Treatment censors: "
-        + (", ".join(comparison["censored_treatment"]) or "none"),
-        "Strict Pareto failures: "
-        + (", ".join(comparison["pareto_failures"]) or "none"),
-        "Per-task bound failures: "
-        + (", ".join(comparison["per_task_bound_failures"]) or "none"),
-        "Aggregate gate failures: "
-        + (", ".join(comparison["aggregate_gate_failures"]) or "none"),
+        "Solve regressions: " + (", ".join(comparison["solve_regressions"]) or "none"),
+        "Treatment censors: " + (", ".join(comparison["censored_treatment"]) or "none"),
+        "Invalid repository-intelligence treatments: "
+        + (", ".join(comparison.get("invalid_treatments") or ()) or "none"),
+        "Strict Pareto failures: " + (", ".join(comparison["pareto_failures"]) or "none"),
+        "Per-task bound failures: " + (", ".join(comparison["per_task_bound_failures"]) or "none"),
+        "Aggregate gate failures: " + (", ".join(comparison["aggregate_gate_failures"]) or "none"),
         "",
         "Delta is treatment minus baseline; positive resource deltas are regressions.",
         "",

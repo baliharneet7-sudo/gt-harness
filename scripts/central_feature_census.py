@@ -25,6 +25,10 @@ from gt_engine.central_runtime import (
     feature_payload_grounded,
     feature_payload_valid,
 )
+from gt_engine.context_frontier import (
+    FrontierDisposition,
+    compile_incremental_frontier,
+)
 from gt_engine.provider_view import build_provider_view
 from scripts.verify_gt_index_runtime import verify as verify_repository_substrate
 
@@ -65,10 +69,7 @@ def _expected_model_visible(row: dict) -> bool:
             "submit_refusal",
             "syntax_result",
         }
-        or (
-            feature_id == "GT_LOC_RESLOT"
-            and bool(row.get("payload", {}).get("graph_revision"))
-        )
+        or (feature_id == "GT_LOC_RESLOT" and bool(row.get("payload", {}).get("graph_revision")))
     )
 
 
@@ -322,7 +323,8 @@ def census() -> dict:
         and summary["all_effects_timing_valid"]
         and summary["all_payloads_semantically_grounded"]
         and {
-            row["feature_id"] for row in summary["effect_applications"]
+            row["feature_id"]
+            for row in summary["effect_applications"]
             if row["state_fields_changed"]
         }
         >= set(CENTRAL_FEATURE_IDS)
@@ -341,9 +343,7 @@ def census() -> dict:
         for row in summary["context_compiler_effect_accountability"]
     )
     applied_features = {
-        row["feature_id"]
-        for row in summary["effect_applications"]
-        if row["state_fields_changed"]
+        row["feature_id"] for row in summary["effect_applications"] if row["state_fields_changed"]
     }
     summary["all_17_triggers_proven"] = summary["all_17_producers_proven"]
     summary["all_17_payloads_concrete"] = summary["all_payloads_semantically_grounded"]
@@ -380,9 +380,7 @@ def census() -> dict:
         for row in summary["receipts"]
         if row["feature_id"] == "caller_contract"
     )
-    claims_by_id = {
-        row["claim_id"]: row for row in summary["semantic_decisions"]["claims"]
-    }
+    claims_by_id = {row["claim_id"]: row for row in summary["semantic_decisions"]["claims"]}
     summary["no_duplicate_frame_evidence"] = all(
         len(frame["claim_ids"]) == len(set(frame["claim_ids"]))
         and len([claims_by_id[item]["fact"] for item in frame["claim_ids"]])
@@ -394,6 +392,44 @@ def census() -> dict:
         summary["repository_substrate"].get("status") == "available"
         and int(summary["repository_substrate"].get("definition_count") or 0) >= 2
         and int(summary["repository_substrate"].get("call_count") or 0) >= 1
+    )
+    frontier = compile_incremental_frontier(
+        {
+            "status": "source_backed",
+            "available": True,
+            "index_current": True,
+            "intelligence_valid": True,
+            "source_revision": "r0",
+            "graph_revision": "graph-r0",
+            "anchors": (
+                {
+                    "path": "bottle.py",
+                    "line": 10,
+                    "symbol": "Bottle",
+                    "confidence": 1.0,
+                },
+            ),
+            "definitions": (
+                {
+                    "path": "bottle.py",
+                    "line": 10,
+                    "symbol": "Bottle",
+                    "signature": "class Bottle:",
+                    "semantic_certainty": 1.0,
+                },
+            ),
+            "references": (),
+            "callers": (),
+        },
+        [{"role": "user", "content": "Implement Bottle."}],
+        source_revision="r0",
+    )
+    summary["context_frontier"] = frontier.as_dict()
+    summary["context_frontier_proven"] = (
+        frontier.disposition is FrontierDisposition.SELECTED_FRONTIER
+        and frontier.candidate_count == frontier.accounted_count == 1
+        and bool(frontier.rendered)
+        and "bottle.py:10" in frontier.rendered
     )
     summary["no_actions_blocked"] = (
         summary["action_metrics"]["submit_holds"] == 0
@@ -407,14 +443,10 @@ def main() -> int:
     result = census()
     print(json.dumps(result, indent=2, sort_keys=True))
     print(
-        "ALL_17_PRODUCERS_PROVEN"
-        if result["all_17_producers_proven"]
-        else "PRODUCERS_NOT_PROVEN"
+        "ALL_17_PRODUCERS_PROVEN" if result["all_17_producers_proven"] else "PRODUCERS_NOT_PROVEN"
     )
     print(
-        "ALL_17_CONSUMERS_PROVEN"
-        if result["all_17_consumers_proven"]
-        else "CONSUMERS_NOT_PROVEN"
+        "ALL_17_CONSUMERS_PROVEN" if result["all_17_consumers_proven"] else "CONSUMERS_NOT_PROVEN"
     )
     print(
         "ALL_EFFECTS_TIMING_VALID"
@@ -431,11 +463,7 @@ def main() -> int:
         if result["all_17_consumer_paths_proven"]
         else "CONSUMER_PATHS_NOT_PROVEN"
     )
-    print(
-        "ALL_17_TRIGGERS_PROVEN"
-        if result["all_17_triggers_proven"]
-        else "TRIGGERS_NOT_PROVEN"
-    )
+    print("ALL_17_TRIGGERS_PROVEN" if result["all_17_triggers_proven"] else "TRIGGERS_NOT_PROVEN")
     print(
         "ALL_17_PAYLOADS_CONCRETE"
         if result["all_17_payloads_concrete"]
@@ -467,21 +495,13 @@ def main() -> int:
         if result["no_eligible_trigger_misses"]
         else "ELIGIBLE_TRIGGER_MISSES"
     )
-    print(
-        "NO_FALSE_FEATURE_FIRES"
-        if result["no_false_feature_fires"]
-        else "FALSE_FEATURE_FIRES"
-    )
+    print("NO_FALSE_FEATURE_FIRES" if result["no_false_feature_fires"] else "FALSE_FEATURE_FIRES")
     print(
         "NO_EMPTY_LOCALIZATION_EFFECTS"
         if result["no_empty_localization_effects"]
         else "EMPTY_LOCALIZATION_EFFECTS"
     )
-    print(
-        "NO_UNVERIFIED_CALLERS"
-        if result["no_unverified_callers"]
-        else "UNVERIFIED_CALLERS"
-    )
+    print("NO_UNVERIFIED_CALLERS" if result["no_unverified_callers"] else "UNVERIFIED_CALLERS")
     print(
         "NO_DUPLICATE_FRAME_EVIDENCE"
         if result["no_duplicate_frame_evidence"]
@@ -492,18 +512,28 @@ def main() -> int:
         if result["repository_substrate_proven"]
         else "REPOSITORY_SUBSTRATE_FAILED"
     )
-    return 0 if all(
-        (
-            result["all_17_consumer_paths_proven"],
-            result["all_feature_opportunities_accounted"],
-            result["no_eligible_trigger_misses"],
-            result["no_false_feature_fires"],
-            result["no_empty_localization_effects"],
-            result["no_unverified_callers"],
-            result["no_duplicate_frame_evidence"],
-            result["repository_substrate_proven"],
+    print(
+        "CONTEXT_FRONTIER_PROVEN"
+        if result["context_frontier_proven"]
+        else "CONTEXT_FRONTIER_FAILED"
+    )
+    return (
+        0
+        if all(
+            (
+                result["all_17_consumer_paths_proven"],
+                result["all_feature_opportunities_accounted"],
+                result["no_eligible_trigger_misses"],
+                result["no_false_feature_fires"],
+                result["no_empty_localization_effects"],
+                result["no_unverified_callers"],
+                result["no_duplicate_frame_evidence"],
+                result["repository_substrate_proven"],
+                result["context_frontier_proven"],
+            )
         )
-    ) else 1
+        else 1
+    )
 
 
 if __name__ == "__main__":

@@ -19,10 +19,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-_SOURCE_EXTS = frozenset({
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".c",
-    ".cc", ".h", ".cpp", ".rb", ".php", ".swift", ".cs",
-})
+from gt_engine.language_registry import INDEXABLE_SOURCE_SUFFIXES
+
+_SOURCE_EXTS = INDEXABLE_SOURCE_SUFFIXES
 
 
 def _repo_relative(path: str, repo_root: str) -> str | None:

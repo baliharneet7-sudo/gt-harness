@@ -34,6 +34,14 @@ class SegmentRole(StrEnum):
     UNKNOWN = "unknown"
 
 
+class MutationCertainty(StrEnum):
+    """What shell parsing can prove about workspace mutation."""
+
+    PROVEN_READ_ONLY = "proven_read_only"
+    MAY_MUTATE = "may_mutate"
+    PROVEN_MUTATING = "proven_mutating"
+
+
 class ActionDisposition(StrEnum):
     PASS = "pass"
     AUGMENT = "augment"
@@ -143,6 +151,10 @@ class ProposedAction:
     batch_index: int
     batch_size: int
     parser_confidence: float
+    mutation_certainty: MutationCertainty = MutationCertainty.MAY_MUTATE
+    parse_coverage: float = 0.0
+    has_unknown_segments: bool = False
+    has_opaque_segments: bool = False
     requested_timeout_sec: float | None = None
     operations: tuple[ObservedOperation, ...] = ()
     target_must_be_absent: bool = False
@@ -157,6 +169,7 @@ class ProposedAction:
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
         row["operation"] = self.operation.value
+        row["mutation_certainty"] = self.mutation_certainty.value
         for operation in row["operations"]:
             operation["operation"] = str(operation["operation"])
         row["cycle_id"] = self.cycle_id
@@ -524,6 +537,9 @@ _SEARCH_EXECUTABLES = frozenset({"rg", "grep", "find", "ack", "ag"})
 _VALIDATE_EXECUTABLES = frozenset({"pytest", "ctest"})
 _NON_TARGET_TOKENS = frozenset({"/dev/null", "-", "."})
 _SED_RANGE = re.compile(r"^(\d+)(?:,(\d+))?p$")
+_SHELL_CONTROL_PREFIXES = frozenset({"if", "elif", "then", "else", "while", "until", "do"})
+_SHELL_CONTROL_ONLY = frozenset({"fi", "done", "esac", "{", "}"})
+_SHELL_COMPLEX_CONTROL = frozenset({"for", "select", "case", "function"})
 
 
 def _resolve_segment_path(value: str, cwd: str) -> str:
@@ -682,10 +698,42 @@ def _classify_operations(
         if not words:
             continue
         if segment_index and (
-            segment_index - 1 >= len(connectors)
-            or connectors[segment_index - 1] != "|"
+            segment_index - 1 >= len(connectors) or connectors[segment_index - 1] != "|"
         ):
             pending_pipeline_read_indices.clear()
+        original_head = words[0].lower()
+        if original_head in _SHELL_CONTROL_ONLY or original_head in _SHELL_COMPLEX_CONTROL:
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    "",
+                    ActionOperation.OTHER,
+                    confidence=1.0,
+                    parser_evidence=(
+                        f"shell_control:{original_head}",
+                        f"segment:{segment_index}",
+                    ),
+                    segment_role=SegmentRole.SHELL_CONTEXT,
+                )
+            )
+            continue
+        if original_head in _SHELL_CONTROL_PREFIXES:
+            words = words[1:]
+            if not words:
+                operations.append(
+                    ObservedOperation(
+                        segment_index,
+                        "",
+                        ActionOperation.OTHER,
+                        confidence=1.0,
+                        parser_evidence=(
+                            f"shell_control:{original_head}",
+                            f"segment:{segment_index}",
+                        ),
+                        segment_role=SegmentRole.SHELL_CONTEXT,
+                    )
+                )
+                continue
         invocation = normalize_executable_invocation(words)
         semantic_words = invocation.words
         head = (invocation.executable or "").lower()
@@ -718,7 +766,15 @@ def _classify_operations(
         operands = _segment_operand_paths(semantic_words, current_cwd)
         redirections = _redirection_targets(semantic_words, current_cwd)
         base_targets = tuple(ActionTarget(path) for path in operands)
-        evidence = (f"head:{head or 'unknown'}", f"segment:{segment_index}")
+        evidence = (
+            f"head:{head or 'unknown'}",
+            f"segment:{segment_index}",
+            *(
+                (f"shell_control:{original_head}",)
+                if original_head in _SHELL_CONTROL_PREFIXES
+                else ()
+            ),
+        )
 
         if redirections:
             source_operands = tuple(path for path in operands if path not in redirections)
@@ -760,9 +816,7 @@ def _classify_operations(
         elif head in _SEARCH_EXECUTABLES:
             operation, confidence = ActionOperation.SEARCH, 0.95
         elif head in _VALIDATE_EXECUTABLES or (
-            head in {"go", "cargo"}
-            and len(semantic_words) > 1
-            and semantic_words[1] == "test"
+            head in {"go", "cargo"} and len(semantic_words) > 1 and semantic_words[1] == "test"
         ):
             operation, confidence = ActionOperation.VALIDATE, 0.95
         elif _segment_is_validation(semantic_words, validation):
@@ -842,8 +896,7 @@ def _classify_operations(
                         previous.operation,
                         previous.targets,
                         tuple(
-                            ReadSpan(span.path, start, end, False)
-                            for span in previous.read_spans
+                            ReadSpan(span.path, start, end, False) for span in previous.read_spans
                         ),
                         previous.mutates_workspace,
                         previous.confidence,
@@ -906,7 +959,33 @@ def adapt_proposed_action(
         default=None,
     )
     operation = primary.operation if primary is not None else ActionOperation.OTHER
-    confidence = primary.confidence if primary is not None else (0.2 if stripped else 0.0)
+    action_operations = tuple(
+        item
+        for item in operations
+        if item.segment_role not in {SegmentRole.SHELL_CONTEXT, SegmentRole.OUTPUT_ONLY}
+    )
+    known_operations = tuple(
+        item for item in action_operations if item.operation is not ActionOperation.OTHER
+    )
+    heredoc_interpreter = bool(
+        re.search(r"<<-?\s*['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?", command)
+        and any(
+            item.executable in {"python", "python3", "py", "node", "ruby", "perl", "bash", "sh"}
+            for item in operations
+        )
+    )
+    has_opaque_segments = heredoc_interpreter or any(
+        item.segment_role is SegmentRole.OPAQUE_PROGRAM for item in action_operations
+    )
+    has_unknown_segments = any(
+        item.segment_role is SegmentRole.UNKNOWN for item in action_operations
+    )
+    parse_coverage = len(known_operations) / len(action_operations) if action_operations else 0.0
+    confidence = (
+        min(item.confidence for item in action_operations)
+        if action_operations
+        else (0.2 if stripped else 0.0)
+    )
     validation_kind: str | None = None
     if validation is not None and bool(getattr(validation, "is_validation", False)):
         validation_kind = str(getattr(validation, "command_class", "validation"))
@@ -920,6 +999,23 @@ def adapt_proposed_action(
         for target in observed.targets:
             if target not in parsed_targets:
                 parsed_targets.append(target)
+    proven_mutating = bool(mutation_signals) or any(item.mutates_workspace for item in operations)
+    proven_read_only = (
+        bool(action_operations)
+        and all(
+            item.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+            for item in action_operations
+        )
+        and not has_opaque_segments
+        and not has_unknown_segments
+    )
+    mutation_certainty = (
+        MutationCertainty.PROVEN_MUTATING
+        if proven_mutating
+        else MutationCertainty.PROVEN_READ_ONLY
+        if proven_read_only
+        else MutationCertainty.MAY_MUTATE
+    )
     return ProposedAction(
         action_id=action_id,
         raw_command=command,
@@ -942,6 +1038,10 @@ def adapt_proposed_action(
         batch_index=max(0, int(batch_index)),
         batch_size=max(1, int(batch_size)),
         parser_confidence=confidence,
+        mutation_certainty=mutation_certainty,
+        parse_coverage=round(parse_coverage, 6),
+        has_unknown_segments=has_unknown_segments,
+        has_opaque_segments=has_opaque_segments,
         requested_timeout_sec=next(
             (
                 item.requested_timeout_sec
@@ -963,6 +1063,8 @@ def adapt_proposed_action(
             f"head:{head or 'unknown'}",
             f"segments:{len(segments)}",
             f"operation:{operation.value}",
+            f"mutation_certainty:{mutation_certainty.value}",
+            f"parse_coverage:{parse_coverage:.6f}",
             *(f"mutation:{item}" for item in mutation_signals),
         ),
     )

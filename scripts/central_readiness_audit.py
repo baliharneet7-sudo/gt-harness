@@ -67,9 +67,10 @@ def audit() -> dict[str, bool]:
     workflows = tuple(path.read_text(encoding="utf-8") for path in workflow_paths)
     workflow = workflows[0]
     verification_workflow = workflows[1]
-    provider_free_workflow = (
-        ROOT / ".github/workflows/central_provider_free.yml"
-    ).read_text(encoding="utf-8")
+    provider_free_workflow = (ROOT / ".github/workflows/central_provider_free.yml").read_text(
+        encoding="utf-8"
+    )
+    deep_metrics_source = (ROOT / "gt_engine/deep_metrics.py").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
         model = agent._build_model()
@@ -95,8 +96,7 @@ def audit() -> dict[str, bool]:
         ),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
         "paid_preflight_is_shadow_only": all(
-            "--ak preflight_mode=shadow" in item
-            and "--ak enable_preflight=true" not in item
+            "--ak preflight_mode=shadow" in item and "--ak enable_preflight=true" not in item
             for item in workflows
         ),
         "paid_integration_mode_is_explicit_active": all(
@@ -114,12 +114,26 @@ def audit() -> dict[str, bool]:
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow
         ),
+        "provider_free_gate_covers_repository_intelligence": (
+            "tests/test_gt_intelligence_layer.py" in provider_free_workflow
+            and "tests/test_gt_repository_intelligence.py" in provider_free_workflow
+            and "gt_engine/context_frontier.py" in provider_free_workflow
+            and "gt_engine/language_registry.py" in provider_free_workflow
+        ),
+        "paid_context_frontier_is_explicit": all(
+            "--ak enable_context_frontier=true" in item for item in workflows
+        ),
+        "paid_graph_gate_is_explicit": all(
+            "--ak require_graph_ready=true" in item for item in workflows
+        )
+        and "graph_gate_failures" in run_source
+        and "RepositoryGraphGateFailed" in run_source,
         "paid_deterministic_compaction_enabled": all(
             "--ak enable_context_compaction=true" in item for item in workflows
-        ) and "tests/test_provider_view.py" in provider_free_workflow,
+        )
+        and "tests/test_provider_view.py" in provider_free_workflow,
         "paid_adaptive_validation_timeout_is_explicit": all(
-            "--ak enable_adaptive_validation_timeout=true" in item
-            for item in workflows
+            "--ak enable_adaptive_validation_timeout=true" in item for item in workflows
         ),
         "provider_free_gate_covers_execution_accounting": (
             "tests/test_gt_host_execution.py" in provider_free_workflow
@@ -135,6 +149,22 @@ def audit() -> dict[str, bool]:
             0
             <= run_source.find("_provider_request_receipt(model, query_messages)")
             < run_source.find("model.query, query_messages")
+        ),
+        "repository_frontier_precedes_model_query": (
+            0
+            <= run_source.find("compile_incremental_frontier(")
+            < run_source.find("model.query, query_messages")
+        ),
+        "repository_intelligence_failure_is_receipted": (
+            "zero_visible_incremental_frontier" in run_source
+            and "repository_intelligence_valid" in run_source
+            and "frontier_fact_accounting_incomplete" in run_source
+        ),
+        "repository_intelligence_failure_blocks_outcome_gate": (
+            "invalid_treatments" in deep_metrics_source
+            and "repository_intelligence_required" in deep_metrics_source
+            and "context_frontier_chars_added" in deep_metrics_source
+            and "INVALID GT TREATMENT" in workflow
         ),
         "validation_status_is_attributed_not_outer_rc_only": (
             "status_attributed=True" in validation_source
@@ -201,8 +231,10 @@ def audit() -> dict[str, bool]:
         "central_features_consumer_paths_proven": bool(
             feature_result["all_17_consumer_paths_proven"]
         ),
-        "all_effects_context_accounted": bool(
-            feature_result["all_effects_context_accounted"]
+        "all_effects_context_accounted": bool(feature_result["all_effects_context_accounted"]),
+        "repository_substrate_and_frontier_proven": bool(
+            feature_result["repository_substrate_proven"]
+            and feature_result["context_frontier_proven"]
         ),
     }
 

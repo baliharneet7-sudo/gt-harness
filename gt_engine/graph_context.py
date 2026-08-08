@@ -1,4 +1,5 @@
 """Read-only projection of graph.db surfaces into task and verification context."""
+
 from __future__ import annotations
 
 import hashlib
@@ -38,9 +39,7 @@ def graph_revision(graph_db: str) -> str:
         stat = os.stat(graph_db)
     except (OSError, TypeError, ValueError):
         return ""
-    material = (
-        f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
-    )
+    material = f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
@@ -55,6 +54,8 @@ class GraphSemanticFact:
     line: int = 0
     confidence: float = 0.0
     revision: str = ""
+    semantic_certainty: float = 0.0
+    retrieval_relevance: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -80,9 +81,7 @@ def _tables(con: sqlite3.Connection) -> set[str]:
     try:
         return {
             str(row[0])
-            for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
-            )
+            for row in con.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")
         }
     except sqlite3.Error:
         return set()
@@ -180,35 +179,43 @@ def build_graph_projection(
         if query and "nodes_fts" in tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name,"
+                    "SELECT n.id,n.file_path,n.name,COALESCE(n.start_line,0),"
+                    "COALESCE(n.signature,''),"
                     "snippet(nodes_fts,-1,'','',' ',12) FROM nodes_fts f "
                     "JOIN nodes n ON n.id=f.rowid WHERE nodes_fts MATCH ? "
                     "AND COALESCE(n.is_test,0)=0 ORDER BY bm25(nodes_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["nodes_fts"] += len(rows)
-                for rank, (
-                    node_id, file_path, name, excerpt
-                ) in enumerate(rows, 1):
+                for rank, (node_id, file_path, name, start_line, signature, excerpt) in enumerate(
+                    rows, 1
+                ):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(GraphSemanticFact(
-                        "nodes_fts",
-                        int(node_id),
-                        str(file_path).replace("\\", "/"),
-                        str(name),
-                        "ranked_symbol",
-                        str(excerpt or f"{file_path}:{name}")[:500],
-                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
-                        revision=revision,
-                    ))
+                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            surface="nodes_fts",
+                            node_id=int(node_id),
+                            file_path=str(file_path).replace("\\", "/"),
+                            symbol=str(name),
+                            kind="ranked_symbol",
+                            value=str(signature or excerpt or f"{file_path}:{name}")[:500],
+                            line=int(start_line or 0),
+                            confidence=relevance,
+                            revision=revision,
+                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
+                            retrieval_relevance=relevance,
+                        )
+                    )
             except sqlite3.Error:
                 pass
         if query and {"symbol_content_fts", "nodes"} <= tables:
             try:
                 rows = con.execute(
-                    "SELECT n.id,n.file_path,n.name,"
+                    "SELECT n.id,n.file_path,n.name,COALESCE(n.start_line,0),"
+                    "COALESCE(n.signature,''),"
                     "snippet(symbol_content_fts,0,'','',' ',12) "
                     "FROM symbol_content_fts f "
                     "JOIN nodes n ON n.id=f.rowid "
@@ -217,22 +224,28 @@ def build_graph_projection(
                     (query, limit),
                 ).fetchall()
                 hits["symbol_content_fts"] += len(rows)
-                for rank, (
-                    node_id, file_path, name, excerpt
-                ) in enumerate(rows, 1):
+                for rank, (node_id, file_path, name, start_line, signature, excerpt) in enumerate(
+                    rows, 1
+                ):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(GraphSemanticFact(
-                        "symbol_content_fts",
-                        int(node_id),
-                        str(file_path).replace("\\", "/"),
-                        str(name),
-                        "ranked_body",
-                        str(excerpt or f"{file_path}:{name}")[:500],
-                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
-                        revision=revision,
-                    ))
+                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            surface="symbol_content_fts",
+                            node_id=int(node_id),
+                            file_path=str(file_path).replace("\\", "/"),
+                            symbol=str(name),
+                            kind="ranked_body",
+                            value=str(signature or excerpt or f"{file_path}:{name}")[:500],
+                            line=int(start_line or 0),
+                            confidence=relevance,
+                            revision=revision,
+                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
+                            retrieval_relevance=relevance,
+                        )
+                    )
             except sqlite3.Error:
                 pass
         if query and {"content_passages_fts", "content_passages", "nodes"} <= tables:
@@ -248,23 +261,26 @@ def build_graph_projection(
                 ).fetchall()
                 hits["content_passages_fts"] += len(rows)
                 hits["content_passages"] += len(rows)
-                for rank, (
-                    node_id, file_path, name, excerpt, start_line
-                ) in enumerate(rows, 1):
+                for rank, (node_id, file_path, name, excerpt, start_line) in enumerate(rows, 1):
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    semantic_facts.append(GraphSemanticFact(
-                        "content_passages_fts",
-                        int(node_id),
-                        str(file_path).replace("\\", "/"),
-                        str(name),
-                        "ranked_passage",
-                        str(excerpt or f"{file_path}:{name}")[:500],
-                        int(start_line or 0),
-                        confidence=max(0.5, 1.0 - ((rank - 1) / max(1, limit))),
-                        revision=revision,
-                    ))
+                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            "content_passages_fts",
+                            int(node_id),
+                            str(file_path).replace("\\", "/"),
+                            str(name),
+                            "ranked_passage",
+                            str(excerpt or f"{file_path}:{name}")[:500],
+                            int(start_line or 0),
+                            confidence=relevance,
+                            revision=revision,
+                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
+                            retrieval_relevance=relevance,
+                        )
+                    )
             except sqlite3.Error:
                 pass
 
@@ -315,9 +331,7 @@ def build_graph_projection(
             try:
                 hits["properties"] = int(
                     con.execute(
-                        "SELECT COUNT(*) FROM properties WHERE node_id IN ("
-                        + placeholders
-                        + ")",
+                        "SELECT COUNT(*) FROM properties WHERE node_id IN (" + placeholders + ")",
                         seed_ids,
                     ).fetchone()[0]
                 )
@@ -341,8 +355,7 @@ def build_graph_projection(
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence
-                    in rows
+                    for node_id, path, symbol, kind, value, line, confidence in rows
                 )
             except sqlite3.Error:
                 pass
@@ -378,8 +391,7 @@ def build_graph_projection(
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence
-                    in rows
+                    for node_id, path, symbol, kind, value, line, confidence in rows
                 )
             except sqlite3.Error:
                 pass
@@ -408,8 +420,7 @@ def build_graph_projection(
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence
-                    in rows
+                    for node_id, path, symbol, kind, value, line, confidence in rows
                 )
             except sqlite3.Error:
                 pass
@@ -419,8 +430,7 @@ def build_graph_projection(
             try:
                 rows = con.execute(
                     "SELECT file_path,content_hash,COALESCE(language,''),"
-                    "indexed_at FROM file_hashes WHERE file_path IN ("
-                    + placeholders + ") LIMIT ?",
+                    "indexed_at FROM file_hashes WHERE file_path IN (" + placeholders + ") LIMIT ?",
                     (*base_files, limit),
                 ).fetchall()
                 hits["file_hashes"] += len(rows)
@@ -473,9 +483,7 @@ def build_graph_projection(
                 ).fetchall()
                 hits["cochanges"] += len(rows)
                 for left, right in rows:
-                    files.update(
-                        {str(left).replace("\\", "/"), str(right).replace("\\", "/")}
-                    )
+                    files.update({str(left).replace("\\", "/"), str(right).replace("\\", "/")})
             except sqlite3.Error:
                 pass
         if files and "cochange_sets" in tables:
@@ -501,12 +509,35 @@ def build_graph_projection(
                     files.update(str(row[0]).replace("\\", "/") for row in rows)
             except sqlite3.Error:
                 pass
+        retrieval_surfaces = {
+            "nodes_fts": 3,
+            "symbol_content_fts": 2,
+            "content_passages_fts": 1,
+        }
+        canonical_retrieval: dict[int, GraphSemanticFact] = {}
+        retained: list[GraphSemanticFact] = []
+        for fact in semantic_facts:
+            if fact.surface not in retrieval_surfaces or fact.node_id <= 0:
+                retained.append(fact)
+                continue
+            prior = canonical_retrieval.get(fact.node_id)
+            if prior is None or (
+                fact.semantic_certainty,
+                retrieval_surfaces[fact.surface],
+                fact.retrieval_relevance,
+            ) > (
+                prior.semantic_certainty,
+                retrieval_surfaces[prior.surface],
+                prior.retrieval_relevance,
+            ):
+                canonical_retrieval[fact.node_id] = fact
+        retained.extend(canonical_retrieval[node_id] for node_id in sorted(canonical_retrieval))
         return GraphProjection(
             files=frozenset(files),
             symbols=frozenset(symbols),
             node_ids=frozenset(node_ids),
             surface_hits=tuple(sorted((k, v) for k, v in hits.items() if v)),
-            semantic_facts=tuple(semantic_facts),
+            semantic_facts=tuple(retained),
             revision=revision,
         )
     finally:

@@ -172,3 +172,67 @@ therefore applies consistently to all three tools.
 | Conversation truncation (120k chars) | active | keeps long runs inside the window |
 | Verify pass (1 extra step) | active | buys correctness for ~1 iteration of cost |
 | Loop/thrash detection | **none** | haiku burned 30 iterations on 1-line fixes; nothing stops identical repeated calls |
+
+## GroundTruth repository-intelligence boundary
+
+The active Mini-SWE treatment adds a host-owned deterministic intelligence
+path around the stock model loop:
+
+```text
+task container --bounded mirror transfer--> RepositorySession
+  -> certified graph.db + manifest at source revision S
+  -> task-linked structural retrieval
+  -> ContextFrontierCompiler(history, S)
+  -> exact provider request N
+  -> typed ProposedAction
+  -> SHADOW preflight
+  -> original environment.exec
+  -> postflight diff/validation/features
+  -> incremental graph refresh at source revision S+1
+  -> next frontier/request
+```
+
+The graph is valid only when the shipped binary, schema, FTS tables, source
+coverage, node/edge counts, graph hash, and validation-relevant source revision
+are certified. Supported index suffixes come from the same language registry
+used by workspace capture and source revision. A language can be authored
+source without being structurally supported; that state is an explicit
+unsupported/incomplete-coverage failure, never a license to manufacture regex
+symbols.
+
+The repository frontier is selective retrieval, not a task-start dump. It
+compares certified graph facts with the exact provider view and emits the
+smallest new decision frame: no more than three facts, 1,200 characters per
+call, or 6,000 characters per task. Facts require a concrete path, positive
+line, symbol, current graph/source revisions, semantic certainty, and retrieval
+relevance. Definitions precede callers/references; already represented,
+duplicate, stale, low-precision, unhealthy, or over-budget facts receive an
+explicit non-delivery disposition. Complete facts are omitted rather than
+truncated.
+
+This architecture follows three established results: interface design changes
+software-agent behavior ([SWE-agent](https://arxiv.org/abs/2405.15793));
+localization/repair/validation decomposition can outperform gratuitous agent
+complexity ([Agentless](https://arxiv.org/abs/2407.01489)); and iterative
+repository retrieval is stronger than indiscriminate repository context
+([RepoCoder](https://arxiv.org/abs/2303.12570)). The strict context budget also
+reflects evidence that relevant information can become harder to use inside
+long prompts ([Lost in the Middle](https://arxiv.org/abs/2307.03172)). These
+papers motivate the interface; they do not prove this implementation improves
+the current benchmark.
+
+Operational failure and experimental validity are deliberately separate. A
+graph failure does not block the model from executing commands. It does mark
+the active treatment invalid. Likewise, a task with zero incremental visible
+repository facts is not counted as a healthy GT task, even if private feature
+receipts exist. The merged paid workflow reports this per task and fails the
+promotion gate while still uploading every trajectory and receipt.
+
+The paid workflow additionally enables a pre-provider graph gate. Before the
+first model call, `require_graph_ready=true` requires a current, schema-valid,
+non-empty graph with complete authored-source coverage and matching source and
+graph certification. Missing or invalid substrate exits with
+`RepositoryGraphGateFailed` and zero provider calls; the receipt retains the
+failure reasons. This is the early guard against accidentally measuring a
+graph-less sidecar. The later merge audit remains necessary for frontier
+visibility, payload correctness, timing, and outcome preservation.

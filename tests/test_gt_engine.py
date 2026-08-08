@@ -642,6 +642,9 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
         connection = sqlite3.connect(output)
         try:
             connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
+            connection.execute(
+                "CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)"
+            )
             connection.commit()
         finally:
             connection.close()

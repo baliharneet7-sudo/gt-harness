@@ -404,3 +404,65 @@ compaction epochs because reconstructed raw final provider requests retain at
 least 211,100 tokens of headroom after a conservative advisory allowance. This
 is provider-free policy proof, not a live efficiency claim. See
 `details_done/GT_OUTCOME_PRESERVING_EFFICIENCY_IMPLEMENTATION_20260807.md`.
+
+## Repository-intelligence finalization (2026-08-07)
+
+Treat GT as Mini-SWE's deterministic repository-intelligence layer. Feature
+receipts alone do not satisfy that contract. In the active treatment, every
+coding task must have a certified current repository substrate and at least one
+new bounded repository fact visible in an exact provider request. Zero
+incremental visible GT context is an invalid experiment arm, not successful
+silence. Execution remains fail-open so GT cannot destroy the model's work;
+evaluation and promotion fail closed so a dead graph cannot hide behind model
+luck or favorable aggregate tokens.
+
+The single language registry drives source revision, workspace capture, syntax
+probes, indexing, and both Mini-SWE bridges. Structural support matches the
+vendored `gt-index` spec extensions. Unsupported authored languages are
+explicit substrate failures. Never fabricate regex definitions/callers to make
+coverage appear green.
+
+`graph.db` health requires a certified schema, FTS surface, current source
+revision, binary hash, graph hash, and recorded node/edge/source counts. The
+task mirror uses a full initial build, real per-file incremental refresh plus
+closure rebuild, atomic graph/manifest publication, and exact-revision cache
+hits. Missing captured content, unsafe paths, deletes requiring rebuild,
+sensor degradation, stale revision, incomplete language coverage, empty
+retrieval, or invalid schema must be visible in the receipt and invalidate the
+treatment.
+
+The context frontier runs before each model query and advances beyond provider
+history. It may select only concrete source-backed definitions, signatures,
+callers, references, or tests with path, positive line, symbol, graph revision,
+source revision, semantic certainty, and retrieval relevance. Limits are three
+facts/1,200 characters per call and 6,000 characters per task. Every candidate
+has one disposition; facts are never truncated, duplicated, predicted, or sent
+from stale evidence. The exact request hash and provider message index prove
+visibility; later action alignment remains only a behavioral proxy.
+
+Workspace scanning is skipped only for a parser-certified read-only proposal.
+Opaque interpreters, unsupported syntax, shell uncertainty, and partial parse
+coverage are `MAY_MUTATE` and retain the scan. GT never rewrites or suppresses
+the selected model command in the paid SHADOW configuration.
+
+Deep metrics and the paid merge must report graph schema/source/node/edge
+health, frontier accounting and characters, provider exposure, controller
+cost, model work, outcomes, and censoring per task. Frontier text is part of
+`total_gt_context_chars_added`; omitting it is an accounting bug. Any required
+task whose intelligence status is not `passed` fails the merged treatment gate
+while preserving artifacts for audit.
+
+The all-17 census, repository binary-to-SQLite fixture, context-frontier proof,
+readiness audit, and provider-free tests pass for this implementation. That is
+implementation proof only. No paid smoke has been run after this change, and
+the 89-task run remains blocked. Do not fund a matched smoke containing
+authored COBOL/Scheme-family source until those suffixes have certified
+structural parser coverage; the explicit unsupported-language failure is a
+guardrail, not a completed treatment for that task.
+
+The paid workflow now passes `require_graph_ready=true`. Before any provider
+call, the active treatment fails closed with `RepositoryGraphGateFailed` when
+the graph is missing, stale, empty, schema-invalid, or has incomplete authored
+source coverage. The receipt records the reasons and provider calls remain
+zero. This prevents a graph-less task from being counted as a GT treatment;
+the provider-free pre-smoke gate and strict agent test cover it.

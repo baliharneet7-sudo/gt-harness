@@ -9,15 +9,38 @@ location when the graph cannot prove one.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
 from gt_engine.graph_context import build_graph_projection
 from gt_engine.graph_evidence import build_evidence_need, rank_graph_evidence
-from gt_engine.indexer import IndexBuildReceipt, ensure_index_with_receipt
+from gt_engine.indexer import (
+    IndexBuildReceipt,
+    IndexBuildStatus,
+    ensure_index_with_receipt,
+    refresh_index_files,
+)
+from gt_engine.language_registry import is_indexable_source
 from gt_engine.task_contract import Obligation, TaskContract, extract_task_contract
+
+
+class RepositoryIntelligenceStatus(StrEnum):
+    HEALTHY_CURRENT = "source_backed"
+    NOT_INDEXED = "not_indexed"
+    ENVIRONMENT_TRANSFER_UNAVAILABLE = "environment_transfer_unavailable"
+    NO_SUPPORTED_SOURCE = "no_supported_source"
+    UNSUPPORTED_LANGUAGE = "unsupported_language"
+    INCOMPLETE_COVERAGE = "incomplete_source_coverage"
+    INDEX_UNAVAILABLE = "index_unavailable"
+    SCHEMA_INVALID = "schema_invalid"
+    STALE = "stale_source_revision"
+    EMPTY_RETRIEVAL = "no_task_linked_evidence"
+    LOW_PRECISION = "low_precision"
+    MIRROR_INCOMPLETE = "mirror_incomplete"
+    SENSOR_DEGRADED = "sensor_degraded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,9 +54,49 @@ class RepositoryEvidence:
     project_checks: tuple[str, ...] = ()
     status: str = "unavailable"
     index: IndexBuildReceipt | None = None
+    source_revision: str = ""
+    index_current: bool = False
+    intelligence_valid: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def graph_gate_failures(evidence: RepositoryEvidence) -> tuple[str, ...]:
+    """Return fail-closed reasons for an active task graph gate.
+
+    This is intentionally a substrate gate, not a retrieval-quality oracle.
+    A task may still have no task-linked frontier fact, but GT must never enter
+    a paid active loop when the graph itself is absent, stale, incomplete, or
+    structurally uncertified.
+    """
+
+    failures: list[str] = []
+    index = evidence.index
+    if not evidence.available:
+        failures.append(evidence.status or "repository_unavailable")
+    if index is None or not index.graph_db:
+        failures.append("graph_missing")
+    else:
+        if not index.schema_valid:
+            failures.append("graph_schema_invalid")
+        if index.node_count <= 0:
+            failures.append("graph_empty")
+        if not index.coverage_complete:
+            failures.append("graph_source_coverage_incomplete")
+        if not index.graph_revision:
+            failures.append("graph_revision_missing")
+        if not index.source_revision:
+            failures.append("graph_source_revision_missing")
+        elif evidence.source_revision and index.source_revision != evidence.source_revision:
+            failures.append("graph_source_revision_mismatch")
+    if not evidence.source_revision:
+        failures.append("source_revision_missing")
+    if not evidence.index_current:
+        failures.append("graph_not_current")
+    if not evidence.intelligence_valid:
+        failures.append("repository_intelligence_invalid")
+    return tuple(dict.fromkeys(failures))
 
 
 class RepositorySession:
@@ -56,9 +119,12 @@ class RepositorySession:
         self.state_dir = Path(state_dir).resolve()
         self.instruction = instruction
         self.source_revision = ""
+        self.indexed_source_revision = ""
         self.fresh = False
-        self.evidence = RepositoryEvidence(status="not_indexed")
+        self.evidence = RepositoryEvidence(status=RepositoryIntelligenceStatus.NOT_INDEXED.value)
         self.refresh_log: list[dict[str, Any]] = []
+        self._pending_index_paths: set[str] = set()
+        self._requires_full_rebuild = False
         self._owned_directories: tuple[TemporaryDirectory[str], ...] = ()
 
     @classmethod
@@ -119,6 +185,8 @@ class RepositorySession:
                 self.invalidate(source_revision=source_revision, status="unsafe_mirror_path")
                 return False
             if path in deleted:
+                if is_indexable_source(path):
+                    self._requires_full_rebuild = True
                 if target.is_file() or target.is_symlink():
                     target.unlink()
                 continue
@@ -128,26 +196,81 @@ class RepositorySession:
                 return False
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            if is_indexable_source(path):
+                self._pending_index_paths.add(str(path).replace("\\", "/"))
         self.source_revision = source_revision
-        self.fresh = True
+        self.fresh = False
         return True
 
     def refresh(self, *, source_revision: str, limit: int = 8) -> RepositoryEvidence:
-        evidence = inspect_repository(
-            self.root,
-            self.instruction,
-            state_dir=self.state_dir,
-            limit=limit,
+        if source_revision == self.indexed_source_revision and self.evidence.intelligence_valid:
+            self.refresh_log.append(
+                {
+                    "source_revision": source_revision,
+                    "graph_revision": self.evidence.graph_revision,
+                    "available": self.evidence.available,
+                    "status": self.evidence.status,
+                    "mode": "revision_cache_hit",
+                    "elapsed_ms": 0.0,
+                }
+            )
+            return self.evidence
+        prior_index = self.evidence.index
+        mode = "full"
+        if prior_index is not None and prior_index.graph_db and not self._requires_full_rebuild:
+            if self._pending_index_paths:
+                mode = "incremental"
+                index_receipt = refresh_index_files(
+                    self.root,
+                    prior_index.graph_db,
+                    tuple(sorted(self._pending_index_paths)),
+                    source_revision=source_revision,
+                )
+                evidence = inspect_repository(
+                    self.root,
+                    self.instruction,
+                    state_dir=self.state_dir,
+                    limit=limit,
+                    index_receipt=index_receipt,
+                    source_revision=source_revision,
+                )
+            else:
+                mode = "source_revision_only"
+                evidence = self.evidence
+        else:
+            evidence = inspect_repository(
+                self.root,
+                self.instruction,
+                state_dir=self.state_dir,
+                limit=limit,
+                source_revision=source_revision,
+            )
+        evidence = replace(
+            evidence,
+            source_revision=source_revision,
+            index_current=bool(evidence.available and source_revision),
+            intelligence_valid=bool(
+                evidence.available
+                and evidence.status == RepositoryIntelligenceStatus.HEALTHY_CURRENT.value
+                and source_revision
+            ),
         )
         self.source_revision = source_revision
-        self.fresh = evidence.status not in {"mirror_incomplete", "sensor_degraded"}
+        self.indexed_source_revision = source_revision
+        self.fresh = evidence.intelligence_valid
         self.evidence = evidence
+        self._pending_index_paths.clear()
+        self._requires_full_rebuild = False
         self.refresh_log.append(
             {
                 "source_revision": source_revision,
                 "graph_revision": evidence.graph_revision,
                 "available": evidence.available,
                 "status": evidence.status,
+                "mode": mode,
+                "elapsed_ms": (
+                    float(evidence.index.elapsed_ms) if evidence.index is not None else 0.0
+                ),
             }
         )
         return evidence
@@ -155,6 +278,7 @@ class RepositorySession:
     def summary(self) -> dict[str, Any]:
         return {
             "source_revision": self.source_revision,
+            "indexed_source_revision": self.indexed_source_revision,
             "fresh": self.fresh,
             "evidence": self.evidence.as_dict(),
             "refresh_log": list(self.refresh_log),
@@ -182,10 +306,13 @@ def inspect_index(
     root: str | Path,
     *,
     state_dir: str | Path | None = None,
+    source_revision: str = "",
 ) -> IndexBuildReceipt:
     """Build the repository graph while retaining its exact availability status."""
 
-    return ensure_index_with_receipt(root, state_dir=state_dir)
+    return ensure_index_with_receipt(
+        root, state_dir=state_dir, source_revision=source_revision
+    )
 
 
 def _graph_structural_roles(
@@ -204,9 +331,7 @@ def _graph_structural_roles(
     references: list[dict[str, Any]] = []
     callers: list[dict[str, Any]] = []
     target_ids: list[int] = []
-    connection = sqlite3.connect(
-        f"file:{Path(graph_db).resolve().as_posix()}?mode=ro", uri=True
-    )
+    connection = sqlite3.connect(f"file:{Path(graph_db).resolve().as_posix()}?mode=ro", uri=True)
     try:
         for anchor in anchors:
             path = str(anchor.get("path") or "")
@@ -236,8 +361,7 @@ def _graph_structural_roles(
                 }
                 key = (definition["path"], definition["line"], definition["symbol"])
                 if not any(
-                    (item["path"], item["line"], item["symbol"]) == key
-                    for item in definitions
+                    (item["path"], item["line"], item["symbol"]) == key for item in definitions
                 ):
                     definitions.append(definition)
                     target_ids.append(node_id)
@@ -299,25 +423,55 @@ def inspect_repository(
     *,
     state_dir: str | Path | None = None,
     limit: int = 8,
+    index_receipt: IndexBuildReceipt | None = None,
+    source_revision: str = "",
 ) -> RepositoryEvidence:
     """Index and rank task-specific source anchors without raising.
 
-    An empty result is deliberate abstention.  Ranked lexical/body facts are
-    valid locations.  Callers require an explicit relation surface and caller
-    direction; the current graph projection does not expose that direction,
-    so this adapter correctly leaves ``callers`` empty for now.
+    An empty result is deliberate abstention. Ranked lexical/body facts become
+    anchors only with a concrete symbol, positive line, and high retrieval
+    confidence. Callers require a certified directed CALLS edge; ambiguous or
+    heuristic relations remain absent.
     """
     base = Path(root)
     checks = discover_project_checks(base)
     try:
-        index_receipt = inspect_index(
-            base, state_dir=state_dir
+        index_receipt = index_receipt or inspect_index(
+            base, state_dir=state_dir, source_revision=source_revision
         )
         graph_db = index_receipt.graph_db
         if not graph_db:
+            status = {
+                IndexBuildStatus.NO_SUPPORTED_SOURCE: (
+                    RepositoryIntelligenceStatus.NO_SUPPORTED_SOURCE.value
+                ),
+                IndexBuildStatus.UNSUPPORTED_LANGUAGE: (
+                    RepositoryIntelligenceStatus.UNSUPPORTED_LANGUAGE.value
+                ),
+                IndexBuildStatus.INCOMPLETE_COVERAGE: (
+                    RepositoryIntelligenceStatus.INCOMPLETE_COVERAGE.value
+                ),
+                IndexBuildStatus.INVALID_DATABASE: (
+                    RepositoryIntelligenceStatus.SCHEMA_INVALID.value
+                ),
+            }.get(index_receipt.status, RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value)
             return RepositoryEvidence(
                 project_checks=checks,
-                status=index_receipt.status.value,
+                status=status,
+                index=index_receipt,
+            )
+        if not index_receipt.schema_valid:
+            return RepositoryEvidence(
+                graph_revision=index_receipt.graph_revision,
+                project_checks=checks,
+                status=RepositoryIntelligenceStatus.SCHEMA_INVALID.value,
+                index=index_receipt,
+            )
+        if index_receipt.status is IndexBuildStatus.INCOMPLETE_COVERAGE:
+            return RepositoryEvidence(
+                graph_revision=index_receipt.graph_revision,
+                project_checks=checks,
+                status=RepositoryIntelligenceStatus.INCOMPLETE_COVERAGE.value,
                 index=index_receipt,
             )
         contract = extract_task_contract(instruction)
@@ -343,14 +497,21 @@ def inspect_repository(
         ranked = rank_graph_evidence(contract, projection, need, limit=limit)
         anchors: list[dict[str, Any]] = []
         for item in ranked:
-            if not item.file_path:
+            if (
+                not item.file_path
+                or not item.symbol
+                or int(item.line) <= 0
+                or float(item.confidence) < 0.95
+            ):
                 continue
             anchor = {
                 "path": item.file_path,
-                "line": max(0, int(item.line)),
+                "line": int(item.line),
                 "symbol": item.symbol,
                 "surface": item.surface,
                 "confidence": float(item.confidence),
+                "retrieval_relevance": float(item.confidence),
+                "semantic_certainty": 1.0,
             }
             key = (anchor["path"], anchor["line"], anchor["symbol"])
             if any((row["path"], row["line"], row["symbol"]) == key for row in anchors):
@@ -362,7 +523,7 @@ def inspect_repository(
             return RepositoryEvidence(
                 graph_revision=projection.revision,
                 project_checks=checks,
-                status="no_task_linked_evidence",
+                status=RepositoryIntelligenceStatus.EMPTY_RETRIEVAL.value,
                 index=index_receipt,
             )
         definitions, references, callers = _graph_structural_roles(
@@ -378,11 +539,16 @@ def inspect_repository(
             references=references,
             callers=callers,
             project_checks=checks,
-            status="source_backed",
+            status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
             index=index_receipt,
+            intelligence_valid=True,
         )
     except Exception as exc:
         return RepositoryEvidence(
             project_checks=checks,
-            status=f"error:{type(exc).__name__}",
+            status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+            index=IndexBuildReceipt(
+                IndexBuildStatus.BUILD_FAILED,
+                error_type=type(exc).__name__,
+            ),
         )

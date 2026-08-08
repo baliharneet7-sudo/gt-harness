@@ -91,6 +91,7 @@ jobs:
             tests/test_central_readiness.py \
             tests/test_gt_semantic_engine.py \
             tests/test_gt_repository_intelligence.py \
+            tests/test_gt_intelligence_layer.py \
             tests/test_gt_checkpoint_ledger.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_consumer_proof.py \
@@ -337,6 +338,8 @@ jobs:
                 --ak enable_progress_control=true
                 --ak execution_budget_sec="$EXECUTION_BUDGET"
                 --ak enable_task_start_advisory=false
+                --ak enable_context_frontier=true
+                --ak require_graph_ready=true
               )
               ;;
             *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
