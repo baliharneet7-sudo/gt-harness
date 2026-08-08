@@ -4,8 +4,9 @@ Date: 2026-08-08
 
 Branch: `inline-engine`
 
-Status: **IMPLEMENTED_UNVERIFIED** pending the checked-out Linux index-binary
-certification and a separately authorized matched paid smoke.
+Status: **PROVIDER_FREE_CERTIFIED / OUTCOME_UNVERIFIED**. The checked-out Linux
+index binary and deterministic integration passed on exact commit `e6ce41f`;
+promotion still requires a separately authorized matched paid smoke.
 
 ## Release decision
 
@@ -204,7 +205,7 @@ assistant content and reasoning are never removed.
 | metrics/replay | `gt_engine/deep_metrics.py`, `scripts/central_efficiency_replay.py` | fallback, mirror, claim, operation, bounding, compaction and replay metrics |
 | release gates | `scripts/central_pre_smoke_gate.py`, `scripts/central_readiness_audit.py`, `.github/workflows/central_provider_free.yml` | exact new tests and checked-out binary proof |
 
-## Provider-free evidence collected locally
+## Provider-free evidence
 
 ### Tests and static verification
 
@@ -217,9 +218,25 @@ assistant content and reasoning are never removed.
   COBOL and Scheme nodes;
 - `git diff --check`: PASS.
 
-The five blocked cases are not waived. The GitHub provider-free workflow builds the
-checked-out vendored Go source with the pinned grammars and must prove nonzero
-COBOL/Scheme nodes before readiness can become green.
+The five locally blocked cases were not waived. GitHub workflow `31244088870`
+built the checked-out vendored Go source with the pinned grammars on exact
+commit `e6ce41f1177084480a4fbc8ead3caa2da4662b18` and cleared that external
+substrate condition:
+
+- `REPOSITORY_SUBSTRATE_PROVEN`;
+- 3 source and 3 indexable files;
+- 6 graph nodes, 2 edges, 4 definitions, and 2 directed call edges;
+- nonzero COBOL, Python, and Scheme nodes;
+- all required FTS tables and schema checks;
+- 311/311 workflow-scope tests passed;
+- structural readiness printed `READY`;
+- exact changed-file Ruff scope printed `All checks passed!`.
+
+The preceding workflow `31243969685` is rejected as certification evidence. It
+correctly exposed one stale census fixture that omitted the new independent
+substrate/certainty/relevance fields. Commit `e6ce41f` repaired that proof
+fixture; the replacement workflow then passed every stage. Neither workflow
+called a paid model.
 
 ### Archived policy replay
 
@@ -283,12 +300,13 @@ fires and context regression.
 
 The implementation is not promoted until these gates pass in order:
 
-1. Commit and push the exact tracked patch without any local artifacts or
-   credentials.
-2. Run `central_provider_free.yml` on that exact commit. Require the real Linux
-   binary fixture, all-17 census, readiness audit, full workflow tests, and
-   Ruff to pass.
-3. Run `python scripts/central_pre_smoke_gate.py` on the exact pushed commit and
+1. **Passed:** commit and push the exact tracked patch without any local
+   artifacts or credentials.
+2. **Passed:** `central_provider_free.yml` on exact commit `e6ce41f`. The real
+   Linux binary fixture, all-17 census coverage, readiness audit, 311 tests,
+   and Ruff all passed in workflow `31244088870`.
+3. Run `python scripts/central_pre_smoke_gate.py` on the intended exact pushed
+   smoke commit and
    require `SMOKE_APPROVED`.
 4. With separate authorization, run one matched ten-task GT-on smoke against
    the existing frozen GT-off baseline. Do not rerun baseline.
@@ -312,7 +330,7 @@ implementation, but must not restore the pre-provider graph kill switch.
 
 ## What is and is not proved
 
-Proved locally:
+Proved provider-free on the exact pushed implementation:
 
 - the previous graph failure no longer blocks the provider loop;
 - graph health is independent from task retrieval;
@@ -322,11 +340,12 @@ Proved locally:
 - observation bounding and the soft compaction benefit gate preserve distinct
   assistant reasoning;
 - archived provider-view work decreases under the deterministic projection.
+- the checked-out Linux index binary passes schema, graph, COBOL, Python,
+  Scheme, definition, directed-call, and frontier fixture checks;
+- the full workflow-scope deterministic suite and structural readiness pass.
 
 Not yet proved:
 
-- the checked-out Linux index binary passes the full grammar fixture at this
-  exact patch;
 - a live GT-on smoke restores the frozen 9/10 outcome;
 - actual provider tokens, uncached input, cache behavior, calls, actions, and
   wall time improve;

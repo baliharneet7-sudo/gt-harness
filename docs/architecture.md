@@ -254,3 +254,10 @@ operationally fail open. The receipt contains substrate reasons, fallback state,
 retrieval disposition, provider exposure, and request hashes. The later merge
 audit remains authoritative for intelligence validity, payload correctness,
 timing, outcome preservation, and efficiency.
+
+The deterministic implementation boundary was certified on exact commit
+`e6ce41f` by provider-free workflow `31244088870`. Its checked-out Linux
+indexer produced certified COBOL, Python, and Scheme nodes and directed call
+edges; 311 workflow-scope tests, structural readiness, and static checks
+passed. This certification does not establish a live outcome or efficiency
+gain; those remain matched-smoke acceptance gates.

@@ -685,7 +685,10 @@ view. Otherwise it is explicitly deferred so a negligible reduction does not
 break the provider's stable cache prefix. Hard provider-budget headroom remains
 authoritative and fails before `model.query()` rather than sending overflow.
 
-The top-down repair is provider-free implementation evidence only. It requires
-the checked-out Linux `gt-index` build, all-17 census, readiness audit, archived
-replay, and then a separately authorized matched smoke before promotion. The
+The top-down repair is provider-free certified on exact implementation commit
+`e6ce41f` by workflow `31244088870`: the checked-out Linux `gt-index` build,
+COBOL/Python/Scheme repository fixture, 311 workflow-scope tests, all-17 census
+coverage, readiness audit, archived replay, and Ruff passed. This is
+deterministic integration evidence, not live solve-rate or token evidence. A
+separately authorized matched smoke is still required before promotion. The
 89-task run remains blocked.

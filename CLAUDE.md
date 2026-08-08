@@ -474,7 +474,10 @@ changes are receipted and deferred to preserve the stable cache prefix. No
 distinct assistant content or reasoning is removed. Hard provider-budget
 headroom remains fail-before-query.
 
-This repair is provider-free implementation evidence only. The checked-out
-Linux binary must still pass the repository fixture, all-17 census, readiness
-audit, and archived replay. No post-repair paid smoke has run; the 89-task run
-remains blocked pending a separately authorized matched smoke.
+This repair is provider-free certified on exact implementation commit
+`e6ce41f` by workflow `31244088870`. The checked-out Linux binary passed the
+COBOL/Python/Scheme repository fixture; 311 workflow-scope tests, all-17 census
+coverage, readiness, archived replay, and Ruff passed. This proves the
+deterministic integration, not live outcome or efficiency. No post-repair paid
+smoke has run; the 89-task run remains blocked pending a separately authorized
+matched smoke.
