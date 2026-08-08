@@ -238,6 +238,13 @@ substrate/certainty/relevance fields. Commit `e6ce41f` repaired that proof
 fixture; the replacement workflow then passed every stage. Neither workflow
 called a paid model.
 
+When the explicit exact pre-smoke gate was first added, workflow `31244388485`
+passed every behavioral check but correctly rejected the checkout as dirty: the
+install step had unnecessarily changed the executable bit on the tracked
+fallback binary. The workflow now executes only the certified binary built in
+`$RUNNER_TEMP` and does not mutate the tracked fallback before exact-commit
+approval.
+
 ### Archived policy replay
 
 The permanent replay policy passed all archived tasks in three runs:
