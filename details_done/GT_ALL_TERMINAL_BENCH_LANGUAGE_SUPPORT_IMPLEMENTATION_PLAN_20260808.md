@@ -30,10 +30,11 @@ The Terminal-Bench 2 repository visibly contains source-like files in:
 - structured/configuration formats such as Markdown, TOML, YAML, JSON, SQL,
   XML, HTML, protobuf, and data artifacts.
 
-The vendored `gt-index` now has 34 registered parser specs after the native R
-and Verilog bindings were staged, including certified COBOL and Scheme. The
-Python registry matches those parser suffixes. Redcode and POV-Ray remain
-validation-relevant but fail closed; they are no longer invisible.
+The vendored `gt-index` now has 36 registered specs: native Tree-sitter R and
+Verilog plus bounded structured adapters for Redcode and POV-Ray. The Python
+registry matches those parser suffixes. The Redcode/POV-Ray adapters emit only
+labels/control-flow, or macros/declarations/includes/local macro calls; they
+never claim general-purpose call graphs from scene or opcode text.
 
 The official Tree-sitter parser inventory lists a Verilog grammar, and the
 Posit/R community publishes a Tree-sitter R grammar. I found no comparable
@@ -128,10 +129,9 @@ coverage, SQLite integrity, and directed edge coverage. The full central test,
 readiness, static, census, and exact pre-smoke gates also passed.
 
 This certifies deterministic repository substrate support only. It does not
-claim solve-rate, token, timing, or efficiency improvement. Redcode/POV-Ray
-remain explicitly blocked pending a grammar/structured-text decision.
+claim solve-rate, token, timing, or efficiency improvement.
 
-## Phase 3 — Redcode and POV-Ray decision
+## Phase 3 — Redcode and POV-Ray structured adapters (provider-free certified)
 
 These are not ordinary general-purpose languages. First inspect the exact TB
 tasks and determine whether the model edits them or only reads them as input.
@@ -155,9 +155,14 @@ tasks and determine whether the model edits them or only reads them as input.
   includes, and object references only after fixtures demonstrate deterministic
   parsing. Rendering output is never source revision or graph evidence.
 
-If a correct grammar cannot be established, these languages remain explicit
-unsupported and the affected task is blocked from GT promotion. A regex-only
-fallback is prohibited.
+No maintained Tree-sitter grammar was found in the official parser inventory.
+The implementation therefore uses bounded statement/token adapters rather
+than regex-only inference. Redcode records labels and only label-targeting
+control-flow edges (`JMP`, `JMZ`, `JMN`, `DJN`, `SPL`). POV-Ray records
+`#macro`, `#declare`, `#include`, and invocations of locally declared macros.
+Unknown syntax remains source but emits no graph fact. Provider-free fixtures
+prove each adapter; any future semantic expansion requires a new fixture
+oracle.
 
 ## Phase 4 — Cross-surface integration
 

@@ -95,8 +95,8 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
     ),
     # Terminal-Bench contains code-like inputs in these languages.  R and
     # Verilog use the pinned upstream Tree-sitter grammars shipped through the
-    # gt-index Go module; Redcode/POV-Ray remain explicit fail-closed rows
-    # until a grammar-backed structural adapter is certified.
+    # gt-index Go module; Redcode/POV-Ray use bounded, grammar-scoped
+    # structured adapters because no maintained Tree-sitter grammar exists.
     LanguageCapability(
         "r",
         (".r",),
@@ -110,16 +110,14 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
     LanguageCapability(
         "red",
         (".red",),
-        structural_index=False,
-        symbol_support=False,
-        caller_support=False,
+        symbol_support=True,
+        caller_support=True,
     ),
     LanguageCapability(
         "povray",
         (".pov",),
-        structural_index=False,
-        symbol_support=False,
-        caller_support=False,
+        symbol_support=True,
+        caller_support=True,
     ),
     LanguageCapability(
         "racket",

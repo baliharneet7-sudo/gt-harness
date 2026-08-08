@@ -533,13 +533,16 @@ The branch now includes parser-backed R (`.r`) and Verilog (`.v`) support throug
 pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0` and
 `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog name
 unwrapping, module-instantiation attribution, and provider-free fixtures are
-included. Redcode (`.red`) and POV-Ray (`.pov`) remain explicit fail-closed
-capabilities; regex parsing is prohibited.
+included. Redcode (`.red`) and POV-Ray (`.pov`) use bounded structured
+adapters: labels/control-flow for Redcode, and macros/declarations/includes/
+local macro calls for POV-Ray. Unknown syntax remains source-only; regex-only
+graph inference is prohibited.
 
 Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
 proved R/Verilog definitions, directed edges, SQLite integrity, and complete
 38/38 source/file-hash coverage; central census, readiness, static checks, and
-the exact pre-smoke gate passed. This is substrate evidence only, not an
-efficiency or solve-rate claim. Retain the archived replay and matched-smoke
-regression gates; Redcode/POV-Ray remain fail-closed and the 89-task run stays
+the exact pre-smoke gate passed before the adapter stage. The adapter stage
+must pass the same Linux build and fixture gate before promotion. This is
+substrate evidence only, not an efficiency or solve-rate claim. Retain the
+archived replay and matched-smoke regression gates; the 89-task run stays
 blocked.

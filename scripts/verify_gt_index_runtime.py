@@ -63,6 +63,20 @@ def verify() -> dict[str, object]:
             "endmodule\n",
             encoding="utf-8",
         )
+        (root / "fixture.red").write_text(
+            ";redcode-94\n"
+            "start mov 0, 1\n"
+            "      jmp start\n"
+            "      end start\n",
+            encoding="utf-8",
+        )
+        (root / "fixture.pov").write_text(
+            "#macro Thing()\n"
+            "sphere { <0,0,0>, 1 }\n"
+            "#end\n"
+            "Thing()\n",
+            encoding="utf-8",
+        )
         # Exercise every parser that the host registry advertises.  These
         # files are deliberately separate from the semantic Python/COBOL/
         # Scheme fixtures above: file_hashes proves binary language dispatch,
@@ -124,6 +138,8 @@ def verify() -> dict[str, object]:
             scheme_count = int(language_counts.get("scheme", 0))
             r_count = int(language_counts.get("r", 0))
             verilog_count = int(language_counts.get("verilog", 0))
+            red_count = int(language_counts.get("red", 0))
+            povray_count = int(language_counts.get("povray", 0))
             call_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM edges e "
@@ -153,6 +169,11 @@ def verify() -> dict[str, object]:
             raise RuntimeError(
                 "native language parser coverage missing: "
                 f"r={r_count} verilog={verilog_count}"
+            )
+        if red_count < 1 or povray_count < 1:
+            raise RuntimeError(
+                "structured language parser coverage missing: "
+                f"red={red_count} povray={povray_count}"
             )
         expected_languages = {
             "bash" if capability.name == "shell" else capability.name

@@ -362,16 +362,19 @@ The current branch includes parser-backed R (`.r`) and Verilog (`.v`) support
 using pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0`
 and `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog
 name unwrapping, module-instantiation attribution, and provider-free fixtures
-are checked in. Redcode (`.red`) and POV-Ray (`.pov`) remain explicit
-fail-closed capabilities; no regex parser may claim graph support for them.
+are checked in. Redcode (`.red`) and POV-Ray (`.pov`) use bounded structured
+adapters: labels/control-flow for Redcode, and macros/declarations/includes/
+local macro calls for POV-Ray. Unknown syntax remains source-only; regex-only
+graph inference is prohibited.
 
 Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
 proved R/Verilog definitions, directed edges, SQLite integrity, and complete
 38/38 source/file-hash coverage; the central census, readiness, static checks,
-and exact pre-smoke gate passed. This is substrate evidence only, not a
-solve-rate or efficiency claim. Do not start a paid smoke without separate
-authorization; regression approval still requires the archived replay and
-matched outcome smoke. Redcode/POV-Ray remain fail-closed.
+and exact pre-smoke gate passed before the adapter stage. The adapter stage
+must pass the same Linux build and fixture gate before promotion. This is
+substrate evidence only, not a solve-rate or efficiency claim. Do not start a
+paid smoke without separate authorization; regression approval still requires
+the archived replay and matched outcome smoke.
 
 Never infer censoring only from `central_receipt.json`: Harbor can terminate the
 agent after the last receipt. Shared metrics must consume the adjacent trial
@@ -727,9 +730,11 @@ separately authorized.
 
 The staged language-completeness implementation is recorded in
 `details_done/GT_ALL_TERMINAL_BENCH_LANGUAGE_SUPPORT_IMPLEMENTATION_PLAN_20260808.md`.
-Phase 0 inventory/fail-closed accounting and all-registered-parser binary
-parity are implemented; R/Verilog native grammar work and Red/POV structural
-support remain required before claiming full Terminal-Bench language coverage.
+Phase 0 inventory/fail-closed accounting, R/Verilog native grammars, and
+bounded Red/POV structural adapters are implemented. The adapters emit only
+proven labels/control-flow or macro/include facts; unknown syntax stays
+source-only. The adapter commit still requires its exact Linux build and
+fixture gate before promotion.
 
 Provider-view efficiency is governed at the observation boundary. Typed
 read/search/edit/validate operations receive deterministic per-observation

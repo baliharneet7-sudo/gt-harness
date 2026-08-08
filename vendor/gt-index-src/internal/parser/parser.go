@@ -148,6 +148,9 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sf.Language == "red" || sf.Language == "povray" {
+		return parseStructuredSource(sf, src, isTest)
+	}
 
 	warnIfZeroFieldGrammar(sf.Spec)
 

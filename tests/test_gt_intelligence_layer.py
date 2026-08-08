@@ -71,9 +71,11 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".proto",
             ".py",
             ".pyi",
+            ".pov",
             ".r",
             ".rake",
             ".rb",
+            ".red",
             ".rs",
             ".scm",
             ".sc",
@@ -132,7 +134,7 @@ def test_racket_remains_explicitly_unsupported(tmp_path: Path):
 
 
 def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Path):
-    """Certified R/Verilog index; Redcode/POV-Ray still fail closed."""
+    """All Terminal-Bench code-like suffixes are structurally accounted."""
     for suffix in (".r", ".v", ".red", ".pov"):
         path = tmp_path / f"fixture{suffix}"
         path.write_text("source fixture\n")
@@ -140,9 +142,9 @@ def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Pa
     coverage = inspect_source_coverage(tmp_path)
 
     assert coverage.source_files == 4
-    assert coverage.indexable_files == 2
-    assert coverage.unsupported_suffixes == (".pov", ".red")
-    assert coverage.status is IndexBuildStatus.INCOMPLETE_COVERAGE
+    assert coverage.indexable_files == 4
+    assert coverage.unsupported_suffixes == ()
+    assert coverage.status is IndexBuildStatus.AVAILABLE
 
 
 def _graph_with_duplicate_fts_surfaces(path: Path) -> None:
