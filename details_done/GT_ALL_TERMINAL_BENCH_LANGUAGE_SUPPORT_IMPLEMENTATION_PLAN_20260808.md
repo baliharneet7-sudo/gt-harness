@@ -2,7 +2,7 @@
 
 Date: 2026-08-08  
 Branch: `inline-engine`  
-Current head: `d2ae8d7`
+Current head: `89bd3e4`
 
 ## Objective
 
@@ -124,12 +124,15 @@ than relying on an accidental string mismatch.
 Implementation includes the bindings, grammar-scoped Verilog name unwrapping,
 module-instantiation attribution, and provider-free R/Verilog fixtures. The
 Linux provider-free workflow `31273427487` at `d2ae8d7` compiled both cgo
-bindings and passed the exit gate: `r=2`, `verilog=2`, 38/38 source/file-hash
-coverage, SQLite integrity, and directed edge coverage. The full central test,
-readiness, static, census, and exact pre-smoke gates also passed.
+bindings and passed the initial exit gate. The later adapter workflow
+`31273897329` at `89bd3e4` passed the expanded gate: `r=2`, `verilog=2`,
+`red=1`, `povray=1`, 42/42 source/file-hash coverage, SQLite integrity, six
+graph edges, all central tests, readiness, static, census, and exact
+pre-smoke gates.
 
 This certifies deterministic repository substrate support only. It does not
-claim solve-rate, token, timing, or efficiency improvement.
+claim solve-rate, token, timing, or efficiency improvement. The 89-task run
+remains blocked pending matched outcome-preservation evidence.
 
 ## Phase 3 — Redcode and POV-Ray structured adapters (provider-free certified)
 
