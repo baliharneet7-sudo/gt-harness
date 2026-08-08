@@ -44,6 +44,7 @@ class ContextFrontierFact:
     claim_id: str
     kind: ContextFrontierKind
     path: str
+    language: str = ""
     line: int = 0
     symbol: str = ""
     value: str = ""
@@ -105,10 +106,11 @@ def _claim_id(
     symbol: str,
     value: str,
     relation: str,
+    language: str,
 ) -> str:
     """Semantic identity independent of graph/source refresh versions."""
 
-    return _digest(kind.value, path, line, symbol, value, relation)
+    return _digest(kind.value, path, line, symbol, value, relation, language)
 
 
 def _frontier_fact(
@@ -119,17 +121,19 @@ def _frontier_fact(
     symbol: str,
     value: str,
     relation: str,
+    language: str,
     source_revision: str,
     graph_revision: str,
     semantic_certainty: float,
     retrieval_relevance: float,
 ) -> ContextFrontierFact:
-    claim_id = _claim_id(kind, path, line, symbol, value, relation)
+    claim_id = _claim_id(kind, path, line, symbol, value, relation, language)
     return ContextFrontierFact(
         fact_id=_digest(claim_id, source_revision, graph_revision),
         claim_id=claim_id,
         kind=kind,
         path=path,
+        language=language,
         line=line,
         symbol=symbol,
         value=value,
@@ -176,6 +180,7 @@ def _definition_candidates(
                 symbol=symbol,
                 value=signature,
                 relation="defines",
+                language=str(item.get("language") or ""),
                 source_revision=source_revision,
                 graph_revision=graph_revision,
                 semantic_certainty=certainty,
@@ -209,6 +214,7 @@ def _caller_candidates(
                 symbol=symbol,
                 value=target,
                 relation="calls",
+                language=str(item.get("language") or ""),
                 source_revision=source_revision,
                 graph_revision=graph_revision,
                 semantic_certainty=certainty,
@@ -243,6 +249,7 @@ def _reference_candidates(
                 symbol=symbol,
                 value=str(item.get("target") or ""),
                 relation="references",
+                language=str(item.get("language") or ""),
                 source_revision=source_revision,
                 graph_revision=graph_revision,
                 semantic_certainty=certainty,
@@ -285,6 +292,7 @@ def _anchor_candidates(
                 symbol=symbol,
                 value=symbol,
                 relation="task_anchor",
+                language=str(item.get("language") or ""),
                 source_revision=source_revision,
                 graph_revision=graph_revision,
                 semantic_certainty=certainty,
@@ -415,6 +423,7 @@ def compile_incremental_frontier(
                 "claim_id": fact.claim_id,
                 "kind": fact.kind.value,
                 "path": fact.path,
+                "language": fact.language,
                 "line": fact.line,
                 "symbol": fact.symbol,
                 "source_revision": fact.source_revision,

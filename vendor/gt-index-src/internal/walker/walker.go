@@ -3,6 +3,7 @@ package walker
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,10 +34,11 @@ var skipDirs = map[string]bool{
 
 // SourceFile represents a discovered source file.
 type SourceFile struct {
-	Path     string // relative path from root
-	AbsPath  string
-	Language string
-	Spec     *specs.Spec
+	Path             string // relative path from root
+	AbsPath          string
+	Language         string
+	Spec             *specs.Spec
+	ResolutionReason string
 }
 
 // WalkResult contains discovered files and metadata about the walk.
@@ -66,7 +68,7 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 			return nil // skip errors
 		}
 		if len(files) >= maxFiles {
-			if !info.IsDir() && specs.ForExtension(filepath.Ext(path)) != nil {
+			if !info.IsDir() && specs.HasCandidatePath(path) {
 				skipped++
 			}
 			if skipped > 1000 {
@@ -94,17 +96,27 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 		// contract for repositories containing conventional upper-case COBOL
 		// extensions (for example .CBL) instead of silently omitting them from
 		// the structural graph.
-		ext := strings.ToLower(filepath.Ext(path))
-		spec := specs.ForExtension(ext)
-		if spec == nil {
-			return nil
-		}
-
 		relPath, _ := filepath.Rel(root, path)
 		relPath = filepath.ToSlash(relPath)
 
 		// Check gitignore
 		if isIgnored(relPath, ignorePatterns) {
+			return nil
+		}
+
+		if !specs.HasCandidatePath(path) {
+			return nil
+		}
+		var prefix []byte
+		if specs.ResolutionNeedsContent(path) {
+			var readErr error
+			prefix, readErr = readPrefix(path, 65536)
+			if readErr != nil {
+				return nil
+			}
+		}
+		spec, resolutionReason := specs.ResolveSource(path, prefix)
+		if spec == nil {
 			return nil
 		}
 
@@ -114,15 +126,25 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 		}
 
 		files = append(files, SourceFile{
-			Path:     relPath,
-			AbsPath:  path,
-			Language: spec.Name,
-			Spec:     spec,
+			Path:             relPath,
+			AbsPath:          path,
+			Language:         spec.Name,
+			Spec:             spec,
+			ResolutionReason: resolutionReason,
 		})
 		return nil
 	})
 
 	return WalkResult{Files: files, FilesSkipped: skipped}, err
+}
+
+func readPrefix(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(io.LimitReader(file, limit))
 }
 
 // isGeneratedFile checks the first line of a file for common codegen markers.
@@ -391,4 +413,3 @@ func IsNonSourceFile(relPath string) bool {
 	}
 	return false
 }
-

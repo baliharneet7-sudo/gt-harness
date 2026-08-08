@@ -415,7 +415,8 @@ def _graph_structural_roles(
                 "SELECT src.name,src.file_path,COALESCE(e.source_line,src.start_line,0),"
                 "tgt.name,tgt.file_path,COALESCE(e.resolution_method,''),"
                 "COALESCE(e.confidence,0),COALESCE(e.trust_tier,''),"
-                "COALESCE(e.candidate_count,0),COALESCE(e.evidence_type,'') "
+                "COALESCE(e.candidate_count,0),COALESCE(e.evidence_type,''),"
+                "COALESCE(src.language,''),COALESCE(tgt.language,'') "
                 "FROM edges e JOIN nodes src ON src.id=e.source_id "
                 "JOIN nodes tgt ON tgt.id=e.target_id "
                 "WHERE e.type='CALLS' AND e.target_id=? "
@@ -433,6 +434,7 @@ def _graph_structural_roles(
                     "semantics": "graph_call_reference",
                     "semantic_certainty": min(target_certainty, float(row[6])),
                     "retrieval_relevance": target_relevance,
+                    "language": str(row[10]),
                 }
                 caller = {
                     "caller": str(row[0]),
@@ -448,6 +450,8 @@ def _graph_structural_roles(
                     "semantics": "graph_recorded",
                     "semantic_certainty": min(target_certainty, float(row[6])),
                     "retrieval_relevance": target_relevance,
+                    "language": str(row[10]),
+                    "target_language": str(row[11]),
                 }
                 if reference not in references:
                     references.append(reference)

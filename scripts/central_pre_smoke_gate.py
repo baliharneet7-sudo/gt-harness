@@ -35,6 +35,8 @@ RELEASE_TESTS = (
     "tests/test_gt_repository_intelligence.py",
     "tests/test_gt_repository_mirror.py",
     "tests/test_gt_intelligence_layer.py",
+    "tests/test_gt_language_resolution.py",
+    "tests/test_gt_benchmark_language_contract.py",
     "tests/test_gt_central_agent.py::test_context_frontier_advances_repository_intelligence_without_feature_advisory",
     "tests/test_gt_central_agent.py::test_active_code_task_with_unavailable_graph_is_invalid_not_silently_idle",
     "tests/test_gt_central_agent.py::test_task_graph_failure_degrades_but_preserves_provider_loop",
@@ -156,6 +158,11 @@ def main() -> int:
             "repository intelligence substrate",
             sys.executable,
             "scripts/verify_gt_index_runtime.py",
+        ),
+        run(
+            "pinned benchmark language contract",
+            sys.executable,
+            "scripts/verify_tb2_language_contract.py",
         ),
         run("workflow/readiness audit", sys.executable, "scripts/central_readiness_audit.py"),
     )

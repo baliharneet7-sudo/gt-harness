@@ -841,6 +841,7 @@ func main() {
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
 	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
+	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
@@ -990,14 +991,8 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	defer db.Close()
 
-	// Resolve language spec from extension. If unsupported, surface an error
-	// rather than silently no-op (caller intent was clearly to reindex this file).
-	ext := filepath.Ext(relpath)
-	spec := specs.ForExtension(ext)
-	if spec == nil {
-		return fmt.Errorf("no language spec registered for extension %q (file=%s)", ext, relpath)
-	}
-
+	// Resolve language from path plus content. Shared suffixes must not be
+	// guessed during incremental reindexing.
 	absPath := filepath.Join(root, relpath)
 	relSlash := filepath.ToSlash(relpath)
 
@@ -1005,6 +1000,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	contents, err := os.ReadFile(absPath)
 	if err != nil {
 		return fmt.Errorf("read file %s: %w", absPath, err)
+	}
+	spec, resolutionReason := specs.ResolveSource(relpath, contents)
+	if spec == nil {
+		return fmt.Errorf("language unresolved for file=%s reason=%s", relpath, resolutionReason)
 	}
 	sum := sha256.Sum256(contents)
 	newHash := hex.EncodeToString(sum[:])

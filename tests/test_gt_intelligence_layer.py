@@ -35,19 +35,26 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
     assert INDEXABLE_SOURCE_SUFFIXES == frozenset(
         {
             ".bash",
+            ".ac",
+            ".am",
             ".cbl",
             ".c",
             ".cc",
             ".cpp",
             ".cob",
             ".cs",
+            ".cls",
+            ".cmake",
+            ".conf",
             ".css",
             ".cue",
             ".cxx",
+            ".dockerfile",
             ".ex",
             ".exs",
             ".elm",
             ".go",
+            ".gcode",
             ".gradle",
             ".groovy",
             ".h",
@@ -65,6 +72,8 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".mjs",
             ".ml",
             ".mli",
+            ".mk",
+            ".nc",
             ".cjs",
             ".md",
             ".php",
@@ -76,19 +85,27 @@ def test_structural_registry_matches_the_shipped_gt_index_spec_extensions():
             ".rake",
             ".rb",
             ".red",
+            ".rq",
             ".rs",
             ".scm",
             ".sc",
             ".scala",
             ".sh",
+            ".sparql",
             ".sql",
+            ".stan",
+            ".sty",
             ".svelte",
             ".swift",
             ".tf",
             ".toml",
             ".ts",
             ".tsx",
+            ".tap",
+            ".tex",
+            ".ttl",
             ".v",
+            ".vim",
             ".yaml",
             ".yml",
             ".cpy",
@@ -135,9 +152,12 @@ def test_racket_remains_explicitly_unsupported(tmp_path: Path):
 
 def test_terminal_bench_code_like_suffixes_are_not_silently_ignored(tmp_path: Path):
     """All Terminal-Bench code-like suffixes are structurally accounted."""
-    for suffix in (".r", ".v", ".red", ".pov"):
+    for suffix in (".r", ".red", ".pov"):
         path = tmp_path / f"fixture{suffix}"
         path.write_text("source fixture\n")
+    (tmp_path / "fixture.v").write_text(
+        "module fixture(input a, output b); assign b = a; endmodule\n"
+    )
 
     coverage = inspect_source_coverage(tmp_path)
 
@@ -235,6 +255,7 @@ def test_frontier_advances_from_represented_file_to_definition():
                 "line": 7,
                 "symbol": "greet",
                 "signature": "def greet(name: str) -> str",
+                "language": "python",
                 "semantics": "graph_definition",
                 "semantic_certainty": 1.0,
             },
@@ -257,6 +278,8 @@ def test_frontier_advances_from_represented_file_to_definition():
 
     assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
     assert decision.facts[0].kind is ContextFrontierKind.DEFINITION
+    assert decision.facts[0].language == "python"
+    assert decision.accounting[0]["language"] == "python"
     assert "def greet(name: str) -> str" in decision.rendered
     assert "Repository intelligence" in decision.rendered
 

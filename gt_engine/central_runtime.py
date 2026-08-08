@@ -25,7 +25,7 @@ from gt_engine.central_controls import (
 )
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.language_registry import (
-    VALIDATION_SOURCE_SUFFIXES,
+    candidate_capabilities,
     is_validation_source,
     syntax_probe_command,
 )
@@ -139,7 +139,6 @@ _BACKGROUND_ARTIFACT_NAMES = frozenset(
     {"benchmark_out.txt", "callback-test.txt", "a.out", "data.comp"}
 )
 _DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
-_SOURCE_CAPTURE_SUFFIXES = VALIDATION_SOURCE_SUFFIXES
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
 
 
@@ -1187,7 +1186,7 @@ class WorkspaceSensor:
         capture_paths = [
             path
             for path in changed
-            if any(path.lower().endswith(suffix) for suffix in _SOURCE_CAPTURE_SUFFIXES)
+            if is_validation_source(path)
             and entries[path].size <= _MAX_SOURCE_CAPTURE_BYTES
         ][:8]
         if capture_paths:
@@ -3255,7 +3254,7 @@ class CentralFeatureRuntime:
                     ).origin
                     == ChangeOrigin.MODEL_AUTHORED
                     and candidate.validation_relevant
-                    and path.lower().endswith(tuple(_SOURCE_CAPTURE_SUFFIXES))
+                    and is_validation_source(path)
                 )
             }
             precedent_path = ""
@@ -3273,11 +3272,13 @@ class CentralFeatureRuntime:
                     or created_classification.origin != ChangeOrigin.MODEL_AUTHORED
                     or not created_classification.validation_relevant
                     or created_classification.kind != "f"
-                    or not created_path.lower().endswith(tuple(_SOURCE_CAPTURE_SUFFIXES))
+                    or not is_validation_source(created_path)
                 ):
                     continue
                 parent = created_path.rsplit("/", 1)[0] if "/" in created_path else ""
-                suffix = "." + created_path.rsplit(".", 1)[-1] if "." in created_path else ""
+                created_languages = {
+                    capability.name for capability in candidate_capabilities(created_path)
+                }
                 created_stem = created_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
                 created_tokens = set(re.findall(r"[a-z0-9]+", created_stem.lower()))
 
@@ -3308,7 +3309,13 @@ class CentralFeatureRuntime:
                         for path in source_precedent_paths
                         if path not in transition.created
                         and (path.rsplit("/", 1)[0] if "/" in path else "") == parent
-                        and (not suffix or path.lower().endswith(suffix.lower()))
+                        and bool(
+                            created_languages
+                            & {
+                                capability.name
+                                for capability in candidate_capabilities(path)
+                            }
+                        )
                         and concrete_precedent(path)
                     ),
                     key=precedent_rank,

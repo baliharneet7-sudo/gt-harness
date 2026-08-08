@@ -148,7 +148,8 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sf.Language == "red" || sf.Language == "povray" {
+	switch sf.Language {
+	case "red", "povray", "coq", "stan", "sparql", "turtle", "latex", "vim", "nginx", "gcode", "make", "dockerfile", "cmake", "meson", "autotools":
 		return parseStructuredSource(sf, src, isTest)
 	}
 
@@ -185,6 +186,9 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
+	if sf.Language == "cobol" {
+		extractCOBOLParagraphCalls(root, sf, src, result)
+	}
 
 	// Go: link receiver methods (func (r *T) M()) to their struct T. Go methods
 	// are not lexically nested in the type, so walkNode labels them "Function"
@@ -564,6 +568,15 @@ func linkRustImplMethods(result *ParseResult) {
 func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) string {
 	spec := sf.Spec
 	nodeType := node.Type()
+	if sf.Language == "r" && nodeType == "function_definition" {
+		parent := node.Parent()
+		if parent != nil && parent.Type() == "binary_operator" {
+			left := parent.ChildByFieldName("lhs")
+			if left != nil && left.Type() == "identifier" {
+				return left.Content(src)
+			}
+		}
+	}
 	name := extractFieldText(node, spec.NameField, src)
 	if name == "" {
 		name = extractFirstIdentifier(node, src)
@@ -1816,6 +1829,7 @@ func isLiteralReceiver(t string) bool {
 //     chain head (the call's function's receiver) to the ultimate base.
 //   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
 //     wrapping the literal; we unwrap it.
+//
 // When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
 // call (str/list/dict/…), never an internal call-graph edge. Conservative: any
 // unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops

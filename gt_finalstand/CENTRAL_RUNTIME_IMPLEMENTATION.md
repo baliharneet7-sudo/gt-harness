@@ -53,6 +53,44 @@ appear in a later call. The provider-free gate now rejects eligible trigger
 misses, false fires, empty localization, unverified callers, duplicate frame
 evidence, or an unavailable repository substrate.
 
+### Benchmark language resolution and graph completeness (2026-08-08)
+
+The repository substrate now resolves a source identity from path plus bounded
+content before parsing. This closes the critical `.v` collision: Coq and
+Verilog use the same suffix, so declaration signatures select the dialect and
+conflict or insufficient evidence abstains as `AMBIGUOUS`. The same resolver
+handles Nginx `.conf` files, exact build-file basenames, and extensionless
+shebangs. Python coverage and the native Go walker use matching rules.
+
+The native indexer adds conservative structural adapters for Coq, Stan,
+SPARQL, Turtle, LaTeX, Vim, Nginx, and G-code and for Make, Dockerfile, CMake,
+Meson, and Autotools control files. These parsers expose only fixture-proven
+declarations, imports, references, and calls. Unknown syntax produces no
+speculative relationship. Parser failures are persisted in graph metadata and
+make `coverage_complete` false.
+
+The parser-to-index boundary is now explicitly zero-based. A strengthened
+runtime fixture checks per-language directed `CALLS` edges, catching the prior
+structured-adapter off-by-one that produced in-memory calls but no certified
+graph edges. COBOL receives a grammar-backed paragraph/`PERFORM` ownership pass
+because those nodes are siblings rather than a conventional function body.
+
+Benchmark completeness is checked independently of registry parity. The
+checked-in Terminal-Bench 2 contract pins the official repository revision,
+requires exactly 89 tasks, proves named language witnesses and declared
+source-like suffix families, and rejects any registry-recognized structural
+suffix observed but unclassified. The provider-free
+runtime fixture must execute the FTS-enabled binary, validate SQLite, observe
+each structural language in `file_hashes`, produce concrete graph nodes, and
+report zero parser failures.
+
+This closes the in-workspace language-substrate gap only. It does not prove
+retrieval relevance, provider delivery, solve preservation, or efficiency.
+Files outside the task workspace, including task-owned configuration under
+`/etc`, are still outside the current mirror and need a separate safe,
+allowlisted resource-monitoring boundary before full-benchmark graph coverage
+can be claimed.
+
 ## Deterministic context-compiler repair (2026-08-05)
 
 The regression diagnosis found that the host was central in execution but not

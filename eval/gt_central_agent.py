@@ -2452,6 +2452,20 @@ class MiniSweCentralAgent(BaseAgent):
                 if row.get("kind") == "source_mirror_plan"
             ]
             mirror_plan = mirror_plan_rows[-1] if mirror_plan_rows else {}
+            frontier_candidate_language_counts: dict[str, int] = {}
+            for decision in frontier_decisions:
+                for fact in decision.get("accounting") or ():
+                    language = str(fact.get("language") or "unknown")
+                    frontier_candidate_language_counts[language] = (
+                        frontier_candidate_language_counts.get(language, 0) + 1
+                    )
+            frontier_delivered_language_counts: dict[str, int] = {}
+            for delivery in frontier_deliveries:
+                for fact in delivery.get("facts") or ():
+                    language = str(fact.get("language") or "unknown")
+                    frontier_delivered_language_counts[language] = (
+                        frontier_delivered_language_counts.get(language, 0) + 1
+                    )
             deep_metrics = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -2625,6 +2639,18 @@ class MiniSweCentralAgent(BaseAgent):
                     - len(delivered_frontier_claim_ids)
                 ),
                 "context_frontier_zero_tasks": int(frontier_required and not frontier_deliveries),
+                "context_frontier_candidate_languages": len(
+                    frontier_candidate_language_counts
+                ),
+                "context_frontier_delivered_languages": len(
+                    frontier_delivered_language_counts
+                ),
+                "context_frontier_candidate_language_counts": dict(
+                    sorted(frontier_candidate_language_counts.items())
+                ),
+                "context_frontier_delivered_language_counts": dict(
+                    sorted(frontier_delivered_language_counts.items())
+                ),
                 "context_frontier_coverage": frontier_coverage,
                 "repository_intelligence_status": intelligence_status,
                 "repository_intelligence_failures": list(intelligence_failures),
@@ -2662,6 +2688,41 @@ class MiniSweCentralAgent(BaseAgent):
                     repository_evidence.index.indexable_files
                     if repository_evidence.index is not None
                     else 0
+                ),
+                "repository_ambiguous_source_files": int(
+                    len(repository_evidence.index.ambiguous_paths)
+                    if repository_evidence.index is not None
+                    else 0
+                ),
+                "repository_unsupported_source_files": int(
+                    len(repository_evidence.index.unsupported_paths)
+                    if repository_evidence.index is not None
+                    else 0
+                ),
+                "repository_resolved_languages": int(
+                    len(repository_evidence.index.language_file_counts)
+                    if repository_evidence.index is not None
+                    else 0
+                ),
+                "repository_resolution_reason_kinds": int(
+                    len(repository_evidence.index.resolution_reason_counts)
+                    if repository_evidence.index is not None
+                    else 0
+                ),
+                "repository_parser_failures": int(
+                    repository_evidence.index.parser_failures
+                    if repository_evidence.index is not None
+                    else 0
+                ),
+                "repository_language_file_counts": dict(
+                    repository_evidence.index.language_file_counts
+                    if repository_evidence.index is not None
+                    else ()
+                ),
+                "repository_resolution_reason_counts": dict(
+                    repository_evidence.index.resolution_reason_counts
+                    if repository_evidence.index is not None
+                    else ()
                 ),
                 "repository_refreshes": (
                     len(repository_session.refresh_log) if repository_session is not None else 0

@@ -49,6 +49,16 @@ jobs:
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
 
+      - name: Prove pinned Terminal-Bench language coverage
+        run: |
+          set -euo pipefail
+          dataset="$RUNNER_TEMP/terminal-bench-2-language-contract"
+          git init "$dataset"
+          git -C "$dataset" remote add origin https://github.com/harbor-framework/terminal-bench-2.git
+          git -C "$dataset" fetch --depth=1 origin 2fd12b88aafdd04a52c298e3940bcb189f9766d6
+          git -C "$dataset" checkout --detach FETCH_HEAD
+          python scripts/verify_tb2_language_contract.py --dataset-root "$dataset"
+
       - name: Central runtime tests
         run: |
           python -m pytest tests/test_gt_central_runtime.py \
@@ -57,6 +67,8 @@ jobs:
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
             tests/test_gt_repository_mirror.py \
+            tests/test_gt_language_resolution.py \
+            tests/test_gt_benchmark_language_contract.py \
             tests/test_gt_task_contract.py \
             tests/test_central_readiness.py \
             tests/test_central_replay.py \
@@ -91,12 +103,15 @@ jobs:
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \
+            scripts/verify_tb2_language_contract.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
             tests/test_gt_repository_mirror.py \
+            tests/test_gt_language_resolution.py \
+            tests/test_gt_benchmark_language_contract.py \
             tests/test_gt_task_contract.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \

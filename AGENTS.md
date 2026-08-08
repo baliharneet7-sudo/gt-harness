@@ -356,20 +356,50 @@ The efficiency acceptance gate failed despite preserving verifier reward 9/10.
 strict per-task Pareto, and aggregate normalized token cost increased 13.33%.
 The 89-task run remains blocked.
 
-## Native R/Verilog language stage (2026-08-08)
+## Terminal-Bench language-resolution and graph stage (2026-08-08)
 
-The current branch includes parser-backed R (`.r`) and Verilog (`.v`) support
-using pinned upstream Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0`
-and `tree-sitter-verilog v1.0.3`). The gt-index specs, grammar-scoped Verilog
-name unwrapping, module-instantiation attribution, and provider-free fixtures
-are checked in. Redcode (`.red`) and POV-Ray (`.pov`) use bounded structured
-adapters: labels/control-flow for Redcode, and macros/declarations/includes/
-local macro calls for POV-Ray. Unknown syntax remains source-only; regex-only
-graph inference is prohibited.
+The current branch includes parser-backed R and Verilog using pinned upstream
+Tree-sitter Go bindings (`r-lib/tree-sitter-r v1.3.0` and
+`tree-sitter-verilog v1.0.3`). Redcode and POV-Ray use bounded structural
+adapters. Unknown syntax remains source-only; unbounded regex graph inference
+is prohibited.
+
+File suffix alone is not a language identity. `.v` is shared by Coq and
+Verilog, so both the host registry and native indexer resolve it from bounded
+source declarations after reading the file. A conflicting or unrecognized
+`.v` file is `AMBIGUOUS` and makes source coverage incomplete; it is never
+silently parsed as Verilog. `.conf` is Nginx only when bounded content contains
+a mechanically recognized Nginx directive; otherwise it remains generic
+configuration. Exact basenames (`Makefile`, `Dockerfile`/`Containerfile`,
+`CMakeLists.txt`, Meson, and Autotools files) and bounded extensionless
+shebangs are resolved by the same authority.
+
+The vendored indexer also ships conservative structural adapters for the
+Terminal-Bench witnesses Coq, Stan, SPARQL, Turtle, LaTeX, Vim, Nginx, and
+G-code, plus Make, Dockerfile, CMake, Meson, and Autotools control files. These
+adapters emit only syntax constructs covered by hand-checked fixtures. A
+non-empty structured source that contains no recognized declaration still
+receives a concrete file node, not a fabricated symbol or caller. Parser
+failures are stored in graph metadata and invalidate substrate readiness.
+All parser `CallRef.CallerNodeIdx` values are zero-based. The runtime fixture
+must prove directed SQLite `CALLS` edges per advertised caller-capable
+language; an in-memory call receipt or a nonzero node count is insufficient.
+This permanently covers the earlier structured-adapter off-by-one defect and
+the COBOL grammar's sibling paragraph/`PERFORM` ownership boundary. Native R
+functions take their name from the assignment's AST `lhs`; the anonymous
+`function` keyword is never indexed as the symbol. POV-Ray calls belong to the
+enclosing macro, never to the invoked callee or a file-level invocation.
+
+Registry closure is not benchmark closure. The checked-in language contract
+pins the official Terminal-Bench 2 repository commit, requires exactly 89 task
+directories, verifies every declared language witness and source-like suffix
+family, and independently rejects any registry-recognized structural suffix
+observed in instructions but left unclassified. Static and exact-tree forms are
+both required by the provider-free workflow.
 
 Provider-free workflow `31273427487` at `d2ae8d7` compiled the cgo bindings and
-proved R/Verilog definitions, directed edges, SQLite integrity, and complete
-The expanded provider-free workflow `31274090882` at `2cdc8f2` also passed the
+proved R/Verilog definitions, directed edges, and SQLite integrity. The
+expanded provider-free workflow `31274090882` at `2cdc8f2` also passed the
 adapter build and fixture gate: R=2, Verilog=2, Redcode=1, POV-Ray=1,
 42/42 source/file-hash coverage, SQLite integrity, six graph edges, central
 census, readiness, static checks, and exact pre-smoke. This is substrate
@@ -691,11 +721,14 @@ intelligence-health, timing, payload, and efficiency gates. A matched slice
 containing authored COBOL or Scheme source is now eligible for the parser gate:
 the pinned Tree-sitter grammars are compiled into the checked-out `gt-index`
 binary and the runtime fixture must observe nonzero COBOL and Scheme nodes.
-R, Verilog, Red, POV-Ray, Racket, and the other explicitly unsupported suffixes
-remain analytically fail-closed; an unsupported language is never silently
-dropped. These four Terminal-Bench code-like suffixes are now recognized as
-validation-relevant source, but they are not claimed as graph-supported until
-a certified parser is shipped.
+R, Verilog, Coq, Stan, SPARQL, Turtle, LaTeX, Vim, Nginx, G-code, Red, and
+POV-Ray now have provider-free graph fixtures. An unsupported or ambiguous
+language remains analytically fail-closed and is never silently dropped. This
+is source-substrate proof, not proof of provider usefulness, solves, or
+efficiency. Runtime paths outside the task workspace (for example task-owned
+configuration under `/etc`) are not captured merely because the language is
+supported; external-resource monitoring requires a separate safe allowlisted
+design and remains a benchmark-readiness gap.
 
 `central_provider_free.yml` must run `central_pre_smoke_gate.py` and print
 `SMOKE_APPROVED` on the exact pushed commit intended for a paid smoke. Passing

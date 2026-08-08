@@ -17,6 +17,61 @@ from gt_engine.indexer import IndexBuildStatus  # noqa: E402
 from gt_engine.language_registry import LANGUAGE_CAPABILITIES  # noqa: E402
 from gt_engine.repository_intelligence import inspect_repository  # noqa: E402
 
+_STRUCTURAL_FIXTURES = {
+    "coq": (
+        "Require Import Arith.\n"
+        "Theorem helper : forall n : nat, n = n.\nProof. reflexivity. Qed.\n"
+        "Theorem target : forall n : nat, n = n.\nProof. intro n. apply helper. Qed.\n"
+    ),
+    "stan": (
+        "functions {\n"
+        "  real helper(real x) { return x; }\n"
+        "  real target(real x) { return helper(x); }\n"
+        "}\n"
+    ),
+    "sparql": "PREFIX ex: <https://example.test/>\nSELECT ?s WHERE { ?s ex:name ?name . }\n",
+    "turtle": "@prefix ex: <https://example.test/> .\nex:University a ex:Organization .\n",
+    "latex": (
+        "\\documentclass{article}\n"
+        "\\newcommand{\\helper}[1]{#1}\n"
+        "\\newcommand{\\target}[1]{\\helper{#1}}\n"
+    ),
+    "vim": (
+        "function! Helper()\nendfunction\n"
+        "function! Target()\n  call Helper()\nendfunction\n"
+    ),
+    "nginx": "upstream backend { server 127.0.0.1:8080; }\nserver { listen 8080; }\n",
+    "gcode": "O1000\nM98 P2000\nM30\nO2000\nM99\n",
+    "make": "all: build\nbuild:\n\t@true\n",
+    "dockerfile": "FROM python:3.12 AS runtime\n",
+    "cmake": (
+        "function(helper)\nendfunction()\n"
+        "function(target)\n  helper()\nendfunction()\n"
+    ),
+    "meson": "project('example', 'c')\nexecutable('app', 'main.c')\n",
+    "autotools": "AC_INIT([example], [1.0])\nAC_CONFIG_FILES([Makefile])\n",
+    "verilog": (
+        "module target(input value, output out);\n"
+        "  assign out = value;\n"
+        "endmodule\n"
+        "module caller(input value, output out);\n"
+        "  target instance(.value(value), .out(out));\n"
+        "endmodule\n"
+    ),
+    "r": (
+        "r_target <- function(value) { value + 1 }\n"
+        "r_caller <- function() { r_target(1) }\n"
+    ),
+    "red": (
+        ";redcode-94\nstart mov 0, 1\n      jmp finish\n"
+        "finish dat 0, 0\n      end start\n"
+    ),
+    "povray": (
+        "#macro Helper()\nsphere { <0,0,0>, 1 }\n#end\n"
+        "#macro Thing()\nHelper()\n#end\nThing()\n"
+    ),
+}
+
 
 def verify() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="gt-index-fixture-") as root_dir:
@@ -50,8 +105,7 @@ def verify() -> dict[str, object]:
             encoding="utf-8",
         )
         (root / "fixture.r").write_text(
-            "target <- function(value) { value + 1 }\n"
-            "caller <- function() { target(1) }\n",
+            _STRUCTURAL_FIXTURES["r"],
             encoding="utf-8",
         )
         (root / "fixture.v").write_text(
@@ -64,17 +118,11 @@ def verify() -> dict[str, object]:
             encoding="utf-8",
         )
         (root / "fixture.red").write_text(
-            ";redcode-94\n"
-            "start mov 0, 1\n"
-            "      jmp start\n"
-            "      end start\n",
+            _STRUCTURAL_FIXTURES["red"],
             encoding="utf-8",
         )
         (root / "fixture.pov").write_text(
-            "#macro Thing()\n"
-            "sphere { <0,0,0>, 1 }\n"
-            "#end\n"
-            "Thing()\n",
+            _STRUCTURAL_FIXTURES["povray"],
             encoding="utf-8",
         )
         # Exercise every parser that the host registry advertises.  These
@@ -82,15 +130,34 @@ def verify() -> dict[str, object]:
         # Scheme fixtures above: file_hashes proves binary language dispatch,
         # while the named fixtures prove definitions and CALLS edges.
         language_root = root / "language_fixtures"
+        explicit_fixture_languages = {
+            "python",
+            "scheme",
+            "cobol",
+            "r",
+            "verilog",
+            "red",
+            "povray",
+        }
         for capability in LANGUAGE_CAPABILITIES:
-            if not capability.structural_index:
+            if (
+                not capability.structural_index
+                or capability.name in explicit_fixture_languages
+            ):
                 continue
-            suffix = capability.suffixes[0]
-            (language_root / f"fixture_{capability.name}{suffix}").parent.mkdir(
+            fixture_name = (
+                capability.basenames[0]
+                if capability.basenames
+                else f"fixture_{capability.name}{capability.suffixes[0]}"
+            )
+            (language_root / fixture_name).parent.mkdir(
                 parents=True, exist_ok=True
             )
-            (language_root / f"fixture_{capability.name}{suffix}").write_text(
-                "/* parser coverage fixture */\n", encoding="utf-8"
+            (language_root / fixture_name).write_text(
+                _STRUCTURAL_FIXTURES.get(
+                    capability.name, "/* parser coverage fixture */\n"
+                ),
+                encoding="utf-8",
             )
         source_revision = "fixture-source-r0"
         evidence = inspect_repository(
@@ -140,6 +207,24 @@ def verify() -> dict[str, object]:
             verilog_count = int(language_counts.get("verilog", 0))
             red_count = int(language_counts.get("red", 0))
             povray_count = int(language_counts.get("povray", 0))
+            benchmark_structured_counts = {
+                language: int(language_counts.get(language, 0))
+                for language in (
+                    "coq",
+                    "stan",
+                    "sparql",
+                    "turtle",
+                    "latex",
+                    "vim",
+                    "nginx",
+                    "gcode",
+                    "make",
+                    "dockerfile",
+                    "cmake",
+                    "meson",
+                    "autotools",
+                )
+            }
             call_count = int(
                 connection.execute(
                     "SELECT COUNT(*) FROM edges e "
@@ -148,6 +233,33 @@ def verify() -> dict[str, object]:
                     "WHERE e.type='CALLS' AND src.name='caller' AND tgt.name='target'"
                 ).fetchone()[0]
             )
+            call_language_counts = dict(
+                connection.execute(
+                    "SELECT src.language,COUNT(*) FROM edges e "
+                    "JOIN nodes src ON src.id=e.source_id "
+                    "WHERE e.type='CALLS' "
+                    "AND COALESCE(e.confidence,0)>=0.95 "
+                    "AND COALESCE(e.trust_tier,'')='CERTIFIED' "
+                    "AND COALESCE(e.candidate_count,0)=1 "
+                    "GROUP BY src.language"
+                ).fetchall()
+            )
+            call_edge_quality = [
+                {
+                    "language": str(row[0]),
+                    "confidence": float(row[1]),
+                    "trust_tier": str(row[2]),
+                    "candidate_count": int(row[3]),
+                    "count": int(row[4]),
+                }
+                for row in connection.execute(
+                    "SELECT src.language,COALESCE(e.confidence,0),"
+                    "COALESCE(e.trust_tier,''),COALESCE(e.candidate_count,0),COUNT(*) "
+                    "FROM edges e JOIN nodes src ON src.id=e.source_id "
+                    "WHERE e.type='CALLS' GROUP BY src.language,e.confidence,"
+                    "e.trust_tier,e.candidate_count ORDER BY src.language"
+                ).fetchall()
+            ]
         finally:
             connection.close()
         if quick_check.lower() != "ok":
@@ -156,10 +268,44 @@ def verify() -> dict[str, object]:
             raise RuntimeError(f"fixture definitions missing: {definition_count}")
         if call_count < 1:
             raise RuntimeError(f"directed CALLS edge missing: {call_count}")
+        expected_call_languages = {
+            "python",
+            "scheme",
+            "cobol",
+            "r",
+            "verilog",
+            "red",
+            "povray",
+            "coq",
+            "stan",
+            "latex",
+            "vim",
+            "gcode",
+            "make",
+            "cmake",
+        }
+        missing_call_languages = sorted(
+            expected_call_languages - set(call_language_counts)
+        )
+        if missing_call_languages:
+            raise RuntimeError(
+                "certified caller languages missing directed edges: "
+                + ", ".join(missing_call_languages)
+                + f" quality={call_edge_quality}"
+            )
         if not receipt.schema_valid or receipt.node_count < 2:
             raise RuntimeError("index receipt did not certify the graph schema/nodes")
         if receipt.source_files != receipt.indexable_files:
             raise RuntimeError("fixture source coverage was not complete")
+        if receipt.parser_failures != 0:
+            raise RuntimeError(
+                f"fixture parser failures were not zero: {receipt.parser_failures}"
+            )
+        if receipt.ambiguous_paths or receipt.unsupported_paths:
+            raise RuntimeError(
+                "fixture language resolution was incomplete: "
+                f"ambiguous={receipt.ambiguous_paths} unsupported={receipt.unsupported_paths}"
+            )
         if cobol_count < 1 or scheme_count < 2:
             raise RuntimeError(
                 "certified language parser coverage missing: "
@@ -174,6 +320,16 @@ def verify() -> dict[str, object]:
             raise RuntimeError(
                 "structured language parser coverage missing: "
                 f"red={red_count} povray={povray_count}"
+            )
+        missing_structured_nodes = sorted(
+            language
+            for language, count in benchmark_structured_counts.items()
+            if count < 1
+        )
+        if missing_structured_nodes:
+            raise RuntimeError(
+                "benchmark structured parser nodes missing: "
+                + ", ".join(missing_structured_nodes)
             )
         expected_languages = {
             "bash" if capability.name == "shell" else capability.name
@@ -199,9 +355,14 @@ def verify() -> dict[str, object]:
             "fts_tables": list(receipt.fts_tables),
             "definition_count": definition_count,
             "call_count": call_count,
+            "call_language_counts": call_language_counts,
+            "call_edge_quality": call_edge_quality,
             "language_counts": language_counts,
             "language_file_counts": language_file_counts,
+            "benchmark_structured_counts": benchmark_structured_counts,
             "source_revision": source_revision,
+            "resolution_reason_counts": dict(receipt.resolution_reason_counts),
+            "parser_failures": receipt.parser_failures,
             "frontier_anchors": len(evidence.anchors),
         }
 

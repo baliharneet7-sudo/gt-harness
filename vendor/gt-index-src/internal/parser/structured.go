@@ -9,19 +9,60 @@ import (
 )
 
 // parseStructuredSource handles small, deliberately bounded adapters for
-// Terminal-Bench's Redcode and POV-Ray inputs.  These are not regex fallbacks:
+// source languages without a certified Tree-sitter binding. These are not
+// regex fallbacks:
 // each adapter has a token/statement grammar, explicit node kinds, and only
 // emits facts that its grammar proves.  Unknown syntax is retained as source
 // but produces no speculative graph edge.
 func parseStructuredSource(sf walker.SourceFile, src []byte, isTest bool) (*ParseResult, error) {
 	switch sf.Language {
 	case "red":
-		return parseRedcode(sf, string(src), isTest), nil
+		return ensureStructuredFileNode(parseRedcode(sf, string(src), isTest), sf, src, isTest), nil
 	case "povray":
-		return parsePOVRay(sf, string(src), isTest), nil
+		return ensureStructuredFileNode(parsePOVRay(sf, string(src), isTest), sf, src, isTest), nil
+	case "coq":
+		return ensureStructuredFileNode(parseCoq(sf, string(src), isTest), sf, src, isTest), nil
+	case "stan":
+		return ensureStructuredFileNode(parseStan(sf, string(src), isTest), sf, src, isTest), nil
+	case "sparql":
+		return ensureStructuredFileNode(parseSPARQL(sf, string(src), isTest), sf, src, isTest), nil
+	case "turtle":
+		return ensureStructuredFileNode(parseTurtle(sf, string(src), isTest), sf, src, isTest), nil
+	case "latex":
+		return ensureStructuredFileNode(parseLaTeX(sf, string(src), isTest), sf, src, isTest), nil
+	case "vim":
+		return ensureStructuredFileNode(parseVim(sf, string(src), isTest), sf, src, isTest), nil
+	case "nginx":
+		return ensureStructuredFileNode(parseNginx(sf, string(src), isTest), sf, src, isTest), nil
+	case "gcode":
+		return ensureStructuredFileNode(parseGCode(sf, string(src), isTest), sf, src, isTest), nil
+	case "make":
+		return ensureStructuredFileNode(parseMake(sf, string(src), isTest), sf, src, isTest), nil
+	case "dockerfile":
+		return ensureStructuredFileNode(parseDockerfile(sf, string(src), isTest), sf, src, isTest), nil
+	case "cmake":
+		return ensureStructuredFileNode(parseCMake(sf, string(src), isTest), sf, src, isTest), nil
+	case "meson":
+		return ensureStructuredFileNode(parseMeson(sf, string(src), isTest), sf, src, isTest), nil
+	case "autotools":
+		return ensureStructuredFileNode(parseAutotools(sf, string(src), isTest), sf, src, isTest), nil
 	default:
 		return nil, nil
 	}
+}
+
+func ensureStructuredFileNode(result *ParseResult, sf walker.SourceFile, src []byte, isTest bool) *ParseResult {
+	if result == nil {
+		result = &ParseResult{}
+	}
+	if len(result.Nodes) == 0 && strings.TrimSpace(string(src)) != "" {
+		result.Nodes = append(result.Nodes, store.Node{
+			Label: "File", Name: sf.Path, QualifiedName: sf.Path, FilePath: sf.Path,
+			StartLine: 1, EndLine: len(strings.Split(string(src), "\n")),
+			IsExported: true, IsTest: isTest, Language: sf.Language,
+		})
+	}
+	return result
 }
 
 func parseRedcode(sf walker.SourceFile, source string, isTest bool) *ParseResult {
@@ -75,7 +116,7 @@ func parseRedcode(sf walker.SourceFile, source string, isTest bool) *ParseResult
 		if stmt.label == "" {
 			continue
 		}
-		nodeIDs[stmt.label] = len(result.Nodes) + 1
+		nodeIDs[stmt.label] = len(result.Nodes)
 		result.Nodes = append(result.Nodes, store.Node{
 			Label: "Function", Name: stmt.label, QualifiedName: stmt.label,
 			FilePath: sf.Path, StartLine: stmt.line, EndLine: stmt.line,
@@ -86,8 +127,8 @@ func parseRedcode(sf walker.SourceFile, source string, isTest bool) *ParseResult
 		if stmt.owner == "" || len(stmt.args) == 0 {
 			continue
 		}
-		caller := nodeIDs[stmt.owner]
-		if caller == 0 {
+		caller, callerFound := nodeIDs[stmt.owner]
+		if !callerFound {
 			continue
 		}
 		for _, arg := range stmt.args {
@@ -95,7 +136,7 @@ func parseRedcode(sf walker.SourceFile, source string, isTest bool) *ParseResult
 			if target == "" {
 				continue
 			}
-			if targetID := nodeIDs[target]; targetID > 0 && isRedControlFlow(stmt.op) {
+			if _, targetFound := nodeIDs[target]; targetFound && isRedControlFlow(stmt.op) {
 				result.Calls = append(result.Calls, CallRef{
 					CallerNodeIdx: caller, CalleeName: target, CalleeQualified: target,
 					Line: stmt.line, File: sf.Path,
@@ -152,16 +193,31 @@ func parsePOVRay(sf walker.SourceFile, source string, isTest bool) *ParseResult 
 		if fields[0] == "#declare" {
 			label = "Class"
 		}
-		macros[name] = len(result.Nodes) + 1
+		macros[name] = len(result.Nodes)
 		result.Nodes = append(result.Nodes, store.Node{
 			Label: label, Name: name, QualifiedName: name, FilePath: sf.Path,
 			StartLine: lineNo + 1, EndLine: lineNo + 1, Signature: fields[0],
 			IsExported: true, IsTest: isTest, Language: sf.Language,
 		})
 	}
+	currentMacro := -1
 	for lineNo, raw := range strings.Split(clean, "\n") {
 		trimmed := strings.TrimSpace(raw)
-		if strings.HasPrefix(trimmed, "#macro") || strings.HasPrefix(trimmed, "#declare") {
+		fields := strings.Fields(trimmed)
+		if len(fields) > 1 && fields[0] == "#macro" {
+			name := strings.TrimFunc(fields[1], func(r rune) bool {
+				return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+			})
+			if owner, found := macros[name]; found {
+				currentMacro = owner
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#end") {
+			currentMacro = -1
+			continue
+		}
+		if currentMacro < 0 || strings.HasPrefix(trimmed, "#declare") {
 			continue
 		}
 		tokens := povIdentifiers(raw)
@@ -169,11 +225,11 @@ func parsePOVRay(sf walker.SourceFile, source string, isTest bool) *ParseResult 
 			if tokens[i+1] != "(" {
 				continue
 			}
-			caller := macros[tokens[i]]
-			if caller == 0 {
+			target, found := macros[tokens[i]]
+			if !found || target == currentMacro {
 				continue
 			}
-			result.Calls = append(result.Calls, CallRef{CallerNodeIdx: caller, CalleeName: tokens[i], CalleeQualified: tokens[i], Line: lineNo + 1, File: sf.Path})
+			result.Calls = append(result.Calls, CallRef{CallerNodeIdx: currentMacro, CalleeName: tokens[i], CalleeQualified: tokens[i], Line: lineNo + 1, File: sf.Path})
 		}
 	}
 	if len(result.Nodes) == 0 && strings.TrimSpace(clean) != "" {

@@ -100,6 +100,9 @@ jobs:
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
 
+      - name: Prove pinned language contract
+        run: python scripts/verify_tb2_language_contract.py
+
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |
           python - <<'EOF'
@@ -258,6 +261,9 @@ jobs:
 
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
+
+      - name: Prove pinned language contract
+        run: python scripts/verify_tb2_language_contract.py
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |

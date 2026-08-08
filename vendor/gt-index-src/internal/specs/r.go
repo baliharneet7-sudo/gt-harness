@@ -5,10 +5,10 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 )
 
-// R is a validation-relevant Terminal-Bench language.  The upstream grammar
-// exposes assignment-bound functions as function_definition nodes with a
-// concrete name field, so this mapping can remain structural rather than
-// falling back to text heuristics.
+// R is a validation-relevant Terminal-Bench language. The upstream grammar
+// represents an assignment-bound function as a binary_operator whose lhs is
+// the concrete identifier and rhs is the function_definition. The parser
+// unwraps that structural parent boundary; it never guesses a name from text.
 func init() {
 	Register(&Spec{
 		Name:          "r",

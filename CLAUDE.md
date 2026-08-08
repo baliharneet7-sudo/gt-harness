@@ -416,16 +416,48 @@ not a reason to fabricate visible context. Execution fails open on substrate
 failure so GT cannot destroy the model's work; evaluation and promotion fail
 closed so a dead graph cannot hide behind model luck or favorable tokens.
 
-The single language registry drives source revision, workspace capture, syntax
-probes, indexing, and both Mini-SWE bridges. Structural support matches the
-vendored `gt-index` spec extensions. Unsupported authored languages are
-explicit substrate failures. Never fabricate regex definitions/callers to make
-coverage appear green.
+The single language resolver drives source revision, workspace capture, syntax
+probes, indexing, and both Mini-SWE bridges. It uses bounded content as well as
+paths. Structural support matches the vendored `gt-index` resolver and specs.
+Unsupported or ambiguous authored languages are explicit substrate failures.
+Never fabricate definitions/callers to make coverage appear green.
 
-Terminal-Bench code-like `.r`, `.v`, `.red`, and `.pov` inputs are recognized
-as validation-relevant but remain graph-unsupported until certified grammars
-and fixtures are shipped; they now fail closed rather than disappearing from
-source coverage.
+Suffixes are candidates, not identities. `.v` is Coq or Verilog only when
+bounded declarations prove one dialect; conflict or insufficient evidence is
+`AMBIGUOUS` and invalidates source coverage. `.conf` becomes Nginx only from
+recognized directives. Exact build-file basenames and extensionless shebangs
+are resolved explicitly. Both Python and Go implementations share these
+fail-closed rules.
+
+The graph runtime has provider-free fixtures for R, Verilog, Coq, Stan,
+SPARQL, Turtle, LaTeX, Vim, Nginx, G-code, Red, POV-Ray, Make, Dockerfile,
+CMake, Meson, and Autotools in addition to the existing languages. Conservative
+structural adapters emit only fixture-proven constructs; unknown syntax emits
+no speculative edge. A non-empty source may receive a concrete file node, but
+not an invented symbol. Parser failures are persisted and invalidate the
+substrate.
+
+Native parser caller indices are zero-based. Readiness requires real directed
+SQLite edges for every fixture language that advertises caller support, not
+just in-memory parser calls or nonzero nodes. COBOL out-of-line `PERFORM`
+statements are attached only to the mechanically preceding paragraph header.
+R assignment-bound functions use the AST `lhs` as identity. POV-Ray calls are
+owned only by a parsed enclosing macro; file-level invocation cannot fabricate
+a caller.
+
+The checked-in Terminal-Bench 2 language contract pins the official dataset
+commit and expected 89 tasks. Its exact-tree gate verifies every named witness
+and declared source-like suffix family and independently rejects any
+registry-recognized structural suffix observed but unclassified; registry
+self-parity is not accepted as benchmark completeness. This proves language
+resolution and graph construction only. It does not prove that retrieved facts
+are relevant, model-visible, outcome-improving, or efficient.
+
+Language support does not expand the workspace trust boundary. Task-owned
+files outside `/app`, such as Nginx configuration under `/etc`, are not
+mirrored or indexed by the current sensor. Supporting those requires a
+separate allowlisted external-resource monitor. Do not call the complete
+benchmark graph-covered until that boundary is implemented and proven.
 
 `graph.db` health requires a certified schema, FTS surface, current source
 revision, binary hash, graph hash, and recorded node/edge/source counts. The

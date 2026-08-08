@@ -2,7 +2,19 @@
 
 Date: 2026-08-08  
 Branch: `inline-engine`  
-Current head: `2cdc8f2`
+Implementation base: `6778c4b` (verification commit pending)
+
+## Implementation status (2026-08-08)
+
+The original suffix inventory was incomplete and its `.v = Verilog`
+assumption was wrong. The official pinned 89-task tree uses `.v` for Coq, while
+the existing general registry used the same suffix for Verilog. The
+implementation now resolves language from path plus bounded content, fails
+closed on ambiguous dialects, and extends the native graph to every source
+family observed in the checked-in benchmark contract. Local provider-free
+proof and archived policy replay are complete; exact-pushed-commit CI remains
+the release authority. No paid smoke or 89-task run has been authorized from
+this change.
 
 ## Objective
 
@@ -25,22 +37,29 @@ The Terminal-Bench 2 repository visibly contains source-like files in:
 
 - Python (`.py`), JavaScript (`.js`), C (`.c`, `.h`), C++ (`.cpp`), Rust
   (`.rs`), COBOL (`.cbl`), Scheme (`.scm`), shell (`.sh`), and OCaml (`.ml`);
-- R (`.r`), Verilog (`.v`), Redcode (`.red`), and POV-Ray scene language
-  (`.pov`) in task inputs or task-owned source;
+- R (`.r`), Coq (`.v`), Redcode (`.red`), POV-Ray (`.pov`),
+  Stan (`.stan`), SPARQL (`.sparql`), Turtle (`.ttl`), LaTeX (`.tex`), Vim
+  (`.vim`), Nginx (`.conf`), and G-code (`.gcode`);
+- exact build/control names including Makefile, Dockerfile/Containerfile,
+  CMakeLists.txt, Meson, and Autotools files, plus extensionless interpreters;
 - structured/configuration formats such as Markdown, TOML, YAML, JSON, SQL,
   XML, HTML, protobuf, and data artifacts.
 
-The vendored `gt-index` now has 36 registered specs: native Tree-sitter R and
-Verilog plus bounded structured adapters for Redcode and POV-Ray. The Python
-registry matches those parser suffixes. The Redcode/POV-Ray adapters emit only
-labels/control-flow, or macros/declarations/includes/local macro calls; they
-never claim general-purpose call graphs from scene or opcode text.
+Verilog is not a live witness in the pinned 89-task tree; it is retained as a
+general capability and as the collision oracle for content-aware `.v`
+resolution. The vendored `gt-index` retains native Tree-sitter R and Verilog and bounded
+Redcode/POV-Ray adapters. It now adds conservative structural adapters for Coq,
+Stan, SPARQL, Turtle, LaTeX, Vim, Nginx, G-code, Make, Dockerfile, CMake,
+Meson, and Autotools. The Python and Go resolvers both disambiguate `.v` from
+bounded declarations. The adapters emit only fixture-proven structure and
+never infer a general-purpose call graph from arbitrary text.
 
 The official Tree-sitter parser inventory lists a Verilog grammar, and the
 Posit/R community publishes a Tree-sitter R grammar. I found no comparable
-maintained Redcode or POV-Ray grammar in that inventory. This is why R and
-Verilog are parser-integration candidates, while Red/POV require a separate
-correctness decision instead of a guessed regex parser.
+maintained Redcode or POV-Ray grammar in that inventory. This motivated the
+existing native R/Verilog integrations. Languages without a selected pinned
+grammar use deliberately bounded adapters with hand-checked oracles;
+unsupported constructs abstain instead of being guessed.
 
 ## Non-negotiable support contract
 
@@ -112,8 +131,9 @@ than relying on an accidental string mismatch.
 
 1. Pin `github.com/tree-sitter/tree-sitter-verilog v1.0.3` and its
    ABI-compatible generated C parser.
-2. Add `internal/specs/verilog.go` for `.v` and, only if observed in the
-   dataset, `.sv`/`.svh`.
+2. Add `internal/specs/verilog.go` for Verilog candidates. `.v` must not resolve
+   from suffix alone because Coq shares it; bounded content must prove the
+   dialect. `.sv`/`.svh` remain unambiguous Verilog candidates.
 3. Model modules, tasks, functions, instantiations, and module references as
    definitions/calls with an explicit relation mapping. Do not call signal
    assignments function calls.

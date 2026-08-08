@@ -94,6 +94,9 @@ def audit() -> dict[str, bool]:
         "paid_central_executes_index_fixture": (
             workflow.count("python scripts/verify_gt_index_runtime.py") >= 2
         ),
+        "paid_central_executes_language_contract": (
+            workflow.count("python scripts/verify_tb2_language_contract.py") >= 2
+        ),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
         "paid_preflight_is_shadow_only": all(
             "--ak preflight_mode=shadow" in item and "--ak enable_preflight=true" not in item
@@ -121,6 +124,14 @@ def audit() -> dict[str, bool]:
             and "gt_engine/context_frontier.py" in provider_free_workflow
             and "gt_engine/language_registry.py" in provider_free_workflow
             and "gt_engine/repository_mirror.py" in provider_free_workflow
+        ),
+        "provider_free_gate_covers_pinned_benchmark_languages": (
+            "tests/test_gt_language_resolution.py" in provider_free_workflow
+            and "tests/test_gt_benchmark_language_contract.py" in provider_free_workflow
+            and "scripts/verify_tb2_language_contract.py --dataset-root"
+            in provider_free_workflow
+            and "2fd12b88aafdd04a52c298e3940bcb189f9766d6"
+            in provider_free_workflow
         ),
         "paid_context_frontier_is_explicit": all(
             "--ak enable_context_frontier=true" in item for item in workflows
