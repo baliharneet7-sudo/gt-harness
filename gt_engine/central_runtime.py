@@ -14,7 +14,7 @@ import json
 import re
 import shlex
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -1214,17 +1214,69 @@ class WorkspaceSensor:
                         **kwargs,
                     )
                     if recorder is not None
-                    else await environment.exec(command, **kwargs)
+                else await environment.exec(command, **kwargs)
                 )
-                encoded = json.loads(captured.stdout or "{}") if captured.return_code == 0 else {}
-                for path in capture_paths:
-                    value = encoded.get(path)
-                    if isinstance(value, str):
-                        content = base64.b64decode(value).decode("utf-8", "replace")
+                encoded: dict[str, Any] = {}
+                if captured.return_code == 0:
+                    try:
+                        parsed = json.loads(captured.stdout or "{}")
+                        if isinstance(parsed, dict):
+                            encoded = parsed
+                    except (TypeError, ValueError):
+                        encoded = {}
+
+                def apply_encoded(values: Mapping[str, Any]) -> set[str]:
+                    applied: set[str] = set()
+                    for path in capture_paths:
+                        value = values.get(path)
+                        if not isinstance(value, str):
+                            continue
+                        try:
+                            content = base64.b64decode(value, validate=True).decode(
+                                "utf-8", "replace"
+                            )
+                        except (ValueError, UnicodeError):
+                            continue
                         entries[path] = replace(entries[path], content=content)
+                        applied.add(path)
+                    return applied
+
+                captured_paths = apply_encoded(encoded)
+                missing_paths = [path for path in capture_paths if path not in captured_paths]
+                if missing_paths:
+                    # Task images are not required to contain Python.  Keep the
+                    # fast JSON path above, but fall back to POSIX base64 so a
+                    # missing interpreter cannot make the repository mirror
+                    # stale after an authored source edit.  Paths come from the
+                    # validated workspace manifest and remain shell-quoted.
+                    fallback_command = (
+                        "for p in "
+                        + " ".join(shlex.quote(path) for path in missing_paths)
+                        + "; do printf '%s\\t' \"$p\"; "
+                        + "base64 \"$p\" | tr -d '\\n'; printf '\\n'; done"
+                    )
+                    fallback = (
+                        await recorder.exec(
+                            environment,
+                            fallback_command,
+                            category=HostExecCategory.WORKSPACE_CAPTURE,
+                            action_id=action_id,
+                            source_revision=source_revision,
+                            **kwargs,
+                        )
+                        if recorder is not None
+                        else await environment.exec(fallback_command, **kwargs)
+                    )
+                    if fallback.return_code == 0:
+                        fallback_values: dict[str, str] = {}
+                        for line in (fallback.stdout or "").splitlines():
+                            path, separator, value = line.partition("\t")
+                            if separator and path in missing_paths:
+                                fallback_values[path] = value
+                        apply_encoded(fallback_values)
             except Exception:
-                # Content witnesses improve semantic features but metadata and
-                # hashes remain authoritative when a task image lacks Python.
+                # Content witnesses improve semantic features, but metadata and
+                # hashes remain authoritative if both capture mechanisms fail.
                 pass
         return replace(snapshot, entries=entries, revision=_snapshot_revision(entries))
 

@@ -482,6 +482,28 @@ changes are receipted and deferred to preserve the stable cache prefix. No
 distinct assistant content or reasoning is removed. Hard provider-budget
 headroom remains fail-before-query.
 
+## Portable source capture boundary (2026-08-08)
+
+The host-side `WorkspaceSensor` must not assume that a task image contains
+Python. It first attempts bounded `python3 -c` JSON/base64 source capture,
+then falls back to shell-native `base64 | tr -d '\\n'` records for validated
+changed paths when Python is missing or returns malformed data. Both paths are
+recorded as workspace-capture executions and decoded only for exact manifest
+paths; hashes and metadata remain authoritative if both mechanisms fail. A
+missing capture must never be silently treated as a current graph: repository
+refresh becomes `mirror_incomplete`, execution fails open, and the paid merge
+fails closed.
+
+Diagnostic paid workflow `31270761663` exposed this boundary. COBOL had a
+passed current graph but zero context-frontier deliveries because its
+candidates were already represented in durable Mini-SWE history; its one
+157-character guidance event is not evidence of causal help. `write-compressor`
+solved, but after authored C edits its source mirror could not refresh because
+the task image reported `python3: command not found`, so graph health was
+`mirror_incomplete` with zero final nodes/edges. That run is rejected as GT
+evidence. The portable fallback is provider-free fixed and requires a new
+authorized matched smoke before any outcome claim.
+
 This repair is provider-free certified on exact implementation commit
 `e6ce41f` by workflow `31244088870`. The checked-out Linux binary passed the
 COBOL/Python/Scheme repository fixture; 311 workflow-scope tests, all-17 census

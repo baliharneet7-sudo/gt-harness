@@ -850,6 +850,39 @@ async def test_sensor_carries_hash_without_reinventing_an_edit():
 
 
 @pytest.mark.asyncio
+async def test_sensor_captures_source_when_task_image_has_no_python():
+    """Source mirroring must not depend on a task-image Python interpreter."""
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    source = "int main(void) { return 0; }\n"
+    encoded = base64.b64encode(source.encode()).decode()
+    calls: list[str] = []
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            calls.append(command)
+            if command.startswith("sha256sum"):
+                return Result(("a" * 64) + "  app.c\n")
+            if command.startswith("python3 -c"):
+                return Result("bash: python3: command not found\n", 127)
+            if "base64" in command:
+                return Result(f"app.c\t{encoded}\n")
+            return Result("f\t29\t2.0\t2.0\tapp.c\t\n")
+
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app")
+
+    assert snapshot.healthy is True
+    assert snapshot.entries["app.c"].content == source
+    assert any(command.startswith("python3 -c") for command in calls)
+    assert any("base64" in command for command in calls)
+
+
+@pytest.mark.asyncio
 async def test_sensor_exception_fails_open_and_preserves_last_known_revision():
     class Environment:
         async def exec(self, command, **kwargs):

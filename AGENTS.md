@@ -685,6 +685,26 @@ causes the merged treatment gate to fail. This prevents a graph bug from
 destroying a baseline solve while preventing a graph-less run from being
 promoted as valid GT evidence.
 
+## Portable source capture boundary (2026-08-08)
+
+Workspace source mirroring is host-owned and must work in task images without
+Python. `WorkspaceSensor` first tries bounded `python3 -c` JSON/base64 capture,
+then falls back to shell-native `base64 | tr -d '\\n'` records for validated
+changed paths when Python is missing or output is malformed. It decodes only
+exact manifest paths and retains digest/metadata authority. If both captures
+fail, the repository session is `mirror_incomplete`; Mini-SWE execution stays
+fail-open, while the required intelligence gate fails closed.
+
+Diagnostic paid workflow `31270761663` exposed this defect. COBOL had a healthy
+graph but no frontier delivery because its candidates were already represented
+in durable Mini-SWE messages; its one guidance event is not a causal-use
+claim. `write-compressor` solved but lost current graph substrate after the
+task image returned `python3: command not found`; its final graph had zero
+nodes/edges, so the run is invalid GT evidence. A portable-capture regression
+test and implementation now protect this boundary. Do not start a paid rerun
+until provider-free gates pass on the pushed commit and a matched smoke is
+separately authorized.
+
 Provider-view efficiency is governed at the observation boundary. Typed
 read/search/edit/validate operations receive deterministic per-observation
 bounds before the provider call; a successful large read retains head, three
