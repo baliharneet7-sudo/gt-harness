@@ -248,3 +248,27 @@ binary for certification. The exact pre-smoke gate must be rerun on the pushed
 commit. No paid smoke was started during this repair. Parser certification is
 not outcome or efficiency evidence; the 10-task smoke remains the next
 authorized step only after `SMOKE_APPROVED` on the rebuilt-binary commit.
+
+## Local stale-binary resolution (2026-08-08)
+
+The readiness failure observed on the Windows workstation was caused by the
+cached `C:\Users\Lenovo\.groundtruth\bin\gt-index.exe` predating commit
+`c5f2983`; it did not contain the newly vendored COBOL/Scheme parsers. The
+checked-in source and GitHub workflows were already correct, but the local
+cache was stale. Rebuilding from `vendor/gt-index-src` with Go 1.22 and
+`-tags sqlite_fts5` produced binary SHA-256
+`3248b6e98d146359c1925e0e4724677f74035900609d25e229c8d967343cb4d3`.
+
+Provider-free verification with that binary returned:
+
+```text
+source_files=3 indexable_files=3 node_count=6 edge_count=2
+language_counts={'cobol': 2, 'python': 2, 'scheme': 2}
+definition_count=4 call_count=2 schema_valid=True
+```
+
+The repaired anchor-frontier commit was pushed as `fe5d873`. With
+`GT_INDEX_BINARY` pointed at the rebuilt binary, the direct census, module
+census, repository-substrate check, readiness audit, and exact pre-smoke gate
+all passed; the gate printed `SMOKE_APPROVED`. No paid smoke or 89-task run
+was started.
