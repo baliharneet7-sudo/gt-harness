@@ -21,7 +21,7 @@ func init() {
 		BodyField:     "body",
 		ParamsField:   "parameters",
 		IsExported: func(name string) bool {
-			return name != "" && name[0] != "."
+			return name != "" && name[0] != '.'
 		},
 	})
 }
