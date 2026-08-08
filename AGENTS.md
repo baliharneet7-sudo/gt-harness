@@ -627,13 +627,20 @@ advance source revision.
 
 Before every provider call, the deterministic context frontier advances beyond
 facts already represented in durable Mini-SWE history. It emits only certified
-definition, signature, caller, reference, or test facts with concrete
-path/line/symbol anchors, at most three facts and 1,200 characters per call and
-6,000 characters per task. It never truncates a fact, invents an anchor,
+definition, signature, caller, reference, test, or bounded ranked-anchor facts
+with concrete path/line/symbol anchors, at most three facts and 1,200
+characters per call and 6,000 characters per task. It never truncates a fact,
+invents an anchor,
 predicts the model's action, duplicates a delivered fact, or emits on stale or
 unhealthy evidence. Candidate count must equal accounted count. Provider hash,
 message index, source/graph revisions, fact IDs, timing, and exact characters
 are receipted.
+
+When a healthy current graph has a concrete high-confidence ranked anchor but
+no separate definition, reference, caller, or test role, the frontier may use
+that anchor as a bounded `FILE`/`SYMBOL` fallback. It names only the certified
+source path, positive line, and optional symbol; it never invents a structural
+relationship, and it is deduplicated against richer roles and retained history.
 
 Semantic certainty and task retrieval relevance are independent. A structurally
 valid graph node is not automatically relevant to the task. Generic anchors

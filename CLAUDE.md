@@ -435,12 +435,20 @@ explicit non-delivery disposition without invalidating a healthy graph.
 
 The context frontier runs before each model query and advances beyond provider
 history. It may select only concrete source-backed definitions, signatures,
-callers, references, or tests with path, positive line, symbol, graph revision,
-source revision, semantic certainty, and retrieval relevance. Limits are three
-facts/1,200 characters per call and 6,000 characters per task. Every candidate
+callers, references, tests, or bounded ranked anchors with path, positive line,
+symbol, graph revision, source revision, semantic certainty, and retrieval
+relevance. Limits are three facts/1,200 characters per call and 6,000
+characters per task. Every candidate
 has one disposition; facts are never truncated, duplicated, predicted, or sent
 from stale evidence. The exact request hash and provider message index prove
 visibility; later action alignment remains only a behavioral proxy.
+
+If the graph is healthy and current but provides only a concrete high-confidence
+ranked anchor, the frontier uses a bounded `FILE`/`SYMBOL` fallback rather than
+silently keeping that usable source fact private. The fallback names only the
+certified path, positive line, and optional symbol, is deduplicated against a
+richer structural role or retained history, and never fabricates callers,
+definitions, or intent.
 
 Semantic certainty and retrieval relevance are independent gates. Graph
 confidence cannot promote a generic or task-unrelated symbol. Semantic claim

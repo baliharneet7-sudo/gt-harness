@@ -243,6 +243,44 @@ def test_frontier_advances_from_represented_file_to_definition():
     assert "Repository intelligence" in decision.rendered
 
 
+def test_frontier_delivers_ranked_anchor_when_no_structural_role_exists():
+    """A healthy graph anchor is useful even without a CALLS/definition row."""
+
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (
+            {
+                "path": "legacy.cob",
+                "line": 42,
+                "symbol": "WRITE-RECORD",
+                "surface": "nodes_fts",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+        "definitions": (),
+        "references": (),
+        "callers": (),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Update the record writer."}],
+        source_revision="s1",
+    )
+
+    assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
+    assert decision.facts[0].kind is ContextFrontierKind.SYMBOL
+    assert decision.facts[0].path == "legacy.cob"
+    assert "legacy.cob:42" in decision.rendered
+
+
 def test_unhealthy_repository_never_fabricates_a_frontier():
     decision = compile_incremental_frontier(
         {

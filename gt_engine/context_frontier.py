@@ -252,6 +252,48 @@ def _reference_candidates(
     return candidates
 
 
+def _anchor_candidates(
+    evidence: Mapping[str, Any], source_revision: str
+) -> list[ContextFrontierFact]:
+    """Convert ranked task anchors into a bounded fallback frontier.
+
+    Repository retrieval can prove a concrete path/line/symbol without
+    producing a separate definition, reference, or caller role (common for
+    COBOL and small source files).  Keeping those anchors private made GT
+    appear silent even though the graph had usable evidence.  An anchor is
+    eligible only when both semantic certainty and task relevance are explicit
+    and high-confidence; it never invents a role or a caller relationship.
+    """
+
+    graph_revision = str(evidence.get("graph_revision") or "")
+    candidates: list[ContextFrontierFact] = []
+    for item in evidence.get("anchors") or ():
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or "").replace("\\", "/")
+        line = int(item.get("line") or 0)
+        symbol = str(item.get("symbol") or "")
+        if not path or line <= 0:
+            continue
+        certainty = float(item.get("semantic_certainty") or item.get("confidence") or 0.0)
+        relevance = float(item.get("retrieval_relevance") or 0.0)
+        candidates.append(
+            _frontier_fact(
+                kind=(ContextFrontierKind.SYMBOL if symbol else ContextFrontierKind.FILE),
+                path=path,
+                line=line,
+                symbol=symbol,
+                value=symbol,
+                relation="task_anchor",
+                source_revision=source_revision,
+                graph_revision=graph_revision,
+                semantic_certainty=certainty,
+                retrieval_relevance=relevance,
+            )
+        )
+    return candidates
+
+
 def _represented(fact: ContextFrontierFact, text: str) -> bool:
     if fact.kind is ContextFrontierKind.DEFINITION:
         return bool(fact.value and fact.value in text)
@@ -320,7 +362,19 @@ def compile_incremental_frontier(
         *_definition_candidates(row, source_revision),
         *_caller_candidates(row, source_revision),
         *_reference_candidates(row, source_revision),
+        *_anchor_candidates(row, source_revision),
     ]
+    # A ranked anchor often points at the same node as a structural role.  Keep
+    # the richer role and use the anchor only as a fallback when no role exists.
+    unique_candidates: list[ContextFrontierFact] = []
+    seen_locations: set[tuple[str, int, str]] = set()
+    for fact in candidates:
+        identity = (fact.path, fact.line, fact.symbol)
+        if identity in seen_locations:
+            continue
+        seen_locations.add(identity)
+        unique_candidates.append(fact)
+    candidates = unique_candidates
     provider_text = _provider_text(messages)
     selected: list[ContextFrontierFact] = []
     accounting: list[dict[str, Any]] = []

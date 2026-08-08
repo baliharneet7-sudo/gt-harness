@@ -264,6 +264,56 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
 
 
 @pytest.mark.asyncio
+async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request(tmp_path):
+    """Anchor-only graph evidence must cross the real model boundary once."""
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_task_start_advisory=False,
+        enable_context_frontier=True,
+    )
+    agent._model_factory = lambda: model
+
+    async def fake_repository_session(*args, **kwargs):
+        return (
+            RepositoryEvidence(
+                available=True,
+                graph_revision="g1",
+                anchors=(
+                    {
+                        "path": "legacy.cob",
+                        "line": 42,
+                        "symbol": "WRITE-RECORD",
+                        "semantic_certainty": 1.0,
+                        "retrieval_relevance": 1.0,
+                    },
+                ),
+                status="source_backed",
+                # The fake deliberately leaves the revision unbound; the
+                # compiler accepts it and binds the fact to the agent's
+                # current source revision for this boundary test.
+                source_revision="",
+                index_current=True,
+                intelligence_valid=True,
+                substrate_ready=True,
+            ),
+            None,
+        )
+
+    agent._start_repository_session = fake_repository_session
+    await agent.run("Update the record writer.", _Environment(), AgentContext())
+
+    assert any("legacy.cob:42" in item for item in model.observed_history[0])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    deliveries = receipt["repository_intelligence"]["frontier_deliveries"]
+    assert len(deliveries) == 1
+    assert deliveries[0]["delivered_before_call"] == 1
+    assert deliveries[0]["facts"][0]["kind"] == "symbol"
+
+
+@pytest.mark.asyncio
 async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_idle(
     tmp_path,
 ):
