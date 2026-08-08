@@ -129,6 +129,8 @@ Implemented in commit `544dd93` and pushed to `inline-engine`.
   `repository_intelligence.transient_failures` but no longer poison a healthy
   final source revision.
 - Current final failures remain fail-closed.
+- Initial graph-gate failures are now compared with the final graph revision;
+  recovered initial failures are retained as transient `graph_gate:*` events.
 - Source-less tasks report
   `not_applicable_no_supported_source` and are excluded only from the
   repository-intelligence invalidity denominator; they remain in outcome

@@ -2405,7 +2405,22 @@ class MiniSweCentralAgent(BaseAgent):
                 intelligence_failures.append(
                     repository_evidence.status or "repository_intelligence_invalid"
                 )
-            intelligence_failures.extend(graph_gate_reasons)
+            final_graph_gate_reasons = (
+                graph_gate_failures(repository_evidence)
+                if (
+                    self.require_graph_ready
+                    and self.integration_mode is GTIntegrationMode.ACTIVE
+                    and self.runtime_mode == "treatment"
+                    and self.enable_repository_intelligence
+                )
+                else ()
+            )
+            intelligence_failures.extend(final_graph_gate_reasons)
+            transient_intelligence_failures.extend(
+                f"graph_gate:{reason}"
+                for reason in graph_gate_reasons
+                if reason not in final_graph_gate_reasons
+            )
             if repository_required and repository_session is not None:
                 refresh_current, refresh_transient = _partition_recovered_repository_failures(
                     repository_session.refresh_log,
@@ -2731,7 +2746,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "repository_graph_gate_enabled": int(self.require_graph_ready),
                 "repository_graph_gate_blocked": int(graph_gate_blocked),
                 "repository_graph_degraded_fallback": int(graph_degraded_fallback),
-                "repository_graph_gate_failures": list(graph_gate_reasons),
+                "repository_graph_gate_failures": list(final_graph_gate_reasons),
+                "repository_graph_gate_initial_failures": list(graph_gate_reasons),
                 "repository_graph_schema_valid": int(
                     bool(repository_evidence.index and repository_evidence.index.schema_valid)
                 ),
@@ -3231,7 +3247,8 @@ class MiniSweCentralAgent(BaseAgent):
                                 "enabled": bool(self.require_graph_ready),
                                 "blocked": graph_gate_blocked,
                                 "degraded_fallback": graph_degraded_fallback,
-                                "failures": list(graph_gate_reasons),
+                                "failures": list(final_graph_gate_reasons),
+                                "initial_failures": list(graph_gate_reasons),
                             },
                         },
                         "host_execution": host_execution,
