@@ -7,6 +7,23 @@ command before and after host-side execution.
 
 ## What counts as GT working
 
+## Incremental graph lifecycle (2026-08-09)
+
+Repository intelligence is refreshed at the post-action finalization boundary:
+the workspace sensor captures every bounded changed source candidate, the
+shared content-aware resolver classifies it, and the session applies the
+captured transition before the next model request.  Extensionless and
+content-signature sources (including shebang scripts and basename languages)
+must be resolved from captured bytes, not path suffixes alone.  A created or
+modified indexable file is queued for certified incremental indexing; a deleted
+indexable file, or a source that becomes non-source, forces a full rebuild so
+stale graph nodes cannot survive.  Multi-file transitions are all captured
+within the existing file/byte bounds; no arbitrary eight-file suffix may be
+dropped.  Non-source extensionless files may be captured for classification,
+but never advance source revision or enter the graph.  A refresh is complete
+before the next provider request, and a failed/incomplete capture fails closed
+instead of serving stale graph evidence.
+
 Keep these states distinct in every audit:
 
 1. **Receipt:** a FACT or CAP payload was produced at the correct action and

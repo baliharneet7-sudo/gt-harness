@@ -8,6 +8,7 @@ location when the graph cannot prove one.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, replace
@@ -247,7 +248,19 @@ class RepositorySession:
                 self.invalidate(source_revision=source_revision, status="unsafe_mirror_path")
                 return False
             if path in deleted:
-                if is_indexable_source(path):
+                # Content-signature and shebang languages have no reliable
+                # path-only identity.  Resolve the file while its captured
+                # bytes still exist so deletion cannot leave stale nodes in
+                # an otherwise current graph.
+                prior_prefix: bytes = b""
+                try:
+                    if target.is_file() or target.is_symlink():
+                        prior_prefix = target.read_bytes()[:65_536]
+                except OSError:
+                    prior_prefix = b""
+                if is_indexable_source(path, prior_prefix) or not os.path.splitext(
+                    str(path).replace("\\", "/")
+                )[1]:
                     self._requires_full_rebuild = True
                 if target.is_file() or target.is_symlink():
                     target.unlink()
@@ -256,9 +269,25 @@ class RepositorySession:
             if not isinstance(content, str):
                 self.invalidate(source_revision=source_revision, status="mirror_incomplete")
                 return False
+            prior_prefix: bytes = b""
+            try:
+                if target.is_file() or target.is_symlink():
+                    prior_prefix = target.read_bytes()[:65_536]
+            except OSError:
+                prior_prefix = b""
+            was_indexable = is_indexable_source(path, prior_prefix)
+            is_indexable = is_indexable_source(path, content[:65_536])
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            if is_indexable_source(path):
+            # The indexer also resolves extensionless/content-signature files
+            # from bounded content.  The session must use the same evidence
+            # when deciding whether to enqueue an incremental refresh.
+            if was_indexable and not is_indexable:
+                # The incremental binary can update a file, but it cannot
+                # reliably remove a path whose language identity disappeared
+                # without rebuilding closure from the current mirror.
+                self._requires_full_rebuild = True
+            if is_indexable:
                 normalized = str(path).replace("\\", "/")
                 if normalized.startswith(("/etc/nginx/", "/var/log/nginx/")):
                     normalized = "__external__" + normalized

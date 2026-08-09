@@ -2013,6 +2013,11 @@ class MiniSweCentralAgent(BaseAgent):
                             path,
                             kind=(after.entries[path].kind if path in after.entries else "f"),
                             task_deliverables=task_deliverables,
+                            content=(
+                                after.entries[path].content
+                                if path in after.entries
+                                else transition.before_contents.get(path)
+                            ),
                         )
                         for path in transition.changed_paths
                     )
@@ -2082,6 +2087,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 normalized,
                                 kind="f",
                                 task_deliverables=task_deliverables,
+                                content=snapshot.entries[normalized].content,
                             ).validation_relevant
                         )
                     )

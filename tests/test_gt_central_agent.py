@@ -2137,10 +2137,13 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
     assert receipt["completion"]["auto_submit_count"] == 1
     assert receipt["metrics"]["auto_submits"] == 1
     assert receipt["metrics"]["actions"] == 1
-    assert receipt["metrics"]["actual_environment_execs"] == 8
-    assert receipt["metrics"]["effective_actions"] == 7
-    assert receipt["metrics"]["sensor_environment_execs"] == 3
-    assert receipt["metrics"]["controller_environment_execs"] == 7
+    # Extensionless files are captured once so content-signature sources can
+    # be classified and mirrored rather than silently omitted from graph
+    # substrate discovery.
+    assert receipt["metrics"]["actual_environment_execs"] == 10
+    assert receipt["metrics"]["effective_actions"] == 9
+    assert receipt["metrics"]["sensor_environment_execs"] == 5
+    assert receipt["metrics"]["controller_environment_execs"] == 9
     assert receipt["metrics"]["effective_actions_schema"] == "actual-task-environment-execs-v2"
     assert receipt["metrics"]["host_exec_category_counts"]["model_action"] == 1
     assert receipt["metrics"]["host_exec_category_counts"]["completion_probe"] == 2

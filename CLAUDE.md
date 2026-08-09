@@ -15,6 +15,23 @@ first benchmark execution awaits budget approval.
 
 ## GT central runtime: current behavioral truth
 
+### Incremental repository graph (2026-08-09)
+
+The graph is an evolving substrate, not a one-time startup snapshot.  After
+each finalized workspace action, the sensor captures all bounded changed-file
+content, including extensionless/content-signature sources; classification and
+indexing use the same resolver evidence.  Creates and modifications enter the
+certified incremental index before the next model call.  Deletions and
+source-to-data transitions force a full rebuild to remove stale nodes.  The
+existing hash/file/byte limits remain the bound, but there is no arbitrary
+eight-file truncation that can make a multi-file transition incomplete.
+
+Unknown or non-source files are allowed to be captured for deterministic
+classification and are excluded from source revision and graph facts.  A
+missing capture or failed refresh is fail-closed; GT must never present a
+previous graph as current.  This lifecycle is the contract for all supported
+languages and basename/shebang forms.
+
 The active benchmark path is a host-owned engine in
 `eval/gt_central_agent.py`, not the legacy installed inline runtime. It owns
 the model/action loop, observes every execution transition, and keeps GT code,

@@ -950,13 +950,45 @@ async def test_sensor_discovers_bounded_extensionless_shebang_source():
     snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app")
 
     assert snapshot.healthy is True
-    assert snapshot.entries["run-script"].content is None
+    assert snapshot.entries["run-script"].content == source
 
     snapshot = await WorkspaceSensor().scan(
         Environment(), cwd="/app", shebang_paths=("run-script",)
     )
 
     assert snapshot.entries["run-script"].content == source
+
+
+@pytest.mark.asyncio
+async def test_sensor_captures_all_extensionless_sources_in_one_action():
+    import base64
+    import json
+
+    source = "#!/bin/sh\necho ok\n"
+    encoded = base64.b64encode(source.encode()).decode()
+    paths = tuple(f"run-{index}" for index in range(9))
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if "find . -xdev" in command:
+                return Result(
+                    "".join(f"f\t{len(source)}\t2.0\t2.0\t{path}\t\n" for path in paths)
+                )
+            if command.startswith("sha256sum"):
+                return Result("".join(("d" * 64) + f"  {path}\n" for path in paths))
+            if command.startswith("python3 -c"):
+                return Result(json.dumps({path: encoded for path in paths}) + "\n")
+            raise AssertionError(command)
+
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app")
+
+    assert snapshot.healthy is True
+    assert all(snapshot.entries[path].content == source for path in paths)
 
 
 @pytest.mark.asyncio

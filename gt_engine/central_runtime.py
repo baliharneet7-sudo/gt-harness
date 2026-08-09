@@ -11,6 +11,7 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import re
 import shlex
 import time
@@ -146,6 +147,18 @@ _BACKGROUND_ARTIFACT_NAMES = frozenset(
 )
 _DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
+
+
+def _may_be_content_signature_source(path: str) -> bool:
+    """Keep extensionless files eligible for bounded source capture.
+
+    Language identity for shebang and other content-signature sources cannot
+    be known from a manifest path.  Capturing the bounded prefix lets the
+    shared resolver classify the file deterministically; non-source files are
+    then excluded by ``classify_change`` and never advance source revision.
+    """
+
+    return not os.path.splitext(path.replace("\\", "/"))[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1209,6 +1222,7 @@ class WorkspaceSensor:
                     is_validation_source(path)
                     or _workspace_relative_path(path) in tracked
                     or _workspace_relative_path(path) in shebang_candidates
+                    or _may_be_content_signature_source(path)
                 )
                 and state.size <= _MAX_SOURCE_CAPTURE_BYTES
             ]
@@ -1229,6 +1243,7 @@ class WorkspaceSensor:
                     is_validation_source(path)
                     or _workspace_relative_path(path) in tracked
                     or _workspace_relative_path(path) in shebang_candidates
+                    or _may_be_content_signature_source(path)
                 )
                 and (
                     previous.entries.get(path) is None
@@ -1285,9 +1300,14 @@ class WorkspaceSensor:
             if (
                 is_validation_source(path)
                 or _workspace_relative_path(path) in shebang_candidates
+                or _may_be_content_signature_source(path)
             )
             and entries[path].size <= _MAX_SOURCE_CAPTURE_BYTES
-        ][:8]
+        ]
+        # ``changed`` is already bounded by max_hashes and max_hash_bytes.
+        # Do not apply a second eight-file cap here: dropping the suffix of a
+        # multi-file action would make the mirror incomplete and prevent the
+        # graph from representing files created in the same finalizing action.
         if capture_paths:
             script = (
                 "import base64,json,pathlib,sys;"

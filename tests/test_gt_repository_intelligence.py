@@ -189,6 +189,112 @@ def test_repository_session_recovers_when_source_is_created_after_initial_empty_
     assert graph_gate_failures(recovered) == ()
 
 
+def test_repository_session_incrementally_indexes_content_signature_source(
+    tmp_path: Path,
+):
+    """A shebang-only source must enter the incremental graph after creation."""
+    mirror = tmp_path / "mirror"
+    state = tmp_path / "state"
+    mirror.mkdir()
+    (mirror / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    session = RepositorySession(
+        root=mirror,
+        state_dir=state,
+        instruction="Update the command-line tool.",
+    )
+
+    initial = session.refresh(source_revision="s1")
+    assert initial.substrate_ready is True
+    first_graph_revision = initial.graph_revision
+
+    tool = "#!/bin/sh\necho ready\n"
+    transition = SimpleNamespace(
+        changed_paths=("tool",),
+        deleted=(),
+        after_contents={"tool": tool},
+        sensor_healthy=True,
+    )
+    assert session.apply_transition(transition, source_revision="s2") is True
+    updated = session.refresh(source_revision="s2")
+
+    assert updated.substrate_ready is True
+    assert updated.graph_revision != first_graph_revision
+    assert session.refresh_log[-1]["mode"] == "incremental"
+    assert updated.index is not None
+    manifest = json.loads(Path(updated.index.graph_db).with_suffix(".manifest.json").read_text())
+    assert manifest["refresh_mode"] == "incremental"
+    assert manifest["changed_paths"] == ["tool"]
+    assert dict(updated.index.language_file_counts).get("shell") == 1
+
+
+def test_repository_session_rebuilds_after_content_signature_source_deletion(
+    tmp_path: Path,
+):
+    """Deleting an extensionless source must not leave stale graph nodes."""
+    mirror = tmp_path / "mirror"
+    state = tmp_path / "state"
+    mirror.mkdir()
+    (mirror / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (mirror / "tool").write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    session = RepositorySession(
+        root=mirror,
+        state_dir=state,
+        instruction="Remove the command-line tool.",
+    )
+
+    initial = session.refresh(source_revision="s1")
+    assert initial.substrate_ready is True
+    assert dict(initial.index.language_file_counts).get("shell") == 1
+    initial_graph_revision = initial.graph_revision
+
+    transition = SimpleNamespace(
+        changed_paths=("tool",),
+        deleted=("tool",),
+        after_contents={},
+        sensor_healthy=True,
+    )
+    assert session.apply_transition(transition, source_revision="s2") is True
+    updated = session.refresh(source_revision="s2")
+
+    assert updated.substrate_ready is True
+    assert updated.graph_revision != initial_graph_revision
+    assert session.refresh_log[-1]["mode"] == "full"
+    assert dict(updated.index.language_file_counts).get("shell", 0) == 0
+
+
+def test_repository_session_rebuilds_when_content_signature_source_becomes_data(
+    tmp_path: Path,
+):
+    """A source-to-data edit must remove its old graph nodes."""
+    mirror = tmp_path / "mirror"
+    state = tmp_path / "state"
+    mirror.mkdir()
+    (mirror / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (mirror / "tool").write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    session = RepositorySession(
+        root=mirror,
+        state_dir=state,
+        instruction="Replace the command-line tool with data.",
+    )
+
+    initial = session.refresh(source_revision="s1")
+    assert initial.substrate_ready is True
+    assert dict(initial.index.language_file_counts).get("shell") == 1
+
+    transition = SimpleNamespace(
+        changed_paths=("tool",),
+        deleted=(),
+        after_contents={"tool": "plain task data\n"},
+        sensor_healthy=True,
+    )
+    assert session.apply_transition(transition, source_revision="s2") is True
+    updated = session.refresh(source_revision="s2")
+
+    assert updated.substrate_ready is True
+    assert session.refresh_log[-1]["mode"] == "full"
+    assert dict(updated.index.language_file_counts).get("shell", 0) == 0
+
+
 def test_repository_session_invalidates_when_changed_source_was_not_captured(tmp_path: Path):
     mirror = tmp_path / "mirror"
     mirror.mkdir()
