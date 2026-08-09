@@ -112,12 +112,11 @@ The provider-free workflow and pre-smoke suite now cover semantic revision, prov
 
 ## Remaining gate
 
-1. Review every changed function and serialized receipt field.
-2. Commit and push tracked repair files only. Do not add local research, artifacts, graph databases, binaries, account data, or secrets.
-3. Run central_pre_smoke_gate.py at the exact pushed commit and require SMOKE_APPROVED.
-4. Dispatch only the ten-task certified_full/integrated GT-on smoke: ACTIVE integration, SHADOW preflight, exact replay capture, graph required, and completion/progress controls. Reuse the frozen GT-off baseline in Downloads.
-5. Audit official and uncensored outcomes first, then graph completeness, all effect and provider-evidence dispositions, actual dispatch counters, timing, duplication, payload semantics, and common-solved deltas.
-6. Keep 89 blocked unless the ten-task smoke has no solve regression/censor, valid graph for every applicable task, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.
+The repair was committed and pushed on `inline-engine`. The exact pushed-commit gate passed every subcheck and printed `SMOKE_APPROVED`; no paid smoke was started as part of this implementation audit.
+
+1. Dispatch only the ten-task certified_full/integrated GT-on smoke: ACTIVE integration, SHADOW preflight, exact replay capture, graph required, and completion/progress controls. Reuse the frozen GT-off baseline in Downloads.
+2. Audit official and uncensored outcomes first, then graph completeness, all effect and provider-evidence dispositions, actual dispatch counters, timing, duplication, payload semantics, and common-solved deltas.
+3. Keep 89 blocked unless the ten-task smoke has no solve regression/censor, valid graph for every applicable task, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.
 
 ## Rollback
 
