@@ -33,6 +33,18 @@ def test_source_less_repository_is_explicitly_not_applicable():
     )
 
 
+def test_source_backed_graph_failure_remains_a_hard_gate():
+    evidence = RepositoryEvidence(
+        status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+        source_revision="source-r1",
+        substrate_status=RepositorySubstrateStatus.UNAVAILABLE.value,
+    )
+
+    failures = graph_gate_failures(evidence)
+
+    assert "index_unavailable" in failures
+    assert "repository_intelligence_invalid" in failures
+
 def test_source_backed_empty_retrieval_remains_applicable():
     evidence = RepositoryEvidence(
         status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,

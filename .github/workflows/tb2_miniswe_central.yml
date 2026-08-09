@@ -538,6 +538,10 @@ jobs:
                       "censored": metrics.get("censored"),
                       "censored_reason": metrics.get("censored_reason"),
                       "repository_intelligence_status": intelligence.get("status"),
+                      "repository_intelligence_applicability": intelligence.get("applicability"),
+                      "repository_intelligence_denominator_excluded": bool(
+                          intelligence.get("denominator_excluded")
+                      ),
                       "repository_intelligence_required": intelligence.get("required"),
                       "repository_intelligence_failures": intelligence.get("failures") or [],
                       "repository_intelligence_transient_failures": (
@@ -597,6 +601,7 @@ jobs:
               row["task"]
               for row in receipt_metrics
               if row["repository_intelligence_required"]
+              and not row["repository_intelligence_denominator_excluded"]
               and (
                   row["repository_intelligence_status"] != "passed"
                   or row["repository_graph_degraded_fallback"]

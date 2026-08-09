@@ -1165,6 +1165,11 @@ class MiniSweCentralAgent(BaseAgent):
             self._features.suppress_task_start_delivery()
         terminal = ""
         solver_exhausted_reason = ""
+        repository_applicability = classify_repository_applicability(repository_evidence)
+        source_less_task = (
+            repository_applicability
+            == "not_applicable_no_supported_source"
+        )
         graph_gate_reasons = (
             graph_gate_failures(repository_evidence)
             if (
@@ -1172,6 +1177,7 @@ class MiniSweCentralAgent(BaseAgent):
                 and self.integration_mode is GTIntegrationMode.ACTIVE
                 and self.runtime_mode == "treatment"
                 and self.enable_repository_intelligence
+                and not source_less_task
             )
             else ()
         )
@@ -2649,11 +2655,23 @@ class MiniSweCentralAgent(BaseAgent):
                 and self.integration_mode is GTIntegrationMode.ACTIVE
                 and self.runtime_mode == "treatment"
             )
-            frontier_required = bool(repository_required and self.enable_context_frontier)
             repository_applicability = classify_repository_applicability(repository_evidence)
+            source_less_task = (
+                repository_applicability
+                == "not_applicable_no_supported_source"
+            )
+            frontier_required = bool(
+                repository_required
+                and self.enable_context_frontier
+                and not source_less_task
+            )
             intelligence_failures: list[str] = []
             transient_intelligence_failures: list[str] = []
-            if repository_required and not repository_evidence.substrate_ready:
+            if (
+                repository_required
+                and not source_less_task
+                and not repository_evidence.substrate_ready
+            ):
                 intelligence_failures.append(
                     repository_evidence.status or "repository_intelligence_invalid"
                 )
@@ -2664,6 +2682,7 @@ class MiniSweCentralAgent(BaseAgent):
                     and self.integration_mode is GTIntegrationMode.ACTIVE
                     and self.runtime_mode == "treatment"
                     and self.enable_repository_intelligence
+                    and not source_less_task
                 )
                 else ()
             )
@@ -2677,7 +2696,7 @@ class MiniSweCentralAgent(BaseAgent):
                 for reason in graph_gate_reasons
                 if reason not in final_graph_gate_reasons
             )
-            if repository_required and repository_session is not None:
+            if repository_required and repository_session is not None and not source_less_task:
                 refresh_current, refresh_transient = _partition_recovered_repository_failures(
                     repository_session.refresh_log,
                     current_source_revision=str(

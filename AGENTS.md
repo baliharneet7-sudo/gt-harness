@@ -7,6 +7,20 @@ command before and after host-side execution.
 
 ## What counts as GT working
 
+### Graph applicability boundary (2026-08-09)
+
+`require_graph_ready=true` is a fail-closed gate for a task that contains
+supported, source-backed files.  A task containing only data/model artifacts,
+task outputs, documentation, or other non-indexable files is explicitly
+`not_applicable_no_supported_source`: GT must not fabricate a graph, must not
+emit repository facts, and must exclude that task from the repository-
+intelligence denominator.  This legitimate abstention is not a degraded
+fallback or an invalid treatment.  Any source-backed task with a missing,
+stale, schema-invalid, incomplete, or unavailable graph remains a real
+substrate failure and invalidates the treatment.  The workflow merge gate
+must use the recorded applicability/denominator flag rather than treating
+every non-`passed` status as a graph failure.
+
 ## Incremental graph lifecycle (2026-08-09)
 
 Repository intelligence is refreshed at the post-action finalization boundary:

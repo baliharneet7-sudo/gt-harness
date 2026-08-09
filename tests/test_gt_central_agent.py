@@ -431,7 +431,7 @@ async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request
 
 
 @pytest.mark.asyncio
-async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_idle(
+async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     tmp_path,
 ):
     class TransferEnvironment(_Environment):
@@ -453,11 +453,12 @@ async def test_active_code_task_with_unavailable_graph_is_invalid_not_silently_i
     assert intelligence["status"] == "not_applicable"
     assert intelligence["applicability"] == "not_applicable_no_supported_source"
     assert intelligence["denominator_excluded"] is True
-    assert "no_supported_source" in intelligence["failures"]
+    assert intelligence["failures"] == []
+    assert intelligence["graph_gate"]["failures"] == []
     assert intelligence["frontier_deliveries"] == []
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
-    assert receipt["metrics"]["context_frontier_zero_tasks"] == 1
+    assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
 
 
 @pytest.mark.asyncio
@@ -484,8 +485,8 @@ async def test_task_graph_failure_degrades_but_preserves_provider_loop(tmp_path)
     assert receipt["calls"] == 1
     assert receipt["metrics"]["repository_graph_gate_enabled"] == 1
     assert receipt["metrics"]["repository_graph_gate_blocked"] == 0
-    assert receipt["metrics"]["repository_graph_degraded_fallback"] == 1
-    assert "no_supported_source" in receipt["metrics"]["repository_graph_gate_failures"]
+    assert receipt["metrics"]["repository_graph_degraded_fallback"] == 0
+    assert receipt["metrics"]["repository_graph_gate_failures"] == []
     assert receipt["metrics"]["api_calls"] == 1
 
 

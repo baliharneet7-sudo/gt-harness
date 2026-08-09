@@ -15,6 +15,19 @@ first benchmark execution awaits budget approval.
 
 ## GT central runtime: current behavioral truth
 
+### Graph applicability boundary (2026-08-09)
+
+The graph gate applies to source-backed tasks. If a task has no supported
+source files after artifact/deliverable exclusion (for example, a model
+checkpoint plus a vocabulary file), the engine records
+`not_applicable_no_supported_source`, emits no graph facts, and excludes the
+task from the repository-intelligence denominator. That is a correct
+deterministic abstention, not a degraded fallback or invalid treatment. A
+source-backed task whose graph is missing, stale, schema-invalid, incomplete,
+or unavailable remains a hard treatment failure. Workflow acceptance must
+honor the receipt's applicability/denominator flag instead of invalidating
+every non-`passed` status.
+
 ### Incremental repository graph (2026-08-09)
 
 The graph is an evolving substrate, not a one-time startup snapshot.  After
