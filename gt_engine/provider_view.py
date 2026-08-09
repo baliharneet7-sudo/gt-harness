@@ -179,6 +179,7 @@ class ProviderViewSession:
     stable_prefix_hash: str = ""
     source_revision: str = ""
     receipts: list[CompactionEpochReceipt] = field(default_factory=list)
+    delivered_state_fact_ids: set[str] = field(default_factory=set)
 
     @staticmethod
     def _hash(messages: list[dict[str, Any]]) -> str:
@@ -198,6 +199,7 @@ class ProviderViewSession:
         self.source_prefix_hash = ""
         self.stable_prefix_hash = ""
         self.source_revision = ""
+        self.delivered_state_fact_ids.clear()
 
     def project(
         self,
@@ -244,7 +246,12 @@ class ProviderViewSession:
         }
         view = [*copy.deepcopy(self.checkpoint_messages), *tail]
         facts, duplicate_fact_count = _context_facts(active_state)
-        state_text, selected_ids, compiled_rows = _compile_fact_frame(facts, view)
+        state_text, selected_ids, compiled_rows = _compile_fact_frame(
+            facts,
+            view,
+            restoration_source_messages=messages,
+            suppressed_fact_ids=self.delivered_state_fact_ids,
+        )
         candidate_view, state_frame_message_index = _attach_state_frame(view, state_text)
         state_frame_over_budget = bool(
             state_frame_message_index is not None
@@ -254,6 +261,8 @@ class ProviderViewSession:
             state_frame_message_index = None
         else:
             view = candidate_view
+            if state_frame_message_index is not None:
+                self.delivered_state_fact_ids.update(selected_ids)
         accounting = tuple(
             {
                 **row,
@@ -999,7 +1008,11 @@ def _render_state_value(key: str, value: Any) -> str:
 
 
 _CONTROLLER_ONLY_FACT_KINDS = frozenset(
-    {ContextFactKind.REVISION, ContextFactKind.STRUCTURAL}
+    {
+        ContextFactKind.REVISION,
+        ContextFactKind.STRUCTURAL,
+        ContextFactKind.DECISION,
+    }
 )
 _FACT_PRIORITY = {
     ContextFactKind.FAILURE: 0,
@@ -1231,6 +1244,8 @@ def _compile_fact_frame(
     messages: list[dict[str, Any]],
     *,
     limit: int = 4_000,
+    restoration_source_messages: list[dict[str, Any]] | None = None,
+    suppressed_fact_ids: set[str] | frozenset[str] | None = None,
 ) -> tuple[str, tuple[str, ...], list[dict[str, Any]]]:
     """Select only current facts absent from the concrete provider request."""
 
@@ -1256,6 +1271,13 @@ def _compile_fact_frame(
             indices = _fact_representation_indices(fact, messages)
             if indices:
                 disposition = "represented_message"
+            elif fact.fact_id in (suppressed_fact_ids or ()):
+                disposition = "controller_only_already_delivered"
+            elif (
+                restoration_source_messages is not None
+                and not _fact_representation_indices(fact, restoration_source_messages)
+            ):
+                disposition = "controller_only_not_removed"
             else:
                 line = _render_fact(fact)
                 if line and len("\n".join((*lines, line))) <= limit:
@@ -1339,7 +1361,9 @@ def _provider_metrics(
         candidate_fact_count=len(accounting),
         selected_fact_count=dispositions.count("selected_state_frame"),
         represented_fact_count=dispositions.count("represented_message"),
-        controller_only_fact_count=dispositions.count("controller_only"),
+        controller_only_fact_count=sum(
+            disposition.startswith("controller_only") for disposition in dispositions
+        ),
         omitted_fact_count=sum(
             disposition
             not in {"selected_state_frame", "represented_message"}
@@ -1459,7 +1483,11 @@ def build_provider_view(
             target_chars=max(1, int(target_chars)),
             keep_recent_turns=keep_recent_turns,
         )
-    state_text, selected_fact_ids, compiled_rows = _compile_fact_frame(facts, view)
+    state_text, selected_fact_ids, compiled_rows = _compile_fact_frame(
+        facts,
+        view,
+        restoration_source_messages=messages,
+    )
     state_frame_message_index: int | None = None
     state_frame_over_budget = False
     if cleared and state_text and attach_state_frame:

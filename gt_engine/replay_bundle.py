@@ -11,6 +11,7 @@ unidentifiable.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -59,7 +60,13 @@ def _response_projection(response: Any) -> dict[str, Any]:
 
 
 class ReplayBundleWriter:
-    """Write one bounded replay artifact without changing runtime behavior."""
+    """Write an exact content-addressed replay bundle.
+
+    Requests and responses are stored once by canonical SHA-256.  Per-call
+    rows contain only ordered references, so long tasks cannot become
+    unreplayable because one monolithic JSON document crossed an arbitrary
+    character or byte cap.
+    """
 
     def __init__(
         self,
@@ -71,11 +78,19 @@ class ReplayBundleWriter:
     ) -> None:
         self.path = path
         self.enabled = bool(enabled)
+        # Retained as constructor compatibility and reported for audits; v2
+        # does not truncate exact replay data at either legacy threshold.
         self.max_call_chars = max(1_000, int(max_call_chars))
         self.max_bundle_bytes = max(10_000, int(max_bundle_bytes))
         self._calls: dict[int, dict[str, Any]] = {}
         self._complete = self.enabled
-        self._bytes_estimate = 0
+        self._blobs: dict[str, bytes] = {}
+
+    def _blob(self, value: Any) -> str:
+        body = _canonical(value)
+        digest = hashlib.sha256(body).hexdigest()
+        self._blobs.setdefault(digest, body)
+        return digest
 
     def record_request(
         self,
@@ -94,6 +109,7 @@ class ReplayBundleWriter:
         if not self.enabled:
             return
         body = _canonical(provider_messages)
+        request_blob = self._blob(provider_messages)
         row: dict[str, Any] = {
             "call": int(call),
             "request_payload_sha256": str(request_payload_sha256),
@@ -105,20 +121,26 @@ class ReplayBundleWriter:
             "source_revision": str(source_revision),
             "workspace_revision": str(workspace_revision),
             "controller_state": active_state,
-            "request_captured": False,
+            "request_blob_sha256": request_blob,
+            "request_captured": True,
             "response_captured": False,
+            "dispatch_status": "prepared",
         }
-        if len(body) > self.max_call_chars or (
-            self._bytes_estimate + len(body) > self.max_bundle_bytes
-        ):
-            self._complete = False
-            row["request_omitted"] = True
-            row["request_sha256"] = hashlib.sha256(body).hexdigest()
-        else:
-            row["provider_messages"] = provider_messages
-            row["request_captured"] = True
-            self._bytes_estimate += len(body)
         self._calls[int(call)] = row
+
+    def record_invocation(self, *, call: int) -> None:
+        if not self.enabled:
+            return
+        self._calls.setdefault(int(call), {"call": int(call)})[
+            "dispatch_status"
+        ] = "invoked"
+
+    def record_not_sent(self, *, call: int, reason: str) -> None:
+        if not self.enabled:
+            return
+        row = self._calls.setdefault(int(call), {"call": int(call)})
+        row["dispatch_status"] = "prepared_not_sent"
+        row["not_sent_reason"] = str(reason)
 
     def record_response(self, *, call: int, response: Any) -> None:
         if not self.enabled:
@@ -127,21 +149,16 @@ class ReplayBundleWriter:
         projected = _response_projection(response)
         body = _canonical(projected)
         row["response_sha256"] = hashlib.sha256(body).hexdigest()
-        if len(body) > self.max_call_chars or (
-            self._bytes_estimate + len(body) > self.max_bundle_bytes
-        ):
-            self._complete = False
-            row["response_omitted"] = True
-        else:
-            row["response"] = projected
-            row["response_captured"] = True
-            self._bytes_estimate += len(body)
+        row["response_blob_sha256"] = self._blob(projected)
+        row["response_captured"] = True
+        row["dispatch_status"] = "response_received"
 
     def record_error(self, *, call: int, error_type: str) -> None:
         if not self.enabled:
             return
         row = self._calls.setdefault(int(call), {"call": int(call)})
         row["response_error"] = str(error_type)
+        row["dispatch_status"] = "response_error"
         self._complete = False
 
     def finalize(self) -> dict[str, Any]:
@@ -157,25 +174,97 @@ class ReplayBundleWriter:
             ),
             "responses_captured": bool(
                 self.enabled
-                and self._calls
-                and all(row.get("response_captured") for row in self._calls.values())
+                and all(
+                    row.get("response_captured")
+                    for row in self._calls.values()
+                    if row.get("dispatch_status") != "prepared_not_sent"
+                )
             ),
             "trajectory_replay_ready": bool(
                 self.enabled
                 and self._complete
                 and self._calls
                 and all(row.get("request_captured") for row in self._calls.values())
-                and all(row.get("response_captured") for row in self._calls.values())
+                and all(
+                    row.get("response_captured")
+                    for row in self._calls.values()
+                    if row.get("dispatch_status") != "prepared_not_sent"
+                )
             ),
             "model_causal_replay_ready": False,
+            "blob_count": len(self._blobs),
         }
         if not self.enabled:
             return metadata
-        payload = {
-            "schema": "gt.counterfactual_replay_bundle.v1",
+        self.path.mkdir(parents=True, exist_ok=True)
+        blobs_dir = self.path / "blobs"
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        for digest, body in self._blobs.items():
+            target = blobs_dir / f"{digest}.json.gz"
+            if not target.exists():
+                target.write_bytes(gzip.compress(body, mtime=0))
+        calls_body = b"".join(
+            _canonical(self._calls[key]) + b"\n" for key in sorted(self._calls)
+        )
+        calls_path = self.path / "calls.jsonl"
+        calls_path.write_bytes(calls_body)
+        metadata["calls_sha256"] = hashlib.sha256(calls_body).hexdigest()
+        manifest = {
+            "schema": "gt.counterfactual_replay_bundle.v2",
             "metadata": metadata,
-            "calls": [self._calls[key] for key in sorted(self._calls)],
         }
-        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        metadata["sha256"] = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        manifest_path = self.path / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        metadata["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         return metadata
+
+
+def load_replay_bundle(path: str | Path) -> dict[str, Any]:
+    """Load and cryptographically verify an exact v2 replay bundle."""
+
+    root = Path(path)
+    manifest_path = root / "manifest.json"
+    calls_path = root / "calls.jsonl"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        calls_body = calls_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise ValueError("replay manifest unreadable") from exc
+    if manifest.get("schema") != "gt.counterfactual_replay_bundle.v2":
+        raise ValueError("replay schema mismatch")
+    metadata = manifest.get("metadata") or {}
+    if hashlib.sha256(calls_body).hexdigest() != metadata.get("calls_sha256"):
+        raise ValueError("replay calls hash mismatch")
+    calls: list[dict[str, Any]] = []
+    for raw in calls_body.splitlines():
+        try:
+            row = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("replay call row invalid") from exc
+        for field, output_key in (
+            ("request_blob_sha256", "provider_messages"),
+            ("response_blob_sha256", "response"),
+        ):
+            digest = str(row.get(field) or "")
+            if not digest:
+                continue
+            blob_path = root / "blobs" / f"{digest}.json.gz"
+            try:
+                body = gzip.decompress(blob_path.read_bytes())
+            except (OSError, EOFError, gzip.BadGzipFile) as exc:
+                raise ValueError("replay blob unreadable") from exc
+            if hashlib.sha256(body).hexdigest() != digest:
+                raise ValueError("replay blob hash mismatch")
+            try:
+                row[output_key] = json.loads(body)
+            except ValueError as exc:
+                raise ValueError("replay blob JSON invalid") from exc
+        calls.append(row)
+    if [int(row.get("call") or 0) for row in calls] != sorted(
+        int(row.get("call") or 0) for row in calls
+    ):
+        raise ValueError("replay call order invalid")
+    return {"manifest": manifest, "calls": calls}
+
+
+__all__ = ["ReplayBundleWriter", "load_replay_bundle"]

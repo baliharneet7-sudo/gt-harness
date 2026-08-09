@@ -79,7 +79,7 @@ def test_provider_view_session_reuses_an_immutable_compacted_prefix():
     assert projected[-1]["content"] == "D" * 100
 
 
-def test_provider_view_session_refreshes_current_frame_without_mutating_checkpoint():
+def test_provider_view_session_does_not_inject_unrepresented_current_failure():
     messages = _history(
         ("cat old.py", "A" * 30_000),
         ("cat current.py", "B" * 30_000),
@@ -113,11 +113,11 @@ def test_provider_view_session_refreshes_current_frame_without_mutating_checkpoi
     }
     second, second_metrics = session.project(messages, active_state=second_state)
 
-    assert first_metrics.selected_fact_count == 1
-    assert "FAILED first_contract" in str(first[first_metrics.state_frame_message_index])
-    assert second_metrics.selected_fact_count == 1
-    assert "FAILED second_contract" in str(second[second_metrics.state_frame_message_index])
-    assert "FAILED first_contract" not in "\n".join(
+    assert first_metrics.selected_fact_count == 0
+    assert first_metrics.state_frame_message_index is None
+    assert second_metrics.selected_fact_count == 0
+    assert second_metrics.state_frame_message_index is None
+    assert "FAILED second_contract" not in "\n".join(
         str(item.get("content") or "") for item in second
     )
     assert session.checkpoint_messages == checkpoint
@@ -325,11 +325,11 @@ def test_compiler_emits_missing_current_failure_but_not_private_revisions():
     assert "FAILED tests/test_app.py::test_contract" not in joined
     failure = next(row for row in metrics.fact_accounting if row["kind"] == "failure")
     revisions = [row for row in metrics.fact_accounting if row["kind"] == "revision"]
-    assert failure["disposition"] == "no_compaction_controller_only"
+    assert failure["disposition"] == "controller_only_not_removed"
     assert failure["provider_message_indices"] == []
     assert all(row["disposition"] == "controller_only" for row in revisions)
     assert metrics.selected_fact_count == 0
-    assert metrics.controller_only_fact_count == 2
+    assert metrics.controller_only_fact_count == 3
     assert metrics.accounted_fact_count == metrics.candidate_fact_count
 
 
@@ -391,10 +391,12 @@ def test_tool_clearing_keeps_controller_state_private_and_never_deletes_reasonin
 
     assert metrics.compacted is True
     joined = " ".join(str(m.get("content") or "") for m in view)
-    # Current state is retained once old tool bodies are cleared.
-    assert "Latest source edit" in joined
-    assert "Files already read" in joined
+    # Unrepresented controller state stays private; compaction restores only
+    # concrete facts whose old provider representation it removed.
+    assert "Latest source edit" not in joined
+    assert "Files already read" not in joined
     assert "rerun the command" not in joined.lower()
+    assert metrics.selected_fact_count == 0
     assert metrics.old_tool_results_cleared > 0
     assert metrics.unique_assistant_reasoning_chars_removed == 0
     assert metrics.accounted_fact_count == metrics.candidate_fact_count
@@ -514,7 +516,10 @@ def test_active_state_budget_accounts_validation_and_failure_without_ephemeral_f
 
 def test_compaction_retains_missing_current_failure_in_latest_tool_observation():
     messages = _history(
-        ("cat old.py", "old output" * 200),
+        (
+            "pytest -q",
+            "FAILED tests/test_app.py::test_contract\n" + "old output" * 200,
+        ),
         ("cat current.py", "current output" * 200),
         ("cat third.py", "third output" * 200),
         ("cat fourth.py", "fourth output" * 200),
@@ -546,6 +551,50 @@ def test_compaction_retains_missing_current_failure_in_latest_tool_observation()
         row for row in metrics.fact_accounting if row["disposition"] == "selected_state_frame"
     )
     assert selected["provider_message_indices"] == [metrics.state_frame_message_index]
+
+
+def test_compaction_restoration_is_not_repeated_on_the_adjacent_provider_call():
+    messages = _history(
+        (
+            "pytest -q",
+            "FAILED tests/test_app.py::test_contract\n" + "old output" * 200,
+        ),
+        ("cat current.py", "current output" * 200),
+        ("cat third.py", "third output" * 200),
+        ("cat fourth.py", "fourth output" * 200),
+    )
+    state = {
+        "source_revision": "s9",
+        "unresolved_failure": {
+            "command": "pytest -q",
+            "diagnostic": "FAILED tests/test_app.py::test_contract",
+            "source_revision": "s9",
+        },
+    }
+    session = ProviderViewSession()
+
+    first, first_metrics = session.compact(
+        messages,
+        active_state=state,
+        target_chars=100,
+        keep_recent_turns=2,
+        trigger_tokens=10_000,
+    )
+    second, second_metrics = session.project(messages, active_state=state)
+
+    assert first_metrics.selected_fact_count == 1
+    assert "FAILED tests/test_app.py::test_contract" in "\n".join(
+        str(item.get("content") or "") for item in first
+    )
+    assert second_metrics.selected_fact_count == 0
+    assert second_metrics.active_state_chars == 0
+    assert "FAILED tests/test_app.py::test_contract" not in "\n".join(
+        str(item.get("content") or "") for item in second
+    )
+    assert any(
+        row["disposition"] == "controller_only_already_delivered"
+        for row in second_metrics.fact_accounting
+    )
 
 
 def test_compaction_never_removes_distinct_assistant_reasoning():

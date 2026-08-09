@@ -305,6 +305,44 @@ def test_newfile_precedent_ranks_semantically_related_nonempty_sibling():
     assert row["payload"]["precedent_path"] == "task_file/scripts/baseline_packer.py"
 
 
+def test_newfile_precedent_never_uses_a_model_created_sibling_as_repository_precedent():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Implement",
+        revision=WR0,
+        source_revision=SR0,
+        initial_source_paths=("work/original.c",),
+    )
+    runtime.observe_action(
+        action_id=2,
+        command="write work/decsim2.c",
+        output="",
+        returncode=0,
+        transition=_transition(
+            2,
+            "write work/decsim2.c",
+            WR0,
+            SR1,
+            created=("work/decsim2.c",),
+            before_contents={
+                "work/original.c": "int original(void) { return 0; }\n",
+                "work/decsim.c": "int generated(void) { return 1; }\n",
+            },
+            after_contents={
+                "work/decsim2.c": "int generated2(void) { return 2; }\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 2, 1)
+
+    rows = _feature_rows(runtime.summary(), "newfile_precedent")
+    assert rows
+    assert rows[0]["payload"]["precedent_path"] == "work/original.c"
+    assert rows[0]["payload"]["precedent_origin"] == "task_start_repository"
+
+
 def test_newfile_precedent_abstains_when_only_sibling_is_empty_package_marker():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)

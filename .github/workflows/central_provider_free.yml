@@ -79,6 +79,8 @@ jobs:
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
             tests/test_gt_deep_metrics.py \
+            tests/test_gt_progress.py \
+            tests/test_provider_evidence.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py \
             tests/test_replay_bundle.py -q
@@ -94,6 +96,7 @@ jobs:
           python -m ruff check gt_engine/central_runtime.py \
             gt_engine/central_controls.py \
             gt_engine/preflight.py gt_engine/provider_view.py \
+            gt_engine/provider_evidence.py gt_engine/progress.py \
             gt_engine/host_execution.py gt_engine/context_frontier.py \
             gt_engine/language_registry.py gt_engine/repository_intelligence.py \
             gt_engine/repository_mirror.py gt_engine/graph_evidence.py \
@@ -114,6 +117,7 @@ jobs:
             tests/test_gt_central_agent.py \
             tests/test_gt_uplift_policy.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
+            tests/test_provider_evidence.py tests/test_gt_progress.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
             tests/test_gt_repository_mirror.py \

@@ -1,6 +1,8 @@
 """Deterministic progress-state tracking for early stall detection."""
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 
@@ -11,6 +13,103 @@ class ProgressTransition:
     reason: str
     streak: int
     signature: str
+
+
+@dataclass(frozen=True, slots=True)
+class StallAggregateFact:
+    """Bounded deterministic description of an observed no-progress cycle."""
+
+    fact_id: str
+    state: str
+    repeated_operation: str
+    concrete_targets: tuple[str, ...]
+    repeat_count: int
+    last_returncode: int | None
+    timeout_observed: bool
+    source_revision: str
+    remaining_calls: int
+    remaining_seconds: float | None
+    unresolved_anchors: tuple[str, ...]
+    evidence_action: int
+    eligible_call: int
+
+    @staticmethod
+    def _bounded(values: tuple[str, ...], *, count: int = 2, chars: int = 72) -> tuple[str, ...]:
+        return tuple(" ".join(str(value).split())[:chars] for value in values[:count] if value)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        state: str,
+        repeated_operation: str,
+        concrete_targets: tuple[str, ...],
+        repeat_count: int,
+        last_returncode: int | None,
+        timeout_observed: bool,
+        source_revision: str,
+        remaining_calls: int,
+        remaining_seconds: float | None,
+        unresolved_anchors: tuple[str, ...],
+        evidence_action: int,
+        eligible_call: int,
+    ) -> StallAggregateFact:
+        targets = cls._bounded(concrete_targets)
+        anchors = cls._bounded(unresolved_anchors)
+        material = json.dumps(
+            [
+                state,
+                repeated_operation,
+                targets,
+                repeat_count,
+                last_returncode,
+                timeout_observed,
+                source_revision,
+                remaining_calls,
+                anchors,
+                evidence_action,
+                eligible_call,
+            ],
+            separators=(",", ":"),
+        )
+        return cls(
+            fact_id="stall-" + hashlib.sha256(material.encode()).hexdigest()[:20],
+            state=str(state),
+            repeated_operation=" ".join(str(repeated_operation).split())[:48],
+            concrete_targets=targets,
+            repeat_count=max(1, int(repeat_count)),
+            last_returncode=last_returncode,
+            timeout_observed=bool(timeout_observed),
+            source_revision=str(source_revision),
+            remaining_calls=max(0, int(remaining_calls)),
+            remaining_seconds=(
+                None if remaining_seconds is None else max(0.0, float(remaining_seconds))
+            ),
+            unresolved_anchors=anchors,
+            evidence_action=max(0, int(evidence_action)),
+            eligible_call=max(1, int(eligible_call)),
+        )
+
+    def render(self) -> str:
+        pieces = [
+            f"Execution state {self.state}",
+            f"operation={self.repeated_operation or 'unknown'} repeated={self.repeat_count}",
+        ]
+        if self.concrete_targets:
+            pieces.append("targets=" + ",".join(self.concrete_targets))
+        if self.last_returncode is not None:
+            pieces.append(f"last_rc={self.last_returncode}")
+        if self.timeout_observed:
+            pieces.append("timeout_observed=true")
+        if self.unresolved_anchors:
+            pieces.append("unresolved=" + ",".join(self.unresolved_anchors))
+        pieces.append(f"remaining_calls={self.remaining_calls}")
+        if self.remaining_seconds is not None:
+            pieces.append(f"remaining_seconds={int(self.remaining_seconds)}")
+        rendered = "; ".join(pieces) + "."
+        # Construction bounds make this exceptional; abstain rather than
+        # truncate a source-backed fact into a misleading fragment.
+        return rendered if len(rendered) <= 320 else ""
 
 
 class ProgressLedger:

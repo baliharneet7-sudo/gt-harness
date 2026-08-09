@@ -5,7 +5,9 @@ from pathlib import Path
 
 from gt_engine.context_frontier import (
     ContextFrontierKind,
+    FactOrigin,
     FrontierDisposition,
+    RepositoryFactTracker,
     compile_incremental_frontier,
 )
 from gt_engine.graph_context import build_graph_projection
@@ -322,6 +324,157 @@ def test_frontier_delivers_ranked_anchor_when_no_structural_role_exists():
     assert decision.facts[0].kind is ContextFrontierKind.SYMBOL
     assert decision.facts[0].path == "legacy.cob"
     assert "legacy.cob:42" in decision.rendered
+
+
+def test_frontier_never_exposes_internal_source_revision_identifier():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "secret-internal-revision",
+        "graph_revision": "g1",
+        "anchors": ({
+            "path": "src/app.py",
+            "line": 4,
+            "symbol": "run",
+            "semantic_certainty": 1.0,
+            "retrieval_relevance": 1.0,
+        },),
+        "definitions": ({
+            "path": "src/app.py",
+            "line": 4,
+            "symbol": "run",
+            "signature": "def run()",
+            "semantic_certainty": 1.0,
+            "retrieval_relevance": 1.0,
+        },),
+        "references": (),
+        "callers": (),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Change run in src/app.py"}],
+        source_revision="secret-internal-revision",
+    )
+
+    assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
+    assert "secret-inter" not in decision.rendered
+
+
+def test_definition_without_signature_is_represented_by_path_and_symbol():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": ({
+            "path": "src/app.py",
+            "line": 4,
+            "symbol": "run",
+            "semantic_certainty": 1.0,
+            "retrieval_relevance": 1.0,
+        },),
+        "definitions": ({
+            "path": "src/app.py",
+            "line": 4,
+            "symbol": "run",
+            "signature": "",
+            "semantic_certainty": 1.0,
+            "retrieval_relevance": 1.0,
+        },),
+        "references": (),
+        "callers": (),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "tool", "content": "src/app.py:4:def run():"}],
+        source_revision="s1",
+    )
+
+    assert decision.disposition is FrontierDisposition.REPRESENTED_MESSAGE
+    assert decision.rendered == ""
+
+
+def test_task_start_repository_fact_expires_instead_of_spilling_to_call_two():
+    tracker = RepositoryFactTracker(task_start_source_paths=frozenset({"src/app.py"}))
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": ({
+            "path": "src/app.py", "line": 4, "symbol": "run",
+            "semantic_certainty": 1.0, "retrieval_relevance": 1.0,
+        },),
+        "definitions": (), "references": (), "callers": (),
+    }
+
+    first = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Change src/app.py"}],
+        source_revision="s1",
+        current_call=1,
+        eligible_call=1,
+        fact_tracker=tracker,
+    )
+    second = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Change src/app.py"}],
+        source_revision="s1",
+        current_call=2,
+        eligible_call=2,
+        fact_tracker=tracker,
+    )
+
+    assert first.disposition is FrontierDisposition.SELECTED_FRONTIER
+    assert first.facts[0].provenance.origin is FactOrigin.TASK_START
+    assert second.disposition is FrontierDisposition.EXPIRED_WINDOW
+    assert second.accounting[0]["eligible_call"] == 1
+
+
+def test_model_authored_graph_claim_is_controller_only_not_repository_guidance():
+    tracker = RepositoryFactTracker(task_start_source_paths=frozenset({"src/app.py"}))
+    tracker.record_model_authored_paths(("src/app.py",), action_id=3)
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s2",
+        "graph_revision": "g2",
+        "anchors": ({
+            "path": "src/app.py", "line": 8, "symbol": "new_helper",
+            "semantic_certainty": 1.0, "retrieval_relevance": 1.0,
+        },),
+        "definitions": (), "references": (), "callers": (),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "assistant", "content": "", "extra": {"actions": [
+            {"command": "sed -i '8i def new_helper(): pass' src/app.py"}
+        ]}}],
+        source_revision="s2",
+        current_call=4,
+        eligible_call=4,
+        evidence_action=3,
+        fact_tracker=tracker,
+    )
+
+    assert decision.disposition is FrontierDisposition.CONTROLLER_ONLY
+    assert decision.accounting[0]["origin"] == "model_authored"
+    assert decision.rendered == ""
 
 
 def test_unhealthy_repository_never_fabricates_a_frontier():

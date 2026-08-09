@@ -182,6 +182,23 @@ class WorkspaceSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceRevisionReceipt:
+    """Content-addressed identity of the validation-relevant source mirror.
+
+    Workspace metadata remains available through ``WorkspaceSnapshot.revision``
+    for audit and change detection.  It is deliberately excluded here: a
+    timestamp-only change must not stale graph evidence or validation state.
+    ``complete`` is false when any admitted source lacks a mechanically
+    available full-content digest.
+    """
+
+    revision: str
+    complete: bool
+    source_paths: tuple[str, ...]
+    missing_digest_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceTransition:
     action_id: int
     command: str
@@ -258,13 +275,16 @@ def classify_change(
     )
 
 
-def source_revision_of(
+def source_revision_receipt(
     snapshot: WorkspaceSnapshot,
     task_deliverables: Iterable[str] = (),
-) -> str:
-    """Hash only validation-relevant regular source files, never artifacts."""
+) -> SourceRevisionReceipt:
+    """Hash canonical source paths and content digests, never filesystem metadata."""
+
     deliverables = set(task_deliverables)
     digest = hashlib.sha256()
+    source_paths: list[str] = []
+    missing_digest_paths: list[str] = []
     for path, item in sorted(snapshot.entries.items()):
         if item.kind != "f":
             continue
@@ -275,22 +295,36 @@ def source_revision_of(
             content=item.content,
         ).validation_relevant:
             continue
-        digest.update(path.encode("utf-8", "surrogateescape"))
+        canonical_path = _workspace_relative_path(path)
+        source_paths.append(canonical_path)
+        content_digest = str(item.digest or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", content_digest):
+            if item.content is not None:
+                content_digest = hashlib.sha256(
+                    item.content.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+            else:
+                missing_digest_paths.append(canonical_path)
+                content_digest = "missing"
+        digest.update(canonical_path.encode("utf-8", "surrogateescape"))
         digest.update(b"\0")
-        digest.update(
-            "\t".join(
-                (
-                    item.kind,
-                    str(item.size),
-                    item.mtime,
-                    item.ctime,
-                    item.link_target,
-                    item.digest,
-                )
-            ).encode("utf-8", "surrogateescape")
-        )
+        digest.update(content_digest.encode("ascii"))
         digest.update(b"\0")
-    return digest.hexdigest()
+    return SourceRevisionReceipt(
+        revision=digest.hexdigest(),
+        complete=not missing_digest_paths,
+        source_paths=tuple(source_paths),
+        missing_digest_paths=tuple(missing_digest_paths),
+    )
+
+
+def source_revision_of(
+    snapshot: WorkspaceSnapshot,
+    task_deliverables: Iterable[str] = (),
+) -> str:
+    """Compatibility projection of :func:`source_revision_receipt`."""
+
+    return source_revision_receipt(snapshot, task_deliverables).revision
 
 
 def _workspace_relative_path(path: str) -> str:
@@ -1097,6 +1131,11 @@ class WorkspaceSensor:
         self.max_seconds = max_seconds
         self.max_hashes = max_hashes
         self.max_hash_bytes = max_hash_bytes
+        self._capture_backend = "auto"
+
+    @property
+    def capture_backend(self) -> str:
+        return self._capture_backend
 
     @staticmethod
     def _degraded(
@@ -1322,26 +1361,29 @@ class WorkspaceSensor:
             )
             try:
                 kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
-                captured = (
-                    await recorder.exec(
-                        environment,
-                        command,
-                        category=HostExecCategory.WORKSPACE_CAPTURE,
-                        action_id=action_id,
-                        source_revision=source_revision,
-                        **kwargs,
-                    )
-                    if recorder is not None
-                else await environment.exec(command, **kwargs)
-                )
                 encoded: dict[str, Any] = {}
-                if captured.return_code == 0:
-                    try:
-                        parsed = json.loads(captured.stdout or "{}")
-                        if isinstance(parsed, dict):
-                            encoded = parsed
-                    except (TypeError, ValueError):
-                        encoded = {}
+                if self._capture_backend != "posix_base64":
+                    captured = (
+                        await recorder.exec(
+                            environment,
+                            command,
+                            category=HostExecCategory.WORKSPACE_CAPTURE,
+                            action_id=action_id,
+                            source_revision=source_revision,
+                            **kwargs,
+                        )
+                        if recorder is not None
+                        else await environment.exec(command, **kwargs)
+                    )
+                    if captured.return_code == 0:
+                        try:
+                            parsed = json.loads(captured.stdout or "{}")
+                            if isinstance(parsed, dict):
+                                encoded = parsed
+                        except (TypeError, ValueError):
+                            encoded = {}
+                    else:
+                        self._capture_backend = "posix_base64"
 
                 def apply_encoded(values: Mapping[str, Any]) -> set[str]:
                     applied: set[str] = set()
@@ -1360,6 +1402,8 @@ class WorkspaceSensor:
                     return applied
 
                 captured_paths = apply_encoded(encoded)
+                if len(captured_paths) == len(capture_paths):
+                    self._capture_backend = "python_json"
                 missing_paths = [path for path in capture_paths if path not in captured_paths]
                 if missing_paths:
                     # Task images are not required to contain Python.  Keep the
@@ -1391,7 +1435,9 @@ class WorkspaceSensor:
                             path, separator, value = line.partition("\t")
                             if separator and path in missing_paths:
                                 fallback_values[path] = value
-                        apply_encoded(fallback_values)
+                        fallback_applied = apply_encoded(fallback_values)
+                        if len(fallback_applied) == len(missing_paths):
+                            self._capture_backend = "posix_base64"
             except Exception:
                 # Content witnesses improve semantic features, but metadata and
                 # hashes remain authoritative if both capture mechanisms fail.
@@ -1553,6 +1599,7 @@ class CentralFeatureRuntime:
         self._failed_actions: dict[tuple[str, str, int, str], int] = {}
         self._searched = False
         self._precedent_verified = False
+        self._initial_source_paths: set[str] | None = None
         self._post_edit_checks = 0
         self._feedback_cursor = 0
         self._feedback_calls = 0
@@ -2714,12 +2761,18 @@ class CentralFeatureRuntime:
         source_revision: str | None = None,
         explicit_checks: Iterable[str] = (),
         task_deliverables: Iterable[str] = (),
+        initial_source_paths: Iterable[str] | None = None,
     ) -> None:
         if not self.enabled:
             return
         self._current_source_revision = source_revision if source_revision is not None else revision
         self._explicit_checks = tuple(explicit_checks)
         self._task_deliverables = set(task_deliverables)
+        self._initial_source_paths = (
+            None
+            if initial_source_paths is None
+            else {_workspace_relative_path(path) for path in initial_source_paths}
+        )
         self._mark_lifecycle("task_started", action_id=0)
         if instruction.strip():
             self._mark_lifecycle("contract_captured", action_id=0)
@@ -3394,6 +3447,11 @@ class CentralFeatureRuntime:
                 for path in available_paths
                 if (
                     (
+                        self._initial_source_paths is None
+                        or _workspace_relative_path(path) in self._initial_source_paths
+                    )
+                    and
+                    (
                         candidate := classify_change(
                             path,
                             kind=(
@@ -3496,6 +3554,7 @@ class CentralFeatureRuntime:
                         "created_files": [precedent_created_path],
                         "precedent_verified": True,
                         "precedent_path": precedent_path,
+                        "precedent_origin": "task_start_repository",
                         "message": (
                             f"New source file {precedent_created_path} has repository "
                             f"precedent {precedent_path}."

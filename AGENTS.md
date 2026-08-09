@@ -544,13 +544,14 @@ The audit test is part of the central provider-free workflow.
 
 ## Counterfactual replay capture (2026-08-09)
 
-`enable_replay_capture` is opt-in and default-false. It writes a bounded,
-separate `gt_replay_bundle.json` containing exact provider-prepared messages,
-controller/source checkpoints, response projections, and hashes. Secrets are
-redacted and truncation/error is explicit. A bundle is replay-ready only when
-all requests/responses are complete. It never injects a provider-specific seed
-or sampling control; model causality remains `UNIDENTIFIABLE`. Capture must
-not alter provider messages or the model loop.
+`enable_replay_capture` is opt-in and default-false. It writes exact,
+content-addressed capture under `gt_replay/`: `manifest.json`, `calls.jsonl`,
+and gzip-compressed `blobs/<sha256>.json.gz`. The verifier fails closed on a
+missing, truncated, corrupt, or hash-mismatched request/response blob. A bundle
+is replay-ready only when every invoked request has its exact response. It
+never injects a provider-specific seed or sampling control; model causality
+remains `UNIDENTIFIABLE`. Capture must not alter provider messages or the model
+loop.
 
 ## Conservative uplift policy and provider baseline shield (2026-08-08)
 
@@ -930,3 +931,21 @@ coverage, readiness audit, archived replay, and Ruff passed. This is
 deterministic integration evidence, not live solve-rate or token evidence. A
 separately authorized matched smoke is still required before promotion. The
 89-task run remains blocked.
+
+## Final regression-repair contract (2026-08-09)
+
+GT source identity is semantic. SourceRevisionReceipt hashes canonical source path plus full-content SHA-256 only; raw workspace metadata remains a separate audit revision. Missing source digests invalidate graph refresh and completion certification without blocking Mini-SWE. Internal revision hashes are never model-visible.
+
+Repository facts have persistent provenance (TASK_START, MODEL_AUTHORED, OBSERVED_EXTERNAL, or UNKNOWN) and exactly one eligible provider call. Task-start facts cannot spill, and new claims on model-authored paths remain controller-only. Genuine new cross-file consequences may remain eligible. newfile_precedent can use only a non-empty compatible task-start source and receipts precedent_origin=task_start_repository.
+
+ProviderEvidenceLedger is the authoritative provider-context accounting surface. It joins graph_frontier, feature_fact, state_frame, progress_frame, and preflight_return events to evidence action, eligible/prepared/dispatched calls, exact provider message indices, request hash, characters, disposition, reasons, and revision. A represented fact with zero newly inserted characters is correct GT operation; never force provider text merely to avoid a zero-visible count.
+
+Provider request lifecycle is explicit: provider_requests_prepared, model_query_invocations, provider_responses_received, and provider_requests_not_sent. api_calls equals actual model_query_invocations. An unsent prepared request confirms no delivery and contributes no visible context.
+
+Deterministic compaction restores only a current fact whose last concrete provider representation it removed. It does not inject generic controller state, repeat adjacent frames, delete unique assistant reasoning, or truncate a fact. StallAggregateFact is a separately gated controller fact, not an eighteenth feature: deterministic, declarative, <=320 characters, at most twice per task, first-eligible, source-bound, and non-predictive.
+
+Replay v2 is exact and content-addressed under gt_replay/ (manifest.json, calls.jsonl, blobs/<sha256>.json.gz). The verifier fails closed on corruption. Workspace source capture caches its working backend; a missing task-image python3 is not retried on every edit. Local graph resolution prefers the checked-out pinned gt-index binary over obsolete machine-global builds.
+
+Efficiency gates aggregate provider/model resources only across common uncensored solves. Tokens, actual model calls, model-selected actions, assistant responses, cost, and wall time are primary. Effective actions and host/controller/sensor executions are reported separately. Cheap failed tasks cannot improve the aggregate.
+
+Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The next permitted paid step is the exact ten-task certified_full/integrated GT-on smoke after the exact pushed commit prints SMOKE_APPROVED. Preflight remains SHADOW. The 89-task run remains blocked until that smoke has no uncensored outcome regression/censor, valid graph substrate, complete provider-evidence accounting, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.

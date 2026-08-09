@@ -67,6 +67,7 @@ _SKIP_DIRS = frozenset(
 
 # Known local gt-index builds probed only when nothing else resolves.
 _LOCAL_BINARY_CANDIDATES = (
+    str(Path(__file__).resolve().parents[1] / "vendor" / "gt-index-src" / "gt-index.exe"),
     r"D:\Groundtruth\gt-index\gt-index.exe",
     "/opt/groundtruth/gt-index/gt-index",
 )

@@ -28,6 +28,7 @@ from gt_engine.central_runtime import (
     render_runtime_feedback,
     select_declared_check,
     source_revision_of,
+    source_revision_receipt,
     task_deliverable_paths,
 )
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
@@ -36,6 +37,40 @@ from scripts.central_feature_census import census
 
 def _snapshot(revision: str, **entries: FileState) -> WorkspaceSnapshot:
     return WorkspaceSnapshot(revision=revision, entries=entries, healthy=True)
+
+
+def test_semantic_source_revision_ignores_filesystem_timestamps():
+    left = _snapshot(
+        "workspace-a",
+        **{
+            "src/app.py": FileState(
+                "f", 12, "1.0", "1.0", "", digest="a" * 64, content="print('x')\n"
+            )
+        },
+    )
+    right = _snapshot(
+        "workspace-b",
+        **{
+            "src/app.py": FileState(
+                "f", 12, "99.0", "101.0", "", digest="a" * 64, content="print('x')\n"
+            )
+        },
+    )
+
+    assert source_revision_of(left) == source_revision_of(right)
+
+
+def test_semantic_source_revision_receipt_fails_closed_when_source_digest_is_missing():
+    snapshot = _snapshot(
+        "workspace",
+        **{"src/app.py": FileState("f", 12, "1.0", "1.0", "")},
+    )
+
+    receipt = source_revision_receipt(snapshot)
+
+    assert receipt.complete is False
+    assert receipt.source_paths == ("src/app.py",)
+    assert receipt.missing_digest_paths == ("src/app.py",)
 
 
 def test_manifest_and_diff_are_non_git_and_cross_language():
@@ -892,6 +927,43 @@ async def test_sensor_captures_source_when_task_image_has_no_python():
 
 
 @pytest.mark.asyncio
+async def test_sensor_caches_missing_python_capture_backend_across_source_edits():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    encoded = base64.b64encode(b"int value = 1;\n").decode()
+    python_calls = 0
+    manifest_calls = 0
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            nonlocal python_calls, manifest_calls
+            if "-printf" in command:
+                manifest_calls += 1
+                stamp = str(manifest_calls)
+                return Result(f"f\t15\t{stamp}.0\t{stamp}.0\tapp.c\t\n")
+            if command.startswith("sha256sum"):
+                return Result((str(manifest_calls) * 64)[:64] + "  app.c\n")
+            if command.startswith("python3 -c"):
+                python_calls += 1
+                return Result("python3: not found\n", 127)
+            if "base64" in command:
+                return Result(f"app.c\t{encoded}\n")
+            raise AssertionError(command)
+
+    sensor = WorkspaceSensor()
+    first = await sensor.scan(Environment(), cwd="/app")
+    second = await sensor.scan(Environment(), cwd="/app", previous=first)
+
+    assert second.healthy is True
+    assert python_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_sensor_captures_allowlisted_external_source_path():
     import base64
 
@@ -1113,11 +1185,27 @@ def test_report_jsonl_is_a_deliverable_not_source():
 
 
 def test_source_revision_ignores_artifact_changes_but_not_source_edits():
-    base = parse_manifest("f\t10\t1.0\t1.0\tapp.py\t\nf\t5\t1.0\t1.0\tbenchmark_out.txt\t\n")
-    artifact_only = parse_manifest(
-        "f\t10\t1.0\t1.0\tapp.py\t\nf\t99\t2.0\t2.0\tbenchmark_out.txt\t\n"
+    base = _snapshot(
+        "w0",
+        **{
+            "app.py": FileState("f", 10, "1.0", "1.0", "", digest="a" * 64),
+            "benchmark_out.txt": FileState("f", 5, "1.0", "1.0", "", digest="b" * 64),
+        },
     )
-    source_edit = parse_manifest("f\t11\t2.0\t2.0\tapp.py\t\nf\t5\t1.0\t1.0\tbenchmark_out.txt\t\n")
+    artifact_only = _snapshot(
+        "w1",
+        **{
+            "app.py": FileState("f", 10, "1.0", "1.0", "", digest="a" * 64),
+            "benchmark_out.txt": FileState("f", 99, "2.0", "2.0", "", digest="c" * 64),
+        },
+    )
+    source_edit = _snapshot(
+        "w2",
+        **{
+            "app.py": FileState("f", 11, "2.0", "2.0", "", digest="d" * 64),
+            "benchmark_out.txt": FileState("f", 5, "1.0", "1.0", "", digest="b" * 64),
+        },
+    )
 
     assert source_revision_of(artifact_only) == source_revision_of(base)
     assert source_revision_of(source_edit) != source_revision_of(base)

@@ -1,4 +1,28 @@
-from gt_engine.progress import ProgressLedger
+from gt_engine.progress import ProgressLedger, StallAggregateFact
+
+
+def test_stall_aggregate_is_bounded_declarative_and_source_bound():
+    fact = StallAggregateFact.create(
+        state="STALLED",
+        repeated_operation="search",
+        concrete_targets=("src/parser.py",),
+        repeat_count=3,
+        last_returncode=1,
+        timeout_observed=False,
+        source_revision="s1",
+        remaining_calls=17,
+        remaining_seconds=420.0,
+        unresolved_anchors=("parse_expr",),
+        evidence_action=9,
+        eligible_call=10,
+    )
+
+    rendered = fact.render()
+    assert len(rendered) <= 320
+    assert "STALLED" in rendered
+    assert "src/parser.py" in rendered
+    assert "parse_expr" in rendered
+    assert "should" not in rendered.lower()
 
 
 def test_repeated_failure_transitions_before_budget_exhaustion():

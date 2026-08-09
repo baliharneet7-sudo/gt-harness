@@ -309,8 +309,10 @@ async def test_opt_in_replay_capture_is_receipted_without_changing_request(tmp_p
     assert metadata["responses_captured"] is True
     assert metadata["trajectory_replay_ready"] is True
     assert metadata["model_causal_replay_ready"] is False
-    bundle = json.loads((tmp_path / "gt_replay_bundle.json").read_text())
-    assert bundle["calls"][0]["provider_messages"]
+    manifest = json.loads((tmp_path / "gt_replay" / "manifest.json").read_text())
+    calls = (tmp_path / "gt_replay" / "calls.jsonl").read_text().splitlines()
+    assert manifest["schema"] == "gt.counterfactual_replay_bundle.v2"
+    assert calls
 
 
 @pytest.mark.asyncio
@@ -2062,7 +2064,46 @@ async def test_provider_budget_failure_stops_before_model_query_and_is_receipted
     assert receipt["metrics"]["solver_exhausted"] is True
     assert receipt["metrics"]["solver_exhausted_reason"] == "context_budget_exhausted"
     assert receipt["model_call_contexts"][0]["request_budget_within_limit"] is False
+    assert receipt["metrics"]["provider_requests_prepared"] == 1
+    assert receipt["metrics"]["model_query_invocations"] == 0
+    assert receipt["metrics"]["provider_responses_received"] == 0
+    assert receipt["metrics"]["provider_requests_not_sent"] == 1
+    assert receipt["metrics"]["api_calls"] == 0
+    assert receipt["model_call_contexts"][0]["dispatch_status"] == "prepared_not_sent"
     assert context.metadata["exit_status"] == "ContextBudgetExhausted"
+
+
+@pytest.mark.asyncio
+async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice(tmp_path):
+    model = _ScriptedModel(
+        [
+            "printf same",
+            "printf same",
+            "printf same",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_repository_intelligence=False,
+        enable_progress_control=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Complete the task.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    deliveries = receipt["progress"]["fact_deliveries"]
+    assert len(deliveries) == 1
+    assert deliveries[0]["first_eligible_call"] == deliveries[0]["delivered_before_call"]
+    assert deliveries[0]["one_step_late"] is False
+    assert deliveries[0]["not_predictive"] is True
+    assert receipt["metrics"]["progress_frame_deliveries"] == 1
+    visible = "\n".join(model.observed_history[3])
+    assert "Execution state STALLED" in visible
+    stall_line = next(line for line in visible.splitlines() if "Execution state STALLED" in line)
+    assert "should" not in stall_line.lower()
 
 
 @pytest.mark.asyncio

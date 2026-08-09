@@ -275,6 +275,42 @@ def test_outcome_first_gate_allows_small_per_task_variance_only_when_aggregate_w
     assert comparison["gate_passed"] is True
 
 
+def test_efficiency_aggregate_uses_only_common_uncensored_solves_and_separates_controller_work():
+    baseline = {
+        "common": {
+            "solved": True, "censored": False, "total_tokens": 100,
+            "api_calls": 10, "actions": 10, "effective_actions": 10,
+            "assistant_steps": 10, "normalized_cost_usd": 1.0,
+        },
+        "lost": {
+            "solved": True, "censored": False, "total_tokens": 10_000,
+            "api_calls": 100, "actions": 100, "effective_actions": 100,
+            "assistant_steps": 100, "normalized_cost_usd": 100.0,
+        },
+    }
+    treatment = {
+        "common": {
+            **baseline["common"], "total_tokens": 90, "api_calls": 9,
+            "actions": 9, "effective_actions": 14, "assistant_steps": 9,
+            "normalized_cost_usd": 0.9,
+        },
+        "lost": {
+            **baseline["lost"], "solved": False, "total_tokens": 1,
+            "api_calls": 1, "actions": 1, "effective_actions": 2,
+            "assistant_steps": 1, "normalized_cost_usd": 0.01,
+        },
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert comparison["comparable_solved"] == ["common"]
+    assert comparison["aggregate_deltas"]["total_tokens"] == -10
+    assert comparison["all_task_aggregate_deltas"]["total_tokens"] == -10_009
+    assert comparison["controller_aggregate_deltas"]["effective_actions"] == 4
+    assert "effective_actions" not in comparison["aggregate_gate_failures"]
+    assert comparison["gate_passed"] is False  # the lost solve still fails outcome preservation
+
+
 def test_outcome_first_gate_rejects_two_large_per_task_resource_regressions():
     baseline = {
         "a": {

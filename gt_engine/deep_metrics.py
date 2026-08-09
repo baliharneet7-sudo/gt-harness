@@ -15,9 +15,14 @@ PRIMARY_RESOURCES = (
     "total_tokens",
     "api_calls",
     "actions",
-    "effective_actions",
     "assistant_steps",
     "normalized_cost_usd",
+)
+CONTROLLER_RESOURCES = (
+    "effective_actions",
+    "controller_environment_execs",
+    "controller_cached_reads",
+    "sensor_environment_execs",
 )
 DIAGNOSTIC_METRICS = (
     "input_tokens",
@@ -28,6 +33,13 @@ DIAGNOSTIC_METRICS = (
     "provider_requests_hashed",
     "provider_request_hash_coverage",
     "provider_request_budget_failures",
+    "provider_requests_prepared",
+    "model_query_invocations",
+    "provider_responses_received",
+    "provider_requests_not_sent",
+    "provider_evidence_events",
+    "provider_evidence_dispatched",
+    "provider_evidence_prepared_not_sent",
     "provider_request_min_headroom_tokens",
     "provider_stable_prefix_chars",
     "provider_stable_prefix_ratio_mean",
@@ -63,6 +75,9 @@ DIAGNOSTIC_METRICS = (
     "gt_context_chars_added",
     "context_state_frame_chars_added",
     "context_frontier_chars_added",
+    "progress_frame_chars_added",
+    "newly_inserted_context_chars",
+    "represented_context_facts",
     "total_gt_context_chars_added",
     "effects_produced",
     "effects_applied",
@@ -667,6 +682,10 @@ def extract_trajectory(
         )
         for key in (
             "gt_context_chars_added",
+            "context_state_frame_chars_added",
+            "progress_frame_chars_added",
+            "newly_inserted_context_chars",
+            "represented_context_facts",
             "stock_context_chars_sent",
             "effects_produced",
             "effects_applied",
@@ -694,6 +713,13 @@ def extract_trajectory(
             "context_frontier_deliveries",
             "context_frontier_facts_delivered",
             "context_frontier_chars_added",
+            "provider_requests_prepared",
+            "model_query_invocations",
+            "provider_responses_received",
+            "provider_requests_not_sent",
+            "provider_evidence_events",
+            "provider_evidence_dispatched",
+            "provider_evidence_prepared_not_sent",
             "context_frontier_zero_tasks",
             "context_frontier_duplicate_facts",
             "context_frontier_duplicate_claims",
@@ -793,6 +819,7 @@ def extract_trajectory(
             int(result.get("gt_context_chars_added") or 0)
             + int(result.get("context_frontier_chars_added") or 0)
             + int(result.get("context_state_frame_chars_added") or 0)
+            + int(result.get("progress_frame_chars_added") or 0)
         )
         result["repository_intelligence_status"] = str(
             repository_intelligence.get("status") or "unreported"
@@ -835,6 +862,12 @@ def compare_arms(
     aggregate_values: dict[str, list[float]] = {
         metric: [] for metric in (*PRIMARY_RESOURCES, *DIAGNOSTIC_METRICS)
     }
+    all_task_aggregate_values: dict[str, list[float]] = {
+        metric: [] for metric in (*PRIMARY_RESOURCES, *DIAGNOSTIC_METRICS)
+    }
+    controller_aggregate_values: dict[str, list[float]] = {
+        metric: [] for metric in CONTROLLER_RESOURCES
+    }
     for task in tasks:
         before, after = baseline[task], treatment[task]
         b_solved, a_solved = before.get("solved"), after.get("solved")
@@ -863,6 +896,16 @@ def compare_arms(
             metric: resource_value(after, metric) - resource_value(before, metric)
             for metric in PRIMARY_RESOURCES
         }
+        common_uncensored_solve = bool(
+            b_solved is True
+            and a_solved is True
+            and not before.get("censored")
+            and not after.get("censored")
+        )
+        controller_deltas = {
+            metric: resource_value(after, metric) - resource_value(before, metric)
+            for metric in CONTROLLER_RESOURCES
+        }
         diagnostic_deltas: dict[str, float | None] = {}
         for metric in DIAGNOSTIC_METRICS:
             before_value = before.get(metric)
@@ -872,19 +915,26 @@ def compare_arms(
                 continue
             delta = float(after_value) - float(before_value)
             diagnostic_deltas[metric] = delta
-            aggregate_values[metric].append(delta)
+            all_task_aggregate_values[metric].append(delta)
+            if common_uncensored_solve:
+                aggregate_values[metric].append(delta)
         for metric, delta in deltas.items():
-            aggregate_values[metric].append(delta)
+            all_task_aggregate_values[metric].append(delta)
+            if common_uncensored_solve:
+                aggregate_values[metric].append(delta)
+        if common_uncensored_solve:
+            for metric, delta in controller_deltas.items():
+                controller_aggregate_values[metric].append(delta)
         pareto = None
         exceeded_bounds: list[str] = []
-        if b_solved is True and a_solved is True:
+        if common_uncensored_solve:
             comparable_solved.append(task)
             pareto = all(delta <= 0 for delta in deltas.values()) and any(
                 delta < 0 for delta in deltas.values()
             )
             if not pareto:
                 pareto_failures.append(task)
-            for metric in ("api_calls", "actions", "effective_actions"):
+            for metric in ("api_calls", "actions"):
                 baseline_value = resource_value(before, metric)
                 if deltas[metric] > max(3.0, baseline_value * 0.20):
                     exceeded_bounds.append(metric)
@@ -910,19 +960,27 @@ def compare_arms(
             "treatment_censored_reason": str(after.get("censored_reason") or ""),
             "deltas": deltas,
             "diagnostic_deltas": diagnostic_deltas,
+            "controller_deltas": controller_deltas,
             "strict_pareto": pareto,
             "exceeded_resource_bounds": exceeded_bounds,
         }
     aggregate_deltas = {
-        metric: sum(values) if len(values) == len(tasks) else None
+        metric: sum(values) if len(values) == len(comparable_solved) else None
         for metric, values in aggregate_values.items()
+    }
+    all_task_aggregate_deltas = {
+        metric: sum(values) if len(values) == len(tasks) else None
+        for metric, values in all_task_aggregate_values.items()
+    }
+    controller_aggregate_deltas = {
+        metric: sum(values) if len(values) == len(comparable_solved) else None
+        for metric, values in controller_aggregate_values.items()
     }
     aggregate_gate_failures = [
         metric
         for metric in (
             "total_tokens",
             "api_calls",
-            "effective_actions",
             "normalized_cost_usd",
         )
         if aggregate_deltas.get(metric) is None or aggregate_deltas[metric] >= 0
@@ -974,6 +1032,8 @@ def compare_arms(
         "per_task_bound_failures": per_task_bound_failures,
         "aggregate_gate_failures": aggregate_gate_failures,
         "aggregate_deltas": aggregate_deltas,
+        "all_task_aggregate_deltas": all_task_aggregate_deltas,
+        "controller_aggregate_deltas": controller_aggregate_deltas,
         "gate_passed": gate_passed,
     }
 

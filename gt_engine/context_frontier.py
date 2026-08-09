@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -44,6 +44,97 @@ class FrontierDisposition(StrEnum):
     FRONTIER_BUDGET = "frontier_budget"
     NO_DECISION_ANCHOR = "no_decision_anchor"
     NO_FRONTIER = "no_frontier"
+    CONTROLLER_ONLY = "controller_only"
+    EXPIRED_WINDOW = "expired_window"
+    NOT_YET_ELIGIBLE = "not_yet_eligible"
+
+
+class FactOrigin(StrEnum):
+    TASK_START = "task_start"
+    MODEL_AUTHORED = "model_authored"
+    OBSERVED_EXTERNAL = "observed_external"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryFactProvenance:
+    origin: FactOrigin
+    origin_action: int
+    evidence_action: int
+    eligible_call: int
+    source_path: str
+    source_content_sha256: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["origin"] = self.origin.value
+        return row
+
+
+@dataclass(slots=True)
+class RepositoryFactTracker:
+    """Bind each structural claim to one origin and one provider window."""
+
+    task_start_source_paths: frozenset[str] = frozenset()
+    task_start_claim_ids: set[str] = field(default_factory=set)
+    model_authored_paths: dict[str, int] = field(default_factory=dict)
+    claim_provenance: dict[str, RepositoryFactProvenance] = field(default_factory=dict)
+
+    @staticmethod
+    def _path(path: str) -> str:
+        normalized = str(path or "").replace("\\", "/")
+        if normalized.startswith("/app/"):
+            normalized = normalized[5:]
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    def __post_init__(self) -> None:
+        self.task_start_source_paths = frozenset(
+            self._path(path) for path in self.task_start_source_paths
+        )
+
+    def record_model_authored_paths(
+        self, paths: Sequence[str], *, action_id: int
+    ) -> None:
+        for path in paths:
+            normalized = self._path(path)
+            if normalized:
+                self.model_authored_paths.setdefault(normalized, max(0, int(action_id)))
+
+    def provenance_for(
+        self,
+        fact: ContextFrontierFact,
+        *,
+        evidence_action: int,
+        eligible_call: int,
+    ) -> RepositoryFactProvenance:
+        existing = self.claim_provenance.get(fact.claim_id)
+        if existing is not None:
+            return existing
+        path = self._path(fact.path)
+        if evidence_action == 0 and path in self.task_start_source_paths:
+            origin = FactOrigin.TASK_START
+            origin_action = 0
+            self.task_start_claim_ids.add(fact.claim_id)
+        elif path in self.model_authored_paths:
+            origin = FactOrigin.MODEL_AUTHORED
+            origin_action = self.model_authored_paths[path]
+        elif evidence_action > 0:
+            origin = FactOrigin.OBSERVED_EXTERNAL
+            origin_action = evidence_action
+        else:
+            origin = FactOrigin.UNKNOWN
+            origin_action = 0
+        provenance = RepositoryFactProvenance(
+            origin=origin,
+            origin_action=origin_action,
+            evidence_action=max(0, int(evidence_action)),
+            eligible_call=max(1, int(eligible_call)),
+            source_path=path,
+        )
+        self.claim_provenance[fact.claim_id] = provenance
+        return provenance
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,10 +152,12 @@ class ContextFrontierFact:
     graph_revision: str = ""
     semantic_certainty: float = 0.0
     retrieval_relevance: float = 0.0
+    provenance: RepositoryFactProvenance | None = None
 
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
         row["kind"] = self.kind.value
+        row["provenance"] = self.provenance.as_dict() if self.provenance else None
         return row
 
 
@@ -344,7 +437,10 @@ def _anchor_candidates(
 
 def _represented(fact: ContextFrontierFact, text: str) -> bool:
     if fact.kind is ContextFrontierKind.DEFINITION:
-        return bool(fact.value and fact.value in text)
+        if fact.value:
+            return fact.value in text
+        anchors = [anchor for anchor in (fact.path, fact.symbol) if anchor]
+        return bool(anchors and all(anchor in text for anchor in anchors))
     anchors = [anchor for anchor in (fact.path, fact.symbol, fact.value) if anchor]
     return bool(anchors and all(anchor in text for anchor in anchors[:2]))
 
@@ -374,6 +470,9 @@ def compile_incremental_frontier(
     relevance_threshold: float = 0.95,
     workspace_revision: str = "",
     current_call: int = 1,
+    eligible_call: int = 1,
+    evidence_action: int = 0,
+    fact_tracker: RepositoryFactTracker | None = None,
 ) -> FrontierDecision:
     """Select the smallest certified repository frame absent from provider history."""
 
@@ -434,14 +533,32 @@ def compile_incremental_frontier(
         seen_claim_ids.add(fact.claim_id)
         unique_candidates.append(fact)
     candidates = unique_candidates
+    if fact_tracker is not None:
+        candidates = [
+            replace(
+                fact,
+                provenance=fact_tracker.provenance_for(
+                    fact,
+                    evidence_action=evidence_action,
+                    eligible_call=eligible_call,
+                ),
+            )
+            for fact in candidates
+        ]
     provider_text = _provider_text(messages)
     selected: list[ContextFrontierFact] = []
     accounting: list[dict[str, Any]] = []
-    rendered_lines = [f"Repository intelligence at source revision {source_revision[:12]}:"]
+    # Revisions are controller identities, not useful model context.  Exposing
+    # their hashes creates stochastic prompt differences between identical
+    # workspaces restored with different filesystem timestamps.
+    rendered_lines = ["Repository intelligence for the current source state:"]
     for fact in candidates:
         valid_relevance = 0.0 <= fact.retrieval_relevance <= 1.0
         valid_certainty = 0.0 <= fact.semantic_certainty <= 1.0
-        if not valid_relevance:
+        provenance = fact.provenance
+        if provenance is not None and provenance.origin is FactOrigin.MODEL_AUTHORED:
+            disposition = FrontierDisposition.CONTROLLER_ONLY
+        elif not valid_relevance:
             disposition = FrontierDisposition.INVALID_RELEVANCE
         elif not valid_certainty:
             disposition = FrontierDisposition.LOW_PRECISION
@@ -451,6 +568,10 @@ def compile_incremental_frontier(
             or _represented(fact, provider_text)
         ):
             disposition = FrontierDisposition.REPRESENTED_MESSAGE
+        elif provenance is not None and current_call < provenance.eligible_call:
+            disposition = FrontierDisposition.NOT_YET_ELIGIBLE
+        elif provenance is not None and current_call > provenance.eligible_call:
+            disposition = FrontierDisposition.EXPIRED_WINDOW
         elif (
             fact.semantic_certainty < certainty_threshold
             or fact.retrieval_relevance < relevance_threshold
@@ -483,6 +604,10 @@ def compile_incremental_frontier(
                 "graph_revision": fact.graph_revision,
                 "semantic_certainty": fact.semantic_certainty,
                 "retrieval_relevance": fact.retrieval_relevance,
+                "origin": provenance.origin.value if provenance else "",
+                "origin_action": provenance.origin_action if provenance else None,
+                "evidence_action": provenance.evidence_action if provenance else evidence_action,
+                "eligible_call": provenance.eligible_call if provenance else eligible_call,
                 "disposition": disposition.value,
             }
         )
@@ -516,6 +641,27 @@ def compile_incremental_frontier(
         disposition = FrontierDisposition.REPRESENTED_MESSAGE
         rendered = ""
         reasons = ("all_certified_facts_already_represented",)
+    elif candidates and all(
+        item["disposition"] == FrontierDisposition.CONTROLLER_ONLY.value
+        for item in accounting
+    ):
+        disposition = FrontierDisposition.CONTROLLER_ONLY
+        rendered = ""
+        reasons = ("model_authored_claims_remain_controller_only",)
+    elif candidates and all(
+        item["disposition"] == FrontierDisposition.EXPIRED_WINDOW.value
+        for item in accounting
+    ):
+        disposition = FrontierDisposition.EXPIRED_WINDOW
+        rendered = ""
+        reasons = ("repository_fact_delivery_window_expired",)
+    elif candidates and all(
+        item["disposition"] == FrontierDisposition.NOT_YET_ELIGIBLE.value
+        for item in accounting
+    ):
+        disposition = FrontierDisposition.NOT_YET_ELIGIBLE
+        rendered = ""
+        reasons = ("repository_fact_not_yet_eligible",)
     elif (
         candidates
         and all(
@@ -556,7 +702,10 @@ def compile_incremental_frontier(
 __all__ = [
     "ContextFrontierFact",
     "ContextFrontierKind",
+    "FactOrigin",
     "FrontierDecision",
     "FrontierDisposition",
+    "RepositoryFactProvenance",
+    "RepositoryFactTracker",
     "compile_incremental_frontier",
 ]
