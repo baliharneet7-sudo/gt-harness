@@ -19,9 +19,9 @@ from eval.gt_central_agent import (
     GTIntegrationMode,
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
+    _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
-    _graph_gate_degraded_fallback,
     _stable_provider_prefix,
 )
 from gt_engine.central_runtime import classify_validation_command
