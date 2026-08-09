@@ -40,7 +40,7 @@ RELEASE_TESTS = (
     "tests/test_gt_language_resolution.py",
     "tests/test_gt_benchmark_language_contract.py",
     "tests/test_gt_central_agent.py::test_context_frontier_advances_repository_intelligence_without_feature_advisory",
-    "tests/test_gt_central_agent.py::test_active_code_task_with_unavailable_graph_is_invalid_not_silently_idle",
+    "tests/test_gt_central_agent.py::test_source_less_task_is_denominator_excluded_not_graph_invalid",
     "tests/test_gt_central_agent.py::test_task_graph_failure_degrades_but_preserves_provider_loop",
     "tests/test_gt_central_agent.py::test_paid_environment_path_transfers_only_selected_source_files",
     "tests/test_gt_central_agent.py::test_strict_graph_gate_allows_current_certified_graph",
