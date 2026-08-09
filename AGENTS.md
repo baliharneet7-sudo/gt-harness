@@ -534,9 +534,9 @@ The audit test is part of the central provider-free workflow.
 separate `gt_replay_bundle.json` containing exact provider-prepared messages,
 controller/source checkpoints, response projections, and hashes. Secrets are
 redacted and truncation/error is explicit. A bundle is replay-ready only when
-all requests/responses are complete and a deterministic sampling seed exists;
-otherwise causality remains `UNIDENTIFIABLE`. Capture must not alter provider
-messages or the model loop.
+all requests/responses are complete. It never injects a provider-specific seed
+or sampling control; model causality remains `UNIDENTIFIABLE`. Capture must
+not alter provider messages or the model loop.
 
 ## Conservative uplift policy and provider baseline shield (2026-08-08)
 

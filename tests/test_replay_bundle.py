@@ -17,11 +17,12 @@ def test_capture_is_disabled_without_writing_an_artifact(tmp_path):
     metadata = writer.finalize()
 
     assert metadata["enabled"] is False
-    assert metadata["counterfactual_replay_ready"] is False
+    assert metadata["trajectory_replay_ready"] is False
+    assert metadata["model_causal_replay_ready"] is False
     assert not (tmp_path / "bundle.json").exists()
 
 
-def test_capture_records_exact_requests_and_reports_missing_seed(tmp_path):
+def test_capture_records_exact_requests_without_provider_specific_controls(tmp_path):
     path = tmp_path / "bundle.json"
     writer = ReplayBundleWriter(path, enabled=True)
     writer.record_request(
@@ -44,8 +45,8 @@ def test_capture_records_exact_requests_and_reports_missing_seed(tmp_path):
     assert metadata["complete"] is True
     assert metadata["request_bodies_captured"] is True
     assert metadata["responses_captured"] is True
-    assert metadata["sampling_seed_available"] is False
-    assert metadata["counterfactual_replay_ready"] is False
+    assert metadata["trajectory_replay_ready"] is True
+    assert metadata["model_causal_replay_ready"] is False
     assert bundle["calls"][0]["provider_messages"] == _request()
 
 
@@ -57,7 +58,7 @@ def test_capture_is_not_replay_ready_when_request_is_bounded_out(tmp_path):
         request_payload_sha256="request-1",
         provider_messages_sha256="messages-1",
         model_name="test-model",
-        model_kwargs={"seed": 7},
+        model_kwargs={"temperature": 1.0},
         temperature=1.0,
         active_state={},
         source_revision="s1",
@@ -68,4 +69,5 @@ def test_capture_is_not_replay_ready_when_request_is_bounded_out(tmp_path):
     metadata = writer.finalize()
 
     assert metadata["complete"] is False
-    assert metadata["counterfactual_replay_ready"] is False
+    assert metadata["trajectory_replay_ready"] is False
+    assert metadata["model_causal_replay_ready"] is False

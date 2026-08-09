@@ -95,7 +95,7 @@ def _replay_state_available(receipt: dict[str, Any]) -> bool:
     state = receipt.get("replay_state") or receipt.get("model_replay") or {}
     if not isinstance(state, dict):
         return False
-    if state.get("counterfactual_replay_ready") is True:
+    if state.get("model_causal_replay_ready") is True:
         return True
     required = ("provider_request_bodies", "model_state", "sampling_state")
     return all(state.get(key) for key in required)

@@ -307,7 +307,8 @@ async def test_opt_in_replay_capture_is_receipted_without_changing_request(tmp_p
     assert metadata["enabled"] is True
     assert metadata["request_bodies_captured"] is True
     assert metadata["responses_captured"] is True
-    assert metadata["counterfactual_replay_ready"] is False
+    assert metadata["trajectory_replay_ready"] is True
+    assert metadata["model_causal_replay_ready"] is False
     bundle = json.loads((tmp_path / "gt_replay_bundle.json").read_text())
     assert bundle["calls"][0]["provider_messages"]
 

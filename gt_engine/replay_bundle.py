@@ -3,9 +3,10 @@
 The normal paid workflow keeps this disabled.  When explicitly enabled, the
 writer stores exact prepared provider messages and the corresponding model
 response metadata in a separate artifact.  It never alters the provider
-request.  A bundle is replay-ready only when every request/response is
-captured without truncation and the model exposes a deterministic sampling
-seed.
+request.  A bundle is trajectory-replay-ready only when every request/response
+is captured without truncation. It never injects or requires provider-specific
+sampling controls; model-level causal reaction remains explicitly
+unidentifiable.
 """
 
 from __future__ import annotations
@@ -100,16 +101,13 @@ class ReplayBundleWriter:
             "provider_request_chars": len(body.decode("utf-8")),
             "model_name": str(model_name),
             "model_kwargs": _safe_model_kwargs(model_kwargs),
-            "sampling": {"temperature": float(temperature), "seed": None},
+            "sampling": {"temperature": float(temperature)},
             "source_revision": str(source_revision),
             "workspace_revision": str(workspace_revision),
             "controller_state": active_state,
             "request_captured": False,
             "response_captured": False,
         }
-        sampling = row["sampling"]
-        if isinstance(model_kwargs, dict) and model_kwargs.get("seed") is not None:
-            sampling["seed"] = model_kwargs.get("seed")
         if len(body) > self.max_call_chars or (
             self._bytes_estimate + len(body) > self.max_bundle_bytes
         ):
@@ -162,25 +160,14 @@ class ReplayBundleWriter:
                 and self._calls
                 and all(row.get("response_captured") for row in self._calls.values())
             ),
-            "sampling_seed_available": bool(
-                self.enabled
-                and self._calls
-                and all(
-                    row.get("sampling", {}).get("seed") is not None
-                    for row in self._calls.values()
-                )
-            ),
-            "counterfactual_replay_ready": bool(
+            "trajectory_replay_ready": bool(
                 self.enabled
                 and self._complete
                 and self._calls
                 and all(row.get("request_captured") for row in self._calls.values())
                 and all(row.get("response_captured") for row in self._calls.values())
-                and all(
-                    row.get("sampling", {}).get("seed") is not None
-                    for row in self._calls.values()
-                )
             ),
+            "model_causal_replay_ready": False,
         }
         if not self.enabled:
             return metadata
