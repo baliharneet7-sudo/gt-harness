@@ -534,6 +534,13 @@ jobs:
                       "repository_intelligence_status": intelligence.get("status"),
                       "repository_intelligence_required": intelligence.get("required"),
                       "repository_intelligence_failures": intelligence.get("failures") or [],
+                      "repository_intelligence_transient_failures": (
+                          intelligence.get("transient_failures") or []
+                      ),
+                      "repository_graph_degraded_fallback": bool(
+                          metrics.get("repository_graph_degraded_fallback")
+                          or (intelligence.get("graph_gate") or {}).get("degraded_fallback")
+                      ),
                       "repository_graph_schema_valid": metrics.get("repository_graph_schema_valid"),
                       "repository_graph_nodes": metrics.get("repository_graph_nodes"),
                       "repository_graph_edges": metrics.get("repository_graph_edges"),
@@ -584,7 +591,12 @@ jobs:
               row["task"]
               for row in receipt_metrics
               if row["repository_intelligence_required"]
-              and row["repository_intelligence_status"] != "passed"
+              and (
+                  row["repository_intelligence_status"] != "passed"
+                  or row["repository_graph_degraded_fallback"]
+                  or row["repository_intelligence_failures"]
+                  or row["repository_intelligence_transient_failures"]
+              )
           ]
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
