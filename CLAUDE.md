@@ -662,13 +662,14 @@ confidence bounds. The frozen baseline is descriptive only. The 89-task run
 remains blocked. See
 `details_done/GT_CONSERVATIVE_UPLIFT_IMPLEMENTATION_20260808.md`.
 
-Local provider-free verification for this implementation is complete: 376
-central-engine tests and the exact 161-test pre-smoke lifecycle set passed,
-along with direct/module census, the real vendored graph-runtime fixture,
-readiness, direct/module archived replay, ten-task run diff, Ruff, compilation,
-workflow YAML parsing, and diff checks. The worktree is not yet an exact clean
-pushed commit, so `SMOKE_APPROVED` has not been claimed and no paid run was
-started.
+The current provider-free release scope is complete: all 394 tests in the exact
+workflow test scope passed, along with direct/module census, the real vendored
+graph-runtime fixture, readiness, direct/module archived replay, ten-task run
+diff, Ruff, compilation, workflow YAML parsing, and diff checks. The repair is
+pushed at commit `567bca1`, and the exact pre-smoke gate printed
+`SMOKE_APPROVED`. No paid run was started during this audit; the ten-task GT-on
+smoke remains the next authorized measurement and the 89-task run remains
+blocked.
 
 ## Trajectory causality audit (2026-08-09)
 

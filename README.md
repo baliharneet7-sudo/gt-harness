@@ -6,32 +6,30 @@
 > annotator.**
 
 This repository embeds **GroundTruth (GT)** — a deterministic, LLM-free codebase-evidence
-engine — inside the nano-harness agent loop. GT pre-computes a complete call graph of the
-task repository (tree-sitter AST parsing via the Go `gt-index` binary) and appends verified
-structural facts (definitions, caller contracts, signature deltas, covering tests, recovery
-guidance) directly into the tool observations the model already reads — at most one evidence
-dose per observation, append-only, sealed with a hash chain, and silent when it has nothing
-verified to say.
+engine — alongside the stock nano-harness. The stock `nano/` loop remains the GT-off baseline.
+The active Terminal-Bench GT arm is `eval.gt_central_agent:MiniSweCentralAgent`, with the
+host-owned runtime in `gt_engine/`. It builds a bounded source mirror, validates the pinned
+graph substrate, selects source-backed facts, and accounts for every provider request without
+asking the model to acknowledge GT.
 
-The integration lives in `gt_engine/` (bridge, indexer, evidence-aware context management,
-advisory verify gate) plus the lifecycle boundaries in `nano/agent.py`. A GT-enabled request
-therefore follows a deterministic coding SDLC:
+The active GT arm follows this deterministic boundary:
 
-1. **Ideate/plan:** task-start obligations and ranked localization are inserted before the
-   first model decision.
-2. **Code:** pre-edit, edit, and post-edit observations are normalized through the GT gateway;
-   applicable structural facts compete under the one-dose law.
-3. **Verify/test:** executed syntax, covering-test, and observed-RED evidence update the
-   completion decision; unavailable evidence is named and fails open.
-4. **Penultimate submit check:** every GT-enabled completion is probed before acceptance.
-   Positive failing evidence can refuse once; the second attempt cannot deadlock.
-5. **Proof:** `gt_ledger.jsonl` proves sealed delivery bytes, while the hash-chained
-   `gt_attribution.jsonl` records all 17 mechanisms as witnessed, dark, suppressed, faulted,
-   or ineligible. Provider-request block lists—not trajectories—prove exposure to the next
-   model response, whose resulting tool-call IDs/names are linked to those delivery IDs.
-   Raw model text and tool arguments are never persisted. Exposure is not mislabeled as
-   semantic consumption or causal benefit; a controlled GT-off baseline supplies the
-   behavior/reward delta.
+1. **Model selection:** the model returns a Bash action; GT does not predict it.
+2. **Preflight:** the host normalizes a typed proposal and runs bounded deterministic checks;
+   paid runs currently use SHADOW mode, so the original command executes unchanged.
+3. **Execution/postflight:** the host executes the command, then GT observes the result,
+   source/workspace revisions, validation status, graph changes, and all 17 feature paths.
+4. **Next request:** grounded evidence is delivered at the first eligible provider request;
+   private engine state is accounted separately from model-visible text.
+5. **Audit:** exact request hashes, lifecycle counters, source revisions, graph provenance,
+   replay blobs, and outcome-first metrics make exposure and resource deltas verifiable.
+
+The architecture and behavioral contract are documented in
+[`docs/architecture.md`](docs/architecture.md) and [`AGENTS.md`](AGENTS.md). Exposure is not
+mislabeled as semantic consumption or causal benefit; the frozen GT-off baseline supplies the
+comparison, and a live GT-on efficiency claim requires an authorized matched smoke.
+The implementation audit and remaining ten-task gate are recorded in
+[`details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md`](details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md).
 
 **With GT disabled
 (no `--gt-root`), this harness is byte-identical to stock nano-harness** — that property is
@@ -119,6 +117,12 @@ Docker container, the exact shipping harness installed per container):
 | Harness | Model | Tasks | Score |
 |---------|-------|-------|-------|
 | nano-harness | Claude Opus 4.8 | 89 (full) | **59.6% (53/89)** |
+
+The table above is the historical stock nano-harness result, not a GT-on result. The current
+GT implementation has passed its provider-free and exact pre-smoke gates, but no new paid GT-on
+score is claimed yet. The next authorized measurement is a ten-task matched smoke against the
+frozen GT-off baseline; the 89-task GT run remains blocked until that outcome and efficiency
+audit passes.
 
 Self-run through Harbor, every task in its own Docker container, the exact shipping
 harness installed per container. Errored trials (agent wall-clock timeouts on the
@@ -223,6 +227,9 @@ Key design choices:
 | `nano/prompts.py` | The system prompt and an approximate token counter. |
 | `nano/cli.py` | `nano run` CLI: argument parsing, provider selection, Rich event rendering. |
 | `eval/tb_agent.py` | Terminal-Bench 2.0 (Harbor) installed-agent adapter. |
+| `eval/gt_central_agent.py` | Active host-owned Terminal-Bench GT arm and Mini-SWE model loop. |
+| `gt_engine/` | Deterministic preflight, postflight, graph, context, replay, and deep-metrics runtime. |
+| `scripts/central_pre_smoke_gate.py` | Exact pushed-commit gate required before a paid GT smoke. |
 | `eval/log.py` | `RunLog` / `TaskRecord` — structured run manifests and per-task transcript JSONL. |
 
 ## Setup / Install
@@ -335,9 +342,18 @@ nano-harness/
 
 ## Testing
 
+The stock `nano/` tests and the central GT tests are separate surfaces. The central runtime
+scope includes `eval/gt_central_agent.py`, `gt_engine/`, and the provider-free certification
+scripts; it is not represented by the historical five-file line count above.
+
 ```bash
 pytest          # configured via [tool.pytest.ini_options]; testpaths = ["tests"]
 ruff check .    # lint (line length 100, py312 target)
+
+# provider-free GT certification before any paid smoke
+python -m scripts.central_feature_census
+python scripts/central_readiness_audit.py
+python scripts/central_pre_smoke_gate.py
 ```
 
 ## Notes
