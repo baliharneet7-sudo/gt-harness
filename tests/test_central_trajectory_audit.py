@@ -104,3 +104,15 @@ def test_audit_fails_closed_on_missing_provider_hash(tmp_path):
     assert report["audit_status"] == "DETERMINISTIC_AUDIT_FAILED"
     assert any("provider_request_hash" in item for item in report["failures"])
 
+
+def test_audit_fails_closed_on_missing_context_accounting(tmp_path):
+    _write_bundle(tmp_path)
+    receipt_path = next(tmp_path.rglob("central_receipt.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["model_call_contexts"][0].pop("context_fact_candidates")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "DETERMINISTIC_AUDIT_FAILED"
+    assert any("missing_context_fact_accounting" in item for item in report["failures"])

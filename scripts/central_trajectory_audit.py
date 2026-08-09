@@ -116,7 +116,9 @@ def _context_failures(receipt: dict[str, Any], task: str) -> list[str]:
             failures.append(f"{task}:missing_provider_messages_hash:call:{call}")
         candidates = row.get("context_fact_candidates")
         accounted = row.get("context_facts_accounted")
-        if candidates is not None and accounted is not None and candidates != accounted:
+        if candidates is None or accounted is None:
+            failures.append(f"{task}:missing_context_fact_accounting:call:{call}")
+        elif candidates != accounted:
             failures.append(f"{task}:context_fact_accounting_mismatch:call:{call}")
     return failures
 
@@ -189,6 +191,9 @@ def _delivery_report(receipt: dict[str, Any], task: str) -> tuple[list[dict[str,
             failures.append(f"{task}:delivery_missing_provider_request_hash:{index}")
         if not provider_hash:
             failures.append(f"{task}:delivery_missing_provider_messages_hash:{index}")
+        context = contexts.get(delivered) if isinstance(delivered, int) else None
+        if context and request_hash != str(context.get("request_payload_sha256") or ""):
+            failures.append(f"{task}:delivery_request_hash_context_mismatch:{index}")
         if not concrete:
             failures.append(f"{task}:delivery_without_concrete_anchor:{index}:{feature}")
         if not timing_valid:
