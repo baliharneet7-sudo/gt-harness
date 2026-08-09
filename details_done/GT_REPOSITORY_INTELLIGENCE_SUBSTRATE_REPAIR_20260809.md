@@ -15,7 +15,7 @@ an actually unhealthy final graph.
 
 ## Repair
 
-Commit: `493b96f`
+Commit: `5b32295`
 
 1. `eval/gt_central_agent.py` now computes `graph_degraded_fallback` from the
    final current graph-gate failures. Initial failures remain in
@@ -52,6 +52,14 @@ $env:GT_INDEX_REQUIRE_COVERAGE='1'
 
 Result: `3 passed`.
 
+The widened provider-free suite passed `126 tests`. The exact pushed-commit
+certification then passed:
+
+* direct and module central census, including `REPOSITORY_SUBSTRATE_PROVEN`;
+* repository-intelligence substrate and pinned language contract;
+* workflow/readiness audit: `READY`;
+* exact pre-smoke gate: `SMOKE_APPROVED`.
+
 The full provider-free census, readiness audit, and pre-smoke gate are still
-required before another paid smoke. No paid run or 89-task run was started by
-this repair.
+required before another paid smoke; they now pass at this commit. No paid run or
+89-task run was started by this repair.
