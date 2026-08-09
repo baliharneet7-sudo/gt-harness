@@ -21,6 +21,7 @@ from eval.gt_central_agent import (
     MiniSweCentralShadowAgent,
     _message_context_chars,
     _partition_recovered_repository_failures,
+    _graph_gate_degraded_fallback,
     _stable_provider_prefix,
 )
 from gt_engine.central_runtime import classify_validation_command
@@ -70,6 +71,32 @@ def test_current_frontier_failure_remains_fail_closed():
 
     assert current == ["frontier:substrate_failure"]
     assert transient == []
+
+
+def test_recovered_initial_graph_failure_does_not_remain_degraded():
+    """A transient pre-source snapshot must not invalidate a later fresh graph."""
+
+    assert _graph_gate_degraded_fallback(
+        initial_failures=("no_supported_source", "graph_missing"),
+        current_failures=(),
+    ) is False
+    assert _graph_gate_degraded_fallback(
+        initial_failures=("no_supported_source",),
+        current_failures=("graph_not_current",),
+    ) is True
+
+
+def test_merge_gate_does_not_promote_recovered_transient_repository_failures():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tb2_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+    merge_block = workflow[
+        workflow.index("invalid_intelligence = [") : workflow.index("out = [")
+    ]
+    assert "repository_intelligence_transient_failures" not in merge_block
 
 
 def test_recovered_refresh_failure_is_not_current_failure():

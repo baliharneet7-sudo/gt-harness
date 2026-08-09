@@ -595,7 +595,6 @@ jobs:
                   row["repository_intelligence_status"] != "passed"
                   or row["repository_graph_degraded_fallback"]
                   or row["repository_intelligence_failures"]
-                  or row["repository_intelligence_transient_failures"]
               )
           ]
 

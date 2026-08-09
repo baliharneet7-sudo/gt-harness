@@ -155,6 +155,40 @@ def test_repository_session_persists_and_refreshes_captured_source(tmp_path: Pat
     assert session.refresh_log[-1]["elapsed_ms"] == 0.0
 
 
+def test_repository_session_recovers_when_source_is_created_after_initial_empty_mirror(
+    tmp_path: Path,
+):
+    mirror = tmp_path / "mirror"
+    state = tmp_path / "state"
+    mirror.mkdir()
+    session = RepositorySession(
+        root=mirror,
+        state_dir=state,
+        instruction="Implement the requested C program.",
+    )
+
+    initial = session.refresh(source_revision="empty")
+    assert initial.status == IndexBuildStatus.NO_SUPPORTED_SOURCE.value
+    assert initial.available is False
+
+    transition = SimpleNamespace(
+        changed_paths=("gpt2.c",),
+        deleted=(),
+        after_contents={"gpt2.c": "int main(void) { return 0; }\n"},
+        sensor_healthy=True,
+    )
+    assert session.apply_transition(transition, source_revision="source") is True
+    recovered = session.refresh(source_revision="source")
+
+    # A source-backed repository can have no task-linked anchor; substrate
+    # health is independent from retrieval availability.
+    assert recovered.available is False
+    assert recovered.substrate_ready is True
+    assert recovered.index_current is True
+    assert recovered.intelligence_valid is True
+    assert graph_gate_failures(recovered) == ()
+
+
 def test_repository_session_invalidates_when_changed_source_was_not_captured(tmp_path: Path):
     mirror = tmp_path / "mirror"
     mirror.mkdir()

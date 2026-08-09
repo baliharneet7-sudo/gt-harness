@@ -180,6 +180,22 @@ def _partition_recovered_repository_failures(
     return list(dict.fromkeys(current)), list(dict.fromkeys(transient))
 
 
+def _graph_gate_degraded_fallback(
+    *, initial_failures: tuple[str, ...], current_failures: tuple[str, ...]
+) -> bool:
+    """Report only an unresolved graph failure as treatment degradation.
+
+    A task may begin with no source files because its deliverable is created by
+    the model (for example, a blank task containing only weights/data).  The
+    initial graph gate is still recorded for audit, but a later current graph
+    must clear the operational degradation flag.  The merge gate should fail
+    only when the final source-bound substrate remains unhealthy.
+    """
+
+    del initial_failures  # retained in the receipt as historical evidence
+    return bool(current_failures)
+
+
 def _provider_request_receipt(
     model: Any, messages: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str, str, int]:
@@ -2616,6 +2632,10 @@ class MiniSweCentralAgent(BaseAgent):
                     and self.enable_repository_intelligence
                 )
                 else ()
+            )
+            graph_degraded_fallback = _graph_gate_degraded_fallback(
+                initial_failures=graph_gate_reasons,
+                current_failures=final_graph_gate_reasons,
             )
             intelligence_failures.extend(final_graph_gate_reasons)
             transient_intelligence_failures.extend(
