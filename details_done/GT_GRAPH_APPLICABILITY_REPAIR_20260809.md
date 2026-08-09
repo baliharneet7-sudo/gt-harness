@@ -54,3 +54,8 @@ The new tests prove both sides of the boundary: source-less tasks are
 denominator-excluded and quiet, while a source-backed unavailable index still
 produces hard graph-gate failures. The existing paid smoke remains historical
 rejected evidence; no paid rerun was started by this repair.
+
+Provider-free GitHub certification `31328363512` on commit `9c69f00` passed
+the complete central test suite, readiness audit, all-17 census, strict agent
+lifecycle gate, and printed `SMOKE_APPROVED`. This certifies the repair without
+spending on another task-container run.
