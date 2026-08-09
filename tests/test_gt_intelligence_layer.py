@@ -501,6 +501,52 @@ def test_frontier_claim_identity_is_stable_when_only_line_moves():
     assert second.accounting[0]["claim_id"] == first.accounting[0]["claim_id"]
 
 
+def test_frontier_deduplicates_multiple_occurrences_of_one_semantic_claim():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "callers": (
+            {
+                "caller_path": "interp.py",
+                "caller_line": 331,
+                "caller": "parse_expr",
+                "target": "Pair",
+                "confidence": 1.0,
+                "retrieval_relevance": 1.0,
+                "semantics": "graph_recorded",
+                "language": "python",
+            },
+            {
+                "caller_path": "interp.py",
+                "caller_line": 530,
+                "caller": "parse_expr",
+                "target": "Pair",
+                "confidence": 1.0,
+                "retrieval_relevance": 1.0,
+                "semantics": "graph_recorded",
+                "language": "python",
+            },
+        ),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Update interp.py."}],
+        source_revision="s1",
+        max_facts=3,
+    )
+
+    assert decision.candidate_count == decision.accounted_count == 1
+    assert len(decision.facts) == 1
+    assert decision.facts[0].line == 331
+    assert len({fact.claim_id for fact in decision.facts}) == 1
+
+
 def test_frontier_abstains_from_generic_task_start_symbol_match():
     evidence = {
         "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,

@@ -417,12 +417,21 @@ def compile_incremental_frontier(
     # A ranked anchor often points at the same node as a structural role.  Keep
     # the richer role and use the anchor only as a fallback when no role exists.
     unique_candidates: list[ContextFrontierFact] = []
+    # A semantic claim can have several graph occurrences (for example, two
+    # call sites of the same symbol).  ``claim_id`` intentionally excludes
+    # line number so that a line move does not reopen the delivery window.
+    # Deduplicating only by (path, line, symbol) therefore allowed the same
+    # claim to be emitted twice in one frame, violating the one-shot provider
+    # contract.  Keep the first deterministic candidate, which preserves the
+    # richer role ordering above and the earliest source location.
+    seen_claim_ids: set[str] = set()
     seen_locations: set[tuple[str, int, str]] = set()
     for fact in candidates:
-        identity = (fact.path, fact.line, fact.symbol)
-        if identity in seen_locations:
+        location = (fact.path, fact.line, fact.symbol)
+        if location in seen_locations or fact.claim_id in seen_claim_ids:
             continue
-        seen_locations.add(identity)
+        seen_locations.add(location)
+        seen_claim_ids.add(fact.claim_id)
         unique_candidates.append(fact)
     candidates = unique_candidates
     provider_text = _provider_text(messages)

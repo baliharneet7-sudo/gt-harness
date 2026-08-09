@@ -803,6 +803,9 @@ such as `app`, `url`, or `repr` cannot become visible merely because they have a
 high graph confidence. Frontier claim identity is semantic and stable across
 source revisions; revision-bound fact IDs remain available for audit, while a
 claim already delivered is not resent after an unrelated revision change.
+Multiple graph occurrences of one semantic claim (for example, repeated call
+sites) are coalesced before selection; physical line differences must never
+create duplicate facts or claims in one provider frame.
 
 Preflight mutation certainty is `PROVEN_READ_ONLY`, `PROVEN_MUTATION`, or
 `MAY_MUTATE`, with parser coverage and opaque/unknown segment flags. A workspace

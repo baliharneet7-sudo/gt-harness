@@ -62,6 +62,27 @@ python -m pytest -q tests/test_gt_central_agent.py
 The full central-agent suite is being rerun after the intentional host-scan
 metric change.  No paid smoke or 89-task run was started for this repair.
 
+## Post-smoke deduplication correction
+
+The authorized diagnostic smoke `31297108410` exercised the lifecycle on nine
+completed tasks. Source-backed repositories reached a current graph and
+recorded incremental refreshes. The Scheme receipt exposed a separate
+frontier-accounting defect: two graph call sites for `Pair` had different line
+locations but the same line-independent semantic `claim_id`, so both were
+selected in one provider frame. The receipt correctly rejected this as
+`duplicate_frontier_fact_delivery` and `duplicate_frontier_claim_delivery`.
+
+`compile_incremental_frontier()` now deduplicates candidates by both semantic
+claim identity and physical location, retaining the first deterministic role
+candidate. This prevents one-shot claims from being emitted twice while still
+preserving the existing definition/anchor coalescing behavior. A regression
+test covers multiple call sites for one semantic claim.
+
+This correction is provider-free and does not alter graph construction, source
+revision, or action execution. The paid smoke remains diagnostic until the
+missing portfolio job and this corrected receipt path are separately verified;
+no 89-task run is authorized.
+
 ## Operational semantics
 
 ```text

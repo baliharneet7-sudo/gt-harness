@@ -510,6 +510,9 @@ Semantic certainty and retrieval relevance are independent gates. Graph
 confidence cannot promote a generic or task-unrelated symbol. Semantic claim
 IDs remain stable across source revisions for delivery deduplication; versioned
 fact IDs preserve the exact graph/source evidence used in each receipt.
+Multiple graph occurrences that share a semantic claim ID are coalesced before
+selection, even when their physical lines differ, so one provider frame cannot
+repeat the same claim.
 
 Workspace scanning is skipped only for a parser-certified read-only proposal.
 Opaque interpreters, unsupported syntax, shell uncertainty, and partial parse
