@@ -129,6 +129,11 @@ def audit() -> dict[str, bool]:
             "enable_replay_capture: bool = False" in source
             and "tests/test_replay_bundle.py" in provider_free_workflow
         ),
+        "paid_replay_capture_switch_is_explicit": (
+            "replay_capture:" in workflow
+            and "REPLAY_CAPTURE:" in workflow
+            and '"$REPLAY_CAPTURE"' in workflow
+        ),
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow

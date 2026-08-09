@@ -19,4 +19,5 @@ def test_paid_central_workflow_installs_and_proves_repository_runtime():
     assert result["provider_free_gate_covers_pinned_benchmark_languages"] is True
     assert result["provider_free_gate_covers_trajectory_audit"] is True
     assert result["replay_capture_is_opt_in"] is True
+    assert result["paid_replay_capture_switch_is_explicit"] is True
     assert result["action_conditioned_graph_query_precedes_postflight"] is True
