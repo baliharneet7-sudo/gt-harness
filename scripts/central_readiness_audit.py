@@ -102,8 +102,16 @@ def audit() -> dict[str, bool]:
             "--ak preflight_mode=shadow" in item and "--ak enable_preflight=true" not in item
             for item in workflows
         ),
-        "paid_integration_mode_is_explicit_active": all(
-            "--ak integration_mode=active" in item for item in workflows
+        "staged_policy_arms_are_explicit_and_default_safe": all(
+            "options: [off, audit, certified_context, certified_controllers, certified_full]"
+            in item
+            and "default: audit" in item
+            and "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off"
+            in item
+            and "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow"
+            in item
+            and "--ak policy_mode=certified_active" in item
+            for item in workflows
         ),
         "one_switch_off_is_provider_neutral": (
             GTIntegrationMode.OFF.value == "off"
@@ -116,6 +124,29 @@ def audit() -> dict[str, bool]:
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow
+            and "tests/test_gt_uplift_policy.py" in provider_free_workflow
+            and "tests/test_gt_on_experiment.py" in provider_free_workflow
+        ),
+        "provider_baseline_shield_is_exact_until_measured_pressure": (
+            "stock_provider_messages_sha256" in run_source
+            and "provider_changed_message_indices" in run_source
+            and "provider_compaction_required(" in run_source
+            and "feature_guidance_chars" in run_source
+            and "certified_graph_chars" in run_source
+        ),
+        "common_certification_boundary_is_applied": (
+            "certify_opportunity(" in run_source
+            and "completion_opportunity.certified" in run_source
+            and "certification_decisions" in run_source
+            and (ROOT / "gt_engine/uplift_policy.py").is_file()
+        ),
+        "repeated_control_release_gate_is_available": (
+            "assess_repeated_release" in (ROOT / "gt_engine/experiment.py").read_text(
+                encoding="utf-8"
+            )
+            and "crossover_arm" in (ROOT / "gt_engine/experiment.py").read_text(
+                encoding="utf-8"
+            )
         ),
         "provider_free_gate_covers_repository_intelligence": (
             "tests/test_gt_intelligence_layer.py" in provider_free_workflow
@@ -169,6 +200,13 @@ def audit() -> dict[str, bool]:
             <= run_source.find("compile_incremental_frontier(")
             < run_source.find("model.query, query_messages")
         ),
+        "action_conditioned_graph_query_precedes_postflight": (
+            0
+            <= run_source.find("repository_session.query,")
+            < run_source.find("self._features.observe_action(")
+            and "active_paths=action_graph_paths" in run_source
+            and 'boundary=f"post_{proposed.operation.value}"' in run_source
+        ),
         "repository_intelligence_failure_is_receipted": (
             "material_frontier_not_delivered" in run_source
             and "context_frontier_coverage" in run_source
@@ -210,7 +248,10 @@ def audit() -> dict[str, bool]:
         "treatment_workflow_central": (
             'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
         ),
-        "shadow_workflow_central": "MiniSweCentralShadowAgent" in workflow,
+        "all_component_arms_use_one_central_engine": (
+            'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
+            and "MiniSweCentralShadowAgent" not in workflow
+        ),
         "custom_agent_uses_import_path": '--agent-import-path "$AGENT"' in workflow,
         "frozen_miniswe_version": '"mini-swe-agent==2.2.8"' in workflow,
         "legacy_agent_not_in_paid_workflow": (

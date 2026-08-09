@@ -8,6 +8,7 @@ controller differences.  It reads only archived trajectories and receipts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,19 @@ def _task_name(trajectory_path: Path) -> str:
     return trial.split("__", 1)[0]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _pair_identity(pair: tuple[Path, Path]) -> tuple[str, str]:
+    trajectory_path, receipt_path = pair
+    return _file_sha256(trajectory_path), _file_sha256(receipt_path)
+
+
 def _discover(root: Path) -> dict[str, tuple[Path, Path]]:
     discovered: dict[str, tuple[Path, Path]] = {}
     for trajectory_path in sorted(root.rglob("miniswe_trajectory.json")):
@@ -57,9 +71,12 @@ def _discover(root: Path) -> dict[str, tuple[Path, Path]]:
         if not receipt_path.exists():
             continue
         task = _task_name(trajectory_path)
+        candidate = (trajectory_path, receipt_path)
         if task in discovered:
-            raise ValueError(f"duplicate task {task!r} below {root}")
-        discovered[task] = (trajectory_path, receipt_path)
+            if _pair_identity(discovered[task]) == _pair_identity(candidate):
+                continue
+            raise ValueError(f"conflicting duplicate task {task!r} below {root}")
+        discovered[task] = candidate
     if not discovered:
         raise ValueError(f"no trajectory/receipt pairs below {root}")
     return discovered

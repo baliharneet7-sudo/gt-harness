@@ -46,15 +46,15 @@ on:
         type: string
         default: "inline-engine"
       arm:
-        description: "GT-on arm: treatment delivers the selected feature; shadow computes it privately"
+        description: "Conservative component arm; paid execution still requires the pre-smoke gate"
         type: choice
-        options: [treatment, shadow]
-        default: treatment
+        options: [off, audit, certified_context, certified_controllers, certified_full]
+        default: audit
       feature:
-        description: "Single-feature ablation or the final integrated candidate"
+        description: "Integrated all-17 runtime (component behavior is selected by arm)"
         type: choice
-        options: [lint, submit_readiness, all17, integrated]
-        default: all17
+        options: [integrated]
+        default: integrated
 
 jobs:
   plan:
@@ -326,39 +326,67 @@ jobs:
           FEATURE: ${{ inputs.feature }}
         run: |
           set -uo pipefail
-          if [ "$ARM" = "shadow" ]; then
-            AGENT="eval.gt_central_agent:MiniSweCentralShadowAgent"
-          else
-            AGENT="eval.gt_central_agent:MiniSweCentralAgent"
-          fi
+          AGENT="eval.gt_central_agent:MiniSweCentralAgent"
+          [ "$FEATURE" = "integrated" ] || { echo "::error::unknown feature: $FEATURE"; exit 2; }
           FEATURE_ARGS=()
-          case "$FEATURE" in
-            lint) FEATURE_ARGS+=(--ak enable_lint=true --ak enable_submit_readiness=false) ;;
-            submit_readiness) FEATURE_ARGS+=(--ak enable_lint=false --ak enable_submit_readiness=true) ;;
-            all17|integrated)
-              # This is the paid treatment contract.  Keep it identical to
-              # the engine workflow: GT is active, preflight is observational
-              # (shadow), context compaction is bounded and deterministic,
-              # completion/progress are host controls, and Harbor's own task
-              # timeout remains authoritative.
+          case "$ARM" in
+            off)
               FEATURE_ARGS+=(
-                --ak enable_lint=true --ak enable_submit_readiness=true
-                --ak enable_all_features=true
-                --ak integration_mode=active
-                --ak preflight_mode=shadow
-                --ak enable_context_compaction=true
-                --ak enable_adaptive_validation_timeout=true
-                --ak enable_completion_controller=true
-                --ak enable_progress_control=true
-                --ak execution_budget_sec="$EXECUTION_BUDGET"
-                --ak enable_task_start_advisory=false
-                --ak enable_context_frontier=true
+                --ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
+                --ak enable_all_features=false --ak enable_submit_readiness=false
+                --ak enable_lint=false --ak enable_feature_guidance=false
+                --ak enable_context_frontier=false --ak enable_context_compaction=false
+                --ak enable_completion_controller=false --ak enable_progress_control=false
+                --ak enable_adaptive_validation_timeout=false --ak require_graph_ready=false
+              ) ;;
+            audit)
+              FEATURE_ARGS+=(
+                --ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
+                --ak enable_all_features=true --ak enable_submit_readiness=true
+                --ak enable_repository_intelligence=true
+                --ak enable_lint=false --ak enable_feature_guidance=false
+                --ak enable_context_frontier=false --ak enable_context_compaction=false
+                --ak enable_completion_controller=false --ak enable_progress_control=false
+                --ak enable_adaptive_validation_timeout=false --ak require_graph_ready=false
+              ) ;;
+            certified_context)
+              FEATURE_ARGS+=(
+                --ak integration_mode=active --ak policy_mode=certified_active
+                --ak enable_all_features=true --ak enable_submit_readiness=true
+                --ak enable_repository_intelligence=true
+                --ak preflight_mode=shadow --ak enable_lint=false
+                --ak enable_feature_guidance=true --ak enable_context_frontier=true
+                --ak enable_context_compaction=false --ak enable_completion_controller=false
+                --ak enable_progress_control=false --ak enable_adaptive_validation_timeout=false
                 --ak require_graph_ready=true
-              )
-              ;;
-            *) echo "::error::unknown feature: $FEATURE"; exit 2 ;;
+              ) ;;
+            certified_controllers)
+              FEATURE_ARGS+=(
+                --ak integration_mode=active --ak policy_mode=certified_active
+                --ak enable_all_features=false --ak enable_submit_readiness=false
+                --ak enable_repository_intelligence=false
+                --ak preflight_mode=shadow --ak enable_lint=true
+                --ak enable_feature_guidance=false --ak enable_context_frontier=false
+                --ak enable_context_compaction=false --ak enable_completion_controller=true
+                --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
+                --ak require_graph_ready=false
+              ) ;;
+            certified_full)
+              FEATURE_ARGS+=(
+                --ak integration_mode=active --ak policy_mode=certified_active
+                --ak enable_all_features=true --ak enable_submit_readiness=true
+                --ak enable_repository_intelligence=true
+                --ak preflight_mode=shadow --ak enable_lint=true
+                --ak enable_feature_guidance=true --ak enable_context_frontier=true
+                --ak enable_context_compaction=true --ak enable_completion_controller=true
+                --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
+                --ak require_graph_ready=true
+              ) ;;
+            *) echo "::error::unknown arm: $ARM"; exit 2 ;;
           esac
           FEATURE_ARGS+=(
+            --ak execution_budget_sec="$EXECUTION_BUDGET"
+            --ak enable_task_start_advisory=false
             --ak step_limit=100
           )
           JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"

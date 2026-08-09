@@ -432,12 +432,30 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                 "model_call_contexts": [
                     {
                         "stock_context_chars": 100,
+                        "stock_provider_chars": 120,
+                        "feature_guidance_chars": 0,
+                        "certified_graph_chars": 0,
+                        "compaction_removed_chars": 0,
+                        "compaction_receipt_chars": 0,
+                        "final_provider_chars": 120,
+                        "provider_changed_message_indices": [],
+                        "provider_view_changed": False,
+                        "provider_change_reason": "none",
                         "runtime_advisory_chars": 0,
                         "context_chars": 100,
                         "context_compiler": {"active_state_chars": 20},
                     },
                     {
                         "stock_context_chars": 150,
+                        "stock_provider_chars": 170,
+                        "feature_guidance_chars": 80,
+                        "certified_graph_chars": 25,
+                        "compaction_removed_chars": 40,
+                        "compaction_receipt_chars": 12,
+                        "final_provider_chars": 247,
+                        "provider_changed_message_indices": [3],
+                        "provider_view_changed": True,
+                        "provider_change_reason": "certified_evidence",
                         "runtime_advisory_chars": 80,
                         "context_frontier_chars": 25,
                         "context_chars": 230,
@@ -456,6 +474,16 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["total_gt_context_chars_added"] == 155
     assert metrics["stock_context_chars_from_receipt"] == 250
     assert metrics["max_context_chars_from_receipt"] == 230
+    assert metrics["stock_provider_chars_sent"] == 290
+    assert metrics["feature_guidance_chars_sent"] == 80
+    assert metrics["certified_graph_chars_sent"] == 25
+    assert metrics["provider_compaction_removed_chars"] == 40
+    assert metrics["provider_compaction_receipt_chars"] == 12
+    assert metrics["final_provider_chars_sent"] == 367
+    assert metrics["provider_changed_message_count"] == 1
+    assert metrics["provider_view_changed_calls"] == 1
+    assert metrics["provider_exact_parity_calls"] == 1
+    assert metrics["certified_evidence_changed_calls"] == 1
     assert metrics["context_compiler_calls"] == 2
     assert metrics["context_fact_candidates"] == 7
     assert metrics["context_facts_accounted"] == 7

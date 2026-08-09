@@ -31,6 +31,25 @@ DIAGNOSTIC_METRICS = (
     "provider_request_min_headroom_tokens",
     "provider_stable_prefix_chars",
     "provider_stable_prefix_ratio_mean",
+    "stock_provider_chars_sent",
+    "feature_guidance_chars_sent",
+    "certified_graph_chars_sent",
+    "provider_compaction_removed_chars",
+    "provider_compaction_receipt_chars",
+    "final_provider_chars_sent",
+    "provider_changed_message_count",
+    "provider_view_changed_calls",
+    "provider_exact_parity_calls",
+    "certified_evidence_changed_calls",
+    "provider_budget_compaction_changed_calls",
+    "certified_opportunity_evaluations",
+    "certified_opportunities",
+    "certified_opportunity_abstentions",
+    "heuristic_opportunity_abstentions",
+    "certified_provider_deliveries",
+    "certified_provider_behavior_measurable",
+    "certified_provider_anchor_followed",
+    "certified_controller_actuations",
     "model_output_chars",
     "failed_actions",
     "repeated_commands",
@@ -101,6 +120,8 @@ DIAGNOSTIC_METRICS = (
     "repository_full_refreshes",
     "repository_incremental_refreshes",
     "repository_revision_cache_hits",
+    "repository_action_queries",
+    "repository_action_query_cache_hits",
     "context_exact_duplicate_chars_removed",
     "context_unique_reasoning_chars_removed",
     "context_bounded_observations",
@@ -605,6 +626,43 @@ def extract_trajectory(
                 "max_context_chars_from_receipt": max(
                     (int(item.get("context_chars") or 0) for item in call_contexts), default=0
                 ),
+                "stock_provider_chars_sent": sum(
+                    int(item.get("stock_provider_chars") or 0) for item in call_contexts
+                ),
+                "feature_guidance_chars_sent": sum(
+                    int(item.get("feature_guidance_chars") or 0) for item in call_contexts
+                ),
+                "certified_graph_chars_sent": sum(
+                    int(item.get("certified_graph_chars") or 0) for item in call_contexts
+                ),
+                "provider_compaction_removed_chars": sum(
+                    int(item.get("compaction_removed_chars") or 0) for item in call_contexts
+                ),
+                "provider_compaction_receipt_chars": sum(
+                    int(item.get("compaction_receipt_chars") or 0) for item in call_contexts
+                ),
+                "final_provider_chars_sent": sum(
+                    int(item.get("final_provider_chars") or 0) for item in call_contexts
+                ),
+                "provider_changed_message_count": sum(
+                    len(item.get("provider_changed_message_indices") or ())
+                    for item in call_contexts
+                ),
+                "provider_view_changed_calls": sum(
+                    bool(item.get("provider_view_changed")) for item in call_contexts
+                ),
+                "provider_exact_parity_calls": sum(
+                    not bool(item.get("provider_view_changed")) for item in call_contexts
+                ),
+                "certified_evidence_changed_calls": sum(
+                    "certified_evidence" in str(item.get("provider_change_reason") or "")
+                    for item in call_contexts
+                ),
+                "provider_budget_compaction_changed_calls": sum(
+                    "provider_budget_compaction"
+                    in str(item.get("provider_change_reason") or "")
+                    for item in call_contexts
+                ),
             }
         )
         for key in (
@@ -667,6 +725,8 @@ def extract_trajectory(
             "repository_full_refreshes",
             "repository_incremental_refreshes",
             "repository_revision_cache_hits",
+            "repository_action_queries",
+            "repository_action_query_cache_hits",
             "context_exact_duplicate_chars_removed",
             "context_unique_reasoning_chars_removed",
             "context_selected_facts_action_measurable",
@@ -684,6 +744,25 @@ def extract_trajectory(
             "provider_request_min_headroom_tokens",
             "provider_stable_prefix_chars",
             "provider_stable_prefix_ratio_mean",
+            "stock_provider_chars_sent",
+            "feature_guidance_chars_sent",
+            "certified_graph_chars_sent",
+            "provider_compaction_removed_chars",
+            "provider_compaction_receipt_chars",
+            "final_provider_chars_sent",
+            "provider_changed_message_count",
+            "provider_view_changed_calls",
+            "provider_exact_parity_calls",
+            "certified_evidence_changed_calls",
+            "provider_budget_compaction_changed_calls",
+            "certified_opportunity_evaluations",
+            "certified_opportunities",
+            "certified_opportunity_abstentions",
+            "heuristic_opportunity_abstentions",
+            "certified_provider_deliveries",
+            "certified_provider_behavior_measurable",
+            "certified_provider_anchor_followed",
+            "certified_controller_actuations",
             "context_state_frame_calls",
             "context_provider_view_changed_calls",
             "context_bounded_observations",

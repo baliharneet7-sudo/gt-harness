@@ -329,7 +329,11 @@ class SemanticDecisionEngine:
             if facts and len(candidate_text) > self.max_frame_chars:
                 continue
             if not facts and len(candidate_text) > self.max_frame_chars:
-                candidate_text = candidate_text[: self.max_frame_chars]
+                # A clipped diagnostic can change its meaning.  Keep the
+                # source-bound claim private when the complete fact does not
+                # fit; a later call may not expose it because the one-call
+                # evidence window still applies.
+                continue
             selected_need = selected_need or need
             selected_claims.append(selected)
             facts.append(selected.fact)
@@ -337,7 +341,7 @@ class SemanticDecisionEngine:
                 break
         if not selected_claims or selected_need is None:
             return None
-        text = " ".join(facts)[: self.max_frame_chars]
+        text = " ".join(facts)
         frame_id = "frame-" + self._digest(
             selected_need.need_id,
             tuple(item.claim_id for item in selected_claims),

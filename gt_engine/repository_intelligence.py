@@ -9,6 +9,7 @@ location when the graph cannot prove one.
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -183,6 +184,7 @@ class RepositorySession:
         self.refresh_log: list[dict[str, Any]] = []
         self._pending_index_paths: set[str] = set()
         self._requires_full_rebuild = False
+        self._query_cache: dict[tuple[str, tuple[str, ...]], RepositoryEvidence] = {}
         self._owned_directories: tuple[TemporaryDirectory[str], ...] = ()
 
     @classmethod
@@ -263,6 +265,7 @@ class RepositorySession:
                 self._pending_index_paths.add(normalized)
         self.source_revision = source_revision
         self.fresh = False
+        self._query_cache.clear()
         return True
 
     def refresh(self, *, source_revision: str, limit: int = 8) -> RepositoryEvidence:
@@ -322,6 +325,7 @@ class RepositorySession:
         self.indexed_source_revision = source_revision
         self.fresh = evidence.intelligence_valid
         self.evidence = evidence
+        self._query_cache.clear()
         self._pending_index_paths.clear()
         self._requires_full_rebuild = False
         self.refresh_log.append(
@@ -334,6 +338,86 @@ class RepositorySession:
                 "elapsed_ms": (
                     float(evidence.index.elapsed_ms) if evidence.index is not None else 0.0
                 ),
+            }
+        )
+        return evidence
+
+    def query(
+        self,
+        *,
+        source_revision: str,
+        active_paths: tuple[str, ...],
+        boundary: str,
+        limit: int = 8,
+    ) -> RepositoryEvidence:
+        """Re-rank the current graph for typed action paths without reindexing."""
+
+        normalized = tuple(
+            dict.fromkeys(
+                str(path or "").replace("\\", "/")
+                for path in active_paths
+                if str(path or "").strip()
+            )
+        )
+        index = self.evidence.index
+        if (
+            not normalized
+            or source_revision != self.indexed_source_revision
+            or index is None
+            or not index.graph_db
+            or not self.evidence.substrate_ready
+        ):
+            return self.evidence
+        cache_key = (source_revision, normalized)
+        cached = self._query_cache.get(cache_key)
+        if cached is not None:
+            self.evidence = cached
+            self.refresh_log.append(
+                {
+                    "source_revision": source_revision,
+                    "graph_revision": cached.graph_revision,
+                    "available": cached.available,
+                    "status": cached.status,
+                    "mode": "action_query_cache_hit",
+                    "boundary": str(boundary or "unknown"),
+                    "active_paths": list(normalized),
+                    "elapsed_ms": 0.0,
+                }
+            )
+            return cached
+        started = time.monotonic()
+        evidence = inspect_repository(
+            self.root,
+            self.instruction,
+            state_dir=self.state_dir,
+            limit=limit,
+            index_receipt=index,
+            source_revision=source_revision,
+            active_paths=normalized,
+            boundary=boundary,
+        )
+        evidence = replace(
+            evidence,
+            source_revision=source_revision,
+            index_current=bool(evidence.substrate_ready),
+            intelligence_valid=bool(
+                evidence.substrate_ready
+                and evidence.status == RepositoryIntelligenceStatus.HEALTHY_CURRENT.value
+            ),
+        )
+        self.evidence = evidence
+        self._query_cache[cache_key] = evidence
+        self.fresh = evidence.intelligence_valid
+        self.refresh_log.append(
+            {
+                "source_revision": source_revision,
+                "graph_revision": evidence.graph_revision,
+                "available": evidence.available,
+                "status": evidence.status,
+                "mode": "action_query",
+                "boundary": str(boundary or "unknown"),
+                "active_paths": list(normalized),
+                "elapsed_ms": round((time.monotonic() - started) * 1000.0, 6),
             }
         )
         return evidence
@@ -510,6 +594,8 @@ def inspect_repository(
     limit: int = 8,
     index_receipt: IndexBuildReceipt | None = None,
     source_revision: str = "",
+    active_paths: tuple[str, ...] = (),
+    boundary: str = "task_start",
 ) -> RepositoryEvidence:
     """Index and rank task-specific source anchors without raising.
 
@@ -590,8 +676,18 @@ def inspect_repository(
                     ),
                 ),
             )
-        projection = build_graph_projection(graph_db, contract, limit=max(8, limit * 2))
-        need = build_evidence_need(contract, projection, boundary="task_start")
+        projection = build_graph_projection(
+            graph_db,
+            contract,
+            limit=max(8, limit * 2),
+            active_paths=active_paths,
+        )
+        need = build_evidence_need(
+            contract,
+            projection,
+            boundary=boundary,
+            active_paths=active_paths,
+        )
         ranked = rank_graph_evidence(contract, projection, need, limit=limit)
         anchors: list[dict[str, Any]] = []
         for item in ranked:

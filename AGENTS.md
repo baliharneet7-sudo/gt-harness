@@ -500,6 +500,93 @@ changes. These repairs are provider-free implementation proof only. They do
 not restore the 9/10 baseline until an authorized matched smoke passes; the
 89-task run remains blocked.
 
+## Conservative uplift policy and provider baseline shield (2026-08-08)
+
+The latest paid smoke `31282615178` is rejected outcome evidence: it resolved
+8/10 against the frozen GT-off reference's 9/10. On the eight common solved
+tasks, GT-on used 24.54% more tokens, 26.82% more calls/assistant steps, and
+22.74% more model actions. Its all-task token reduction was dominated by
+different failure trajectories and is not an efficiency win. A frozen
+single-rollout baseline cannot estimate temperature-1 outcome variance or
+causal uplift. Do not use it as the release control for the repaired policy.
+
+Deterministic GT can guarantee its evidence, timing, abstention, controller
+state, provider transformation, and receipts. It cannot guarantee the sampled
+output of a temperature-1 model after changing provider-visible bytes. The
+release target is therefore no *GT-attributable* regression under certified
+interventions plus statistically supported outcome/resource uplift against
+fresh contemporaneous OFF controls. A literal promise of zero observed solve
+losses in every stochastic rollout is not a code-level invariant.
+
+All active consequences now cross one common `CertifiedOpportunity` boundary.
+Certification is conjunctive: mechanical or certified-structural authority,
+current source/workspace revision, concrete anchors, evidence identity, an
+open decision need, absence from provider history, and the exact first
+eligible decision window. Rank, generic lexical similarity, ambiguity,
+heuristics, stale evidence, missing anchors, duplicate representation, and an
+expired window abstain. The same boundary covers feature guidance, graph
+frontier delivery, admitted preflight returns, and completion auto-submit. GT
+never uses another LLM to certify evidence.
+
+Provider history is a baseline shield. Before measured provider-budget
+pressure, GT preserves Mini-SWE's stock provider-prepared request exactly
+unless a certified opportunity contributes bounded current evidence. The old
+soft character trigger and eager per-observation bounding are disabled. A
+successful requested read/search observation remains exact while current; only
+an actual provider-budget compaction epoch may replace older tool bodies with
+hash/return-code receipts. Distinct assistant content and reasoning are never
+removed. An over-budget semantic fact is omitted whole; it is never truncated
+into an ellipsis.
+
+Every provider call records stock/final provider character counts and hashes,
+feature-guidance characters, certified-graph characters, compaction removed
+characters, compaction-receipt characters, changed message indices, and the
+reason the provider view changed. Full per-call request snapshots are not
+duplicated because that would add large observer overhead; the durable
+trajectory, deterministic replay, exact hashes, and changed-index/component
+ledger are the audit source. No model marker or acknowledgement is required.
+`anchor_followed` is a non-causal behavioral proxy only.
+
+Graph retrieval is action-conditioned without prediction. FTS/BM25 rank orders
+candidates but contributes zero certification relevance. After execution of a
+typed READ, SEARCH, EDIT, or CREATE with an exact validation-relevant source
+path, the repository session re-ranks the existing current graph for that path,
+without rebuilding it, and caches repeated path queries. Provider delivery
+still requires semantic certainty >=0.95, mechanically assigned relevance
+>=0.95, and the exact path or symbol in Mini-SWE's provider-visible history.
+Line movement and source refresh do not reopen a stable semantic claim.
+
+The paid workflow exposes five explicit component arms through the same
+`MiniSweCentralAgent`: `off`, `audit`, `certified_context`,
+`certified_controllers`, and `certified_full`. The default is `audit`.
+Preflight remains SHADOW in every paid arm; assistive return-to-model behavior
+requires a separately authorized experiment. OFF is the contemporaneous
+within-wrapper control; the historical frozen GT-off run is descriptive only.
+
+Promotion requires repeated balanced OFF versus `certified_full` trials. Use
+the deterministic ABBA/BAAB crossover, at least two trials per arm per task,
+task-level hierarchical bootstrap, failure-capped tokens/actions/calls/steps/
+effective actions/wall time, a positive solve-rate lower confidence bound (or
+an explicitly predeclared noninferiority margin), and resource-ratio upper
+bounds. Treatment-only and control-only solves are reported separately.
+Component arms isolate instrumentation, context, and controller effects before
+full promotion. No 89-task run may start until the repeated outcome-first gate
+passes.
+
+Provider-free census now additionally requires
+`CERTIFIED_OPPORTUNITY_POLICY_PROVEN`, `PROVIDER_BASELINE_SHIELD_PROVEN`, and
+`REPEATED_CONTROL_GATE_PROVEN`. These prove implementation and measurement,
+not live efficacy. Exact current implementation and remaining work are in
+`details_done/GT_CONSERVATIVE_UPLIFT_IMPLEMENTATION_20260808.md`.
+
+The local conservative-uplift implementation passed 376 central-engine tests,
+the exact 161-test pre-smoke lifecycle selection, both census entrypoints, the
+real 48-language vendored graph-runtime gate, readiness, direct and module
+archived replay, ten-task run-diff accounting, Ruff, compilation, workflow
+YAML parsing, and diff checks. This is provider-free implementation proof only.
+The worktree is not yet an exact clean pushed commit, so do not claim
+`SMOKE_APPROVED`; no paid run has been started and the 89-task run is blocked.
+
 ## Latest outcome gate — workflow 31142998081 (2026-08-06)
 
 Workflow `31142998081` at `5c92a6a` is rejected as an outcome-preserving
@@ -772,16 +859,14 @@ proven labels/control-flow or macro/include facts; unknown syntax stays
 source-only. The adapter commit still requires its exact Linux build and
 fixture gate before promotion.
 
-Provider-view efficiency is governed at the observation boundary. Typed
-read/search/edit/validate operations receive deterministic per-observation
-bounds before the provider call; a successful large read retains head, three
-evenly spaced interior windows, and tail so bounding is not head/tail-blind.
-Distinct assistant content and reasoning are never removed. Soft checkpoint compaction is considered at 120,000 provider
-characters with an 80,000-character target, but it is applied only when the
-exact projected view saves at least 20,000 characters and 10% of the current
-view. Otherwise it is explicitly deferred so a negligible reduction does not
-break the provider's stable cache prefix. Hard provider-budget headroom remains
-authoritative and fails before `model.query()` rather than sending overflow.
+Provider-view efficiency is governed by the later conservative baseline-shield
+contract. Typed observations remain exact before measured provider-budget
+pressure; eager per-observation bounding and the soft character trigger are
+retired regression sources. During a genuine provider-budget compaction epoch,
+only older tool bodies may become bounded hash/return-code receipts. The newest
+successful requested read/search result and every distinct assistant content or
+reasoning field remain exact. Hard provider-budget headroom fails before
+`model.query()` rather than sending overflow.
 
 The top-down repair is provider-free certified on exact implementation commit
 `e6ce41f` by workflow `31244088870`: the checked-out Linux `gt-index` build,

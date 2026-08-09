@@ -63,6 +63,7 @@ jobs:
         run: |
           python -m pytest tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_uplift_policy.py \
             tests/test_gt_preflight.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
@@ -97,6 +98,7 @@ jobs:
             gt_engine/graph_context.py gt_engine/task_contract.py \
             gt_engine/indexer.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
+            gt_engine/uplift_policy.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             scripts/central_feature_census.py \
@@ -106,6 +108,7 @@ jobs:
             scripts/verify_tb2_language_contract.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
+            tests/test_gt_uplift_policy.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \

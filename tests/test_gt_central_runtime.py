@@ -24,6 +24,7 @@ from gt_engine.central_runtime import (
     explicit_check_commands,
     feature_payload_grounded,
     parse_manifest,
+    render_runtime_advisory,
     render_runtime_feedback,
     select_declared_check,
     source_revision_of,
@@ -122,6 +123,13 @@ def test_feedback_is_concise_and_contains_no_private_runtime_identifier():
     assert len(text) <= 320
     assert "groundtruth" not in text.lower()
     assert "gt_" not in text.lower()
+
+
+def test_advisory_is_complete_or_quiet_never_truncated():
+    detail = "Concrete diagnostic: " + ("x" * 200)
+
+    assert render_runtime_advisory(detail, limit=80) == ""
+    assert "..." not in render_runtime_advisory("src/app.py:9 SyntaxError", limit=80)
 
 
 def test_all_seventeen_central_features_have_real_trigger_receipts():
@@ -1297,6 +1305,9 @@ def test_documented_direct_census_entrypoint_is_executable():
     assert "NO_UNVERIFIED_CALLERS" in completed.stdout
     assert "NO_DUPLICATE_FRAME_EVIDENCE" in completed.stdout
     assert "REPOSITORY_SUBSTRATE_PROVEN" in completed.stdout
+    assert "CERTIFIED_OPPORTUNITY_POLICY_PROVEN" in completed.stdout
+    assert "PROVIDER_BASELINE_SHIELD_PROVEN" in completed.stdout
+    assert "REPEATED_CONTROL_GATE_PROVEN" in completed.stdout
 
 
 def test_predecided_actions_are_audited_without_cancellation():

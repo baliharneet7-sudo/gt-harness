@@ -29,6 +29,7 @@ from gt_engine.context_frontier import (
     FrontierDisposition,
     compile_incremental_frontier,
 )
+from gt_engine.experiment import ExperimentArm, crossover_arm
 from gt_engine.provider_view import build_provider_view
 from scripts.verify_gt_index_runtime import verify as verify_repository_substrate
 
@@ -434,6 +435,29 @@ def census() -> dict:
         and frontier.candidate_count == frontier.accounted_count == 1
         and bool(frontier.rendered)
         and "bottle.py:10" in frontier.rendered
+        and frontier.opportunity is not None
+        and frontier.opportunity.certified
+    )
+    stock_messages = [
+        {"role": "system", "content": "stock system"},
+        {"role": "user", "content": "stock task"},
+    ]
+    shielded_messages, shield_metrics = build_provider_view(
+        stock_messages,
+        active_state={"source_revision": "r0", "workspace_revision": "w0"},
+        trigger_chars=1,
+        target_chars=1,
+        transform=False,
+    )
+    summary["provider_baseline_shield_proven"] = (
+        shielded_messages == stock_messages
+        and not shield_metrics.compacted
+        and shield_metrics.input_chars == shield_metrics.output_chars
+    )
+    crossover = [crossover_arm("census-task", index, seed="census") for index in range(4)]
+    summary["repeated_control_gate_proven"] = (
+        crossover.count(ExperimentArm.OFF) == 2
+        and crossover.count(ExperimentArm.CERTIFIED_FULL) == 2
     )
     summary["no_actions_blocked"] = (
         summary["action_metrics"]["submit_holds"] == 0
@@ -521,6 +545,21 @@ def main() -> int:
         if result["context_frontier_proven"]
         else "CONTEXT_FRONTIER_FAILED"
     )
+    print(
+        "CERTIFIED_OPPORTUNITY_POLICY_PROVEN"
+        if result["context_frontier_proven"]
+        else "CERTIFIED_OPPORTUNITY_POLICY_FAILED"
+    )
+    print(
+        "PROVIDER_BASELINE_SHIELD_PROVEN"
+        if result["provider_baseline_shield_proven"]
+        else "PROVIDER_BASELINE_SHIELD_FAILED"
+    )
+    print(
+        "REPEATED_CONTROL_GATE_PROVEN"
+        if result["repeated_control_gate_proven"]
+        else "REPEATED_CONTROL_GATE_FAILED"
+    )
     return (
         0
         if all(
@@ -534,6 +573,8 @@ def main() -> int:
                 result["no_duplicate_frame_evidence"],
                 result["repository_substrate_proven"],
                 result["context_frontier_proven"],
+                result["provider_baseline_shield_proven"],
+                result["repeated_control_gate_proven"],
             )
         )
         else 1

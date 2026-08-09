@@ -205,7 +205,9 @@ def test_graph_projection_uses_canonical_positive_lines_and_deduplicates_nodes(t
     assert matching[0].line == 7
     assert matching[0].value == "def greet(name: str) -> str"
     assert matching[0].semantic_certainty == 1.0
-    assert 0.0 <= matching[0].retrieval_relevance <= 1.0
+    # FTS rank is candidate ordering only.  It is not evidence that the hit is
+    # decision-relevant; the action/task linker assigns that separately.
+    assert matching[0].retrieval_relevance == 0.0
 
 
 def test_compound_opaque_interpreter_is_never_claimed_read_only():
@@ -312,7 +314,7 @@ def test_frontier_delivers_ranked_anchor_when_no_structural_role_exists():
 
     decision = compile_incremental_frontier(
         evidence,
-        [{"role": "user", "content": "Update the record writer."}],
+        [{"role": "user", "content": "Update the record writer in legacy.cob."}],
         source_revision="s1",
     )
 
@@ -433,11 +435,11 @@ def test_frontier_claim_identity_is_stable_across_source_revisions():
         }
 
     first = compile_incremental_frontier(
-        evidence("s1"), [{"role": "user", "content": "Fix greeting."}], source_revision="s1"
+        evidence("s1"), [{"role": "user", "content": "Fix `greet`."}], source_revision="s1"
     )
     second = compile_incremental_frontier(
         evidence("s2"),
-        [{"role": "user", "content": "Fix greeting."}],
+        [{"role": "user", "content": "Fix `greet`."}],
         source_revision="s2",
         delivered_claim_ids=frozenset({first.facts[0].claim_id}),
     )
@@ -445,6 +447,94 @@ def test_frontier_claim_identity_is_stable_across_source_revisions():
     assert first.facts[0].claim_id
     assert second.disposition is FrontierDisposition.REPRESENTED_MESSAGE
     assert second.accounting[0]["claim_id"] == first.facts[0].claim_id
+
+
+def test_frontier_claim_identity_is_stable_when_only_line_moves():
+    def evidence(line: int):
+        return {
+            "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+            "available": True,
+            "substrate_ready": True,
+            "index_current": True,
+            "intelligence_valid": True,
+            "source_revision": "s1",
+            "graph_revision": f"g-{line}",
+            "anchors": (
+                {
+                    "path": "src/module.c",
+                    "line": line,
+                    "symbol": "PyModuleDef",
+                    "retrieval_relevance": 1.0,
+                    "semantic_certainty": 1.0,
+                },
+            ),
+            "definitions": (
+                {
+                    "path": "src/module.c",
+                    "line": line,
+                    "symbol": "PyModuleDef",
+                    "signature": "static struct PyModuleDef module_def",
+                    "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
+                },
+            ),
+        }
+
+    messages = [
+        {"role": "user", "content": "Update src/module.c."},
+        {
+            "role": "assistant",
+            "content": "",
+            "extra": {"actions": [{"command": "sed -n '1,80p' src/module.c"}]},
+        },
+        {"role": "tool", "content": "source opened"},
+    ]
+    first = compile_incremental_frontier(evidence(20), messages, source_revision="s1")
+    second = compile_incremental_frontier(
+        evidence(41),
+        messages,
+        source_revision="s1",
+        delivered_claim_ids=frozenset({first.accounting[0]["claim_id"]}),
+    )
+
+    assert second.disposition is FrontierDisposition.REPRESENTED_MESSAGE
+    assert second.accounting[0]["claim_id"] == first.accounting[0]["claim_id"]
+
+
+def test_frontier_abstains_from_generic_task_start_symbol_match():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (
+            {
+                "path": "interpreter.py",
+                "line": 14,
+                "symbol": "Pair",
+                "surface": "nodes_fts",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+                "relevance_reason_codes": ["exact_distinctive_subject"],
+            },
+        ),
+        "definitions": (),
+        "references": (),
+        "callers": (),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Implement a Scheme evaluator with pairs."}],
+        source_revision="s1",
+    )
+
+    assert decision.rendered == ""
+    assert decision.disposition is FrontierDisposition.LOW_PRECISION
+    assert decision.accounting[0]["disposition"] == "no_decision_anchor"
 
 
 def test_frontier_rejects_out_of_range_relevance_instead_of_delivering():

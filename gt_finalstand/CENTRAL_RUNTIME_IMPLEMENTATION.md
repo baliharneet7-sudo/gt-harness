@@ -587,3 +587,62 @@ joins outer Harbor censor/wall-time evidence into arm-neutral metrics. Compiler
 context totals now include state-frame characters separately from active
 guidance. These repairs are provider-free proven; no later paid smoke is
 claimed.
+
+## 2026-08-08 authoritative architecture correction
+
+The current engine is conservative and two-sided:
+
+```text
+model.query
+  -> typed ProposedAction
+  -> deterministic preflight (paid arms remain SHADOW)
+  -> literal environment execution
+  -> postflight + source-bound graph/state update
+  -> CertifiedOpportunity gate
+  -> exact stock provider request OR one bounded certified delta
+  -> next model.query
+```
+
+This section supersedes earlier design text that prescribed eager observation
+bounding, soft character-trigger compaction, or a single frozen-baseline
+treatment comparison.
+
+`gt_engine/uplift_policy.py` is the common active-consequence authority. A
+candidate is active only when its evidence is mechanical or certified
+structural, current, concrete, absent from provider history, needed for the
+present decision, and inside its one-call window. All uncertainty abstains.
+Completion auto-submit uses the same certification boundary. Preflight rewrite
+and suppression remain disabled; the paid policy is SHADOW.
+
+`ProviderViewSession` preserves the provider-prepared Mini-SWE request exactly
+before measured budget pressure. It does not bound a current large observation
+or create a soft compaction epoch. During a genuine provider-budget epoch, it
+may receipt older tool bodies but preserves all assistant content/reasoning and
+the newest successful requested read/search result. Semantic facts are emitted
+whole or omitted.
+
+The repository index separates structure from relevance. Raw FTS rank never
+certifies relevance. Typed action paths trigger a cached query of the current
+graph without rebuilding it, allowing repository intelligence to advance at
+the actual Mini-SWE decision boundary while remaining non-predictive. Delivery
+requires exact path/symbol anchoring and independent certainty/relevance gates.
+
+Provider receipts expose the complete component delta: stock/final chars and
+hashes, guidance chars, graph chars, compaction removal/receipt chars, changed
+indices, and reason. Behavioral anchor alignment is measured without markers
+but is not causal proof. Causality is evaluated only through the staged OFF,
+AUDIT, context-only, controller-only, and full repeated arms.
+
+The release evaluator uses balanced fresh OFF/full crossover trials,
+hierarchical task/repeat bootstrap, outcome lower confidence bounds, resource
+upper confidence bounds, and failure-capped cost. The latest smoke
+`31282615178` remains rejected (8/10; common-solved resources regressed), and
+the 89-task run remains blocked.
+
+This implementation is locally provider-free verified: 376 central-engine
+tests, the exact 161-test pre-smoke lifecycle set, both census entrypoints, the
+real 48-language graph-runtime fixture, readiness, direct/module archived
+replay, complete ten-task run diff, Ruff, compilation, workflow YAML parsing,
+and diff checks all pass. That does not authorize a smoke: the worktree must
+first become the exact clean pushed commit accepted by
+`central_pre_smoke_gate.py`. No paid run has been started for this change.

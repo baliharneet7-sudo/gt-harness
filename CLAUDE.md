@@ -580,3 +580,59 @@ adapter build and fixture gate: R=2, Verilog=2, Redcode=1, POV-Ray=1,
 census, readiness, static checks, and exact pre-smoke. This remains substrate
 evidence only, not an efficiency or solve-rate claim. Retain the archived
 replay and matched-smoke regression gates; the 89-task run stays blocked.
+
+## Conservative uplift policy and provider baseline shield (2026-08-08)
+
+The latest paid smoke `31282615178` is rejected outcome evidence: 8/10 versus
+the frozen GT-off reference's 9/10. On the eight common solved tasks, GT-on
+used 24.54% more tokens, 26.82% more calls/steps, and 22.74% more actions. A
+single frozen temperature-1 baseline cannot establish causal regression or
+uplift. Deterministic GT guarantees its own evidence, timing, abstention,
+provider view, controller actions, and receipts; it cannot guarantee the next
+sample from a stochastic model after provider-visible bytes change.
+
+Every active consequence crosses one `CertifiedOpportunity` boundary. It
+requires mechanical or certified-structural authority, current revisions,
+concrete anchors, evidence identity, a decision need, absence from retained
+provider history, and the exact first-eligible window. Heuristic/rank-only,
+ambiguous, stale, duplicate, unanchored, or late candidates abstain. Feature
+guidance, graph frontier facts, admitted preflight returns, and completion
+auto-submit use this boundary. No GT LLM exists.
+
+Before measured provider-budget pressure, the provider request remains the
+stock Mini-SWE request unless certified bounded evidence is added. The removed
+soft character trigger and eager per-observation transform must not return.
+Current requested read/search output stays exact. Only a real budget-compaction
+epoch may replace older tool bodies; assistant content/reasoning is immutable.
+Facts are complete-or-quiet, never ellipsized.
+
+Receipts separately record stock/final provider hashes and characters,
+feature-guidance and graph characters, compaction removal/receipt characters,
+changed message indices, and change reason. Durable trajectory + deterministic
+replay + these exact hashes are the audit surface; do not add model markers.
+Next-command anchor alignment is only a behavioral proxy, never acknowledgement
+or causal proof.
+
+Graph rank is candidate ordering, not relevance certification. Exact typed
+READ/SEARCH/EDIT/CREATE source paths cause a cached re-query of the existing
+current graph without an index rebuild. Delivery still requires >=0.95
+structural certainty, mechanically assigned >=0.95 relevance, and an exact
+path/symbol already present at the Mini-SWE decision boundary. Semantic claim
+identity ignores line movement and revision churn.
+
+The single central engine now has explicit `off`, `audit`,
+`certified_context`, `certified_controllers`, and `certified_full` workflow
+arms; default is `audit`, and paid preflight remains SHADOW. Release evidence
+must use fresh balanced OFF/full ABBA/BAAB trials, at least two trials per arm
+per task, hierarchical bootstrap, failure-capped resources, and outcome-first
+confidence bounds. The frozen baseline is descriptive only. The 89-task run
+remains blocked. See
+`details_done/GT_CONSERVATIVE_UPLIFT_IMPLEMENTATION_20260808.md`.
+
+Local provider-free verification for this implementation is complete: 376
+central-engine tests and the exact 161-test pre-smoke lifecycle set passed,
+along with direct/module census, the real vendored graph-runtime fixture,
+readiness, direct/module archived replay, ten-task run diff, Ruff, compilation,
+workflow YAML parsing, and diff checks. The worktree is not yet an exact clean
+pushed commit, so `SMOKE_APPROVED` has not been claimed and no paid run was
+started.

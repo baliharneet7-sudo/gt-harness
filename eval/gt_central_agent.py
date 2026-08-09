@@ -104,6 +104,12 @@ from gt_engine.repository_intelligence import (
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
+from gt_engine.uplift_policy import (
+    EvidenceAuthority,
+    GTPolicyMode,
+    OpportunityKind,
+    certify_opportunity,
+)
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -114,6 +120,15 @@ def _message_context_chars(message: dict[str, Any]) -> int:
         if value:
             text += json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return len(text)
+
+
+def _workspace_target_path(path: str) -> str:
+    normalized = str(path or "").strip().replace("\\", "/")
+    if normalized.startswith("/app/"):
+        return normalized[5:]
+    if normalized.startswith("./"):
+        return normalized[2:]
+    return normalized
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -226,6 +241,20 @@ def _stable_provider_prefix(
     return count, chars, round(chars / total_chars, 6) if total_chars else 0.0
 
 
+def _changed_provider_message_indices(
+    stock: list[dict[str, Any]], current: list[dict[str, Any]]
+) -> list[int]:
+    """Return exact provider-message positions changed by the GT treatment."""
+
+    changed: list[int] = []
+    for index in range(max(len(stock), len(current))):
+        if index >= len(stock) or index >= len(current):
+            changed.append(index)
+        elif _canonical_json(stock[index]) != _canonical_json(current[index]):
+            changed.append(index)
+    return changed
+
+
 def _inject_runtime_evidence(
     messages: list[dict[str, Any]], evidence: str
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -294,6 +323,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_repository_intelligence: bool = True,
         require_graph_ready: bool = False,
         enable_task_start_advisory: bool = False,
+        enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
         context_frontier_task_budget_chars: int = 6_000,
         enable_context_compaction: bool = False,
@@ -316,6 +346,7 @@ class MiniSweCentralAgent(BaseAgent):
         provider_context_hard_ratio: float = 0.90,
         provider_context_reserve_tokens: int = 131_072,
         integration_mode: str | GTIntegrationMode | None = None,
+        policy_mode: str | GTPolicyMode | None = None,
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
         preflight_timeout_sec: float = 0.1,
@@ -341,12 +372,33 @@ class MiniSweCentralAgent(BaseAgent):
         self.integration_mode = GTIntegrationMode.parse(
             integration_mode if integration_mode is not None else inferred_integration_mode
         )
+        inferred_policy_mode = {
+            GTIntegrationMode.OFF: GTPolicyMode.OFF,
+            GTIntegrationMode.AUDIT: GTPolicyMode.AUDIT,
+            GTIntegrationMode.ACTIVE: (
+                GTPolicyMode.AUDIT
+                if self.runtime_mode == "shadow"
+                else GTPolicyMode.CERTIFIED_ACTIVE
+            ),
+        }[self.integration_mode]
+        self.policy_mode = GTPolicyMode.parse(
+            policy_mode if policy_mode is not None else inferred_policy_mode
+        )
+        if self.policy_mode is GTPolicyMode.OFF:
+            self.integration_mode = GTIntegrationMode.OFF
+        elif self.policy_mode is GTPolicyMode.AUDIT:
+            self.integration_mode = GTIntegrationMode.AUDIT
+        elif self.integration_mode is GTIntegrationMode.OFF:
+            # A second switch cannot reactivate an explicitly disabled host.
+            self.policy_mode = GTPolicyMode.OFF
+        self.policy_active = self.policy_mode is GTPolicyMode.CERTIFIED_ACTIVE
         if self.integration_mode is GTIntegrationMode.OFF:
             enable_lint = False
             enable_submit_readiness = False
             enable_all_features = False
             enable_repository_intelligence = False
             enable_task_start_advisory = False
+            enable_feature_guidance = False
             enable_context_frontier = False
             enable_context_compaction = False
             enable_completion_controller = False
@@ -354,6 +406,14 @@ class MiniSweCentralAgent(BaseAgent):
             enable_adaptive_validation_timeout = False
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
+            enable_feature_guidance = False
+            enable_context_compaction = False
+            enable_completion_controller = False
+            enable_adaptive_validation_timeout = False
+        elif self.policy_mode is GTPolicyMode.CERTIFIED_SHADOW:
+            enable_lint = False
+            enable_task_start_advisory = False
+            enable_feature_guidance = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -363,6 +423,7 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_repository_intelligence = enable_repository_intelligence
         self.require_graph_ready = bool(require_graph_ready)
         self.enable_task_start_advisory = enable_task_start_advisory
+        self.enable_feature_guidance = bool(enable_feature_guidance)
         self.enable_context_frontier = bool(enable_context_frontier)
         self.context_frontier_task_budget_chars = max(0, int(context_frontier_task_budget_chars))
         self.enable_context_compaction = enable_context_compaction
@@ -418,10 +479,7 @@ class MiniSweCentralAgent(BaseAgent):
             parsed_preflight_mode = legacy_mode
         if self.integration_mode is GTIntegrationMode.OFF:
             parsed_preflight_mode = PreflightMode.OFF
-        elif (
-            self.integration_mode is GTIntegrationMode.AUDIT
-            and parsed_preflight_mode is PreflightMode.ASSISTIVE_SAFE
-        ):
+        elif not self.policy_active and parsed_preflight_mode is PreflightMode.ASSISTIVE_SAFE:
             parsed_preflight_mode = PreflightMode.SHADOW
         self.preflight_mode = parsed_preflight_mode
         # Compatibility for external receipt consumers; dispatch uses the enum.
@@ -436,6 +494,8 @@ class MiniSweCentralAgent(BaseAgent):
             model_visible=(
                 self.runtime_mode == "treatment"
                 and self.integration_mode is GTIntegrationMode.ACTIVE
+                and self.policy_active
+                and self.enable_feature_guidance
             ),
         )
         self._model_factory: Callable[[], Any] = self._build_model
@@ -1044,6 +1104,7 @@ class MiniSweCentralAgent(BaseAgent):
         }
         auto_submit_attempts = 0
         auto_submit_count = 0
+        controller_opportunities: list[dict[str, Any]] = []
         self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
         progress_transitions: list[dict[str, Any]] = []
         seen_semantic_signatures: set[str] = set()
@@ -1191,6 +1252,12 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                     },
                 }
+                (
+                    stock_provider_messages,
+                    _stock_request_payload_sha256,
+                    stock_provider_messages_sha256,
+                    stock_provider_request_chars,
+                ) = _provider_request_receipt(model, messages)
                 if self.enable_context_compaction:
                     query_messages, provider_view_metrics = provider_view_session.project(
                         messages,
@@ -1206,56 +1273,10 @@ class MiniSweCentralAgent(BaseAgent):
                         transform=False,
                     )
                 compaction_epoch_started = False
-                if (
-                    self.enable_context_compaction
-                    and provider_view_session.epoch == 0
-                    and provider_view_metrics.output_chars > self.context_trigger_chars
-                ):
-                    _preview_view, preview_metrics = build_provider_view(
-                        query_messages,
-                        active_state=active_state,
-                        trigger_chars=1,
-                        target_chars=self.context_target_chars,
-                        keep_recent_turns=2,
-                        transform=True,
-                        attach_state_frame=False,
-                    )
-                    projected_savings = max(
-                        0,
-                        provider_view_metrics.output_chars - preview_metrics.output_chars,
-                    )
-                    projected_ratio = (
-                        projected_savings / provider_view_metrics.output_chars
-                        if provider_view_metrics.output_chars
-                        else 0.0
-                    )
-                    if (
-                        projected_savings >= self.context_min_compaction_savings_chars
-                        and projected_ratio >= self.context_min_compaction_savings_ratio
-                    ):
-                        query_messages, provider_view_metrics = provider_view_session.compact(
-                            messages,
-                            active_state=active_state,
-                            target_chars=self.context_target_chars,
-                            keep_recent_turns=2,
-                            trigger_tokens=0,
-                            trigger_kind="provider_view_chars",
-                            trigger_chars=provider_view_metrics.output_chars,
-                        )
-                        context_compactions += 1
-                        context_chars_elided += provider_view_metrics.elided_chars
-                        compaction_epoch_started = True
-                    else:
-                        context_compaction_deferrals.append(
-                            {
-                                "call": calls,
-                                "input_chars": provider_view_metrics.output_chars,
-                                "projected_output_chars": preview_metrics.output_chars,
-                                "projected_savings_chars": projected_savings,
-                                "projected_savings_ratio": round(projected_ratio, 6),
-                                "reason": "insufficient_cache_break_benefit",
-                            }
-                        )
+                # Character-count compaction used to change otherwise safe
+                # provider requests long before the model's measured context
+                # reserve was at risk.  Only the exact provider-budget gate
+                # below may start an epoch now.
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
@@ -1263,6 +1284,8 @@ class MiniSweCentralAgent(BaseAgent):
                     repository_evidence,
                     query_messages,
                     source_revision=source_revision,
+                    workspace_revision=snapshot.revision,
+                    current_call=calls,
                     delivered_fact_ids=frozenset(delivered_frontier_fact_ids),
                     delivered_claim_ids=frozenset(delivered_frontier_claim_ids),
                     max_chars=min(
@@ -1278,6 +1301,7 @@ class MiniSweCentralAgent(BaseAgent):
                     if (
                         self.enable_context_frontier
                         and self.integration_mode is GTIntegrationMode.ACTIVE
+                        and self.policy_active
                         and self.runtime_mode == "treatment"
                         and frontier_decision.disposition is FrontierDisposition.SELECTED_FRONTIER
                     )
@@ -1291,6 +1315,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "call": calls,
                         "source_revision": source_revision,
                         "integration_mode": self.integration_mode.value,
+                        "policy_mode": self.policy_mode.value,
                         "delivery_enabled": bool(frontier_payload),
                         **frontier_decision.as_dict(),
                     }
@@ -1411,6 +1436,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "not_predictive": True,
                             "one_step_late": False,
                             "chars": len(frontier_payload),
+                            "certified_opportunity": (
+                                frontier_decision.opportunity.as_dict()
+                                if frontier_decision.opportunity is not None
+                                else None
+                            ),
                         }
                     )
                 if delivery_metadata is not None:
@@ -1425,6 +1455,9 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "claim_ids": delivery_metadata.get("claim_ids", []),
                             "claim_anchors": delivery_metadata.get("claim_anchors", []),
+                            "certified_opportunity": delivery_metadata.get(
+                                "certified_opportunity"
+                            ),
                             "decision_need_id": delivery_metadata.get("decision_need_id"),
                             "decision_need_kind": delivery_metadata.get("decision_need_kind"),
                             "decision_frame_id": delivery_metadata.get("decision_frame_id"),
@@ -1467,11 +1500,41 @@ class MiniSweCentralAgent(BaseAgent):
                         context_parts["system_user_chars"] += chars
                 context_chars = sum(context_parts.values())
                 context_chars_sent += context_chars
+                provider_changed_message_indices = _changed_provider_message_indices(
+                    stock_provider_messages, provider_messages
+                )
+                provider_change_reasons = [
+                    reason
+                    for reason, applies in (
+                        ("provider_budget_compaction", provider_view_metrics.compacted),
+                        ("certified_evidence", bool(runtime_enrichment_chars)),
+                    )
+                    if applies
+                ]
                 model_call_contexts.append(
                     {
                         "call": calls,
                         **context_parts,
                         "stock_context_chars": context_chars - runtime_enrichment_chars,
+                        "stock_provider_chars": stock_provider_request_chars,
+                        "feature_guidance_chars": len(guidance_payload),
+                        "certified_graph_chars": len(frontier_payload),
+                        "compaction_removed_chars": provider_view_metrics.elided_chars,
+                        "compaction_receipt_chars": max(
+                            0,
+                            provider_view_metrics.output_chars
+                            - max(
+                                0,
+                                provider_view_metrics.input_chars
+                                - provider_view_metrics.elided_chars,
+                            ),
+                        ),
+                        "final_provider_chars": provider_request_chars,
+                        "stock_provider_messages_sha256": stock_provider_messages_sha256,
+                        "provider_changed_message_indices": provider_changed_message_indices,
+                        "provider_view_changed": bool(provider_changed_message_indices),
+                        "provider_change_reasons": provider_change_reasons,
+                        "provider_change_reason": "+".join(provider_change_reasons) or "none",
                         "context_chars": context_chars,
                         "request_payload_sha256": request_payload_sha256,
                         "logical_messages_sha256": logical_messages_sha256,
@@ -1653,6 +1716,34 @@ class MiniSweCentralAgent(BaseAgent):
                     else:
                         behavioral_relation = "other_action"
                     guidance_deliveries[-1].update(
+                        {
+                            "next_command": first_command,
+                            "behavioral_relation": behavioral_relation,
+                            "anchor_followed": anchor_followed,
+                        }
+                    )
+                if frontier_payload and frontier_deliveries:
+                    first_command = str((actions[0] if actions else {}).get("command") or "")
+                    frontier_anchors = tuple(
+                        str(anchor)
+                        for fact in frontier_deliveries[-1].get("facts") or ()
+                        for anchor in (fact.get("path"), fact.get("symbol"))
+                        if anchor
+                    )
+                    anchor_followed = bool(first_command) and any(
+                        anchor in first_command for anchor in frontier_anchors
+                    )
+                    if not first_command:
+                        behavioral_relation = "no_action"
+                    elif anchor_followed:
+                        behavioral_relation = "anchor_followed"
+                    elif is_check_command(first_command):
+                        behavioral_relation = "validation_action"
+                    elif is_submit_command(first_command):
+                        behavioral_relation = "submit_action"
+                    else:
+                        behavioral_relation = "other_action"
+                    frontier_deliveries[-1].update(
                         {
                             "next_command": first_command,
                             "behavioral_relation": behavioral_relation,
@@ -1947,6 +2038,47 @@ class MiniSweCentralAgent(BaseAgent):
                                 callers=(),
                                 graph_revision="",
                             )
+                    action_graph_paths = tuple(
+                        dict.fromkeys(
+                            normalized
+                            for target in proposed.targets
+                            for normalized in [_workspace_target_path(target.path)]
+                            if normalized in snapshot.entries
+                            and snapshot.entries[normalized].kind == "f"
+                            and classify_change(
+                                normalized,
+                                kind="f",
+                                task_deliverables=task_deliverables,
+                            ).validation_relevant
+                        )
+                    )
+                    if (
+                        repository_session is not None
+                        and repository_session.evidence.substrate_ready
+                        and action_graph_paths
+                        and proposed.operation
+                        in {
+                            ActionOperation.READ,
+                            ActionOperation.SEARCH,
+                            ActionOperation.EDIT,
+                            ActionOperation.CREATE,
+                        }
+                    ):
+                        repository_evidence = await asyncio.to_thread(
+                            repository_session.query,
+                            source_revision=source_revision,
+                            active_paths=action_graph_paths,
+                            boundary=f"post_{proposed.operation.value}",
+                        )
+                        if repository_evidence.available:
+                            self._features.refresh_structural_evidence(
+                                source_revision=source_revision,
+                                anchors=repository_evidence.anchors,
+                                definitions=repository_evidence.definitions,
+                                references=repository_evidence.references,
+                                callers=repository_evidence.callers,
+                                graph_revision=repository_evidence.graph_revision,
+                            )
                     classification = classification.with_result(
                         result_code=result.return_code,
                         output=output["output"],
@@ -2153,6 +2285,33 @@ class MiniSweCentralAgent(BaseAgent):
                         )
                         completion_certificates.append(certificate)
                         last_completion_workspace_revision = snapshot.revision
+                        completion_opportunity = None
+                        if certificate.auto_submit_eligible:
+                            completion_opportunity = certify_opportunity(
+                                kind=OpportunityKind.COMPLETION_READY,
+                                authority=EvidenceAuthority.MECHANICAL,
+                                source_revision=source_revision,
+                                current_source_revision=source_revision,
+                                workspace_revision=snapshot.revision,
+                                evidence_ids=tuple(
+                                    item.predicate_id for item in certificate.observations
+                                ),
+                                concrete_anchors=tuple(
+                                    predicate.command
+                                    for predicate in completion_plan.predicates
+                                ),
+                                absent_from_provider_history=True,
+                                decision_relevant=True,
+                                eligible_call=calls,
+                                current_call=calls,
+                            )
+                            controller_opportunities.append(
+                                {
+                                    "boundary": "completion_controller",
+                                    "action_id": actions_count,
+                                    **completion_opportunity.as_dict(),
+                                }
+                            )
                         receipts.append(
                             {
                                 "action": actions_count,
@@ -2160,13 +2319,24 @@ class MiniSweCentralAgent(BaseAgent):
                                 "decision": (
                                     "AUTO_SUBMIT"
                                     if certificate.auto_submit_eligible
+                                    and completion_opportunity is not None
+                                    and completion_opportunity.certified
                                     else "CONTINUE"
                                 ),
                                 "revision": snapshot.revision,
                                 "reason_codes": list(certificate.reason_codes),
+                                "certified_opportunity": (
+                                    completion_opportunity.as_dict()
+                                    if completion_opportunity is not None
+                                    else None
+                                ),
                             }
                         )
-                        if certificate.auto_submit_eligible:
+                        if (
+                            certificate.auto_submit_eligible
+                            and completion_opportunity is not None
+                            and completion_opportunity.certified
+                        ):
                             auto_submit_attempts += 1
                             try:
                                 submit_result = await self._host_executions.exec(
@@ -2354,6 +2524,19 @@ class MiniSweCentralAgent(BaseAgent):
             elapsed_seconds = max(time.monotonic() - started, 1e-6)
             assistant_steps = sum(1 for message in messages if message.get("role") == "assistant")
             feature_summary = self._features.summary()
+            certification_decisions = [
+                *feature_summary.get("certification_decisions", ()),
+                *(
+                    {
+                        "boundary": "repository_frontier",
+                        "call": int(row.get("call") or 0),
+                        **dict(row["opportunity"]),
+                    }
+                    for row in frontier_decisions
+                    if isinstance(row.get("opportunity"), dict)
+                ),
+                *controller_opportunities,
+            ]
             preflight_rows = feature_summary["preflight_receipts"]
             action_cycles = feature_summary["action_cycles"]
             preflight_latencies = [
@@ -2622,6 +2805,68 @@ class MiniSweCentralAgent(BaseAgent):
                     if len(model_call_contexts) > 1
                     else 0.0
                 ),
+                "stock_provider_chars_sent": sum(
+                    int(row.get("stock_provider_chars") or 0) for row in model_call_contexts
+                ),
+                "feature_guidance_chars_sent": sum(
+                    int(row.get("feature_guidance_chars") or 0) for row in model_call_contexts
+                ),
+                "certified_graph_chars_sent": sum(
+                    int(row.get("certified_graph_chars") or 0) for row in model_call_contexts
+                ),
+                "provider_compaction_removed_chars": sum(
+                    int(row.get("compaction_removed_chars") or 0) for row in model_call_contexts
+                ),
+                "provider_compaction_receipt_chars": sum(
+                    int(row.get("compaction_receipt_chars") or 0) for row in model_call_contexts
+                ),
+                "final_provider_chars_sent": sum(
+                    int(row.get("final_provider_chars") or 0) for row in model_call_contexts
+                ),
+                "provider_changed_message_count": sum(
+                    len(row.get("provider_changed_message_indices") or ())
+                    for row in model_call_contexts
+                ),
+                "provider_view_changed_calls": sum(
+                    bool(row.get("provider_view_changed")) for row in model_call_contexts
+                ),
+                "provider_exact_parity_calls": sum(
+                    not bool(row.get("provider_view_changed")) for row in model_call_contexts
+                ),
+                "certified_evidence_changed_calls": sum(
+                    "certified_evidence" in (row.get("provider_change_reasons") or ())
+                    for row in model_call_contexts
+                ),
+                "provider_budget_compaction_changed_calls": sum(
+                    "provider_budget_compaction" in (row.get("provider_change_reasons") or ())
+                    for row in model_call_contexts
+                ),
+                "certified_opportunity_evaluations": len(certification_decisions),
+                "certified_opportunities": sum(
+                    bool(row.get("certified")) for row in certification_decisions
+                ),
+                "certified_opportunity_abstentions": sum(
+                    not bool(row.get("certified")) for row in certification_decisions
+                ),
+                "heuristic_opportunity_abstentions": sum(
+                    "heuristic_evidence" in (row.get("reason_codes") or ())
+                    for row in certification_decisions
+                ),
+                "certified_provider_deliveries": sum(
+                    bool((row.get("certified_opportunity") or {}).get("certified"))
+                    for row in (*guidance_deliveries, *frontier_deliveries)
+                ),
+                "certified_provider_behavior_measurable": sum(
+                    bool(row.get("next_command"))
+                    for row in (*guidance_deliveries, *frontier_deliveries)
+                    if bool((row.get("certified_opportunity") or {}).get("certified"))
+                ),
+                "certified_provider_anchor_followed": sum(
+                    bool(row.get("anchor_followed"))
+                    for row in (*guidance_deliveries, *frontier_deliveries)
+                    if bool((row.get("certified_opportunity") or {}).get("certified"))
+                ),
+                "certified_controller_actuations": auto_submit_attempts,
                 "provider_context_limit_tokens": self.provider_context_limit_tokens,
                 "provider_context_hard_ratio": self.provider_context_hard_ratio,
                 "provider_context_reserve_tokens": self.provider_context_reserve_tokens,
@@ -2873,6 +3118,18 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "repository_revision_cache_hits": sum(
                     row.get("mode") == "revision_cache_hit"
+                    for row in (
+                        repository_session.refresh_log if repository_session is not None else ()
+                    )
+                ),
+                "repository_action_queries": sum(
+                    row.get("mode") == "action_query"
+                    for row in (
+                        repository_session.refresh_log if repository_session is not None else ()
+                    )
+                ),
+                "repository_action_query_cache_hits": sum(
+                    row.get("mode") == "action_query_cache_hit"
                     for row in (
                         repository_session.refresh_log if repository_session is not None else ()
                     )
@@ -3194,7 +3451,21 @@ class MiniSweCentralAgent(BaseAgent):
                         "schema": "central-runtime-receipt-v3",
                         "mode": self.runtime_mode,
                         "integration_mode": self.integration_mode.value,
+                        "policy_mode": self.policy_mode.value,
                         "preflight_mode": self.preflight_mode.value,
+                        "component_configuration": {
+                            "feature_guidance": self.enable_feature_guidance,
+                            "context_frontier": self.enable_context_frontier,
+                            "context_compaction": self.enable_context_compaction,
+                            "completion_controller": self.enable_completion_controller,
+                            "progress_control": self.enable_progress_control,
+                            "adaptive_validation_timeout": (
+                                self.enable_adaptive_validation_timeout
+                            ),
+                            "lint": self.enable_lint,
+                            "repository_intelligence": self.enable_repository_intelligence,
+                            "graph_required": self.require_graph_ready,
+                        },
                         "calls": calls,
                         "actions": actions_count,
                         "elapsed_seconds": elapsed_seconds,
@@ -3253,6 +3524,7 @@ class MiniSweCentralAgent(BaseAgent):
                         },
                         "host_execution": host_execution,
                         "features": feature_summary,
+                        "certification_decisions": certification_decisions,
                         "interventions": receipts,
                         "guidance_deliveries": guidance_deliveries,
                         "model_call_contexts": model_call_contexts,
@@ -3276,6 +3548,7 @@ class MiniSweCentralAgent(BaseAgent):
             context.metadata = {
                 "runtime_mode": self.runtime_mode,
                 "integration_mode": self.integration_mode.value,
+                "policy_mode": self.policy_mode.value,
                 "api_calls": calls,
                 "actions": actions_count,
                 "input_tokens": input_tokens,

@@ -31,6 +31,7 @@ from gt_engine.preflight import (
     adapt_proposed_action,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence
+from gt_engine.uplift_policy import GTPolicyMode
 
 
 def test_recovered_frontier_failure_is_receipted_but_not_current_failure():
@@ -301,6 +302,9 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
         delivery["request_payload_sha256"]
         == receipt["model_call_contexts"][0]["request_payload_sha256"]
     )
+    assert delivery["behavioral_relation"] == "submit_action"
+    assert delivery["anchor_followed"] is False
+    assert delivery["certified_opportunity"]["certified"] is True
     assert receipt["metrics"]["repository_intelligence_valid"] == 1
     assert receipt["metrics"]["repository_graph_schema_valid"] == 1
     assert receipt["metrics"]["repository_graph_nodes"] > 0
@@ -357,7 +361,7 @@ async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request
         )
 
     agent._start_repository_session = fake_repository_session
-    await agent.run("Update the record writer.", _Environment(), AgentContext())
+    await agent.run("Update the record writer in legacy.cob.", _Environment(), AgentContext())
 
     assert any("legacy.cob:42" in item for item in model.observed_history[0])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
@@ -365,6 +369,10 @@ async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request
     assert len(deliveries) == 1
     assert deliveries[0]["delivered_before_call"] == 1
     assert deliveries[0]["facts"][0]["kind"] == "symbol"
+    call = receipt["model_call_contexts"][0]
+    assert call["stock_provider_messages_sha256"] != call["provider_messages_sha256"]
+    assert call["provider_changed_message_indices"]
+    assert call["certified_graph_chars"] > 0
 
 
 @pytest.mark.asyncio
@@ -638,7 +646,7 @@ async def test_custom_probe_failure_is_not_reframed_as_model_guidance(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_context_transform_bounds_oversized_read_before_budget_pressure(tmp_path):
+async def test_context_transform_preserves_oversized_read_before_budget_pressure(tmp_path):
     class LargeReadEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -661,20 +669,22 @@ async def test_context_transform_bounds_oversized_read_before_budget_pressure(tm
     await agent.run("Inspect huge.log and finish.", LargeReadEnvironment(), AgentContext())
 
     second_request = "\n".join(model.observed_history[1])
-    assert "Z" * 30_000 not in second_request
-    assert "Tool output bounded by host" in second_request
+    assert "Z" * 30_000 in second_request
+    assert "Tool output bounded by host" not in second_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     assert receipt["metrics"]["context_compactions"] == 0
     compiler = receipt["model_call_contexts"][1]["context_compiler"]
-    assert compiler["bounded_observation_count"] == 1
-    assert compiler["bounded_observations"][0]["operation"] == "read"
+    assert compiler["bounded_observation_count"] == 0
+    call = receipt["model_call_contexts"][1]
+    assert call["stock_provider_messages_sha256"] == call["provider_messages_sha256"]
+    assert call["provider_changed_message_indices"] == []
     assert all(
         not row["provider_compaction_epoch_started"] for row in receipt["model_call_contexts"]
     )
 
 
 @pytest.mark.asyncio
-async def test_context_soft_limit_starts_one_reasoning_preserving_compaction_epoch(tmp_path):
+async def test_context_soft_character_limit_never_starts_compaction_epoch(tmp_path):
     class LargeReadEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -709,14 +719,11 @@ async def test_context_soft_limit_starts_one_reasoning_preserving_compaction_epo
     await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert receipt["metrics"]["context_compactions"] == 1
-    epoch = receipt["metrics"]["context_compaction_epochs"][0]
-    assert epoch["trigger_kind"] == "provider_view_chars"
-    assert epoch["trigger_chars"] > 20_000
-    assert epoch["reasoning_messages_removed"] == 0
+    assert receipt["metrics"]["context_compactions"] == 0
+    assert receipt["metrics"]["context_compaction_epochs"] == []
     assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
-    assert receipt["metrics"]["context_bounded_observations"] == 4
-    assert receipt["metrics"]["context_bounded_observation_applications"] >= 4
+    assert receipt["metrics"]["context_bounded_observations"] == 0
+    assert receipt["metrics"]["context_bounded_observation_applications"] == 0
 
 
 @pytest.mark.asyncio
@@ -753,12 +760,7 @@ async def test_soft_compaction_defers_when_cache_break_savings_are_too_small(tmp
 
     metrics = json.loads((tmp_path / "central_receipt.json").read_text())["metrics"]
     assert metrics["context_compactions"] == 0
-    assert metrics["context_compaction_deferral_count"] > 0
-    assert all(
-        row["projected_savings_chars"] < 20_000
-        or row["projected_savings_ratio"] < 0.10
-        for row in metrics["context_compaction_deferrals"]
-    )
+    assert metrics["context_compaction_deferral_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -1000,7 +1002,13 @@ async def test_missing_edit_passes_to_shell_then_postflight_keeps_loop_live(tmp_
     assert revised_cycle["postflight"]["source_revision"]
     session = receipt["repository_session"]
     assert session["fresh"] is True
-    assert len(session["refresh_log"]) == 2
+    assert len(session["refresh_log"]) == 3
+    assert [row["mode"] for row in session["refresh_log"]] == [
+        "full",
+        "incremental",
+        "action_query",
+    ]
+    assert session["refresh_log"][-1]["active_paths"] == ["app.py"]
     assert session["source_revision"] == receipt["source_revision"]
     assert receipt["metrics"]["repository_incremental_refreshes"] == 1
     assert receipt["metrics"]["preflight_commands_returned_to_model"] == 0
@@ -1113,6 +1121,26 @@ def test_integration_mode_is_one_switch_and_audit_cannot_intervene(tmp_path):
     assert audit.preflight_mode is PreflightMode.SHADOW
     assert audit.enable_context_compaction is False
     assert audit.enable_task_start_advisory is False
+
+
+def test_certified_shadow_is_provider_neutral_and_cannot_run_active_controllers(tmp_path):
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        policy_mode="certified_shadow",
+        preflight_mode="assistive_safe",
+        enable_context_compaction=True,
+        enable_completion_controller=True,
+        enable_adaptive_validation_timeout=True,
+    )
+
+    assert agent.policy_mode is GTPolicyMode.CERTIFIED_SHADOW
+    assert agent.preflight_mode is PreflightMode.SHADOW
+    assert agent.enable_context_compaction is False
+    assert agent.enable_completion_controller is False
+    assert agent.enable_feature_guidance is False
+    assert agent.enable_adaptive_validation_timeout is False
+    assert agent._features.model_visible is False
 
 
 @pytest.mark.asyncio
@@ -1451,9 +1479,12 @@ def test_paid_workflow_uses_external_central_agent_and_frozen_version():
     assert '-a "$AGENT"' not in workflow
     assert '"mini-swe-agent==2.2.8"' in workflow
     assert "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
-    assert "MiniSweCentralShadowAgent" in workflow
+    assert (
+        "options: [off, audit, certified_context, certified_controllers, certified_full]"
+        in workflow
+    )
+    assert "default: audit" in workflow
     assert "enable_lint=false" in workflow
-    assert "enable_submit_readiness=false" in workflow
     assert "preflight_mode=shadow" in workflow
     assert "enable_preflight=true" not in workflow
 
@@ -1465,7 +1496,8 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
 
     # The same task.toml timeout still owns the experiment.  GT receives that
     # value only so it can return before Harbor asynchronously cancels run().
-    assert "--ak enable_lint=true --ak enable_submit_readiness=true" in workflow
+    assert "--ak enable_lint=true" in workflow
+    assert "--ak enable_submit_readiness=true" in workflow
     assert "scripts/resolve_harbor_budget.py" in workflow
     assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
     assert "--ak model_timeout_sec" not in workflow
@@ -1473,6 +1505,7 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
     assert "--agent-timeout-multiplier 1.0" in workflow
     assert "--ak enable_context_compaction=true" in workflow
     assert "--ak enable_completion_controller=true" in workflow
+    assert "--ak enable_feature_guidance=false --ak enable_context_frontier=false" in workflow
 
 
 def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
@@ -1483,6 +1516,12 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert 'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
     assert '--agent-import-path "$AGENT"' in workflow
     assert "--ak integration_mode=active" in workflow
+    assert "--ak policy_mode=certified_active" in workflow
+    assert "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off" in workflow
+    assert (
+        "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow"
+        in workflow
+    )
     assert "--ak preflight_mode=shadow" in workflow
     assert "--ak enable_context_compaction=true" in workflow
     assert "--ak enable_adaptive_validation_timeout=true" in workflow

@@ -208,15 +208,16 @@ class ProviderViewSession:
         """Project the durable history without rewriting an established prefix."""
 
         if not self.checkpoint_messages:
-            # Active compaction mode always applies the per-observation
-            # governor.  It does not clear historical tool bodies or attach a
-            # state frame until an explicit compaction epoch begins.
+            # Before measured provider pressure begins an epoch, GT is
+            # observation-only.  In particular, a model-requested read must
+            # reach the provider byte-for-byte; silently bounding it changes
+            # the treatment even though no compaction was required.
             return build_provider_view(
                 messages,
                 active_state=active_state,
                 trigger_chars=10**18,
                 target_chars=10**18,
-                transform=True,
+                transform=False,
                 attach_state_frame=False,
             )
         if (
@@ -229,11 +230,18 @@ class ProviderViewSession:
                 active_state=active_state,
                 trigger_chars=10**18,
                 target_chars=10**18,
-                transform=True,
+                transform=False,
                 attach_state_frame=False,
             )
 
-        tail, preparation = _prepare_provider_history(messages[self.source_message_count :])
+        tail = copy.deepcopy(messages[self.source_message_count :])
+        preparation = {
+            "bounded_count": 0,
+            "bounded_removed": 0,
+            "duplicate_count": 0,
+            "duplicate_removed": 0,
+            "bounded_observations": (),
+        }
         view = [*copy.deepcopy(self.checkpoint_messages), *tail]
         facts, duplicate_fact_count = _context_facts(active_state)
         state_text, selected_ids, compiled_rows = _compile_fact_frame(facts, view)
@@ -779,11 +787,27 @@ def _prepare_provider_history(
     """Bound tool bodies and represent later exact duplicates append-only."""
 
     prepared = copy.deepcopy(messages)
+    protected_observation_index: int | None = None
+    last_tool_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if messages[index].get("role") == "tool"
+        ),
+        None,
+    )
+    if last_tool_index is not None:
+        last_tool = messages[last_tool_index]
+        operation, _limit = _observation_limit(last_tool, observation_limit_chars)
+        if operation in {"read", "search"} and _tool_return_code(last_tool) == 0:
+            protected_observation_index = last_tool_index
     bounded_count = 0
     bounded_removed = 0
     bounded_observations: list[dict[str, Any]] = []
     for message_index, item in enumerate(prepared):
         if item.get("role") != "tool":
+            continue
+        if message_index == protected_observation_index:
             continue
         original = str(item.get("content") or "")
         operation, limit = _observation_limit(item, observation_limit_chars)
@@ -831,6 +855,10 @@ def _prepare_provider_history(
         fingerprint = _turn_fingerprint(messages, original_start, original_end)
         if fingerprint not in first_by_fingerprint:
             first_by_fingerprint[fingerprint] = position
+            continue
+        if protected_observation_index is not None and (
+            original_start <= protected_observation_index < original_end
+        ):
             continue
         prior = first_by_fingerprint[fingerprint]
         duplicate_count += 1

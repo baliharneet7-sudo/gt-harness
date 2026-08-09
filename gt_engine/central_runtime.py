@@ -49,6 +49,11 @@ from gt_engine.semantic_decisions import (
     SemanticDecisionEngine,
 )
 from gt_engine.task_contract import TaskResourceRole, extract_task_resources
+from gt_engine.uplift_policy import (
+    EvidenceAuthority,
+    OpportunityKind,
+    certify_opportunity,
+)
 
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
@@ -1060,8 +1065,8 @@ def render_runtime_advisory(detail: str, *, limit: int = 160) -> str:
     prefix = "Observed task fact: "
     available = max(0, limit - len(prefix))
     if len(cleaned) > available:
-        cleaned = cleaned[: max(0, available - 3)].rstrip() + "..."
-    return (prefix + cleaned)[:limit]
+        return ""
+    return prefix + cleaned
 
 
 class WorkspaceSensor:
@@ -1602,6 +1607,7 @@ class CentralFeatureRuntime:
         self._structural_evidence: dict[str, Any] = {}
         self._preflight_intervention_keys: set[str] = set()
         self._feature_opportunities: list[FeatureOpportunityReceipt] = []
+        self._certification_decisions: list[dict[str, Any]] = []
 
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
@@ -2541,6 +2547,38 @@ class CentralFeatureRuntime:
                 ).encode("utf-8", "replace")
             ).hexdigest()[:20],
         )
+        authority = {
+            EvidenceGrade.DIRECT: EvidenceAuthority.MECHANICAL,
+            EvidenceGrade.STRUCTURAL: EvidenceAuthority.CERTIFIED_STRUCTURAL,
+            EvidenceGrade.DERIVED: EvidenceAuthority.UNKNOWN,
+            EvidenceGrade.HEURISTIC: EvidenceAuthority.HEURISTIC,
+        }[decision.evidence_grade]
+        opportunity = certify_opportunity(
+            kind=(
+                OpportunityKind.SUBMIT_DEBT
+                if "proven_submit_blocker" in decision.reason_codes
+                else OpportunityKind.EDIT_CONTRADICTION
+            ),
+            authority=authority,
+            source_revision=decision.source_revision or proposed.source_revision,
+            current_source_revision=proposed.source_revision,
+            workspace_revision=proposed.workspace_revision,
+            evidence_ids=tuple(evidence_identity),
+            concrete_anchors=evidence,
+            absent_from_provider_history=True,
+            decision_relevant=True,
+            eligible_call=proposed.model_call,
+            current_call=proposed.model_call,
+        )
+        self._certification_decisions.append(
+            {
+                "boundary": "preflight",
+                "action_id": proposed.action_id,
+                **opportunity.as_dict(),
+            }
+        )
+        if not opportunity.certified:
+            return False, "opportunity_" + "_".join(opportunity.reason_codes)
         key = "\0".join(evidence_identity)
         if key in self._preflight_intervention_keys:
             return False, "duplicate_evidence"
@@ -4210,6 +4248,9 @@ class CentralFeatureRuntime:
             "semantic_decisions": self._decisions.summary(),
             "structural_evidence": dict(self._structural_evidence),
             "feature_opportunities": opportunity_rows,
+            "certification_decisions": [
+                dict(item) for item in self._certification_decisions
+            ],
             "feature_applicability": feature_applicability,
             "all_feature_opportunities_accounted": (
                 set(feature_applicability) == set(CENTRAL_FEATURE_IDS)
@@ -4480,6 +4521,59 @@ class CentralFeatureRuntime:
             self._guidance_suppressed += 1
             return ""
 
+        claim_anchors = tuple(
+            dict.fromkeys(
+                anchor
+                for claim_id in frame.claim_ids
+                for claim in [self._decisions.claim(claim_id)]
+                if claim is not None
+                for anchor in claim.anchors
+            )
+        )
+        structural_features = {"signature_delta", "newfile_precedent", "GT_LOC_RESLOT"}
+        authority = (
+            EvidenceAuthority.CERTIFIED_STRUCTURAL
+            if selected_items
+            and all(item.feature_id in structural_features for item in selected_items)
+            else EvidenceAuthority.MECHANICAL
+        )
+        opportunity_kind = {
+            DecisionNeedKind.LOCALIZE_TASK: OpportunityKind.LOCALIZATION_CONTRACTION,
+            DecisionNeedKind.REPAIR_IMPACT: OpportunityKind.LOCALIZATION_CONTRACTION,
+            DecisionNeedKind.REPAIR_FAILURE: OpportunityKind.DECLARED_CHECK_FAILURE,
+            DecisionNeedKind.RECOVER_FAILURE: OpportunityKind.REPEATED_FAILURE,
+            DecisionNeedKind.VALIDATE_CHANGE: OpportunityKind.DECLARED_CHECK_FAILURE,
+            DecisionNeedKind.SUBMIT_SAFELY: OpportunityKind.DECLARED_CHECK_FAILURE,
+        }[frame.need_kind]
+        opportunity = certify_opportunity(
+            kind=opportunity_kind,
+            authority=authority,
+            source_revision=frame.source_revision,
+            current_source_revision=source_revision,
+            workspace_revision=selected_items[0].revision,
+            evidence_ids=tuple(frame.claim_ids),
+            concrete_anchors=claim_anchors,
+            absent_from_provider_history=True,
+            decision_relevant=True,
+            eligible_call=min(frame.evidence_actions) + 1,
+            current_call=call,
+        )
+        self._certification_decisions.append(
+            {
+                "boundary": "provider_guidance",
+                "action_id": min(frame.evidence_actions),
+                **opportunity.as_dict(),
+            }
+        )
+        if not opportunity.certified:
+            for item in selected_items:
+                self._suppress_receipt_delivery(
+                    item,
+                    reason="opportunity_" + "_".join(opportunity.reason_codes),
+                )
+            self._guidance_suppressed += len(selected_items)
+            return ""
+
         # A source-bound submit risk generated from the same failing check is
         # a private contributor to the failure frame, not a duplicate sentence.
         covering_actions = {
@@ -4526,15 +4620,8 @@ class CentralFeatureRuntime:
             "contributing_features": contributing_features,
             "effect_ids": effect_ids,
             "claim_ids": list(frame.claim_ids),
-            "claim_anchors": list(
-                dict.fromkeys(
-                    anchor
-                    for claim_id in frame.claim_ids
-                    for claim in [self._decisions.claim(claim_id)]
-                    if claim is not None
-                    for anchor in claim.anchors
-                )
-            ),
+            "claim_anchors": list(claim_anchors),
+            "certified_opportunity": opportunity.as_dict(),
             "decision_need_id": frame.need_id,
             "decision_need_kind": frame.need_kind.value,
             "decision_frame_id": frame.frame_id,

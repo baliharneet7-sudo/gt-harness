@@ -59,6 +59,31 @@ def test_pending_claim_never_leaks_past_its_first_eligible_provider_call():
     assert claim["active"] is True
 
 
+def test_over_budget_fact_is_omitted_whole_instead_of_truncated():
+    engine = SemanticDecisionEngine(max_frame_chars=80)
+    fact = "Concrete diagnostic: " + ("x" * 120)
+    claim = engine.upsert_claim(
+        feature_id="syntax_result",
+        kind=SemanticClaimKind.FAILURE,
+        fact=fact,
+        anchors=("src/app.py:9",),
+        source_revision="r1",
+        evidence_action=1,
+    )
+    assert claim is not None
+    engine.open_need(
+        kind=DecisionNeedKind.REPAIR_FAILURE,
+        source_revision="r1",
+        created_after_action=1,
+        required_claim_kinds=(SemanticClaimKind.FAILURE,),
+    )
+
+    frame = engine.materialize(call=2, source_revision="r1")
+
+    assert frame is None
+    assert claim.claim_id not in engine._exposures
+
+
 def test_task_start_localization_is_available_before_the_first_model_call():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix greet output", revision="r0", source_revision="s0")

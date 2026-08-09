@@ -205,3 +205,41 @@ def test_current_graph_with_empty_retrieval_is_healthy_substrate(tmp_path: Path)
     assert refreshed.substrate_ready is True
     assert refreshed.index_current is True
     assert graph_gate_failures(refreshed) == ()
+
+
+def test_typed_action_path_requeries_current_graph_without_rebuilding(tmp_path: Path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "greeter.py").write_text(
+        "def greet(name: str) -> str:\n    return f'hello {name}'\n",
+        encoding="utf-8",
+    )
+    session = RepositorySession(
+        root=tmp_path,
+        state_dir=tmp_path / ".state",
+        instruction="Repair the implementation.",
+    )
+    initial = session.refresh(source_revision="s1")
+    assert initial.index is not None
+    graph_revision = initial.graph_revision
+
+    action_evidence = session.query(
+        source_revision="s1",
+        active_paths=("src/greeter.py",),
+        boundary="post_read",
+    )
+
+    assert action_evidence.graph_revision == graph_revision
+    assert action_evidence.available is True
+    assert any(item["path"] == "src/greeter.py" for item in action_evidence.anchors)
+    assert action_evidence.definitions
+    assert session.refresh_log[-1]["mode"] == "action_query"
+    assert session.refresh_log[-1]["active_paths"] == ["src/greeter.py"]
+
+    cached = session.query(
+        source_revision="s1",
+        active_paths=("src/greeter.py",),
+        boundary="post_read",
+    )
+    assert cached == action_evidence
+    assert session.refresh_log[-1]["mode"] == "action_query_cache_hit"

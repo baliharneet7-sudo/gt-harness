@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -11,6 +12,12 @@ from typing import Any
 from gt_engine.repository_intelligence import (
     RepositoryEvidence,
     RepositoryIntelligenceStatus,
+)
+from gt_engine.uplift_policy import (
+    CertifiedOpportunity,
+    EvidenceAuthority,
+    OpportunityKind,
+    certify_opportunity,
 )
 
 
@@ -35,6 +42,7 @@ class FrontierDisposition(StrEnum):
     LOW_PRECISION = "low_precision"
     INVALID_RELEVANCE = "invalid_relevance"
     FRONTIER_BUDGET = "frontier_budget"
+    NO_DECISION_ANCHOR = "no_decision_anchor"
     NO_FRONTIER = "no_frontier"
 
 
@@ -69,6 +77,7 @@ class FrontierDecision:
     candidate_count: int = 0
     accounted_count: int = 0
     accounting: tuple[dict[str, Any], ...] = ()
+    opportunity: CertifiedOpportunity | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +88,7 @@ class FrontierDecision:
             "candidate_count": self.candidate_count,
             "accounted_count": self.accounted_count,
             "accounting": [dict(row) for row in self.accounting],
+            "opportunity": self.opportunity.as_dict() if self.opportunity else None,
         }
 
 
@@ -110,7 +120,37 @@ def _claim_id(
 ) -> str:
     """Semantic identity independent of graph/source refresh versions."""
 
-    return _digest(kind.value, path, line, symbol, value, relation, language)
+    # A source edit may move a stable definition without changing what GT
+    # knows.  Location remains provenance, but line movement alone must not
+    # reopen the provider delivery window.
+    return _digest(kind.value, path, symbol, value, relation, language)
+
+
+def _has_decision_anchor(
+    fact: ContextFrontierFact,
+    messages: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return whether Mini-SWE has exposed this exact path or symbol.
+
+    FTS rank and broad task similarity are not decision anchors.  Exact task
+    paths/symbols and concrete assistant/tool observations are; this keeps
+    repository intelligence action-conditioned without predicting intent.
+    """
+
+    text = _provider_text(messages)
+    normalized = text.replace("\\", "/")
+    if fact.path and fact.path.replace("\\", "/").lower() in normalized.lower():
+        return True
+    symbol = str(fact.symbol or "").strip()
+    if not symbol:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _frontier_fact(
@@ -332,6 +372,8 @@ def compile_incremental_frontier(
     max_chars: int = 1_200,
     certainty_threshold: float = 0.95,
     relevance_threshold: float = 0.95,
+    workspace_revision: str = "",
+    current_call: int = 1,
 ) -> FrontierDecision:
     """Select the smallest certified repository frame absent from provider history."""
 
@@ -406,6 +448,8 @@ def compile_incremental_frontier(
             or fact.line <= 0
         ):
             disposition = FrontierDisposition.LOW_PRECISION
+        elif not _has_decision_anchor(fact, messages):
+            disposition = FrontierDisposition.NO_DECISION_ANCHOR
         else:
             line = _render_fact(fact)
             if (
@@ -433,10 +477,30 @@ def compile_incremental_frontier(
                 "disposition": disposition.value,
             }
         )
+    opportunity: CertifiedOpportunity | None = None
     if selected:
         disposition = FrontierDisposition.SELECTED_FRONTIER
         rendered = "\n".join(rendered_lines)
         reasons = ("incremental_repository_frontier",)
+        opportunity = certify_opportunity(
+            kind=OpportunityKind.LOCALIZATION_CONTRACTION,
+            authority=EvidenceAuthority.CERTIFIED_STRUCTURAL,
+            source_revision=source_revision,
+            current_source_revision=source_revision,
+            workspace_revision=workspace_revision or source_revision,
+            evidence_ids=tuple(fact.fact_id for fact in selected),
+            concrete_anchors=tuple(
+                f"{fact.path}:{fact.line}:{fact.symbol}" for fact in selected
+            ),
+            absent_from_provider_history=True,
+            decision_relevant=True,
+            eligible_call=current_call,
+            current_call=current_call,
+        )
+        if not opportunity.certified:
+            disposition = FrontierDisposition.LOW_PRECISION
+            rendered = ""
+            reasons = opportunity.reason_codes
     elif candidates and all(
         item["disposition"] == FrontierDisposition.REPRESENTED_MESSAGE.value for item in accounting
     ):
@@ -476,6 +540,7 @@ def compile_incremental_frontier(
         len(candidates),
         len(accounting),
         tuple(accounting),
+        opportunity,
     )
 
 

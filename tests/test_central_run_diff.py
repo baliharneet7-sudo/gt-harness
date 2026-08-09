@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 from scripts.central_run_diff import compare_run_roots
 
@@ -110,6 +113,32 @@ def test_run_diff_reports_identical_execution_without_spurious_differences(tmp_p
     assert task["first_divergent_model_call"] is None
     assert task["request_differences"] == []
     assert task["accounting_complete"] is True
+
+
+def test_run_diff_accepts_byte_identical_duplicate_task_extractions(tmp_path):
+    left, right = tmp_path / "left", tmp_path / "right"
+    for root in (left, right):
+        _write_run(root, actions=["ls -la"], request_hashes=["same-first"])
+    shutil.copytree(left / "artifact-task-demo", left / "partial" / "artifact-task-demo")
+
+    report = compare_run_roots(left, right)
+
+    assert list(report["tasks"]) == ["demo"]
+
+
+def test_run_diff_rejects_conflicting_duplicate_task_extractions(tmp_path):
+    left, right = tmp_path / "left", tmp_path / "right"
+    for root in (left, right):
+        _write_run(root, actions=["ls -la"], request_hashes=["same-first"])
+    duplicate = left / "partial" / "artifact-task-demo"
+    shutil.copytree(left / "artifact-task-demo", duplicate)
+    trajectory_path = next(duplicate.rglob("miniswe_trajectory.json"))
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["messages"][1]["extra"]["actions"][0]["command"] = "pwd"
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="conflicting duplicate task"):
+        compare_run_roots(left, right)
 
 
 def test_central_replay_direct_script_invocation_bootstraps_project_imports():

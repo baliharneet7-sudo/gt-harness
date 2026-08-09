@@ -37,18 +37,15 @@ def _history(*turns) -> list[dict]:
     return messages
 
 
-def test_provider_view_session_bounds_oversized_observation_before_compaction_epoch():
+def test_provider_view_session_preserves_oversized_observation_before_compaction_epoch():
     messages = _history(("cat app.py", "x" * 30_000))
     session = ProviderViewSession()
 
     view, metrics = session.project(messages, active_state={"source_revision": "s1"})
 
-    assert view != messages
-    tool = next(item for item in view if item.get("role") == "tool")
-    assert len(tool["content"]) <= 20_000
-    assert metrics.bounded_observation_count == 1
-    assert metrics.bounded_observations[0]["operation"] == "other"
-    assert metrics.bounded_observations[0]["original_chars"] == 30_000
+    assert view == messages
+    assert metrics.bounded_observation_count == 0
+    assert metrics.compacted is False
     assert session.epoch == 0
 
 
@@ -583,9 +580,11 @@ def test_compaction_never_removes_distinct_assistant_reasoning():
     assert metrics.unique_assistant_reasoning_chars_removed == 0
 
 
-def test_recent_oversized_observation_is_bounded_even_when_it_is_the_only_turn():
+def test_recent_oversized_observation_is_preserved_when_it_is_the_only_turn():
     huge = "TRACE\n" + ("diagnostic line\n" * 200_000)
     messages = _history(("cat dbg_trace.txt", huge))
+    tool = next(item for item in messages if item.get("role") == "tool")
+    tool["extra"] = {"operation": "read", "returncode": 0, "observation_index": 2}
 
     view, metrics = build_provider_view(
         messages,
@@ -594,15 +593,16 @@ def test_recent_oversized_observation_is_bounded_even_when_it_is_the_only_turn()
         target_chars=200_000,
     )
 
-    tool = next(item for item in view if item.get("role") == "tool")
-    assert len(tool["content"]) <= 21_000
-    assert "Tool output bounded by host" in tool["content"]
-    assert "sha256=" in tool["content"]
-    assert metrics.output_chars < 200_000
+    assert view == messages
+    assert metrics.bounded_observation_count == 0
+    assert metrics.output_chars >= len(huge)
 
 
 def test_typed_operation_selects_observation_budget_without_reparsing_command():
-    messages = _history(("custom-wrapper --query x", "R" * 30_000))
+    messages = _history(
+        ("custom-wrapper --query x", "R" * 30_000),
+        ("printf done", "done"),
+    )
     tool = next(item for item in messages if item.get("role") == "tool")
     tool["extra"] = {
         "operation": "search",
@@ -610,8 +610,12 @@ def test_typed_operation_selects_observation_budget_without_reparsing_command():
         "returncode": 0,
     }
 
-    view, metrics = ProviderViewSession().project(
-        messages, active_state={"source_revision": "s1"}
+    view, metrics = ProviderViewSession().compact(
+        messages,
+        active_state={"source_revision": "s1"},
+        target_chars=50_000,
+        keep_recent_turns=1,
+        trigger_tokens=900_000,
     )
 
     bounded = next(item for item in view if item.get("role") == "tool")
@@ -638,7 +642,7 @@ def test_bounded_read_preserves_deterministic_interior_samples_not_only_head_tai
         + ("D" * 20_000)
         + "\nTAIL"
     )
-    messages = _history(("cat large.py", content))
+    messages = _history(("cat large.py", content), ("pytest -q", "1 passed"))
     tool = next(item for item in messages if item.get("role") == "tool")
     tool["extra"] = {
         "operation": "read",
@@ -646,8 +650,12 @@ def test_bounded_read_preserves_deterministic_interior_samples_not_only_head_tai
         "returncode": 0,
     }
 
-    view, metrics = ProviderViewSession().project(
-        messages, active_state={"source_revision": "s1"}
+    view, metrics = ProviderViewSession().compact(
+        messages,
+        active_state={"source_revision": "s1"},
+        target_chars=50_000,
+        keep_recent_turns=1,
+        trigger_tokens=900_000,
     )
 
     bounded = str(next(item for item in view if item.get("role") == "tool")["content"])
@@ -668,8 +676,8 @@ def test_duplicate_turn_is_represented_append_only_instead_of_deleting_history()
     view, metrics = build_provider_view(
         messages,
         active_state={},
-        trigger_chars=10**18,
-        target_chars=10**18,
+        trigger_chars=1,
+        target_chars=10_000,
     )
 
     assistants = [item for item in view if item.get("role") == "assistant"]

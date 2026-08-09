@@ -6,6 +6,7 @@ import hashlib
 import os
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 from gt_engine.task_contract import TaskContract, TaskResourceRole, significant_tokens
 
@@ -176,6 +177,7 @@ def build_graph_projection(
     contract: TaskContract,
     *,
     limit: int = 24,
+    active_paths: tuple[str, ...] = (),
 ) -> GraphProjection:
     """Use lexical, body, relation, closure, property, test, and cochange surfaces."""
     con = _connect(graph_db)
@@ -189,6 +191,48 @@ def build_graph_projection(
     revision = graph_revision(graph_db)
     try:
         tables = _tables(con)
+        normalized_active_paths: list[str] = []
+        for raw_path in active_paths:
+            path = str(raw_path or "").strip().replace("\\", "/")
+            if path.startswith("/app/"):
+                path = path[5:]
+            elif path.startswith("./"):
+                path = path[2:]
+            if path and not path.startswith("/") and ".." not in Path(path).parts:
+                normalized_active_paths.append(path)
+        normalized_active_paths = list(dict.fromkeys(normalized_active_paths))
+        if normalized_active_paths and "nodes" in tables:
+            try:
+                placeholders = ",".join("?" for _ in normalized_active_paths)
+                rows = con.execute(
+                    "SELECT id,file_path,name,COALESCE(start_line,0),"
+                    "COALESCE(signature,''),COALESCE(language,'') FROM nodes "
+                    "WHERE file_path IN (" + placeholders + ") "
+                    "AND COALESCE(is_test,0)=0 ORDER BY file_path,start_line,id LIMIT ?",
+                    (*normalized_active_paths, limit),
+                ).fetchall()
+                hits["nodes"] += len(rows)
+                for node_id, file_path, name, start_line, signature, _language in rows:
+                    node_ids.add(int(node_id))
+                    files.add(str(file_path).replace("\\", "/"))
+                    symbols.add(str(name))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            surface="nodes",
+                            node_id=int(node_id),
+                            file_path=str(file_path).replace("\\", "/"),
+                            symbol=str(name),
+                            kind="active_path_symbol",
+                            value=str(signature or f"{file_path}:{name}")[:500],
+                            line=int(start_line or 0),
+                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
+                            revision=revision,
+                            semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
+                            retrieval_relevance=0.0,
+                        )
+                    )
+            except sqlite3.Error:
+                pass
         query = _fts_query(contract)
         if query and "nodes_fts" in tables:
             try:
@@ -201,13 +245,10 @@ def build_graph_projection(
                     (query, limit),
                 ).fetchall()
                 hits["nodes_fts"] += len(rows)
-                for rank, (node_id, file_path, name, start_line, signature, excerpt) in enumerate(
-                    rows, 1
-                ):
+                for node_id, file_path, name, start_line, signature, excerpt in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
                     semantic_facts.append(
                         GraphSemanticFact(
                             surface="nodes_fts",
@@ -217,10 +258,14 @@ def build_graph_projection(
                             kind="ranked_symbol",
                             value=str(signature or excerpt or f"{file_path}:{name}")[:500],
                             line=int(start_line or 0),
-                            confidence=relevance,
+                            # FTS rank orders candidates; it is not evidence
+                            # that a candidate is relevant to the current
+                            # decision.  The downstream evidence linker owns
+                            # that certification.
+                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
                             revision=revision,
                             semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=relevance,
+                            retrieval_relevance=0.0,
                         )
                     )
             except sqlite3.Error:
@@ -238,13 +283,10 @@ def build_graph_projection(
                     (query, limit),
                 ).fetchall()
                 hits["symbol_content_fts"] += len(rows)
-                for rank, (node_id, file_path, name, start_line, signature, excerpt) in enumerate(
-                    rows, 1
-                ):
+                for node_id, file_path, name, start_line, signature, excerpt in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
                     semantic_facts.append(
                         GraphSemanticFact(
                             surface="symbol_content_fts",
@@ -254,10 +296,10 @@ def build_graph_projection(
                             kind="ranked_body",
                             value=str(signature or excerpt or f"{file_path}:{name}")[:500],
                             line=int(start_line or 0),
-                            confidence=relevance,
+                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
                             revision=revision,
                             semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=relevance,
+                            retrieval_relevance=0.0,
                         )
                     )
             except sqlite3.Error:
@@ -275,11 +317,10 @@ def build_graph_projection(
                 ).fetchall()
                 hits["content_passages_fts"] += len(rows)
                 hits["content_passages"] += len(rows)
-                for rank, (node_id, file_path, name, excerpt, start_line) in enumerate(rows, 1):
+                for node_id, file_path, name, excerpt, start_line in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
-                    relevance = max(0.5, 1.0 - ((rank - 1) / max(1, limit)))
                     semantic_facts.append(
                         GraphSemanticFact(
                             "content_passages_fts",
@@ -289,10 +330,10 @@ def build_graph_projection(
                             "ranked_passage",
                             str(excerpt or f"{file_path}:{name}")[:500],
                             int(start_line or 0),
-                            confidence=relevance,
+                            confidence=1.0 if int(start_line or 0) > 0 else 0.0,
                             revision=revision,
                             semantic_certainty=1.0 if int(start_line or 0) > 0 else 0.0,
-                            retrieval_relevance=relevance,
+                            retrieval_relevance=0.0,
                         )
                     )
             except sqlite3.Error:
@@ -524,6 +565,7 @@ def build_graph_projection(
             except sqlite3.Error:
                 pass
         retrieval_surfaces = {
+            "nodes": 4,
             "nodes_fts": 3,
             "symbol_content_fts": 2,
             "content_passages_fts": 1,

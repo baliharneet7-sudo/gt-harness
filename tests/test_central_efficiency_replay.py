@@ -93,7 +93,7 @@ def test_archived_replay_projects_custom_failures_private_and_partial_probes_zer
     )
 
 
-def test_archived_replay_measures_unique_observation_and_cumulative_view_savings(tmp_path):
+def test_archived_replay_preserves_unique_observations_below_budget_epoch(tmp_path):
     agent = tmp_path / "large-read__trial" / "agent"
     agent.mkdir(parents=True)
     messages = [{"role": "user", "content": "Inspect the logs."}]
@@ -131,9 +131,9 @@ def test_archived_replay_measures_unique_observation_and_cumulative_view_savings
     # The fourth observation has no following provider call and therefore is
     # correctly outside the replay exposure window.
     assert replay["model_calls_replayed"] == 4
-    assert replay["bounded_unique_observations"] == 3
-    assert replay["projected_provider_view_chars_avoided"] > 0
+    assert replay["bounded_unique_observations"] == 0
+    assert replay["projected_provider_view_chars_avoided"] == 0
     assert replay["assistant_reasoning_chars_removed"] == 0
-    assert result["projected_provider_view_chars_avoided"] > 0
+    assert result["projected_provider_view_chars_avoided"] == 0
     assert result["provider_view_assistant_reasoning_chars_removed"] == 0
     assert result["provider_view_compaction_deferrals"] >= 0
