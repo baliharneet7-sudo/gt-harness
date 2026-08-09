@@ -104,6 +104,7 @@ from gt_engine.repository_intelligence import (
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
+from gt_engine.trajectory_utilization import SemanticUtilizationTracker
 from gt_engine.uplift_policy import (
     EvidenceAuthority,
     GTPolicyMode,
@@ -1165,6 +1166,7 @@ class MiniSweCentralAgent(BaseAgent):
         guidance_deliveries: list[dict[str, Any]] = []
         frontier_decisions: list[dict[str, Any]] = []
         frontier_deliveries: list[dict[str, Any]] = []
+        semantic_utilization = SemanticUtilizationTracker(max_calls=5, max_actions=10)
         delivered_frontier_fact_ids: set[str] = set()
         delivered_frontier_claim_ids: set[str] = set()
         frontier_chars_delivered = 0
@@ -1443,6 +1445,11 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                         }
                     )
+                    semantic_utilization.register(
+                        frontier_deliveries[-1],
+                        call=calls,
+                        source_revision=source_revision,
+                    )
                 if delivery_metadata is not None:
                     evidence_action = int(delivery_metadata.get("evidence_action") or 0)
                     guidance_deliveries.append(
@@ -1475,6 +1482,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "message_index": runtime_message_index,
                             "chars": len(guidance_payload),
                         }
+                    )
+                    semantic_utilization.register(
+                        guidance_deliveries[-1],
+                        call=calls,
+                        source_revision=source_revision,
                     )
                 context_parts = {
                     "system_user_chars": 0,
@@ -1658,6 +1670,11 @@ class MiniSweCentralAgent(BaseAgent):
                         validation=action_classifications[index],
                     )
                     for index, action in enumerate(actions)
+                )
+                semantic_utilization.observe(
+                    call=calls,
+                    actions=proposed_actions,
+                    source_revision=source_revision,
                 )
                 next_commands = tuple(
                     str(action.get("command") or action.get("cmd") or "") for action in actions
@@ -2522,6 +2539,8 @@ class MiniSweCentralAgent(BaseAgent):
             # monotonic clock tick.  Preserve the truthful lower bound that
             # work occurred instead of serializing an impossible zero duration.
             elapsed_seconds = max(time.monotonic() - started, 1e-6)
+            semantic_utilization.finalize()
+            semantic_utilization_summary = semantic_utilization.summary()
             assistant_steps = sum(1 for message in messages if message.get("role") == "assistant")
             feature_summary = self._features.summary()
             certification_decisions = [
@@ -2865,6 +2884,25 @@ class MiniSweCentralAgent(BaseAgent):
                     bool(row.get("anchor_followed"))
                     for row in (*guidance_deliveries, *frontier_deliveries)
                     if bool((row.get("certified_opportunity") or {}).get("certified"))
+                ),
+                "semantic_utilization_deliveries": semantic_utilization_summary["deliveries"],
+                "semantic_utilization_same_response": semantic_utilization_summary[
+                    "same_response"
+                ],
+                "semantic_utilization_deferred": semantic_utilization_summary["deferred"],
+                "semantic_utilization_stale_source": semantic_utilization_summary[
+                    "stale_source"
+                ],
+                "semantic_utilization_no_match": semantic_utilization_summary["no_match"],
+                "semantic_utilization_matched": semantic_utilization_summary["matched"],
+                "semantic_utilization_rate": (
+                    round(
+                        semantic_utilization_summary["matched"]
+                        / semantic_utilization_summary["deliveries"],
+                        6,
+                    )
+                    if semantic_utilization_summary["deliveries"]
+                    else 1.0
                 ),
                 "certified_controller_actuations": auto_submit_attempts,
                 "provider_context_limit_tokens": self.provider_context_limit_tokens,

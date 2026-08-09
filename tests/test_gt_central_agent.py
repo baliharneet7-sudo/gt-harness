@@ -258,6 +258,8 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     assert delivery["delivered_before_call"] == 1
     assert delivery["one_step_late"] is False
     assert delivery["not_predictive"] is True
+    assert receipt["metrics"]["semantic_utilization_deliveries"] == 1
+    assert receipt["metrics"]["semantic_utilization_no_match"] == 1
 
 
 @pytest.mark.asyncio
@@ -309,6 +311,8 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
     assert receipt["metrics"]["repository_graph_schema_valid"] == 1
     assert receipt["metrics"]["repository_graph_nodes"] > 0
     assert receipt["metrics"]["context_frontier_chars_added"] > 0
+    assert receipt["metrics"]["semantic_utilization_deliveries"] == 1
+    assert receipt["metrics"]["semantic_utilization_no_match"] == 1
     assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
     assert receipt["metrics"]["repository_mirror_files"] == 2
     assert receipt["metrics"]["repository_mirror_bytes"] > 0

@@ -57,6 +57,7 @@ RELEASE_TESTS = (
     "tests/test_gt_preflight.py::test_attached_output_redirection_is_classified_as_edit",
     "tests/test_gt_preflight.py::test_absent_output_target_is_expected_creation_and_preflight_passes",
     "tests/test_gt_preflight.py::test_absent_in_place_edit_target_fails_open_to_shell_postflight",
+    "tests/test_gt_trajectory_utilization.py",
     "tests/test_provider_view.py::test_compiler_proves_existing_read_fact_at_exact_provider_message",
     "tests/test_gt_central_runtime.py::test_declared_verifier_text_in_a_read_is_not_a_validation_result",
     "tests/test_gt_central_runtime.py::test_literal_timeout_wrapper_preserves_declared_check_authority",
