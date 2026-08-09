@@ -95,6 +95,7 @@ from gt_engine.provider_view import (
     provider_compaction_required,
     provider_request_budget,
 )
+from gt_engine.replay_bundle import ReplayBundleWriter
 from gt_engine.repository_intelligence import (
     RepositoryEvidence,
     RepositoryIntelligenceStatus,
@@ -367,6 +368,9 @@ class MiniSweCentralAgent(BaseAgent):
         preflight_mode: str | PreflightMode = PreflightMode.OFF,
         enable_preflight: bool | None = None,
         preflight_timeout_sec: float = 0.1,
+        enable_replay_capture: bool = False,
+        replay_capture_max_call_chars: int = 500_000,
+        replay_capture_max_bundle_bytes: int = 25_000_000,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, model_name, **kwargs)
@@ -502,6 +506,9 @@ class MiniSweCentralAgent(BaseAgent):
         # Compatibility for external receipt consumers; dispatch uses the enum.
         self.enable_preflight = parsed_preflight_mode is not PreflightMode.OFF
         self.preflight_timeout_sec = max(0.001, float(preflight_timeout_sec))
+        self.enable_replay_capture = bool(enable_replay_capture)
+        self.replay_capture_max_call_chars = max(1_000, int(replay_capture_max_call_chars))
+        self.replay_capture_max_bundle_bytes = max(10_000, int(replay_capture_max_bundle_bytes))
         self._ledger = EvidenceLedger(max_holds=max_submit_holds)
         self._checkpoints = ShadowCheckpointLedger()
         self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
@@ -1201,6 +1208,12 @@ class MiniSweCentralAgent(BaseAgent):
         action_timeout_decisions: list[dict[str, Any]] = []
         previous_provider_messages: list[dict[str, Any]] | None = None
         provider_view_session = ProviderViewSession()
+        replay_bundle = ReplayBundleWriter(
+            self.logs_dir / "gt_replay_bundle.json",
+            enabled=self.enable_replay_capture,
+            max_call_chars=self.replay_capture_max_call_chars,
+            max_bundle_bytes=self.replay_capture_max_bundle_bytes,
+        )
 
         if (
             repository_evidence.available
@@ -1406,6 +1419,18 @@ class MiniSweCentralAgent(BaseAgent):
                     context_compactions += 1
                     context_chars_elided += provider_view_metrics.elided_chars
                     compaction_epoch_started = True
+                replay_bundle.record_request(
+                    call=calls,
+                    provider_messages=provider_messages,
+                    request_payload_sha256=request_payload_sha256,
+                    provider_messages_sha256=provider_messages_sha256,
+                    model_name=str(self.model_name or ""),
+                    model_kwargs=getattr(model, "model_kwargs", {}) or {},
+                    temperature=self.temperature,
+                    active_state=active_state,
+                    source_revision=source_revision,
+                    workspace_revision=snapshot.revision,
+                )
                 (
                     stable_prefix_messages,
                     stable_prefix_chars,
@@ -1644,6 +1669,7 @@ class MiniSweCentralAgent(BaseAgent):
                         timeout=query_timeout,
                     )
                 except TimeoutError:
+                    replay_bundle.record_error(call=calls, error_type="TimeoutError")
                     if (
                         deadline is not None
                         and deadline - time.monotonic() <= self.deadline_reserve_sec + 0.01
@@ -1656,8 +1682,10 @@ class MiniSweCentralAgent(BaseAgent):
                         censored_reason = "model_request_timeout"
                     break
                 except InterruptAgentFlow as flow:
+                    replay_bundle.record_error(call=calls, error_type="InterruptAgentFlow")
                     messages.extend(flow.messages)
                     continue
+                replay_bundle.record_response(call=calls, response=message)
                 messages.append(message)
                 model_output_chars += _message_context_chars(message)
                 extra = message.get("extra") or {}
@@ -3509,6 +3537,7 @@ class MiniSweCentralAgent(BaseAgent):
             (self.logs_dir / "miniswe_trajectory.json").write_text(
                 json.dumps(trajectory, indent=2), encoding="utf-8"
             )
+            replay_bundle_metadata = replay_bundle.finalize()
             (self.logs_dir / "central_receipt.json").write_text(
                 json.dumps(
                     {
@@ -3526,6 +3555,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "adaptive_validation_timeout": (
                                 self.enable_adaptive_validation_timeout
                             ),
+                            "replay_capture": self.enable_replay_capture,
                             "lint": self.enable_lint,
                             "repository_intelligence": self.enable_repository_intelligence,
                             "graph_required": self.require_graph_ready,
@@ -3592,6 +3622,8 @@ class MiniSweCentralAgent(BaseAgent):
                         "interventions": receipts,
                         "guidance_deliveries": guidance_deliveries,
                         "model_call_contexts": model_call_contexts,
+                        "replay_bundle": replay_bundle_metadata,
+                        "replay_state": replay_bundle_metadata,
                     },
                     indent=2,
                 ),

@@ -528,6 +528,16 @@ contains provider request bodies plus model sampling/checkpoint state, model
 causality is `UNIDENTIFIABLE`; only a counterfactual replay can certify it.
 The audit test is part of the central provider-free workflow.
 
+## Counterfactual replay capture (2026-08-09)
+
+`enable_replay_capture` is opt-in and default-false. It writes a bounded,
+separate `gt_replay_bundle.json` containing exact provider-prepared messages,
+controller/source checkpoints, response projections, and hashes. Secrets are
+redacted and truncation/error is explicit. A bundle is replay-ready only when
+all requests/responses are complete and a deterministic sampling seed exists;
+otherwise causality remains `UNIDENTIFIABLE`. Capture must not alter provider
+messages or the model loop.
+
 ## Conservative uplift policy and provider baseline shield (2026-08-08)
 
 The latest paid smoke `31282615178` is rejected outcome evidence: it resolved

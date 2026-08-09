@@ -125,6 +125,10 @@ def audit() -> dict[str, bool]:
             "scripts/central_trajectory_audit.py" in provider_free_workflow
             and "tests/test_central_trajectory_audit.py" in provider_free_workflow
         ),
+        "replay_capture_is_opt_in": (
+            "enable_replay_capture: bool = False" in source
+            and "tests/test_replay_bundle.py" in provider_free_workflow
+        ),
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow

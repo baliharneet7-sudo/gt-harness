@@ -290,6 +290,29 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_opt_in_replay_capture_is_receipted_without_changing_request(tmp_path):
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_replay_capture=True,
+        enable_repository_intelligence=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Complete the task.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    metadata = receipt["replay_bundle"]
+    assert metadata["enabled"] is True
+    assert metadata["request_bodies_captured"] is True
+    assert metadata["responses_captured"] is True
+    assert metadata["counterfactual_replay_ready"] is False
+    bundle = json.loads((tmp_path / "gt_replay_bundle.json").read_text())
+    assert bundle["calls"][0]["provider_messages"]
+
+
+@pytest.mark.asyncio
 async def test_context_frontier_advances_repository_intelligence_without_feature_advisory(
     tmp_path,
 ):

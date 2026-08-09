@@ -668,3 +668,8 @@ without provider message bodies and model replay state must produce
 `MODEL_CAUSALITY_UNIDENTIFIABLE`; do not promote such a run as causal
 efficiency evidence. See
 `details_done/GT_TRAJECTORY_COUNTERFACTUAL_AUDIT_31297108410_20260809.md`.
+
+Counterfactual capture is now available behind `enable_replay_capture=true`.
+It is bounded and disabled by default; paid workflows remain unchanged. Do
+not claim replay causality unless the resulting bundle reports
+`counterfactual_replay_ready=true`.
