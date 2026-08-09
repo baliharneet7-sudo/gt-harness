@@ -656,3 +656,15 @@ readiness, direct/module archived replay, ten-task run diff, Ruff, compilation,
 workflow YAML parsing, and diff checks. The worktree is not yet an exact clean
 pushed commit, so `SMOKE_APPROVED` has not been claimed and no paid run was
 started.
+
+## Trajectory causality audit (2026-08-09)
+
+Use `scripts/central_trajectory_audit.py` before interpreting a paid run. It
+separates deterministic GT work (`engine_internal_state`,
+`existing_engine_actuation`, `provider_payload`, `audit_only`) from model-level
+causality. A trajectory's anchor-following or semantic-utilization label is a
+behavioral proxy, not proof that GT changed a model decision. Archived hashes
+without provider message bodies and model replay state must produce
+`MODEL_CAUSALITY_UNIDENTIFIABLE`; do not promote such a run as causal
+efficiency evidence. See
+`details_done/GT_TRAJECTORY_COUNTERFACTUAL_AUDIT_31297108410_20260809.md`.

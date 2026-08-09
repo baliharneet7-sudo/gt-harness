@@ -74,6 +74,7 @@ jobs:
             tests/test_central_readiness.py \
             tests/test_central_replay.py \
             tests/test_central_run_diff.py \
+            tests/test_central_trajectory_audit.py \
             tests/test_provider_view.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
@@ -103,6 +104,7 @@ jobs:
             scripts/central_readiness_audit.py \
             scripts/central_feature_census.py \
             scripts/central_replay.py scripts/central_run_diff.py \
+            scripts/central_trajectory_audit.py \
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \
             scripts/verify_tb2_language_contract.py \
@@ -120,6 +122,7 @@ jobs:
             tests/test_central_efficiency_replay.py \
             tests/test_central_readiness.py \
             tests/test_central_replay.py tests/test_central_run_diff.py \
+            tests/test_central_trajectory_audit.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py

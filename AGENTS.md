@@ -517,6 +517,17 @@ changes. These repairs are provider-free implementation proof only. They do
 not restore the 9/10 baseline until an authorized matched smoke passes; the
 89-task run remains blocked.
 
+## Trajectory causality audit (2026-08-09)
+
+`scripts/central_trajectory_audit.py` is the fail-closed audit for archived
+GT-on receipts. It certifies deterministic receipt integrity, grounded
+first-eligible delivery, provider-request hash coverage, effect dispositions,
+and complete context accounting. It must never call `anchor_followed`,
+`same_response`, or later action similarity causal proof. Unless a bundle
+contains provider request bodies plus model sampling/checkpoint state, model
+causality is `UNIDENTIFIABLE`; only a counterfactual replay can certify it.
+The audit test is part of the central provider-free workflow.
+
 ## Conservative uplift policy and provider baseline shield (2026-08-08)
 
 The latest paid smoke `31282615178` is rejected outcome evidence: it resolved

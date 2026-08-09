@@ -17,4 +17,5 @@ def test_paid_central_workflow_installs_and_proves_repository_runtime():
     assert result["paid_central_executes_index_fixture"] is True
     assert result["paid_central_executes_language_contract"] is True
     assert result["provider_free_gate_covers_pinned_benchmark_languages"] is True
+    assert result["provider_free_gate_covers_trajectory_audit"] is True
     assert result["action_conditioned_graph_query_precedes_postflight"] is True

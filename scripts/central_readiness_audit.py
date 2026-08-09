@@ -121,6 +121,10 @@ def audit() -> dict[str, bool]:
         "provider_free_gate_covers_preflight": (
             "tests/test_gt_preflight.py" in provider_free_workflow
         ),
+        "provider_free_gate_covers_trajectory_audit": (
+            "scripts/central_trajectory_audit.py" in provider_free_workflow
+            and "tests/test_central_trajectory_audit.py" in provider_free_workflow
+        ),
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow

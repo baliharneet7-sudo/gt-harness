@@ -1,0 +1,106 @@
+"""Tests for the provider-free trajectory audit boundary."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from scripts.central_trajectory_audit import audit_run_root
+
+
+def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
+    task = root / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    trajectory = {
+        "info": {"exit_status": "Submitted"},
+        "messages": [
+            {"role": "user", "content": "Fix it."},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "inspect",
+                "extra": {
+                    "actions": [
+                        {"command": "cat app.py", "tool_call_id": "call-1"}
+                    ]
+                },
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "ok",
+                "extra": {"returncode": 0, "raw_output": "print(1)"},
+            },
+        ],
+    }
+    (task / "miniswe_trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    request_hash = "h" if complete_hashes else ""
+    receipt = {
+        "actions": 1,
+        "model_call_contexts": [
+            {
+                "call": 1,
+                "request_payload_sha256": request_hash,
+                "provider_messages_sha256": request_hash,
+                "context_fact_candidates": 1,
+                "context_facts_represented": 1,
+                "context_facts_selected": 0,
+                "context_facts_controller_only": 0,
+                "context_facts_omitted": 0,
+                "context_facts_accounted": 1,
+            }
+        ],
+        "features": {
+            "effect_trace": [
+                {
+                    "effect_id": "receipt-1",
+                    "feature_id": "GT_LOC_RESLOT",
+                    "evidence_action": 1,
+                    "applied_call": 1,
+                    "source_revision": "src-1",
+                    "disposition": "provider_payload",
+                    "provider_delivery_ids": ["delivery-1"],
+                    "timing": {"late": False, "predictive": False},
+                }
+            ]
+        },
+        "guidance_deliveries": [
+            {
+                "feature_id": "GT_LOC_RESLOT",
+                "evidence_action": 1,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "one_step_late": False,
+                "not_predictive": True,
+                "request_payload_sha256": request_hash,
+                "provider_messages_sha256": request_hash,
+                "facts": [{"path": "app.py", "line": 1, "symbol": "x"}],
+                "chars": 20,
+            }
+        ],
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+
+def test_audit_certifies_deterministic_integrity_but_not_model_causality(tmp_path):
+    _write_bundle(tmp_path)
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "DETERMINISTIC_AUDIT_CERTIFIED"
+    assert report["certification"]["model_causality"] == "UNIDENTIFIABLE"
+    assert report["certification"]["replay_state_available"] is False
+    delivery = report["tasks"]["demo"]["deliveries"][0]
+    assert delivery["deterministic_status"] == "VALID"
+    assert delivery["causal_status"] == "UNIDENTIFIABLE_NO_REPLAY_STATE"
+
+
+def test_audit_fails_closed_on_missing_provider_hash(tmp_path):
+    _write_bundle(tmp_path, complete_hashes=False)
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "DETERMINISTIC_AUDIT_FAILED"
+    assert any("provider_request_hash" in item for item in report["failures"])
+
