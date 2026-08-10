@@ -948,7 +948,7 @@ Replay v2 is exact and content-addressed under gt_replay/ (manifest.json, calls.
 
 Efficiency gates aggregate provider/model resources only across common uncensored solves. Tokens, actual model calls, model-selected actions, assistant responses, cost, and wall time are primary. Effective actions and host/controller/sensor executions are reported separately. Cheap failed tasks cannot improve the aggregate.
 
-Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The exact pushed pre-smoke gate passed on commit 567bca1 and printed SMOKE_APPROVED. The next permitted paid step is the ten-task certified_full/integrated GT-on smoke. Preflight remains SHADOW. The 89-task run remains blocked until that smoke has no uncensored outcome regression/censor, valid graph substrate, complete provider-evidence accounting, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.
+Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The exact pushed pre-smoke gate passed on commit 567bca1 and printed SMOKE_APPROVED. The authorized ten-task certified_full/integrated GT-on smoke has now run at commit 8720ad9 with preflight SHADOW; its integrity passed but its outcome gate failed. The 89-task run remains blocked pending outcome-preserving efficiency evidence.
 
 Live smoke 31343081886 (commit 8720ad9) completed with integrity certified but
 the outcome gate rejected: GT-on resolved 8/10 versus GT-off 9/10. All ten
