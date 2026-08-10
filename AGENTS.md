@@ -1060,7 +1060,7 @@ Verification at this worktree: the focused central-runtime, agent-loop,
 repository, provider-view, progress, and semantic-engine suites pass; the
 all-17 census prints every producer/consumer/timing/payload/context-accounting
 line; readiness is `READY`; archived 89-task replay and regression-preservation
-replay both pass; and the strict pre-smoke lifecycle tests pass. The gate is
-currently blocked only because these uncommitted changes are not yet the exact
-pushed commit. No paid smoke or 89-task run is approved until the changes are
-committed, pushed, and `central_pre_smoke_gate.py` prints `SMOKE_APPROVED`.
+replay both pass; and the strict pre-smoke lifecycle tests pass. The exact
+pushed gate now prints `SMOKE_APPROVED` on `e38fa06`. That authorizes only a
+separately requested ten-task paid smoke; the 89-task run remains blocked until
+the smoke preserves outcome and passes outcome-first efficiency gates.

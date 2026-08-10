@@ -75,10 +75,10 @@ unchanged apart from exact duplicate turns.
 
 ## Release status and next step
 
-The exact pre-smoke gate is blocked only by commit identity: the repaired
-changes are still uncommitted locally. Commit only the intended tracked files,
-push `inline-engine`, and rerun `python scripts/central_pre_smoke_gate.py`.
-Only a `SMOKE_APPROVED` result authorizes a separately requested ten-task paid
+The repair is committed and pushed as `e38fa06`. The exact
+`python scripts/central_pre_smoke_gate.py` now prints `SMOKE_APPROVED`, including
+the exact pushed-commit, strict lifecycle, census, repository, language, and
+readiness checks. This authorizes only a separately requested ten-task paid
 smoke. The 89-task benchmark remains blocked until that smoke preserves the
 frozen baseline outcome and passes outcome-first efficiency gates (common
 uncensored solves must not regress in reward, calls, steps, actions, or tokens).
