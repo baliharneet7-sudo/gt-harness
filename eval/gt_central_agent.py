@@ -1218,6 +1218,11 @@ class MiniSweCentralAgent(BaseAgent):
             repository_applicability
             == "not_applicable_no_supported_source"
         )
+        # Applicability is a property of the task substrate at transfer time,
+        # not of arbitrary helper files the model may create later.  Persist it
+        # so a source-less binary/data task cannot become a graph failure merely
+        # because the trajectory writes an unsupported-language scratch helper.
+        source_less_task_at_start = source_less_task
         graph_gate_reasons = (
             graph_gate_failures(repository_evidence)
             if (
@@ -1640,6 +1645,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "evidence_action": evidence_action,
                             "evidence_actions": delivery_metadata.get("evidence_actions", []),
                             "revision": delivery_metadata.get("revision"),
+                            "source_revision": source_revision,
                             "prepared_after_call": pending_prepared_after_call,
                             "first_eligible_call": pending_prepared_after_call + 1,
                             "delivered_before_call": calls,
@@ -3138,10 +3144,16 @@ class MiniSweCentralAgent(BaseAgent):
                 and self.runtime_mode == "treatment"
             )
             repository_applicability = classify_repository_applicability(repository_evidence)
-            source_less_task = (
+            # Keep task-start substrate applicability authoritative.  A task
+            # that transferred no structurally supported source remains outside
+            # the graph denominator even if the model later creates helper
+            # files in languages the vendored index cannot parse.
+            source_less_task = bool(source_less_task_at_start) or (
                 repository_applicability
                 == "not_applicable_no_supported_source"
             )
+            if source_less_task_at_start:
+                repository_applicability = "not_applicable_no_supported_source"
             frontier_required = bool(
                 repository_required
                 and self.enable_context_frontier

@@ -121,9 +121,16 @@ def match_delivery_actions(
     target.
     """
 
-    if observed_call > delivery_call and source_revision != str(
-        delivery.get("source_revision") or delivery.get("revision") or ""
-    ):
+    # ``revision`` on legacy guidance rows is the workspace revision.  Semantic
+    # utilization is source-bound: cache/pyc/tool-output changes must not make a
+    # still-valid source fact look stale.  New rows carry ``source_revision``;
+    # retain the workspace fallback only for old archived receipts that do not.
+    delivery_source_revision = str(
+        delivery.get("source_revision")
+        or delivery.get("revision")
+        or ""
+    )
+    if observed_call > delivery_call and source_revision != delivery_source_revision:
         return SemanticMatch(
             SemanticUse.STALE_SOURCE,
             observed_call,

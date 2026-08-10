@@ -745,3 +745,10 @@ even when tokens fall.
 
 Provider-free tests and archived replay pass. No repaired paid smoke has run;
 the live efficiency effect is unverified and the 89-task run remains blocked.
+
+Smoke 31351072175 exposed two accounting boundaries now fixed: semantic-use
+matching must compare source revisions, never a guidance row's workspace
+revision; and graph applicability is anchored to the task-start substrate, so
+a source-less binary/data task cannot become a graph failure after the model
+writes unsupported helper files. See
+`details_done/GT_SMOKE_31351072175_AUDIT_AND_BOUNDARY_REPAIR_20260810.md`.

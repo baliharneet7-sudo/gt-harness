@@ -1,4 +1,4 @@
-from gt_engine.preflight import ActionOperation, ActionTarget, adapt_proposed_action
+from gt_engine.preflight import adapt_proposed_action
 from gt_engine.trajectory_utilization import SemanticUse, SemanticUtilizationTracker
 
 
@@ -65,6 +65,25 @@ def test_semantic_tracker_does_not_claim_use_after_source_revision_changes():
         source_revision="rev-2",
     )
     assert delivery["semantic_utilization"] == SemanticUse.STALE_SOURCE.value
+
+
+def test_semantic_tracker_uses_source_revision_not_workspace_revision():
+    # Guidance receipts also carry a workspace ``revision``.  A cache/pyc or
+    # other workspace-only update must not invalidate a source-bound fact.
+    delivery = {
+        "delivery_id": "d-source",
+        "claim_anchors": ["src/models.py:12:Model"],
+        "revision": "workspace-after-edit",
+        "source_revision": "source-rev-1",
+    }
+    tracker = SemanticUtilizationTracker(max_calls=3)
+    tracker.register(delivery, call=1, source_revision="source-rev-1")
+    tracker.observe(
+        call=2,
+        actions=(_action("cat src/models.py", 2),),
+        source_revision="source-rev-1",
+    )
+    assert delivery["semantic_utilization"] == SemanticUse.DEFERRED.value
 
 
 def test_semantic_tracker_marks_unmatched_without_calling_it_ignored():

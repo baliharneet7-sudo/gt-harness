@@ -1007,3 +1007,10 @@ readiness audit, Ruff, compilation, and archived ten-task replay pass locally.
 This is provider-free implementation proof, not evidence that live call/step
 deltas have turned negative. No post-repair paid smoke has run, and the
 89-task benchmark remains blocked.
+
+Smoke 31351072175 exposed two accounting boundaries now fixed: semantic-use
+matching must compare source revisions, never a guidance row's workspace
+revision; and graph applicability is anchored to the task-start substrate, so
+a source-less binary/data task cannot become a graph failure after the model
+writes unsupported helper files. See
+`details_done/GT_SMOKE_31351072175_AUDIT_AND_BOUNDARY_REPAIR_20260810.md`.
