@@ -191,17 +191,31 @@ jobs:
             | sort -z | xargs -0 cat > "$RUNNER_TEMP/arb-shard-${{ matrix.shard }}.jsonl"
 
       - name: Upload GT retrieval shard
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: arb-gt-shard-${{ github.run_id }}-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/arb-results
             ${{ runner.temp }}/arb-shard-${{ matrix.shard }}.jsonl
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
+      - name: Publish shard progress summary
+        if: ${{ always() }}
+        run: |
+          rows=0
+          if [ -f "$RUNNER_TEMP/arb-shard-${{ matrix.shard }}.jsonl" ]; then
+            rows=$(wc -l < "$RUNNER_TEMP/arb-shard-${{ matrix.shard }}.jsonl")
+          fi
+          {
+            echo "## GT shard ${{ matrix.shard }}"
+            echo "- rows emitted: $rows"
+            echo "- job status: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   aggregate:
-    if: ${{ always() && needs.gt.result == 'success' }}
+    if: ${{ always() && needs.gt.result != 'skipped' }}
     needs: [prepare, gt, official-baselines]
     runs-on: ubuntu-latest
     steps:
@@ -225,6 +239,7 @@ jobs:
           python scripts/arb_aggregate.py \
             --root "$RUNNER_TEMP/arb-gt" \
             --expected-rows "${{ needs.prepare.outputs.sample_rows }}" \
+            --allow-incomplete \
             --output "$RUNNER_TEMP/arb-aggregate.json"
       - name: Download official baselines when present
         if: ${{ inputs.run_baselines == true }}

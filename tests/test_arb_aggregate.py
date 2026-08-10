@@ -42,5 +42,16 @@ def test_aggregate_reads_only_shard_files(tmp_path) -> None:
     )
     result = aggregate(tmp_path, expected_rows=2)
     assert result["rows"] == 2
+    assert result["complete"] is True
     assert result["delivered_rows"] == 1
     assert result["graph_status_counts"] == {"index_unavailable": 1, "source_backed": 1}
+
+
+def test_aggregate_can_publish_partial_progress(tmp_path) -> None:
+    (tmp_path / "arb-shard-0.jsonl").write_text(
+        json.dumps({"sample_id": "only", "abstained": True}) + "\n",
+        encoding="utf-8",
+    )
+    result = aggregate(tmp_path, expected_rows=2, allow_incomplete=True)
+    assert result["complete"] is False
+    assert result["rows"] == 1

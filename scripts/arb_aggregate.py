@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 
-def aggregate(root: str | Path, *, expected_rows: int | None = None) -> dict[str, Any]:
+def aggregate(
+    root: str | Path,
+    *,
+    expected_rows: int | None = None,
+    allow_incomplete: bool = False,
+) -> dict[str, Any]:
     root_path = Path(root)
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -27,7 +32,8 @@ def aggregate(root: str | Path, *, expected_rows: int | None = None) -> dict[str
             seen.add(sample_id)
             rows.append(row)
     rows.sort(key=lambda row: str(row["sample_id"]))
-    if expected_rows is not None and len(rows) != expected_rows:
+    complete = expected_rows is None or len(rows) == expected_rows
+    if expected_rows is not None and not complete and not allow_incomplete:
         raise ValueError(f"expected {expected_rows} rows, found {len(rows)}")
     delivered = sum(bool(row.get("delivered_evidence")) for row in rows)
     diagnostics = Counter(str(row.get("index_error_type") or "") for row in rows)
@@ -36,6 +42,8 @@ def aggregate(root: str | Path, *, expected_rows: int | None = None) -> dict[str
     return {
         "schema": "gt.arb.aggregate.v1",
         "rows": len(rows),
+        "expected_rows": expected_rows,
+        "complete": complete,
         "delivered_rows": delivered,
         "abstained_rows": sum(bool(row.get("abstained")) for row in rows),
         "ranked_candidate_rows": sum(bool(row.get("ranked_candidates")) for row in rows),
@@ -56,9 +64,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     parser.add_argument("--expected-rows", type=int)
+    parser.add_argument("--allow-incomplete", action="store_true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    result = aggregate(args.root, expected_rows=args.expected_rows)
+    result = aggregate(
+        args.root,
+        expected_rows=args.expected_rows,
+        allow_incomplete=args.allow_incomplete,
+    )
     Path(args.output).write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
