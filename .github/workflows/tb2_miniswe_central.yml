@@ -5,10 +5,10 @@
 # code, state, provider credentials, and feature configuration stay on the
 # Harbor host; only literal model-selected Bash commands enter the task image.
 #
-# Matched repair-mix control for the frozen GT-off baseline (9/10 on this
-# selected slice). The default ten-task pool intentionally combines known
-# regressions, known GT-working trajectories, and one prior GT-on flip. This is
-# not a leaderboard submission; clear `include` explicitly before any full run.
+# Matched repair-mix control for the frozen GT-off baseline (17/20 on this
+# selected slice). The default pool covers every known outcome regression,
+# known GT-working trajectories, and prior GT-on flips. This is not a
+# leaderboard submission; clear `include` explicitly before any full run.
 # --agent-timeout-multiplier 1.0. Do not rerun the baseline.
 name: TB2 miniswe central matrix (GT-on)
 
@@ -28,9 +28,9 @@ on:
         type: string
         default: "10"
       include:
-        description: "Repair-mix tasks by default; clear explicitly only for an authorized full run"
+        description: "20-task repair mix by default; clear explicitly only for an authorized full run"
         type: string
-        default: "prove-plus-comm,sanitize-git-repo,write-compressor,regex-chess,headless-terminal,portfolio-optimization,schemelike-metacircular-eval,cobol-modernization,llm-inference-batching-scheduler,count-dataset-tokens"
+        default: "extract-elf,mcmc-sampling-stan,prove-plus-comm,qemu-alpine-ssh,regex-chess,sanitize-git-repo,torch-tensor-parallelism,video-processing,winning-avg-corewars,write-compressor,headless-terminal,portfolio-optimization,schemelike-metacircular-eval,cobol-modernization,llm-inference-batching-scheduler,fix-code-vulnerability,feal-linear-cryptanalysis,count-dataset-tokens,largest-eigenval,torch-pipeline-parallelism"
       exclude:
         description: "Optional comma-separated task names/globs to drop from the pool"
         type: string

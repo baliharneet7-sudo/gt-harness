@@ -17,11 +17,16 @@ import json
 import re
 from pathlib import Path
 
-TEN_SMOKE_TASKS = [
-    "prove-plus-comm", "sanitize-git-repo", "write-compressor", "regex-chess",
-    "headless-terminal", "portfolio-optimization", "schemelike-metacircular-eval",
-    "cobol-modernization", "llm-inference-batching-scheduler", "count-dataset-tokens",
+REPAIR_MIX_TASKS = [
+    "extract-elf", "mcmc-sampling-stan", "prove-plus-comm", "qemu-alpine-ssh",
+    "regex-chess", "sanitize-git-repo", "torch-tensor-parallelism", "video-processing",
+    "winning-avg-corewars", "write-compressor", "headless-terminal",
+    "portfolio-optimization", "schemelike-metacircular-eval", "cobol-modernization",
+    "llm-inference-batching-scheduler", "fix-code-vulnerability",
+    "feal-linear-cryptanalysis", "count-dataset-tokens", "largest-eigenval",
+    "torch-pipeline-parallelism",
 ]
+TEN_SMOKE_TASKS = REPAIR_MIX_TASKS  # compatibility alias for older callers
 
 # DeepSeek V4 Flash pricing (per 1M tokens).
 PRICE_INPUT_HIT = 0.0028
@@ -100,7 +105,7 @@ def main() -> int:
 
     base_dir = Path(args.baseline)
     engine_dir = Path(args.engine)
-    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] or TEN_SMOKE_TASKS
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] or REPAIR_MIX_TASKS
 
     lines = [
         "# ENGINE vs baseline — token / call / action / cost deltas",

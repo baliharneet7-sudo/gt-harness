@@ -23,11 +23,16 @@ DECISION_RE = re.compile(r'decision=\\?"([^"]+)"')
 GT_ENGINE_RE = re.compile(r"<result")
 FALLBACK_RE = re.compile(r"notice: .*?(fallback|no answer)")
 
-TEN_SMOKE_TASKS = [
-    "prove-plus-comm", "sanitize-git-repo", "write-compressor", "regex-chess",
-    "headless-terminal", "portfolio-optimization", "schemelike-metacircular-eval",
-    "cobol-modernization", "llm-inference-batching-scheduler", "count-dataset-tokens",
+REPAIR_MIX_TASKS = [
+    "extract-elf", "mcmc-sampling-stan", "prove-plus-comm", "qemu-alpine-ssh",
+    "regex-chess", "sanitize-git-repo", "torch-tensor-parallelism", "video-processing",
+    "winning-avg-corewars", "write-compressor", "headless-terminal",
+    "portfolio-optimization", "schemelike-metacircular-eval", "cobol-modernization",
+    "llm-inference-batching-scheduler", "fix-code-vulnerability",
+    "feal-linear-cryptanalysis", "count-dataset-tokens", "largest-eigenval",
+    "torch-pipeline-parallelism",
 ]
+TEN_SMOKE_TASKS = REPAIR_MIX_TASKS  # compatibility alias for older callers
 
 
 def _load_messages(trajectory_path: Path) -> list[dict]:
@@ -186,7 +191,7 @@ def main() -> int:
     parser.add_argument("--out", default="", help="write markdown here")
     args = parser.parse_args()
 
-    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] or TEN_SMOKE_TASKS
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] or REPAIR_MIX_TASKS
     result = compare(Path(args.baseline), Path(args.engine), tasks)
     markdown = render_markdown(result)
     print(markdown)

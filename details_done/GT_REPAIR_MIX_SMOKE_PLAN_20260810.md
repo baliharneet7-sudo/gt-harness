@@ -13,14 +13,17 @@ therefore miss the exact failure classes that caused the 60/89 treatment.
 
 | Stratum | Tasks | Purpose |
 |---|---|---|
-| Known regression witnesses | `prove-plus-comm`, `sanitize-git-repo`, `write-compressor`, `regex-chess` | exercise graph/cwd substrate, graph applicability, deadline reserve, and oversized/context behavior |
-| Known GT-working witnesses | `headless-terminal`, `portfolio-optimization`, `schemelike-metacircular-eval`, `cobol-modernization`, `llm-inference-batching-scheduler` | retain tasks with certified graph/frontier or grounded feature deliveries and successful GT-on outcomes |
+| Known regression witnesses | `prove-plus-comm`, `sanitize-git-repo`, `write-compressor`, `regex-chess`, `qemu-alpine-ssh`, `torch-tensor-parallelism` | exercise graph/cwd substrate, graph applicability, deadline reserve, oversized/context behavior, and environment/model-workload paths |
+| Known GT-working witnesses | `headless-terminal`, `portfolio-optimization`, `schemelike-metacircular-eval` | retain tasks with certified graph/frontier or grounded feature deliveries and successful GT-on outcomes |
 | Prior GT-on flip | `count-dataset-tokens` | check that the repaired controller does not lose a previously positive GT-on outcome |
 
 The frozen GT-off baseline solved 9/10 of this mix; only
 `count-dataset-tokens` was baseline-unsolved. The mix therefore preserves a
-clean outcome comparison while concentrating half the sample on known failure
-classes. It intentionally does not use `gpt2-codegolf`, whose source-less
+clean outcome comparison while concentrating six of ten slots on known failure
+classes. The four remaining full-run outcome regressions—`extract-elf`,
+`mcmc-sampling-stan`, `video-processing`, and `winning-avg-corewars`—are
+reserved for a follow-up diagnostic rather than silently considered fixed. It
+intentionally does not use `gpt2-codegolf`, whose source-less
 substrate is correctly excluded from the graph denominator and would add no
 repository-intelligence coverage to this diagnostic smoke.
 
