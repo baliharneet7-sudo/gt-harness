@@ -706,3 +706,14 @@ Replay v2 is exact and content-addressed under gt_replay/ (manifest.json, calls.
 Efficiency gates aggregate provider/model resources only across common uncensored solves. Tokens, actual model calls, model-selected actions, assistant responses, cost, and wall time are primary. Effective actions and host/controller/sensor executions are reported separately. Cheap failed tasks cannot improve the aggregate.
 
 Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The next permitted paid step is the exact ten-task certified_full/integrated GT-on smoke after the exact pushed commit prints SMOKE_APPROVED. Preflight remains SHADOW. The 89-task run remains blocked until that smoke has no uncensored outcome regression/censor, valid graph substrate, complete provider-evidence accounting, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.
+
+Live smoke 31343081886 (commit 8720ad9) completed with integrity certified but
+the outcome gate rejected: GT-on resolved 8/10 versus GT-off 9/10. All ten
+receipts enabled all 17 features; 447/447 preflights were PASS; 187/187
+effects applied; 6,777/6,777 context facts accounted; and five grounded
+feature plus seven graph-frontier deliveries were first-eligible, with zero
+late/predictive/duplicate/ungrounded deliveries. `write-compressor` was the
+new uncensored reward-0 deadline-reserve loss; `gpt2-codegolf` remained the
+baseline-known miss. Aggregate tokens fell 21.12%, but this is not an
+efficiency win after the solve regression. See
+`details_done/GT_SMOKE_31343081886_DEEP_AUDIT_20260809.md`; 89 remains blocked.
