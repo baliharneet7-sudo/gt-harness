@@ -74,6 +74,18 @@ class RetrievalProbeResult:
     source_revision: str
     index_latency_ms: float
     query_latency_ms: float
+    # Index-build diagnostics are part of the retrieval measurement.  A bare
+    # ``index_unavailable`` status cannot distinguish a missing executable,
+    # parser/coverage failure, invalid SQLite schema, or a build exception,
+    # which makes a GitHub run impossible to diagnose or promote.
+    index_error_type: str | None = None
+    index_error_diagnostic: str = ""
+    index_source_files: int = 0
+    index_indexable_files: int = 0
+    index_schema_valid: bool = False
+    index_node_count: int = 0
+    index_edge_count: int = 0
+    index_binary_sha256: str = ""
 
 
 def _walk_keys(value: Any) -> set[str]:
@@ -199,6 +211,7 @@ def run_probe(
         abstention_reason = str(evidence.status)
     else:
         abstention_reason = "no_certified_ranked_evidence"
+    index = evidence.index
     return RetrievalProbeResult(
         sample_id=probe.sample_id,
         repository=probe.repository,
@@ -217,6 +230,14 @@ def run_probe(
             6,
         ),
         query_latency_ms=round((time.perf_counter() - indexed_at) * 1000.0, 6),
+        index_error_type=str(index.error_type) if index and index.error_type else None,
+        index_error_diagnostic=str(index.error_diagnostic) if index else "",
+        index_source_files=int(index.source_files) if index else 0,
+        index_indexable_files=int(index.indexable_files) if index else 0,
+        index_schema_valid=bool(index.schema_valid) if index else False,
+        index_node_count=int(index.node_count) if index else 0,
+        index_edge_count=int(index.edge_count) if index else 0,
+        index_binary_sha256=str(index.binary_sha256) if index else "",
     )
 
 
