@@ -13,13 +13,16 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
+import shlex
 import tarfile
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from harbor.agents.base import BaseAgent
@@ -53,6 +56,7 @@ from gt_engine.central_runtime import (
     classify_validation_command,
     diff_snapshots,
     explicit_check_commands,
+    graph_revision_receipt,
     is_check_command,
     is_submit_command,
     lint_commands,
@@ -91,6 +95,7 @@ from gt_engine.progress import (
     ProgressObservation,
     StallAggregateFact,
     classify_action_result,
+    task_information_gain,
 )
 from gt_engine.provider_evidence import (
     ProviderEvidenceDisposition,
@@ -105,6 +110,7 @@ from gt_engine.provider_view import (
     ProviderViewSession,
     build_provider_view,
     provider_compaction_required,
+    provider_compaction_target_chars,
     provider_request_budget,
 )
 from gt_engine.replay_bundle import ReplayBundleWriter
@@ -337,7 +343,7 @@ class MiniSweCentralAgent(BaseAgent):
         logs_dir: Path,
         model_name: str | None = None,
         *,
-        cwd: str = "/app",
+        cwd: str | None = None,
         temperature: float = 1.0,
         step_limit: int = 100,
         command_timeout_sec: int = 30,
@@ -536,6 +542,7 @@ class MiniSweCentralAgent(BaseAgent):
         )
         self._model_factory: Callable[[], Any] = self._build_model
         self._repository_work_receipts: list[dict[str, Any]] = []
+        self._cwd_receipt: dict[str, Any] = {}
         self._completion_cache: dict[tuple[str, str], PredicateObservation] = {}
         self._completion_cache_hits = 0
         self._completion_probe_execs = 0
@@ -569,12 +576,17 @@ class MiniSweCentralAgent(BaseAgent):
         )
 
     async def _system_information(self, environment: BaseEnvironment) -> dict[str, str]:
+        configured = str(self.cwd or "").strip()
+        command = "uname -s; uname -r; uname -v; uname -m; pwd -P"
+        if configured:
+            configured_q = shlex.quote(configured)
+            command += f"; if test -d {configured_q}; then cd -- {configured_q} && pwd -P; fi"
         try:
             result = await self._host_executions.exec(
                 environment,
-                "uname -s; uname -r; uname -v; uname -m",
+                command,
                 category=HostExecCategory.SYSTEM_INFORMATION,
-                cwd=self.cwd,
+                cwd=None,
                 env={},
                 timeout_sec=5,
             )
@@ -583,8 +595,281 @@ class MiniSweCentralAgent(BaseAgent):
         values = (result.stdout or "").strip().splitlines()
         if len(values) == 1 and "\t" in values[0]:
             values = values[0].split("\t")
+        inherited = values[4].strip() if len(values) >= 5 else ""
+        validated_configured = values[5].strip() if configured and len(values) >= 6 else ""
+        if validated_configured.startswith("/") and "\x00" not in validated_configured:
+            self.cwd = posixpath.normpath(validated_configured)
+            status = "configured"
+        elif inherited.startswith("/") and "\x00" not in inherited:
+            self.cwd = posixpath.normpath(inherited)
+            status = "invalid_configured_fallback" if configured else "resolved"
+        else:
+            # Fail open for transports/test doubles that expose no pwd line;
+            # real POSIX task images return it. An explicit cwd remains the
+            # compatibility fallback, otherwise the historical /app path is
+            # retained and clearly receipted rather than silently assumed.
+            self.cwd = configured or "/app"
+            status = "configured_fallback" if configured else "legacy_fallback"
+        self._cwd_receipt = {
+            "status": status,
+            "configured": configured,
+            "observed": inherited,
+            "resolved": self.cwd,
+        }
         values += [""] * (4 - len(values))
         return dict(zip(("system", "release", "version", "machine"), values[:4], strict=True))
+
+    async def _resolve_cwd(self, environment: BaseEnvironment) -> str:
+        """Resolve the task image's actual working directory before scanning."""
+
+        configured = str(self.cwd or "").strip()
+        result = await self._host_executions.exec(
+            environment,
+            "pwd -P",
+            category=HostExecCategory.SYSTEM_INFORMATION,
+            cwd=None,
+            env={},
+            timeout_sec=5,
+        )
+        lines = (result.stdout or "").strip().splitlines()
+        candidate = lines[-1].strip() if result.return_code == 0 and lines else ""
+        if not candidate.startswith("/") or "\x00" in candidate:
+            raise RuntimeError("TaskWorkingDirectoryUnavailable")
+        inherited = posixpath.normpath(candidate)
+        resolved = inherited
+        status = "resolved"
+        if configured:
+            configured_q = shlex.quote(configured)
+            try:
+                configured_probe = await self._host_executions.exec(
+                    environment,
+                    f"test -d {configured_q} && cd -- {configured_q} && pwd -P",
+                    category=HostExecCategory.SYSTEM_INFORMATION,
+                    cwd=None,
+                    env={},
+                    timeout_sec=5,
+                )
+            except Exception:
+                configured_probe = ExecResult(stdout="", return_code=-1)
+            configured_lines = (configured_probe.stdout or "").strip().splitlines()
+            configured_value = (
+                configured_lines[-1].strip()
+                if configured_probe.return_code == 0 and configured_lines
+                else ""
+            )
+            if configured_value.startswith("/") and "\x00" not in configured_value:
+                resolved = posixpath.normpath(configured_value)
+                status = "configured"
+            else:
+                status = "invalid_configured_fallback"
+        if not resolved.startswith("/"):
+            raise RuntimeError("TaskWorkingDirectoryInvalid")
+        self.cwd = resolved
+        self._cwd_receipt = {
+            "status": status,
+            "configured": configured,
+            "observed": inherited,
+            "resolved": resolved,
+        }
+        return resolved
+
+    async def _transfer_source_archive(
+        self,
+        environment: BaseEnvironment,
+        session: RepositorySession,
+        mirror_plan: SourceMirrorPlan,
+        *,
+        source_revision: str,
+    ) -> None:
+        """Transfer selected source without leaving task-visible controller files."""
+
+        archive_members = tuple(
+            (
+                path[len("__external__/") :]
+                if path.startswith("__external__/")
+                else "app/" + path
+            )
+            for path in mirror_plan.paths
+        )
+        manifest_bytes = b"".join(
+            path.encode("utf-8", "surrogateescape") + b"\0"
+            for path in archive_members
+        )
+        remote_stage = f"/tmp/.gt-mirror.{uuid.uuid4().hex}"
+        remote_manifest = f"{remote_stage}/paths.nul"
+        remote_archive = f"{remote_stage}/source.tar.gz"
+        stage_q = shlex.quote(remote_stage)
+        manifest_q = shlex.quote(remote_manifest)
+        archive_q = shlex.quote(remote_archive)
+        cleanup_status = "not_attempted"
+        try:
+            init = await self._host_executions.exec(
+                environment,
+                f"umask 077; mkdir -m 700 -- {stage_q}; : > {manifest_q}",
+                category=HostExecCategory.REPOSITORY_TRANSFER,
+                source_revision=source_revision,
+                cwd=self.cwd,
+                env={},
+                timeout_sec=5,
+            )
+            if init.return_code != 0:
+                raise RuntimeError("SourceMirrorManifestInitFailed")
+            for offset in range(0, len(manifest_bytes), 24_000):
+                encoded = base64.b64encode(
+                    manifest_bytes[offset : offset + 24_000]
+                ).decode("ascii")
+                appended = await self._host_executions.exec(
+                    environment,
+                    f"printf '%s' '{encoded}' | base64 -d >> {manifest_q}",
+                    category=HostExecCategory.REPOSITORY_TRANSFER,
+                    source_revision=source_revision,
+                    cwd=self.cwd,
+                    env={},
+                    timeout_sec=5,
+                )
+                if appended.return_code != 0:
+                    raise RuntimeError("SourceMirrorManifestWriteFailed")
+            archived = await self._host_executions.exec(
+                environment,
+                (
+                    "tar --null --verbatim-files-from --transform='s,^app/,,' "
+                    "--transform='s,^etc/,__external__/etc/,' "
+                    "--transform='s,^var/,__external__/var/,' -czf "
+                    f"{archive_q} -C / -T {manifest_q}"
+                ),
+                category=HostExecCategory.REPOSITORY_TRANSFER,
+                source_revision=source_revision,
+                cwd=self.cwd,
+                env={},
+                timeout_sec=20,
+            )
+            if archived.return_code != 0:
+                raise RuntimeError("SourceMirrorArchiveFailed")
+            local_archive = session.state_dir / "source-mirror.tar.gz"
+            await asyncio.wait_for(
+                environment.download_file(remote_archive, local_archive),
+                timeout=20,
+            )
+            with tarfile.open(local_archive, mode="r:gz") as archive:
+                for member in archive.getmembers():
+                    target = (session.root / member.name).resolve()
+                    try:
+                        target.relative_to(session.root)
+                    except ValueError as exc:
+                        raise RuntimeError("UnsafeSourceMirrorArchive") from exc
+                    if not (member.isfile() or member.isdir()):
+                        raise RuntimeError("UnsafeSourceMirrorMember")
+                archive.extractall(session.root, filter="data")
+        finally:
+            try:
+                cleanup = await self._host_executions.exec(
+                    environment,
+                    (
+                        f"rm -f -- {manifest_q} {archive_q}; "
+                        f"rmdir -- {stage_q} 2>/dev/null || true; "
+                        f"test ! -e {stage_q}"
+                    ),
+                    category=HostExecCategory.REPOSITORY_TRANSFER,
+                    source_revision=source_revision,
+                    cwd=self.cwd,
+                    env={},
+                    timeout_sec=5,
+                )
+                cleanup_status = "complete" if cleanup.return_code == 0 else "failed"
+            except Exception:
+                cleanup_status = "failed"
+            self._repository_work_receipts.append(
+                {
+                    "kind": "mirror_transfer_cleanup",
+                    "status": cleanup_status,
+                    "remote_stage_sha256": hashlib.sha256(
+                        remote_stage.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+            if cleanup_status != "complete":
+                raise RuntimeError("SourceMirrorCleanupFailed")
+
+    async def _hydrate_graph_transition(
+        self,
+        environment: BaseEnvironment,
+        session: RepositorySession,
+        transition: Any,
+        *,
+        snapshot: Any,
+        changed_paths: tuple[str, ...],
+        source_revision: str,
+    ) -> Any:
+        """Download changed graph source omitted by bounded inline capture."""
+
+        after_contents = dict(getattr(transition, "after_contents", {}) or {})
+        deleted = set(getattr(transition, "deleted", ()) or ())
+        missing = tuple(
+            path for path in changed_paths if path not in deleted and path not in after_contents
+        )
+        if not missing:
+            return transition
+        if not callable(getattr(environment, "download_file", None)):
+            self._repository_work_receipts.append(
+                {
+                    "kind": "incremental_source_transfer",
+                    "status": "unavailable",
+                    "files": len(missing),
+                    "source_revision": source_revision,
+                }
+            )
+            return transition
+        transferred = 0
+        verified = True
+        for path in missing:
+            normalized = str(path or "").replace("\\", "/")
+            candidate = PurePosixPath(normalized)
+            if not normalized or ".." in candidate.parts or "\x00" in normalized:
+                verified = False
+                break
+            state = snapshot.entries.get(path)
+            if state is None or state.kind != "f" or state.size > 50_000_000:
+                verified = False
+                break
+            remote_path = (
+                normalized
+                if normalized.startswith("/")
+                else posixpath.join(str(self.cwd or "/"), normalized)
+            )
+            local_path = session.state_dir / (
+                "incremental-"
+                + hashlib.sha256(normalized.encode("utf-8", "surrogatepass")).hexdigest()
+                + ".source"
+            )
+            try:
+                await asyncio.wait_for(
+                    environment.download_file(remote_path, local_path),
+                    timeout=20,
+                )
+                payload = local_path.read_bytes()
+                observed_digest = hashlib.sha256(payload).hexdigest()
+                if len(payload) != state.size or observed_digest != state.digest:
+                    verified = False
+                    break
+                after_contents[path] = payload.decode("utf-8", "replace")
+                transferred += 1
+            except Exception:
+                verified = False
+                break
+            finally:
+                local_path.unlink(missing_ok=True)
+        status = "complete" if verified and transferred == len(missing) else "failed"
+        self._repository_work_receipts.append(
+            {
+                "kind": "incremental_source_transfer",
+                "status": status,
+                "files": transferred,
+                "requested_files": len(missing),
+                "digest_verified": status == "complete",
+                "source_revision": source_revision,
+            }
+        )
+        return replace(transition, after_contents=after_contents)
 
     async def _start_repository_session(
         self,
@@ -628,79 +913,12 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 if not mirror_plan.complete:
                     raise RuntimeError("SourceMirrorIncomplete")
-                archive_members = tuple(
-                    (
-                        path[len("__external__/") :]
-                        if path.startswith("__external__/")
-                        else "app/" + path
-                    )
-                    for path in mirror_plan.paths
-                )
-                manifest_bytes = b"".join(
-                    path.encode("utf-8", "surrogateescape") + b"\0"
-                    for path in archive_members
-                )
-                remote_manifest = "/tmp/gt-source-paths.nul"
-                remote_archive = "/tmp/gt-source-mirror.tar.gz"
-                init = await self._host_executions.exec(
+                await self._transfer_source_archive(
                     environment,
-                    f"umask 077; : > {remote_manifest}",
-                    category=HostExecCategory.REPOSITORY_TRANSFER,
+                    session,
+                    mirror_plan,
                     source_revision=source_revision,
-                    cwd=self.cwd,
-                    env={},
-                    timeout_sec=5,
                 )
-                if init.return_code != 0:
-                    raise RuntimeError("SourceMirrorManifestInitFailed")
-                # Keep each host command bounded even for a large source tree.
-                raw_chunk_bytes = 24_000
-                for offset in range(0, len(manifest_bytes), raw_chunk_bytes):
-                    encoded = base64.b64encode(
-                        manifest_bytes[offset : offset + raw_chunk_bytes]
-                    ).decode("ascii")
-                    appended = await self._host_executions.exec(
-                        environment,
-                        f"printf '%s' '{encoded}' | base64 -d >> {remote_manifest}",
-                        category=HostExecCategory.REPOSITORY_TRANSFER,
-                        source_revision=source_revision,
-                        cwd=self.cwd,
-                        env={},
-                        timeout_sec=5,
-                    )
-                    if appended.return_code != 0:
-                        raise RuntimeError("SourceMirrorManifestWriteFailed")
-                archived = await self._host_executions.exec(
-                    environment,
-                    (
-                        "tar --null --verbatim-files-from --transform='s,^app/,,' "
-                        "--transform='s,^etc/,__external__/etc/,' "
-                        "--transform='s,^var/,__external__/var/,' -czf "
-                        f"{remote_archive} -C / -T {remote_manifest}"
-                    ),
-                    category=HostExecCategory.REPOSITORY_TRANSFER,
-                    source_revision=source_revision,
-                    cwd=self.cwd,
-                    env={},
-                    timeout_sec=20,
-                )
-                if archived.return_code != 0:
-                    raise RuntimeError("SourceMirrorArchiveFailed")
-                local_archive = session.state_dir / "source-mirror.tar.gz"
-                await asyncio.wait_for(
-                    environment.download_file(remote_archive, local_archive),
-                    timeout=20,
-                )
-                with tarfile.open(local_archive, mode="r:gz") as archive:
-                    for member in archive.getmembers():
-                        target = (session.root / member.name).resolve()
-                        try:
-                            target.relative_to(session.root)
-                        except ValueError as exc:
-                            raise RuntimeError("UnsafeSourceMirrorArchive") from exc
-                        if not (member.isfile() or member.isdir()):
-                            raise RuntimeError("UnsafeSourceMirrorMember")
-                    archive.extractall(session.root, filter="data")
             elif callable(getattr(environment, "download_dir_with_exclusions", None)):
                 # Compatibility for provider-free fakes.  Paid Harbor
                 # environments implement download_file and must use the
@@ -754,6 +972,10 @@ class MiniSweCentralAgent(BaseAgent):
                     "schema_valid": bool(evidence.index and evidence.index.schema_valid),
                     "nodes": int(evidence.index.node_count if evidence.index else 0),
                     "edges": int(evidence.index.edge_count if evidence.index else 0),
+                    "error_type": str(evidence.index.error_type or "") if evidence.index else "",
+                    "error_diagnostic": (
+                        str(evidence.index.error_diagnostic or "") if evidence.index else ""
+                    ),
                 }
             )
             return evidence, session
@@ -1120,15 +1342,9 @@ class MiniSweCentralAgent(BaseAgent):
         )
         source_receipt = source_revision_receipt(snapshot, task_deliverables)
         source_revision = source_receipt.revision
-        initial_mirror_plan = plan_source_mirror(
-            snapshot,
-            excluded_paths=frozenset(task_deliverables),
-        )
-        initial_source_paths = (
-            initial_mirror_plan.paths
-            if initial_mirror_plan.complete
-            else source_receipt.source_paths
-        )
+        graph_receipt = graph_revision_receipt(snapshot, task_deliverables)
+        graph_source_revision = graph_receipt.revision
+        initial_source_paths = graph_receipt.source_paths
         self._features.begin_task(
             instruction,
             revision=snapshot.revision,
@@ -1171,12 +1387,12 @@ class MiniSweCentralAgent(BaseAgent):
         semantic_progress_kinds: dict[str, int] = {}
         activity_events = 0
         task_progress_changes = 0
-        if source_receipt.complete:
+        if graph_receipt.complete:
             repository_evidence, repository_session = await self._start_repository_session(
                 environment,
                 instruction,
                 snapshot=snapshot,
-                source_revision=source_revision,
+                source_revision=graph_source_revision,
                 task_deliverables=frozenset(task_deliverables),
             )
         else:
@@ -1188,8 +1404,9 @@ class MiniSweCentralAgent(BaseAgent):
                 {
                     "kind": "semantic_source_revision",
                     "status": "incomplete",
-                    "source_revision": source_revision,
-                    "missing_digest_paths": list(source_receipt.missing_digest_paths),
+                    "source_revision": graph_source_revision,
+                    "missing_digest_paths": list(graph_receipt.missing_digest_paths),
+                    "revision_scope": "graph_input",
                 }
             )
         self._features.record_repository_evidence_status(
@@ -1320,6 +1537,15 @@ class MiniSweCentralAgent(BaseAgent):
                             completion_certificates
                             and completion_certificates[-1].auto_submit_eligible
                         ),
+                        remaining_seconds=remaining_to_deadline,
+                        time_risk_threshold_seconds=(
+                            None
+                            if effective_budget is None
+                            else max(
+                                self.deadline_reserve_sec * 2.0,
+                                effective_budget * 0.10,
+                            )
+                        ),
                     )
                     if self.enable_progress_control
                     else None
@@ -1416,7 +1642,7 @@ class MiniSweCentralAgent(BaseAgent):
                     delivered_fact_ids=frozenset(delivered_frontier_fact_ids),
                     delivered_claim_ids=frozenset(delivered_frontier_claim_ids),
                     max_chars=min(
-                        1_200,
+                        600,
                         max(
                             0,
                             self.context_frontier_task_budget_chars - frontier_chars_delivered,
@@ -1498,7 +1724,11 @@ class MiniSweCentralAgent(BaseAgent):
                     query_messages, provider_view_metrics = provider_view_session.compact(
                         messages,
                         active_state=active_state,
-                        target_chars=self.context_target_chars,
+                        target_chars=provider_compaction_target_chars(
+                            current_view_chars=provider_view_metrics.output_chars,
+                            budget=request_budget,
+                            target_ratio=0.70,
+                        ),
                         keep_recent_turns=2,
                         trigger_tokens=request_budget.effective_tokens,
                         trigger_kind="provider_budget",
@@ -2357,6 +2587,8 @@ class MiniSweCentralAgent(BaseAgent):
                     snapshot = after
                     source_receipt = source_revision_receipt(after, task_deliverables)
                     source_revision = source_receipt.revision
+                    graph_receipt = graph_revision_receipt(after, task_deliverables)
+                    graph_source_revision = graph_receipt.revision
                     classified_transition = tuple(
                         classify_change(
                             path,
@@ -2382,8 +2614,9 @@ class MiniSweCentralAgent(BaseAgent):
                     model_authored_source_paths = tuple(
                         item.path
                         for item in classified_transition
-                        if item.origin is ChangeOrigin.MODEL_AUTHORED
-                        and item.validation_relevant
+                        if item.origin
+                        in {ChangeOrigin.MODEL_AUTHORED, ChangeOrigin.TASK_DELIVERABLE}
+                        and item.graph_indexable
                     )
                     if model_authored_source_paths:
                         repository_fact_tracker.record_model_authored_paths(
@@ -2392,15 +2625,23 @@ class MiniSweCentralAgent(BaseAgent):
                         )
                     if (
                         repository_session is not None
-                        and source_receipt.complete
-                        and source_revision != proposed.source_revision
+                        and graph_receipt.complete
+                        and graph_source_revision != repository_session.source_revision
                     ):
                         source_paths = tuple(
-                            item.path for item in classified_transition if item.validation_relevant
+                            item.path for item in classified_transition if item.graph_indexable
+                        )
+                        transition = await self._hydrate_graph_transition(
+                            environment,
+                            repository_session,
+                            transition,
+                            snapshot=after,
+                            changed_paths=source_paths,
+                            source_revision=graph_source_revision,
                         )
                         mirror_advanced = repository_session.apply_transition(
                             transition,
-                            source_revision=source_revision,
+                            source_revision=graph_source_revision,
                             changed_paths=source_paths,
                         )
                         if mirror_advanced:
@@ -2408,13 +2649,13 @@ class MiniSweCentralAgent(BaseAgent):
                                 repository_evidence = await asyncio.wait_for(
                                     asyncio.to_thread(
                                         repository_session.refresh,
-                                        source_revision=source_revision,
+                                        source_revision=graph_source_revision,
                                     ),
                                     timeout=5,
                                 )
                             except TimeoutError:
                                 repository_session.invalidate(
-                                    source_revision=source_revision,
+                                    source_revision=graph_source_revision,
                                     status="refresh_timeout",
                                 )
                                 repository_evidence = repository_session.evidence
@@ -2439,10 +2680,10 @@ class MiniSweCentralAgent(BaseAgent):
                                 callers=(),
                                 graph_revision="",
                             )
-                    elif not source_receipt.complete:
+                    elif not graph_receipt.complete:
                         if repository_session is not None:
                             repository_session.invalidate(
-                                source_revision=source_revision,
+                                source_revision=graph_source_revision,
                                 status=RepositoryIntelligenceStatus.MIRROR_INCOMPLETE.value,
                             )
                             repository_evidence = repository_session.evidence
@@ -2458,7 +2699,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 kind="f",
                                 task_deliverables=task_deliverables,
                                 content=snapshot.entries[normalized].content,
-                            ).validation_relevant
+                            ).graph_indexable
                         )
                     )
                     if (
@@ -2475,7 +2716,7 @@ class MiniSweCentralAgent(BaseAgent):
                     ):
                         repository_evidence = await asyncio.to_thread(
                             repository_session.query,
-                            source_revision=source_revision,
+                            source_revision=graph_source_revision,
                             active_paths=action_graph_paths,
                             boundary=f"post_{proposed.operation.value}",
                         )
@@ -2625,10 +2866,14 @@ class MiniSweCentralAgent(BaseAgent):
                             and classification.status_attributed
                         ),
                     )
-                    observation_gain = (
+                    observation_novelty = (
                         progress_observation.observation_id not in seen_observation_ids
                     )
                     seen_observation_ids.add(progress_observation.observation_id)
+                    observation_gain = task_information_gain(
+                        new_read_anchor=new_read_anchor,
+                        diagnostic_gain=diagnostic_gain,
+                    )
                     progress_observation = replace(
                         progress_observation,
                         observation_gain=observation_gain,
@@ -2648,6 +2893,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 progress_observation.diagnostic_fingerprint
                             ),
                             "observation_gain": observation_gain,
+                            "observation_novelty": observation_novelty,
                             "task_progress_gain": task_progress_gain,
                             "contradictory": progress_observation.contradictory,
                             "source_revision": source_revision,
@@ -2674,7 +2920,7 @@ class MiniSweCentralAgent(BaseAgent):
                         task_progress_changes += 1
                     if self.enable_progress_control:
                         progress_transition = self._progress.observe(
-                            progress_observation.observation_id,
+                            progress_observation.attempt_id,
                             information_gain=observation_gain,
                             changed=bool(source_paths),
                             semantic_gain=task_progress_gain,
@@ -3727,6 +3973,9 @@ class MiniSweCentralAgent(BaseAgent):
                 "semantic_source_missing_digests": len(
                     source_receipt.missing_digest_paths
                 ),
+                "graph_source_revision_complete": int(graph_receipt.complete),
+                "graph_source_paths": len(graph_receipt.source_paths),
+                "graph_source_missing_digests": len(graph_receipt.missing_digest_paths),
                 "repository_language_file_counts": dict(
                     repository_evidence.index.language_file_counts
                     if repository_evidence.index is not None
@@ -4026,6 +4275,15 @@ class MiniSweCentralAgent(BaseAgent):
                 "guidance_chars": feature_summary["guidance_chars"],
                 "guidance_candidates": feature_summary["guidance_candidates"],
                 "guidance_suppressed": feature_summary["guidance_suppressed"],
+                "guidance_private_effects": feature_summary[
+                    "feature_delivery_disposition_counts"
+                ].get("private_ineligible", 0),
+                "guidance_delivery_dispositions": dict(
+                    feature_summary["feature_delivery_disposition_counts"]
+                ),
+                "legacy_guidance_suppressed_counter": feature_summary[
+                    "legacy_guidance_suppressed_counter"
+                ],
                 "gt_context_chars_added": sum(
                     int(row.get("runtime_advisory_chars") or 0)
                     for row in dispatched_model_call_contexts
@@ -4177,6 +4435,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
                         "workspace_capture_backend": self._sensor.capture_backend,
+                        "task_working_directory": dict(self._cwd_receipt),
                         "source_revision": source_revision,
                         "semantic_source_revision": {
                             "revision": source_receipt.revision,
@@ -4184,6 +4443,14 @@ class MiniSweCentralAgent(BaseAgent):
                             "source_paths": list(source_receipt.source_paths),
                             "missing_digest_paths": list(
                                 source_receipt.missing_digest_paths
+                            ),
+                        },
+                        "graph_source_revision": {
+                            "revision": graph_receipt.revision,
+                            "complete": graph_receipt.complete,
+                            "source_paths": list(graph_receipt.source_paths),
+                            "missing_digest_paths": list(
+                                graph_receipt.missing_digest_paths
                             ),
                         },
                         "repository_evidence": repository_evidence.as_dict(),

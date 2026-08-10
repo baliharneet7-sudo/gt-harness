@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from gt_engine.indexer import IndexBuildStatus
+import groundtruth._binary as binary
+
+import gt_engine.indexer as indexer
+from gt_engine.indexer import IndexBuildStatus, ensure_index_with_receipt
 from gt_engine.language_registry import LANGUAGE_CAPABILITIES
 from gt_engine.repository_intelligence import (
     RepositoryApplicability,
@@ -32,6 +36,27 @@ def test_source_less_repository_is_explicitly_not_applicable():
         == RepositoryApplicability.NOT_APPLICABLE_NO_SUPPORTED_SOURCE.value
     )
 
+
+def test_failed_index_binary_preserves_bounded_diagnostic(tmp_path, monkeypatch):
+    (tmp_path / "query.sql").write_text("select 1;\n", encoding="utf-8")
+
+    def fail_index(root, output):
+        sys.stderr.write("GroundTruth: gt-index failed: SQL parser exploded on query.sql\n")
+        return False
+
+    monkeypatch.setattr(binary, "run_index", fail_index)
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {"binary_sha256": "a" * 64},
+    )
+
+    receipt = ensure_index_with_receipt(tmp_path, state_dir=tmp_path / "state")
+
+    assert receipt.status is IndexBuildStatus.BUILD_FAILED
+    assert receipt.error_type == "run_index_false"
+    assert "SQL parser exploded" in receipt.error_diagnostic
+    assert len(receipt.error_diagnostic) <= 600
 
 def test_source_backed_graph_failure_remains_a_hard_gate():
     evidence = RepositoryEvidence(

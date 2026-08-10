@@ -24,14 +24,19 @@ from eval.gt_central_agent import (
     _partition_recovered_repository_failures,
     _stable_provider_prefix,
 )
-from gt_engine.central_runtime import classify_validation_command
+from gt_engine.central_runtime import (
+    FileState,
+    WorkspaceSnapshot,
+    WorkspaceTransition,
+    classify_validation_command,
+)
 from gt_engine.preflight import (
     ActionDisposition,
     PreflightDecision,
     PreflightMode,
     adapt_proposed_action,
 )
-from gt_engine.repository_intelligence import RepositoryEvidence
+from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.uplift_policy import GTPolicyMode
 
 
@@ -122,11 +127,98 @@ class _Environment:
 
     async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
         self.commands.append((command, env))
+        if command == "pwd -P":
+            return ExecResult(stdout="/app\n", return_code=0)
         if command.startswith("uname "):
             return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
         if "-printf" in command:
             return ExecResult(stdout="", return_code=0)
         return ExecResult(stdout="", return_code=0)
+
+
+@pytest.mark.asyncio
+async def test_default_cwd_is_resolved_from_environment_not_assumed_app(tmp_path):
+    class RootEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if command == "pwd -P":
+                self.commands.append((command, env))
+                return ExecResult(stdout="/root\n", return_code=0)
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+
+    resolved = await agent._resolve_cwd(RootEnvironment())
+
+    assert resolved == "/root"
+    assert agent.cwd == "/root"
+
+
+@pytest.mark.asyncio
+async def test_invalid_configured_cwd_falls_back_to_inherited_environment_cwd(tmp_path):
+    class RootEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if cwd == "/app":
+                raise RuntimeError("configured cwd does not exist")
+            if command == "pwd -P":
+                return ExecResult(stdout="/root\n", return_code=0)
+            if command.startswith("test -d "):
+                return ExecResult(return_code=1)
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test", cwd="/app")
+
+    resolved = await agent._resolve_cwd(RootEnvironment())
+
+    assert resolved == "/root"
+    assert agent._cwd_receipt["status"] == "invalid_configured_fallback"
+
+
+@pytest.mark.asyncio
+async def test_oversized_changed_source_is_hydrated_and_digest_verified(tmp_path):
+    payload = ("def generated():\n    return 1\n" * 12_000).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+
+    class DownloadEnvironment:
+        async def download_file(self, source_path, target_path):
+            Path(target_path).write_bytes(payload)
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test", cwd="/workspace")
+    session = RepositorySession.temporary(instruction="Implement generated.py")
+    transition = WorkspaceTransition(
+        action_id=1,
+        command="write generated.py",
+        before_revision="w0",
+        after_revision="w1",
+        created=("generated.py",),
+        after_contents={},
+    )
+    snapshot = WorkspaceSnapshot(
+        revision="w1",
+        healthy=True,
+        entries={
+            "generated.py": FileState(
+                "f", len(payload), "1", "1", "", digest=digest, content=None
+            )
+        },
+    )
+
+    try:
+        hydrated = await agent._hydrate_graph_transition(
+            DownloadEnvironment(),
+            session,
+            transition,
+            snapshot=snapshot,
+            changed_paths=("generated.py",),
+            source_revision="g1",
+        )
+    finally:
+        session.close()
+
+    assert hydrated.after_contents["generated.py"].startswith("def generated")
+    receipt = agent._repository_work_receipts[-1]
+    assert receipt["kind"] == "incremental_source_transfer"
+    assert receipt["status"] == "complete"
+    assert receipt["digest_verified"] is True
 
 
 def test_stable_provider_prefix_counts_only_exact_append_stable_messages():
@@ -529,7 +621,8 @@ async def test_paid_environment_path_transfers_only_selected_source_files(tmp_pa
     )
     agent._model_factory = lambda: model
 
-    await agent.run("Fix solve in app.py.", SourceArchiveEnvironment(), AgentContext())
+    environment = SourceArchiveEnvironment()
+    await agent.run("Fix solve in app.py.", environment, AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     plan = next(
@@ -543,6 +636,13 @@ async def test_paid_environment_path_transfers_only_selected_source_files(tmp_pa
     assert plan["paths"] == ["app.py"]
     assert plan["excluded_artifacts"] == 2
     assert transfer["transfer_mode"] == "source_only_archive"
+    transfer_commands = [command for command, _env in environment.commands]
+    assert not any("/tmp/gt-source-paths.nul" in command for command in transfer_commands)
+    assert not any("/tmp/gt-source-mirror.tar.gz" in command for command in transfer_commands)
+    assert any(
+        "rmdir -- /tmp/.gt-mirror." in command and "test ! -e /tmp/.gt-mirror." in command
+        for command in transfer_commands
+    )
     assert receipt["metrics"]["repository_mirror_files"] == 1
     assert (
         receipt["host_execution"]["category_counts"]["repository_transfer"]

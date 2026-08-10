@@ -453,6 +453,30 @@ def provider_compaction_required(
     return budget.remaining_tokens < effective_reserve
 
 
+def provider_compaction_target_chars(
+    *,
+    current_view_chars: int,
+    budget: RequestBudget,
+    target_ratio: float = 0.70,
+) -> int:
+    """Scale a provider-view target from measured request pressure.
+
+    The compiler previously collapsed every pressured request toward a fixed
+    80k-character window even when the provider could safely retain far more.
+    This preserves the largest deterministic view that targets a fraction of
+    the measured hard prompt limit.
+    """
+
+    current = max(1, int(current_view_chars))
+    effective = max(1, int(budget.effective_tokens))
+    desired_tokens = max(
+        1,
+        int(budget.hard_prompt_limit * min(0.90, max(0.50, float(target_ratio)))),
+    )
+    scaled = int(current * min(1.0, desired_tokens / effective))
+    return max(800, min(current, scaled))
+
+
 _FACT_KIND_BY_STATE_KEY = {
     "obligations": ContextFactKind.REQUIREMENT,
     "source_revision": ContextFactKind.REVISION,
@@ -796,27 +820,11 @@ def _prepare_provider_history(
     """Bound tool bodies and represent later exact duplicates append-only."""
 
     prepared = copy.deepcopy(messages)
-    protected_observation_index: int | None = None
-    last_tool_index = next(
-        (
-            index
-            for index in range(len(messages) - 1, -1, -1)
-            if messages[index].get("role") == "tool"
-        ),
-        None,
-    )
-    if last_tool_index is not None:
-        last_tool = messages[last_tool_index]
-        operation, _limit = _observation_limit(last_tool, observation_limit_chars)
-        if operation in {"read", "search"} and _tool_return_code(last_tool) == 0:
-            protected_observation_index = last_tool_index
     bounded_count = 0
     bounded_removed = 0
     bounded_observations: list[dict[str, Any]] = []
     for message_index, item in enumerate(prepared):
         if item.get("role") != "tool":
-            continue
-        if message_index == protected_observation_index:
             continue
         original = str(item.get("content") or "")
         operation, limit = _observation_limit(item, observation_limit_chars)
@@ -864,10 +872,6 @@ def _prepare_provider_history(
         fingerprint = _turn_fingerprint(messages, original_start, original_end)
         if fingerprint not in first_by_fingerprint:
             first_by_fingerprint[fingerprint] = position
-            continue
-        if protected_observation_index is not None and (
-            original_start <= protected_observation_index < original_end
-        ):
             continue
         prior = first_by_fingerprint[fingerprint]
         duplicate_count += 1

@@ -19,6 +19,16 @@ class ActionResultKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+def task_information_gain(*, new_read_anchor: bool, diagnostic_gain: bool) -> bool:
+    """Whether an observation added task-linked decision evidence.
+
+    A different stdout hash is activity, not information gain. Only a new
+    localized task anchor or a new attributable diagnostic advances this edge.
+    """
+
+    return bool(new_read_anchor or diagnostic_gain)
+
+
 def classify_action_result(
     *,
     operation: str,
@@ -394,8 +404,16 @@ class ProgressLedger:
         iteration: int,
         limit: int,
         unresolved: bool = False,
+        remaining_seconds: float | None = None,
+        time_risk_threshold_seconds: float | None = None,
     ) -> ProgressTransition | None:
-        if limit <= 0 or iteration < max(1, int(limit * 0.8)):
+        iteration_risk = limit > 0 and iteration >= max(1, int(limit * 0.8))
+        time_risk = bool(
+            remaining_seconds is not None
+            and time_risk_threshold_seconds is not None
+            and remaining_seconds <= max(0.0, time_risk_threshold_seconds)
+        )
+        if not iteration_risk and not time_risk:
             return None
         if self.state == "BUDGET_RISK":
             return None
@@ -409,8 +427,12 @@ class ProgressLedger:
                 prior=prior,
                 current=self.state,
                 reason=(
-                    "unresolved_contract_near_iteration_limit"
+                    "unresolved_contract_near_time_limit"
+                    if unresolved and time_risk and not iteration_risk
+                    else "unresolved_contract_near_iteration_limit"
                     if unresolved
+                    else "unresolved_stall_near_time_limit"
+                    if time_risk and not iteration_risk
                     else "unresolved_stall_near_iteration_limit"
                 ),
                 streak=self._repeat_streak,

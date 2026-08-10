@@ -65,7 +65,7 @@ def test_unhealthy_workspace_cannot_claim_a_complete_source_mirror():
     assert plan.reason_codes == ("workspace_snapshot_unhealthy",)
 
 
-def test_oversize_authored_source_invalidates_mirror_but_optional_metadata_does_not():
+def test_multi_megabyte_authored_source_is_selected_for_archive_transfer():
     snapshot = WorkspaceSnapshot(
         revision="w1",
         healthy=True,
@@ -77,11 +77,11 @@ def test_oversize_authored_source_invalidates_mirror_but_optional_metadata_does_
 
     plan = plan_source_mirror(snapshot)
 
-    assert plan.paths == ()
-    assert plan.excluded_oversize == 2
-    assert plan.excluded_source_oversize == 1
-    assert plan.complete is False
-    assert plan.reason_codes == ("source_mirror_source_oversize",)
+    assert plan.paths == ("large.py",)
+    assert plan.excluded_oversize == 1
+    assert plan.excluded_source_oversize == 0
+    assert plan.complete is True
+    assert plan.reason_codes == ()
 
 
 def test_metadata_budget_pressure_does_not_claim_authored_source_is_incomplete():
@@ -102,7 +102,7 @@ def test_metadata_budget_pressure_does_not_claim_authored_source_is_incomplete()
     assert plan.complete is True
 
 
-def test_declared_json_deliverable_is_excluded_while_project_json_source_remains():
+def test_nonstructural_json_does_not_enter_graph_mirror():
     snapshot = WorkspaceSnapshot(
         revision="w1",
         healthy=True,
@@ -114,9 +114,31 @@ def test_declared_json_deliverable_is_excluded_while_project_json_source_remains
 
     plan = plan_source_mirror(snapshot, excluded_paths={"/app/report.json"})
 
-    assert plan.paths == ("config.json",)
+    assert plan.paths == ()
     assert plan.excluded_deliverables == 1
     assert plan.complete is True
+
+
+def test_authored_code_deliverable_is_not_excluded_from_graph_mirror():
+    snapshot = WorkspaceSnapshot(
+        revision="w1",
+        healthy=True,
+        entries={
+            "parallel_linear.py": FileState(
+                "f", 100, "1", "1", "", content="def parallel_linear():\n    pass\n"
+            ),
+            "report.json": _file(700),
+        },
+    )
+
+    plan = plan_source_mirror(
+        snapshot,
+        excluded_paths={"parallel_linear.py", "report.json"},
+    )
+
+    assert plan.paths == ("parallel_linear.py",)
+    assert plan.source_files == 1
+    assert plan.excluded_deliverables == 1
 
 
 def test_allowlisted_external_nginx_source_is_mirrored_under_safe_prefix():

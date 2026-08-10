@@ -759,3 +759,46 @@ source-less GPT-2 as denominator-excluded. Common-solved tokens/calls/steps/
 model actions fell, but controller-inclusive effective executions rose by
 345, so the 89-task outcome-first efficiency gate remains blocked. See
 `details_done/GT_SMOKE_31352963297_OUTCOME_AND_EFFICIENCY_AUDIT_20260810.md`.
+
+## Regression repair implementation (2026-08-10)
+
+The next repair pass corrected the two misleading conclusions from the
+89-task treatment `31355487270`. `guidance_suppressed=2,264` was not a count of
+withheld model guidance: the old counter incremented for almost every private
+engine effect. The authoritative accounting is now disposition-based. In that
+run the recorded totals were 2,365 effects, 2,337 private engine effects, 36
+real guidance candidates, 28 candidate receipts, 26 coalesced provider frames,
+6 facts already represented in history, and 8 candidates not delivered. Private
+effects are not inert, but they are not model-visible guidance; the receipt
+must identify `private_ineligible`, `candidate_delivered`,
+`candidate_represented`, `candidate_window_unselected`, `candidate_stale`,
+`candidate_budget_rejected`, `candidate_policy_rejected`, or
+`no_eligible_model_call`.
+
+The repaired substrate separates validation source revision from graph source
+revision. A code deliverable remains graph-indexable; a JSON/data/task output
+does not. Workspace capture is batched by byte/file bounds without dropping the
+suffix after an arbitrary 100-file cap. Oversized source is transferred and
+hash-verified before incremental indexing. Index failures retain bounded stderr
+diagnostics. The graph mirror is source-only, bounded, and no longer writes
+static `/tmp/gt-source-*` files: every transfer uses a unique mode-700 private
+directory and verifies cleanup. The agent resolves the task cwd from the host
+environment, validates a configured override, and records an explicit fallback
+instead of silently assuming `/app`.
+
+The controller repairs are equally conservative. Progress does not treat a new
+output hash as task progress; only an attributed validation pass or confirmed
+task output advances completion, while deadline risk is tracked separately.
+Provider compaction measures actual request pressure, can bound the newest
+oversized observation, preserves distinct assistant reasoning, and uses a
+scaled target rather than a fixed 80k window. These changes default to PASS and
+preserve the historical provider view below the compaction trigger.
+
+Verification at this worktree: the focused central-runtime, agent-loop,
+repository, provider-view, progress, and semantic-engine suites pass; the
+all-17 census prints every producer/consumer/timing/payload/context-accounting
+line; readiness is `READY`; archived 89-task replay and regression-preservation
+replay both pass; and the strict pre-smoke lifecycle tests pass. The gate is
+currently blocked only because these uncommitted changes are not yet the exact
+pushed commit. No paid smoke or 89-task run is approved until the changes are
+committed, pushed, and `central_pre_smoke_gate.py` prints `SMOKE_APPROVED`.

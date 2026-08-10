@@ -14,6 +14,7 @@ from gt_engine.provider_view import (
     build_provider_view,
     dedupe_provider_view,
     provider_compaction_required,
+    provider_compaction_target_chars,
     provider_request_budget,
 )
 
@@ -129,6 +130,18 @@ def test_provider_compaction_trigger_is_based_on_measured_headroom():
 
     assert provider_compaction_required(safe, reserve_tokens=131_072) is False
     assert provider_compaction_required(risky, reserve_tokens=131_072) is True
+
+
+def test_provider_compaction_target_tracks_token_budget_not_fixed_small_window():
+    budget = RequestBudget(1_000_000, 850_000, 850_000, 850_000, 900_000, 50_000, "test")
+
+    target = provider_compaction_target_chars(
+        current_view_chars=800_000,
+        budget=budget,
+        target_ratio=0.70,
+    )
+
+    assert 590_000 <= target <= 595_000
 
 
 def test_dedupe_drops_identical_duplicate_turns_and_keeps_latest():
@@ -629,7 +642,7 @@ def test_compaction_never_removes_distinct_assistant_reasoning():
     assert metrics.unique_assistant_reasoning_chars_removed == 0
 
 
-def test_recent_oversized_observation_is_preserved_when_it_is_the_only_turn():
+def test_recent_oversized_observation_is_bounded_when_pressure_requires_transform():
     huge = "TRACE\n" + ("diagnostic line\n" * 200_000)
     messages = _history(("cat dbg_trace.txt", huge))
     tool = next(item for item in messages if item.get("role") == "tool")
@@ -642,9 +655,11 @@ def test_recent_oversized_observation_is_preserved_when_it_is_the_only_turn():
         target_chars=200_000,
     )
 
-    assert view == messages
-    assert metrics.bounded_observation_count == 0
-    assert metrics.output_chars >= len(huge)
+    bounded = next(item for item in view if item.get("role") == "tool")
+    assert view != messages
+    assert metrics.bounded_observation_count == 1
+    assert len(str(bounded.get("content") or "")) <= 12_000
+    assert metrics.output_chars < len(huge)
 
 
 def test_typed_operation_selects_observation_budget_without_reparsing_command():

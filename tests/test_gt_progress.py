@@ -1,5 +1,11 @@
 import gt_engine.progress as progress
-from gt_engine.progress import ProgressLedger, StallAggregateFact
+from gt_engine.progress import ProgressLedger, StallAggregateFact, task_information_gain
+
+
+def test_information_gain_requires_task_linked_evidence_not_output_novelty():
+    assert task_information_gain(new_read_anchor=False, diagnostic_gain=False) is False
+    assert task_information_gain(new_read_anchor=True, diagnostic_gain=False) is True
+    assert task_information_gain(new_read_anchor=False, diagnostic_gain=True) is True
 
 
 def test_stall_aggregate_is_bounded_declarative_and_source_bound():
@@ -72,6 +78,22 @@ def test_unresolved_contract_triggers_budget_risk_without_exact_loop():
     assert transition is not None
     assert transition.current == "BUDGET_RISK"
     assert transition.reason == "unresolved_contract_near_iteration_limit"
+
+
+def test_unresolved_contract_triggers_budget_risk_near_time_limit():
+    ledger = ProgressLedger(stall_threshold=3)
+
+    transition = ledger.budget_risk(
+        iteration=20,
+        limit=100,
+        unresolved=True,
+        remaining_seconds=80.0,
+        time_risk_threshold_seconds=90.0,
+    )
+
+    assert transition is not None
+    assert transition.current == "BUDGET_RISK"
+    assert transition.reason == "unresolved_contract_near_time_limit"
 
 
 def test_novel_activity_cannot_clear_budget_risk_without_task_state_progress():

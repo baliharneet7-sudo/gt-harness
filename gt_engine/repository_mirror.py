@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from gt_engine.central_runtime import WorkspaceSnapshot
-from gt_engine.language_registry import is_validation_source
+from gt_engine.language_registry import is_indexable_source
 
 _METADATA_NAMES = frozenset(
     {
@@ -106,7 +106,7 @@ def plan_source_mirror(
     snapshot: WorkspaceSnapshot,
     *,
     excluded_paths: set[str] | frozenset[str] = frozenset(),
-    max_source_file_bytes: int = 2_000_000,
+    max_source_file_bytes: int = 50_000_000,
     max_metadata_file_bytes: int = 256_000,
     max_total_bytes: int = 50_000_000,
     max_files: int = 20_000,
@@ -144,7 +144,10 @@ def plan_source_mirror(
         if not path or state.kind != "f":
             excluded_artifacts += 1
             continue
-        if path in normalized_exclusions:
+        # A task output can also be authored code. Exclude only output-only
+        # paths; code deliverables remain part of the graph substrate.
+        deliverable_source = is_indexable_source(path, state.content)
+        if path in normalized_exclusions and not deliverable_source:
             excluded_deliverables += 1
             continue
         parts = PurePosixPath(path).parts
@@ -152,7 +155,7 @@ def plan_source_mirror(
             excluded_artifacts += 1
             continue
         is_metadata = PurePosixPath(path).name.lower() in _METADATA_NAMES
-        is_source = is_validation_source(path, state.content) and not is_metadata
+        is_source = is_indexable_source(path, state.content) and not is_metadata
         if not is_source and not is_metadata:
             excluded_artifacts += 1
             continue

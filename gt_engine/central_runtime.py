@@ -27,6 +27,7 @@ from gt_engine.central_controls import (
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.language_registry import (
     candidate_capabilities,
+    is_indexable_source,
     is_validation_source,
     syntax_probe_command,
 )
@@ -232,6 +233,7 @@ class ClassifiedChange:
     kind: str
     origin: ChangeOrigin
     validation_relevant: bool
+    graph_indexable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,8 +259,6 @@ def classify_change(
     revision.  Task deliverables are tracked separately and satisfy
     obligations without pretending to be source edits.
     """
-    if path in set(task_deliverables):
-        return ClassifiedChange(path, kind, ChangeOrigin.TASK_DELIVERABLE, False)
     parts = path.replace("\\", "/").split("/")
     if kind != "f" or any(part in _DERIVED_PATH_PARTS for part in parts):
         return ClassifiedChange(path, kind, ChangeOrigin.BACKGROUND_DERIVED, False)
@@ -267,11 +267,24 @@ def classify_change(
         return ClassifiedChange(path, kind, ChangeOrigin.VALIDATOR_DERIVED, False)
     if any(name in path for name in _BACKGROUND_ARTIFACT_NAMES):
         return ClassifiedChange(path, kind, ChangeOrigin.BACKGROUND_DERIVED, False)
+    validation_relevant = is_validation_source(path, content)
+    graph_indexable = is_indexable_source(path, content)
+    if path in set(task_deliverables):
+        # Output is a task role, not a file type. Authored code can be both a
+        # required output and validation/index source; data remains output-only.
+        return ClassifiedChange(
+            path,
+            kind,
+            ChangeOrigin.TASK_DELIVERABLE,
+            validation_relevant,
+            graph_indexable,
+        )
     return ClassifiedChange(
         path,
         kind,
         ChangeOrigin.MODEL_AUTHORED,
-        is_validation_source(path, content),
+        validation_relevant,
+        graph_indexable,
     )
 
 
@@ -294,6 +307,50 @@ def source_revision_receipt(
             task_deliverables=deliverables,
             content=item.content,
         ).validation_relevant:
+            continue
+        canonical_path = _workspace_relative_path(path)
+        source_paths.append(canonical_path)
+        content_digest = str(item.digest or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", content_digest):
+            if item.content is not None:
+                content_digest = hashlib.sha256(
+                    item.content.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+            else:
+                missing_digest_paths.append(canonical_path)
+                content_digest = "missing"
+        digest.update(canonical_path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(content_digest.encode("ascii"))
+        digest.update(b"\0")
+    return SourceRevisionReceipt(
+        revision=digest.hexdigest(),
+        complete=not missing_digest_paths,
+        source_paths=tuple(source_paths),
+        missing_digest_paths=tuple(missing_digest_paths),
+    )
+
+
+def graph_revision_receipt(
+    snapshot: WorkspaceSnapshot,
+    task_deliverables: Iterable[str] = (),
+) -> SourceRevisionReceipt:
+    """Hash only structurally indexable source for repository intelligence."""
+
+    deliverables = set(task_deliverables)
+    digest = hashlib.sha256()
+    source_paths: list[str] = []
+    missing_digest_paths: list[str] = []
+    for path, item in sorted(snapshot.entries.items()):
+        if item.kind != "f":
+            continue
+        classified = classify_change(
+            path,
+            kind=item.kind,
+            task_deliverables=deliverables,
+            content=item.content,
+        )
+        if not classified.graph_indexable:
             continue
         canonical_path = _workspace_relative_path(path)
         source_paths.append(canonical_path)
@@ -1269,7 +1326,7 @@ class WorkspaceSensor:
             return snapshot
 
         if previous is None:
-            candidates = [
+            changed = [
                 path
                 for path, state in sorted(snapshot.entries.items())
                 if state.kind == "f"
@@ -1279,16 +1336,7 @@ class WorkspaceSensor:
                     or _workspace_relative_path(path) in shebang_candidates
                     or _may_be_content_signature_source(path)
                 )
-                and state.size <= _MAX_SOURCE_CAPTURE_BYTES
             ]
-            changed = []
-            captured_bytes = 0
-            for path in candidates:
-                size = snapshot.entries[path].size
-                if len(changed) >= self.max_hashes or captured_bytes + size > self.max_hash_bytes:
-                    break
-                changed.append(path)
-                captured_bytes += size
         else:
             changed = [
                 path
@@ -1305,10 +1353,6 @@ class WorkspaceSensor:
                     or not _same_metadata(previous.entries[path], state)
                 )
             ]
-        if len(changed) > self.max_hashes:
-            return replace(snapshot, healthy=False, reason="changed-file hash limit exceeded")
-        if sum(snapshot.entries[path].size for path in changed) > self.max_hash_bytes:
-            return replace(snapshot, healthy=False, reason="changed-file byte limit exceeded")
         entries = dict(snapshot.entries)
         if previous is not None:
             for path, state in tuple(entries.items()):
@@ -1319,8 +1363,29 @@ class WorkspaceSensor:
                         digest=old.digest,
                         content=old.content,
                     )
-        if changed:
-            command = "sha256sum -- " + " ".join(shlex.quote(path) for path in changed)
+        def bounded_batches(paths: Iterable[str]) -> tuple[tuple[str, ...], ...]:
+            """Bound each host command without truncating revision completeness."""
+
+            batches: list[tuple[str, ...]] = []
+            batch: list[str] = []
+            batch_bytes = 0
+            for path in paths:
+                size = max(0, int(entries[path].size))
+                if batch and (
+                    len(batch) >= max(1, self.max_hashes)
+                    or batch_bytes + size > max(1, self.max_hash_bytes)
+                ):
+                    batches.append(tuple(batch))
+                    batch = []
+                    batch_bytes = 0
+                batch.append(path)
+                batch_bytes += size
+            if batch:
+                batches.append(tuple(batch))
+            return tuple(batches)
+
+        for hash_paths in bounded_batches(changed):
+            command = "sha256sum -- " + " ".join(shlex.quote(path) for path in hash_paths)
             try:
                 kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
                 hashes = (
@@ -1342,9 +1407,9 @@ class WorkspaceSensor:
                     reason=f"changed-file hashing error: {type(exc).__name__}",
                 )
             lines = (hashes.stdout or "").splitlines()
-            if hashes.return_code != 0 or len(lines) != len(changed):
+            if hashes.return_code != 0 or len(lines) != len(hash_paths):
                 return replace(snapshot, healthy=False, reason="changed-file hashing failed")
-            for path, line in zip(changed, lines, strict=True):
+            for path, line in zip(hash_paths, lines, strict=True):
                 digest = line.split(maxsplit=1)[0]
                 if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
                     return replace(snapshot, healthy=False, reason="invalid changed-file hash")
@@ -1359,11 +1424,7 @@ class WorkspaceSensor:
             )
             and entries[path].size <= _MAX_SOURCE_CAPTURE_BYTES
         ]
-        # ``changed`` is already bounded by max_hashes and max_hash_bytes.
-        # Do not apply a second eight-file cap here: dropping the suffix of a
-        # multi-file action would make the mirror incomplete and prevent the
-        # graph from representing files created in the same finalizing action.
-        if capture_paths:
+        for capture_batch in bounded_batches(capture_paths):
             script = (
                 "import base64,json,pathlib,sys;"
                 "print(json.dumps({p:base64.b64encode(pathlib.Path(p).read_bytes()).decode()"
@@ -1373,7 +1434,7 @@ class WorkspaceSensor:
                 "python3 -c "
                 + shlex.quote(script)
                 + " "
-                + " ".join(shlex.quote(path) for path in capture_paths)
+                + " ".join(shlex.quote(path) for path in capture_batch)
             )
             try:
                 kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
@@ -1401,9 +1462,11 @@ class WorkspaceSensor:
                     else:
                         self._capture_backend = "posix_base64"
 
-                def apply_encoded(values: Mapping[str, Any]) -> set[str]:
+                def apply_encoded(
+                    values: Mapping[str, Any], paths: tuple[str, ...] = capture_batch
+                ) -> set[str]:
                     applied: set[str] = set()
-                    for path in capture_paths:
+                    for path in paths:
                         value = values.get(path)
                         if not isinstance(value, str):
                             continue
@@ -1418,9 +1481,9 @@ class WorkspaceSensor:
                     return applied
 
                 captured_paths = apply_encoded(encoded)
-                if len(captured_paths) == len(capture_paths):
+                if len(captured_paths) == len(capture_batch):
                     self._capture_backend = "python_json"
-                missing_paths = [path for path in capture_paths if path not in captured_paths]
+                missing_paths = [path for path in capture_batch if path not in captured_paths]
                 if missing_paths:
                     # Task images are not required to contain Python.  Keep the
                     # fast JSON path above, but fall back to POSIX base64 so a
@@ -1492,6 +1555,19 @@ class FeatureReceipt:
     delivery_reason: str = ""
     source_revision: str = ""
     source_epoch: int = 0
+
+
+class FeatureDeliveryDisposition(StrEnum):
+    """Exhaustive provider-delivery accounting for one feature receipt."""
+
+    PRIVATE_INELIGIBLE = "private_ineligible"
+    CANDIDATE_DELIVERED = "candidate_delivered"
+    CANDIDATE_REPRESENTED = "candidate_represented"
+    CANDIDATE_WINDOW_UNSELECTED = "candidate_window_unselected"
+    CANDIDATE_STALE = "candidate_stale"
+    CANDIDATE_BUDGET_REJECTED = "candidate_budget_rejected"
+    CANDIDATE_POLICY_REJECTED = "candidate_policy_rejected"
+    NO_ELIGIBLE_MODEL_CALL = "no_eligible_model_call"
 
 
 class SearchScope(StrEnum):
@@ -4239,6 +4315,34 @@ class CentralFeatureRuntime:
             "feature_states": self.context_compiler_state(),
         }
 
+    def _delivery_disposition(self, receipt: FeatureReceipt) -> FeatureDeliveryDisposition:
+        candidate = bool(
+            receipt.payload.get("message")
+            and feature_payload_grounded(receipt.feature_id, receipt.payload)
+            and self._render_feature_fact(receipt)
+        )
+        if not candidate:
+            return FeatureDeliveryDisposition.PRIVATE_INELIGIBLE
+        status = str(receipt.delivery_status or "")
+        reason = str(receipt.delivery_reason or "")
+        if status == "delivered" or (
+            receipt.feature_id,
+            receipt.revision,
+            "",
+        ) in self._guided_keys:
+            return FeatureDeliveryDisposition.CANDIDATE_DELIVERED
+        if reason == "represented_in_action_history":
+            return FeatureDeliveryDisposition.CANDIDATE_REPRESENTED
+        if reason == "not_selected_first_eligible_request":
+            return FeatureDeliveryDisposition.CANDIDATE_WINDOW_UNSELECTED
+        if "stale" in reason:
+            return FeatureDeliveryDisposition.CANDIDATE_STALE
+        if "budget" in reason:
+            return FeatureDeliveryDisposition.CANDIDATE_BUDGET_REJECTED
+        if status == "pending" and not self._last_context_compiler_call:
+            return FeatureDeliveryDisposition.NO_ELIGIBLE_MODEL_CALL
+        return FeatureDeliveryDisposition.CANDIDATE_POLICY_REJECTED
+
     def summary(self) -> dict[str, Any]:
         by_feature = {feature_id: 0 for feature_id in CENTRAL_FEATURE_IDS}
         for receipt in self.receipts:
@@ -4302,6 +4406,20 @@ class CentralFeatureRuntime:
             if item.delivery_status == "delivered"
             and item.delivery_reason == "represented_in_action_history"
         )
+        delivery_dispositions = [
+            self._delivery_disposition(item) for item in self.receipts
+        ]
+        delivery_disposition_counts = {
+            disposition.value: delivery_dispositions.count(disposition)
+            for disposition in FeatureDeliveryDisposition
+        }
+        guidance_candidates = sum(
+            disposition is not FeatureDeliveryDisposition.PRIVATE_INELIGIBLE
+            for disposition in delivery_dispositions
+        )
+        guidance_delivered_receipts = delivery_disposition_counts[
+            FeatureDeliveryDisposition.CANDIDATE_DELIVERED.value
+        ]
         return {
             "enabled": self.enabled,
             "feature_count": len(CENTRAL_FEATURE_IDS),
@@ -4309,8 +4427,13 @@ class CentralFeatureRuntime:
             "guidance_events": self._guidance_events,
             "guidance_chars": self._guidance_chars,
             "guidance_features": list(self._guidance_features),
-            "guidance_candidates": self._guidance_candidates,
-            "guidance_suppressed": self._guidance_suppressed,
+            "guidance_candidates": guidance_candidates,
+            # Compatibility field: unlike the historical counter, this now
+            # counts only genuine candidates that did not become a provider
+            # delivery. Engine-private effects are never called suppressed.
+            "guidance_suppressed": guidance_candidates - guidance_delivered_receipts,
+            "legacy_guidance_suppressed_counter": self._guidance_suppressed,
+            "feature_delivery_disposition_counts": delivery_disposition_counts,
             "guidance_by_feature": {
                 feature_id: self._guidance_features.count(feature_id)
                 for feature_id in dict.fromkeys(self._guidance_features)
@@ -4379,6 +4502,7 @@ class CentralFeatureRuntime:
                     "delivery_reason": item.delivery_reason,
                     "source_revision": item.source_revision,
                     "source_epoch": item.source_epoch,
+                    "delivery_disposition": self._delivery_disposition(item).value,
                 }
                 for item in self.receipts
             ],

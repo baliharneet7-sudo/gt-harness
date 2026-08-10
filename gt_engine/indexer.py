@@ -16,6 +16,7 @@ tasks (no harm, no noise).
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from contextlib import redirect_stderr
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -96,6 +98,7 @@ class IndexBuildReceipt:
     binary_sha256: str = ""
     elapsed_ms: float = 0.0
     error_type: str | None = None
+    error_diagnostic: str = ""
     source_files: int = 0
     indexable_files: int = 0
     unsupported_suffixes: tuple[str, ...] = ()
@@ -376,6 +379,7 @@ def ensure_index_with_receipt(
         graph_revision: str = "",
         binary_sha256: str = "",
         error_type: str | None = None,
+        error_diagnostic: str = "",
         coverage: SourceCoverage | None = None,
         schema_valid: bool = False,
         node_count: int = 0,
@@ -391,6 +395,7 @@ def ensure_index_with_receipt(
             binary_sha256=binary_sha256,
             elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
             error_type=error_type,
+            error_diagnostic=" ".join(str(error_diagnostic).split())[:600],
             source_files=observed.source_files,
             indexable_files=observed.indexable_files,
             unsupported_suffixes=observed.unsupported_suffixes,
@@ -450,12 +455,16 @@ def ensure_index_with_receipt(
         ) as handle:
             candidate = Path(handle.name)
         candidate.unlink(missing_ok=True)
-        if not run_index(root_text, str(candidate)):
+        diagnostic_stream = io.StringIO()
+        with redirect_stderr(diagnostic_stream):
+            index_ok = run_index(root_text, str(candidate))
+        if not index_ok:
             candidate.unlink(missing_ok=True)
             return receipt(
                 IndexBuildStatus.BUILD_FAILED,
                 binary_sha256=binary["binary_sha256"],
                 error_type="run_index_false",
+                error_diagnostic=diagnostic_stream.getvalue(),
                 coverage=coverage,
             )
         if not candidate.is_file():

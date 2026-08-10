@@ -84,7 +84,7 @@ RELEASE_TESTS = (
     "tests/test_central_run_diff.py",
     "tests/test_provider_view.py::test_below_compaction_trigger_preserves_provider_messages_byte_for_byte",
     "tests/test_provider_view.py::test_compaction_never_removes_distinct_assistant_reasoning",
-    "tests/test_provider_view.py::test_recent_oversized_observation_is_preserved_when_it_is_the_only_turn",
+    "tests/test_provider_view.py::test_recent_oversized_observation_is_bounded_when_pressure_requires_transform",
     "tests/test_provider_view.py::test_duplicate_turn_is_represented_append_only_instead_of_deleting_history",
     "tests/test_provider_view.py::test_provider_request_budget_fails_closed_before_provider_overflow",
     "tests/test_provider_view.py::test_provider_compaction_trigger_is_based_on_measured_headroom",

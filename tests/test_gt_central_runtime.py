@@ -11,6 +11,7 @@ from gt_engine.central_runtime import (
     CentralFeatureRuntime,
     ChangeOrigin,
     EvidenceLedger,
+    FeatureReceipt,
     FileState,
     InterventionDecision,
     ValidationAuthority,
@@ -23,6 +24,7 @@ from gt_engine.central_runtime import (
     diff_snapshots,
     explicit_check_commands,
     feature_payload_grounded,
+    graph_revision_receipt,
     parse_manifest,
     render_runtime_advisory,
     render_runtime_feedback,
@@ -540,7 +542,8 @@ def test_model_guidance_excludes_passes_non_actionable_receipts_and_repeats():
     summary = runtime.summary()
     assert summary["guidance_events"] == 1
     assert summary["guidance_candidates"] == 1
-    assert summary["guidance_suppressed"] >= 3
+    assert summary["guidance_suppressed"] == 0
+    assert summary["feature_delivery_disposition_counts"]["private_ineligible"] >= 3
     assert summary["guidance_by_feature"] == {"syntax_result": 1}
 
 
@@ -1208,6 +1211,135 @@ def test_report_jsonl_is_a_deliverable_not_source():
     assert change.validation_relevant is False
 
 
+def test_code_deliverable_remains_validation_and_graph_source():
+    change = classify_change(
+        "parallel_linear.py",
+        kind="f",
+        task_deliverables={"parallel_linear.py"},
+        content="def parallel_linear():\n    pass\n",
+    )
+
+    assert change.origin == ChangeOrigin.TASK_DELIVERABLE
+    assert change.validation_relevant is True
+    assert change.graph_indexable is True
+
+
+def test_private_effects_are_not_counted_as_suppressed_guidance_candidates():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.receipts.extend(
+        (
+            FeatureReceipt(
+                feature_id="GT_CHANGE_SURFACE",
+                kind="FACT",
+                boundary="edit_result",
+                action_id=1,
+                revision="w1",
+                decision="DELIVERED",
+                reason="workspace changed",
+                payload={"message": "private change state", "changed_paths": ["app.py"]},
+                fresh=True,
+                model_visible=False,
+                source_revision="s1",
+            ),
+            FeatureReceipt(
+                feature_id="syntax_result",
+                kind="FACT",
+                boundary="syntax_result",
+                action_id=2,
+                revision="w2",
+                decision="DELIVERED",
+                reason="syntax failed",
+                payload={
+                    "message": "syntax failed",
+                    "path": "app.py",
+                    "command": "python3 -m py_compile app.py",
+                    "returncode": 1,
+                    "diagnostic": "SyntaxError",
+                },
+                fresh=True,
+                model_visible=True,
+                delivery_status="delivered",
+                source_revision="s2",
+            ),
+        )
+    )
+
+    summary = runtime.summary()
+
+    assert summary["guidance_candidates"] == 1
+    assert summary["guidance_suppressed"] == 0
+    assert summary["feature_delivery_disposition_counts"] == {
+        "private_ineligible": 1,
+        "candidate_delivered": 1,
+        "candidate_represented": 0,
+        "candidate_window_unselected": 0,
+        "candidate_stale": 0,
+        "candidate_budget_rejected": 0,
+        "candidate_policy_rejected": 0,
+        "no_eligible_model_call": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_initial_sensor_hashes_all_source_files_beyond_one_batch():
+    import base64
+    import json
+    import shlex
+
+    paths = tuple(f"src/mod_{index:03d}.py" for index in range(125))
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if "find . -xdev" in command:
+                return Result("".join(f"f\t8\t1.0\t1.0\t{path}\t\n" for path in paths))
+            if command.startswith("sha256sum"):
+                batch = shlex.split(command)[2:]
+                return Result("".join(("a" * 64) + f"  {path}\n" for path in batch))
+            if command.startswith("python3 -c"):
+                batch = shlex.split(command)[3:]
+                encoded = base64.b64encode(b"x = 1\n").decode()
+                return Result(json.dumps({path: encoded for path in batch}))
+            raise AssertionError(command)
+
+    snapshot = await WorkspaceSensor(max_hashes=32).scan(Environment(), cwd="/workspace")
+    receipt = source_revision_receipt(snapshot)
+
+    assert snapshot.healthy is True
+    assert receipt.complete is True
+    assert len(receipt.source_paths) == 125
+    assert receipt.missing_digest_paths == ()
+
+
+@pytest.mark.asyncio
+async def test_initial_sensor_hashes_oversized_source_without_inline_capture():
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if "find . -xdev" in command:
+                return Result("f\t300000\t1.0\t1.0\tlarge.py\t\n")
+            if command.startswith("sha256sum"):
+                return Result(("b" * 64) + "  large.py\n")
+            if command.startswith("python3 -c") or "base64" in command:
+                raise AssertionError("oversized source must not be captured inline")
+            raise AssertionError(command)
+
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/workspace")
+    receipt = source_revision_receipt(snapshot)
+
+    assert receipt.complete is True
+    assert receipt.source_paths == ("large.py",)
+    assert snapshot.entries["large.py"].content is None
+
+
 def test_source_revision_ignores_artifact_changes_but_not_source_edits():
     base = _snapshot(
         "w0",
@@ -1233,6 +1365,33 @@ def test_source_revision_ignores_artifact_changes_but_not_source_edits():
 
     assert source_revision_of(artifact_only) == source_revision_of(base)
     assert source_revision_of(source_edit) != source_revision_of(base)
+
+
+def test_graph_revision_is_independent_from_nonstructural_validation_files():
+    base = _snapshot(
+        "w0",
+        **{
+            "app.py": FileState("f", 10, "1", "1", "", digest="a" * 64),
+            "fixtures.json": FileState("f", 10, "1", "1", "", digest="b" * 64),
+        },
+    )
+    config_changed = _snapshot(
+        "w1",
+        **{
+            "app.py": FileState("f", 10, "1", "1", "", digest="a" * 64),
+            "fixtures.json": FileState("f", 20, "2", "2", "", digest="c" * 64),
+        },
+    )
+    source_changed = _snapshot(
+        "w2",
+        **{
+            "app.py": FileState("f", 11, "2", "2", "", digest="d" * 64),
+            "fixtures.json": FileState("f", 10, "1", "1", "", digest="b" * 64),
+        },
+    )
+
+    assert graph_revision_receipt(config_changed).revision == graph_revision_receipt(base).revision
+    assert graph_revision_receipt(source_changed).revision != graph_revision_receipt(base).revision
 
 
 def test_validation_debt_does_not_fire_on_artifact_only_changes():
