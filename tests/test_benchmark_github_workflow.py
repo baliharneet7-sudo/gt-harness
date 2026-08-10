@@ -14,7 +14,10 @@ def test_arb_workflow_is_dispatch_only_and_pinned() -> None:
 
 def test_arb_workflow_uses_gold_free_shards_and_github_baseline() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "prepare_arb_redacted_inputs.py" in text
+    assert "benchmarks/arb/redacted/*.jsonl" in text
+    assert "ARB_RELEASE_TAG: arb-v2-pinned-07014c9" in text
+    assert "hf download" not in text
+    assert "huggingface_hub" not in text
     assert "--shard-index" in text
     assert "--shard-count" in text
     assert "--candidate-filter all_files" in text
