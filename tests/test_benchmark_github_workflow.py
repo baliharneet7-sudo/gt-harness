@@ -22,3 +22,6 @@ def test_arb_workflow_uses_gold_free_shards_and_github_baseline() -> None:
     assert "--shard-count" in text
     assert "--candidate-filter all_files" in text
     assert "arb-official-baselines-${{ github.run_id }}" in text
+    assert "Install pinned GroundTruth runtime" in text
+    assert "fromJSON(needs.prepare.outputs.shards)" in text
+    assert "arb-complete-report-${{ github.run_id }}" in text
