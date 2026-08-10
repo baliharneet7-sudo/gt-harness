@@ -184,13 +184,16 @@ This patch removes confirmed deterministic defects. It does not prove that a
 new temperature-1 rollout will solve all four historical losses, and it cannot
 make absent semantic validators authoritative. Before an 89-task run:
 
-1. commit and push the repaired tree;
-2. rerun the exact pre-smoke gate at that pushed commit;
-3. run a paid repair-mix smoke only with separate authorization;
-4. require valid graph substrate for every applicable task, zero false progress
+1. run a paid repair-mix smoke only with separate authorization;
+2. require valid graph substrate for every applicable task, zero false progress
    frames, zero late/duplicate/ungrounded context, and no solve regression;
-5. compare tokens, actual model calls, assistant steps, model actions, effective
+3. compare tokens, actual model calls, assistant steps, model actions, effective
    actions, host scans, latency, and wall time only on common uncensored solves.
+
+The repaired implementation was committed and pushed as `dd2884e`. The exact
+pushed-commit pre-smoke gate then passed its complete functional and substrate
+scope and printed `SMOKE_APPROVED`. This authorizes no paid run by itself; it
+establishes that a separately authorized smoke would test the intended code.
 
 The correct product claim after this patch is narrow: GT's controller state,
 action typing, graph transfer, and provider frames are more accurate and less

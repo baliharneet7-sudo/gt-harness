@@ -1001,6 +1001,9 @@ with `integration_mode=off` versus `active` inside the same host loop when such
 evidence is required. The complete diagnosis, research basis, tests, and
 remaining release boundary are in
 `details_done/GT_GENERALIZED_REGRESSION_ROOT_CAUSE_AND_REPAIR_20260810.md`.
+The repaired implementation was pushed as `dd2884e`; its exact-pushed-commit
+pre-smoke gate printed `SMOKE_APPROVED`. No post-repair paid smoke has run, and
+the 89-task benchmark remains blocked.
 
 ## Call/step efficiency repair after smoke 31343081886 (2026-08-09)
 
