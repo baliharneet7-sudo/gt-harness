@@ -18,10 +18,9 @@ import re
 from pathlib import Path
 
 TEN_SMOKE_TASKS = [
-    "fix-code-vulnerability", "portfolio-optimization", "modernize-scientific-stack",
-    "headless-terminal", "llm-inference-batching-scheduler", "break-filter-js-from-html",
-    "write-compressor", "gpt2-codegolf", "schemelike-metacircular-eval",
-    "cobol-modernization",
+    "prove-plus-comm", "sanitize-git-repo", "write-compressor", "regex-chess",
+    "headless-terminal", "portfolio-optimization", "schemelike-metacircular-eval",
+    "cobol-modernization", "llm-inference-batching-scheduler", "count-dataset-tokens",
 ]
 
 # DeepSeek V4 Flash pricing (per 1M tokens).

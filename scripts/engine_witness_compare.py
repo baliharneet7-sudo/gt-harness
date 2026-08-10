@@ -24,10 +24,9 @@ GT_ENGINE_RE = re.compile(r"<result")
 FALLBACK_RE = re.compile(r"notice: .*?(fallback|no answer)")
 
 TEN_SMOKE_TASKS = [
-    "fix-code-vulnerability", "portfolio-optimization", "modernize-scientific-stack",
-    "headless-terminal", "llm-inference-batching-scheduler", "break-filter-js-from-html",
-    "write-compressor", "gpt2-codegolf", "schemelike-metacircular-eval",
-    "cobol-modernization",
+    "prove-plus-comm", "sanitize-git-repo", "write-compressor", "regex-chess",
+    "headless-terminal", "portfolio-optimization", "schemelike-metacircular-eval",
+    "cobol-modernization", "llm-inference-batching-scheduler", "count-dataset-tokens",
 ]
 
 
@@ -55,7 +54,6 @@ def _arm_metrics(trajectory_path: Path) -> dict:
     fallbacks = 0
     pre_edit_actions = 0
     saw_edit = False
-    edit_actions = set()
     for msg in msgs:
         role = msg.get("role")
         if role == "assistant":
@@ -67,7 +65,13 @@ def _arm_metrics(trajectory_path: Path) -> dict:
                     command = str(act.get("command") or act.get("cmd") or "")
                     # crude edit heuristic: an action touching a source path
                     # with a write verb is an edit attempt
-                    if re.search(r"\b(cat|printf|echo|sed -i|tee|python|nano|vi)\b", command) and not saw_edit:
+                    if (
+                        re.search(
+                            r"\b(cat|printf|echo|sed -i|tee|python|nano|vi)\b",
+                            command,
+                        )
+                        and not saw_edit
+                    ):
                         pre_edit_actions += 1
                     if not saw_edit and re.search(r"\b(sed -i|tee|>|>>)\b", command):
                         saw_edit = True
