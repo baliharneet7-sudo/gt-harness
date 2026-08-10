@@ -1014,3 +1014,10 @@ revision; and graph applicability is anchored to the task-start substrate, so
 a source-less binary/data task cannot become a graph failure after the model
 writes unsupported helper files. See
 `details_done/GT_SMOKE_31351072175_AUDIT_AND_BOUNDARY_REPAIR_20260810.md`.
+
+The authorized follow-up smoke `31352963297` at `34e712e` matched the frozen
+baseline at 9/10, fixed the prior headless loss, and correctly classified
+source-less GPT-2 as denominator-excluded. Common-solved tokens/calls/steps/
+model actions fell, but controller-inclusive effective executions rose by
+345, so the 89-task outcome-first efficiency gate remains blocked. See
+`details_done/GT_SMOKE_31352963297_OUTCOME_AND_EFFICIENCY_AUDIT_20260810.md`.
