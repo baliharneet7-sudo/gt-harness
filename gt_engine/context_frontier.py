@@ -219,6 +219,38 @@ def _claim_id(
     return _digest(kind.value, path, symbol, value, relation, language)
 
 
+_STRUCTURAL_SYMBOL = re.compile(r"^[A-Za-z_~][A-Za-z0-9_.$:@?!+*/<>=~-]*$")
+
+
+def _valid_structural_symbol(fact: ContextFrontierFact) -> bool:
+    if fact.kind is ContextFrontierKind.FILE:
+        return bool(fact.path)
+    symbol = str(fact.symbol or "").strip()
+    if not symbol:
+        return fact.kind not in {
+            ContextFrontierKind.SYMBOL,
+            ContextFrontierKind.DEFINITION,
+            ContextFrontierKind.SIGNATURE,
+            ContextFrontierKind.CALLER,
+            ContextFrontierKind.REFERENCE,
+            ContextFrontierKind.TEST,
+        }
+    return bool(_STRUCTURAL_SYMBOL.fullmatch(symbol))
+
+
+def _exact_anchor(text: str, value: str) -> bool:
+    anchor = str(value or "").strip()
+    if not anchor:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(anchor)}(?![A-Za-z0-9_])",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def _has_decision_anchor(
     fact: ContextFrontierFact,
     messages: Sequence[Mapping[str, Any]],
@@ -232,18 +264,21 @@ def _has_decision_anchor(
 
     text = _provider_text(messages)
     normalized = text.replace("\\", "/")
-    if fact.path and fact.path.replace("\\", "/").lower() in normalized.lower():
-        return True
-    symbol = str(fact.symbol or "").strip()
-    if not symbol:
-        return False
-    return bool(
-        re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])",
-            text,
-            flags=re.IGNORECASE,
-        )
+    path_anchored = bool(
+        fact.path and fact.path.replace("\\", "/").lower() in normalized.lower()
     )
+    symbol_anchored = _exact_anchor(text, fact.symbol)
+    relation_target_anchored = _exact_anchor(text, fact.value) and fact.kind in {
+        ContextFrontierKind.CALLER,
+        ContextFrontierKind.REFERENCE,
+        ContextFrontierKind.TEST,
+    }
+    if fact.kind is ContextFrontierKind.FILE:
+        return path_anchored
+    # A file path identifies a repository location, not every definition in
+    # that file.  Structural roles require the exact symbol or relationship
+    # target to have entered Mini-SWE's decision context.
+    return symbol_anchored or relation_target_anchored
 
 
 def _frontier_fact(
@@ -441,6 +476,12 @@ def _represented(fact: ContextFrontierFact, text: str) -> bool:
             return fact.value in text
         anchors = [anchor for anchor in (fact.path, fact.symbol) if anchor]
         return bool(anchors and all(anchor in text for anchor in anchors))
+    if fact.kind in {ContextFrontierKind.FILE, ContextFrontierKind.SYMBOL}:
+        location = fact.path + (f":{fact.line}" if fact.line > 0 else "")
+        return bool(location and location in text)
+    if fact.kind is ContextFrontierKind.CALLER:
+        relation = f"{fact.symbol} calls {fact.value}"
+        return bool(fact.symbol and fact.value and relation in text)
     anchors = [anchor for anchor in (fact.path, fact.symbol, fact.value) if anchor]
     return bool(anchors and all(anchor in text for anchor in anchors[:2]))
 
@@ -533,6 +574,34 @@ def compile_incremental_frontier(
         seen_claim_ids.add(fact.claim_id)
         unique_candidates.append(fact)
     candidates = unique_candidates
+    provider_text = _provider_text(messages)
+    # A path-only task need may receive a file location, but it must not leak
+    # the ranked symbol merely because the symbol happens to live in that
+    # file.  Upgrade to SYMBOL only when the exact symbol is already part of
+    # Mini-SWE's decision context.
+    candidates = [
+        (
+            _frontier_fact(
+                kind=ContextFrontierKind.FILE,
+                path=fact.path,
+                line=fact.line,
+                symbol="",
+                value="",
+                relation="task_anchor",
+                language=fact.language,
+                source_revision=fact.source_revision,
+                graph_revision=fact.graph_revision,
+                semantic_certainty=fact.semantic_certainty,
+                retrieval_relevance=fact.retrieval_relevance,
+            )
+            if fact.kind is ContextFrontierKind.SYMBOL
+            and not _exact_anchor(provider_text, fact.symbol)
+            and fact.path.replace("\\", "/").lower()
+            in provider_text.replace("\\", "/").lower()
+            else fact
+        )
+        for fact in candidates
+    ]
     if fact_tracker is not None:
         candidates = [
             replace(
@@ -545,7 +614,6 @@ def compile_incremental_frontier(
             )
             for fact in candidates
         ]
-    provider_text = _provider_text(messages)
     selected: list[ContextFrontierFact] = []
     accounting: list[dict[str, Any]] = []
     # Revisions are controller identities, not useful model context.  Exposing
@@ -561,6 +629,8 @@ def compile_incremental_frontier(
         elif not valid_relevance:
             disposition = FrontierDisposition.INVALID_RELEVANCE
         elif not valid_certainty:
+            disposition = FrontierDisposition.LOW_PRECISION
+        elif not _valid_structural_symbol(fact):
             disposition = FrontierDisposition.LOW_PRECISION
         elif (
             fact.fact_id in delivered_fact_ids

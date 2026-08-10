@@ -61,6 +61,97 @@ def test_extract_trajectory_uses_identical_deep_metrics_for_any_arm(tmp_path):
     assert metrics["solved"] is True
 
 
+def test_extract_trajectory_reports_provider_action_batching(tmp_path):
+    path = tmp_path / "batch_trajectory.json"
+    batched = _assistant("cat a.py", prompt=20, completion=2)
+    batched["extra"]["actions"].append(
+        {"command": "cat b.py", "tool_call_id": "cat b.py"}
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "Submitted"},
+                "messages": [
+                    {"role": "user", "content": "inspect"},
+                    batched,
+                    _assistant("pytest -q", prompt=30, completion=3),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = extract_trajectory(path, task="batch", reward=1)
+
+    assert metrics["responses_with_actions"] == 2
+    assert metrics["single_action_responses"] == 1
+    assert metrics["multi_action_responses"] == 1
+    assert metrics["max_actions_per_response"] == 2
+    assert metrics["actions_per_api_call"] == 1.5
+
+
+def test_actions_per_api_call_uses_authoritative_model_invocation_count(tmp_path):
+    path = tmp_path / "attempted_calls_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {
+                    "exit_status": "Submitted",
+                    "model_stats": {"api_calls": 4},
+                },
+                "messages": [
+                    _assistant("cat a.py", prompt=20, completion=2),
+                    _assistant("pytest -q", prompt=30, completion=3),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = extract_trajectory(path, task="attempted-calls", reward=1)
+
+    assert metrics["api_calls"] == 4
+    assert metrics["actions"] == 2
+    assert metrics["actions_per_api_call"] == 0.5
+
+
+def test_receipt_model_invocations_are_authoritative_for_call_efficiency(tmp_path):
+    path = tmp_path / "receipt_calls_trajectory.json"
+    receipt_path = tmp_path / "central_receipt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "Submitted"},
+                "messages": [
+                    _assistant("cat a.py", prompt=20, completion=2),
+                    _assistant("pytest -q", prompt=30, completion=3),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "metrics": {"model_query_invocations": 5},
+                "features": {},
+                "repository_intelligence": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = extract_trajectory(
+        path,
+        task="receipt-calls",
+        reward=1,
+        receipt_path=receipt_path,
+    )
+
+    assert metrics["api_calls"] == 5
+    assert metrics["actions_per_api_call"] == 0.4
+
+
 def test_extract_trajectory_includes_outer_harbor_timeout_and_wall_time(tmp_path):
     path = tmp_path / "task_trajectory.json"
     path.write_text(
@@ -182,6 +273,38 @@ def test_compare_arms_rejects_solve_regression_censoring_and_positive_resources(
     }
 
 
+def test_efficiency_gate_rejects_positive_assistant_steps_and_effective_actions():
+    baseline = {
+        "task": {
+            "solved": True,
+            "censored": False,
+            "total_tokens": 100,
+            "api_calls": 10,
+            "actions": 10,
+            "effective_actions": 10,
+            "assistant_steps": 10,
+            "normalized_cost_usd": 1.0,
+        }
+    }
+    treatment = {
+        "task": {
+            **baseline["task"],
+            "total_tokens": 90,
+            "api_calls": 9,
+            "actions": 9,
+            "effective_actions": 11,
+            "assistant_steps": 11,
+            "normalized_cost_usd": 0.9,
+        }
+    }
+
+    comparison = compare_arms(baseline, treatment)
+
+    assert "assistant_steps" in comparison["aggregate_gate_failures"]
+    assert "effective_actions" in comparison["aggregate_gate_failures"]
+    assert comparison["gate_passed"] is False
+
+
 def test_compare_arms_reports_deep_behavior_context_and_timing_deltas():
     baseline = {
         "task": {
@@ -255,6 +378,7 @@ def test_outcome_first_gate_allows_small_per_task_variance_only_when_aggregate_w
             "api_calls": 11,
             "actions": 11,
             "effective_actions": 11,
+            "assistant_steps": 11,
             "normalized_cost_usd": 1.01,
         },
         "b": {
@@ -263,6 +387,7 @@ def test_outcome_first_gate_allows_small_per_task_variance_only_when_aggregate_w
             "api_calls": 6,
             "actions": 6,
             "effective_actions": 6,
+            "assistant_steps": 6,
             "normalized_cost_usd": 0.70,
         },
     }
@@ -307,7 +432,7 @@ def test_efficiency_aggregate_uses_only_common_uncensored_solves_and_separates_c
     assert comparison["aggregate_deltas"]["total_tokens"] == -10
     assert comparison["all_task_aggregate_deltas"]["total_tokens"] == -10_009
     assert comparison["controller_aggregate_deltas"]["effective_actions"] == 4
-    assert "effective_actions" not in comparison["aggregate_gate_failures"]
+    assert "effective_actions" in comparison["aggregate_gate_failures"]
     assert comparison["gate_passed"] is False  # the lost solve still fails outcome preservation
 
 
@@ -341,6 +466,7 @@ def test_outcome_first_gate_rejects_two_large_per_task_resource_regressions():
             "api_calls": 15,
             "actions": 15,
             "effective_actions": 15,
+            "assistant_steps": 15,
             "normalized_cost_usd": 1.40,
         },
         "b": {
@@ -349,6 +475,7 @@ def test_outcome_first_gate_rejects_two_large_per_task_resource_regressions():
             "api_calls": 70,
             "actions": 70,
             "effective_actions": 70,
+            "assistant_steps": 70,
             "normalized_cost_usd": 7.0,
         },
     }

@@ -138,4 +138,35 @@ Replay v2 is exact and content-addressed under gt_replay/ (manifest.json, calls.
 
 Efficiency gates aggregate provider/model resources only across common uncensored solves. Tokens, actual model calls, model-selected actions, assistant responses, cost, and wall time are primary. Effective actions and host/controller/sensor executions are reported separately. Cheap failed tasks cannot improve the aggregate.
 
+## Typed redirection, result semantics, and edge-only progress (2026-08-09)
+
+`ActionProposalAdapter` first produces semantic argv and a separate list of
+redirections. Attached file descriptors are retained as redirection metadata,
+not operands. Descriptor duplication has no filesystem effect, file output is
+a typed write, and file input is a typed read. The immutable validation
+classification and preflight proposal therefore agree even for a redirected
+declared validator.
+
+`ProgressObservation` contains two content-addressed identities. Its attempt
+identity excludes the result; its observation identity adds the executable-
+aware result kind, output digest, and diagnostic fingerprint. Search no-match,
+file difference, validation pass/fail, host timeout, shell timeout, execution
+error, and ordinary success are distinct. Read/search anchors are committed
+only for valid observations. Authored patches are activity, diagnostics and
+localization are observations, and only attributed validation passes or
+confirmed task outputs are task-progress gains.
+
+`ProgressLedger` emits transitions, not repeated state snapshots. Once
+`STALLED`, `CONTRADICTED`, or `BUDGET_RISK` is visible, another same-state
+update is receipt-only. This bounds the progress delivery surface without
+hiding the underlying action/observation history.
+
+Context-frontier relevance is also decision-conditioned. File paths authorize
+file anchors only. Structural facts require an exact current symbol or
+relationship target and a valid structural symbol. Every rejection remains in
+frontier accounting. Deep metrics expose response batching, actual actions per
+model invocation, typed progress counts, validator redirection preservation,
+adaptive/default validation timeouts, and action timeouts. Strict efficiency
+promotion includes assistant steps and effective actions.
+
 Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The next permitted paid step is the exact ten-task certified_full/integrated GT-on smoke after the exact pushed commit prints SMOKE_APPROVED. Preflight remains SHADOW. The 89-task run remains blocked until that smoke has no uncensored outcome regression/censor, valid graph substrate, complete provider-evidence accounting, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.

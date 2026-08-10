@@ -1,3 +1,4 @@
+import gt_engine.progress as progress
 from gt_engine.progress import ProgressLedger, StallAggregateFact
 
 
@@ -161,3 +162,77 @@ def test_central_policy_detects_alternating_cycle_only_after_six_observations():
     assert transitions[5] is not None
     assert transitions[5].current == "STALLED"
     assert transitions[5].reason == "cyclic_actions_without_information"
+
+
+def test_repeated_same_state_stall_is_private_until_state_changes():
+    ledger = ProgressLedger(stall_threshold=3)
+    assert ledger.observe(
+        "same", information_gain=True, changed=False, semantic_gain=False, is_error=False
+    ) is None
+    assert ledger.observe(
+        "same", information_gain=False, changed=False, semantic_gain=False, is_error=False
+    ) is None
+    first = ledger.observe(
+        "same", information_gain=False, changed=False, semantic_gain=False, is_error=False
+    )
+    duplicate = ledger.observe(
+        "same", information_gain=False, changed=False, semantic_gain=False, is_error=False
+    )
+
+    assert first is not None and first.current == "STALLED"
+    assert duplicate is None
+
+
+def test_action_result_semantics_distinguish_valid_nonzero_observations():
+    assert progress.classify_action_result(
+        operation="search", executable="rg", return_code=1
+    ) is progress.ActionResultKind.SEARCH_NO_MATCH
+    assert progress.classify_action_result(
+        operation="read", executable="diff", return_code=1
+    ) is progress.ActionResultKind.DIFFERENCE
+    assert progress.classify_action_result(
+        operation="validate", executable="python3", return_code=1
+    ) is progress.ActionResultKind.VALIDATION_FAIL
+    assert progress.classify_action_result(
+        operation="read", executable="xxd", return_code=127
+    ) is progress.ActionResultKind.EXECUTION_ERROR
+
+
+def test_action_result_recognizes_miniswe_timeout_protocol():
+    assert progress.classify_action_result(
+        operation="validate",
+        executable="python3",
+        return_code=-1,
+        output="RuntimeError: Command timed out after 30.0 seconds",
+    ) is progress.ActionResultKind.TIMEOUT
+
+
+def test_progress_observation_separates_attempt_identity_from_result_identity():
+    failed = progress.ProgressObservation.create(
+        operation="read",
+        executable="xxd",
+        targets=("legacy.cob",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.EXECUTION_ERROR,
+        output="xxd: command not found",
+    )
+    fallback = progress.ProgressObservation.create(
+        operation="read",
+        executable="od",
+        targets=("legacy.cob",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.SUCCESS,
+        output="0000000 123 456",
+    )
+    repeated = progress.ProgressObservation.create(
+        operation="read",
+        executable="od",
+        targets=("legacy.cob",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.SUCCESS,
+        output="0000000 123 456",
+    )
+
+    assert failed.attempt_id != fallback.attempt_id
+    assert failed.observation_id != fallback.observation_id
+    assert fallback.observation_id == repeated.observation_id

@@ -282,6 +282,89 @@ def test_attached_output_redirection_is_classified_as_edit():
     assert any(target.path == "src/generated.py" for target in proposal.targets)
 
 
+def test_descriptor_redirect_does_not_hide_declared_validation_or_fake_mutation():
+    command = "cd /app && timeout 900 python3 benchmark.py 2>&1"
+    classification = classify_validation_command(command, ("python3 benchmark.py",))
+    proposal = adapt_proposed_action(
+        {"command": command},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classification,
+    )
+
+    assert proposal.operation is ActionOperation.VALIDATE
+    assert proposal.mutates_workspace is False
+    assert proposal.requested_timeout_sec == 900.0
+    assert [item.operation for item in proposal.operations] == [
+        ActionOperation.OTHER,
+        ActionOperation.VALIDATE,
+    ]
+
+
+def test_validator_with_file_redirect_retains_validation_and_records_side_effect():
+    command = "cd /app && python3 benchmark.py >benchmark.log 2>&1"
+    classification = classify_validation_command(command, ("python3 benchmark.py",))
+    proposal = adapt_proposed_action(
+        {"command": command},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classification,
+    )
+
+    assert proposal.operation is ActionOperation.VALIDATE
+    assert proposal.mutates_workspace is True
+    assert any(target.path == "/app/benchmark.log" for target in proposal.targets)
+
+
+def test_input_redirection_is_a_typed_read_without_workspace_mutation():
+    proposal = adapt_proposed_action(
+        {"command": "python3 transform.py < fixtures/input.txt"},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert proposal.mutates_workspace is False
+    assert any(
+        operation.operation is ActionOperation.READ
+        and [target.path for target in operation.targets] == ["fixtures/input.txt"]
+        for operation in proposal.operations
+    )
+    assert proposal.shell_redirections[0].reads_filesystem is True
+
+
+def test_spaced_descriptor_remains_an_argument_but_attached_descriptor_does_not():
+    attached = adapt_proposed_action(
+        {"command": "tool 2>errors.log"},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+    spaced = adapt_proposed_action(
+        {"command": "tool 2 >errors.log"},
+        source_revision="s0",
+        workspace_revision="w0",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert attached.shell_segments == (("tool",),)
+    assert attached.shell_redirections[0].file_descriptor == 2
+    assert spaced.shell_segments == (("tool", "2"),)
+    assert spaced.shell_redirections[0].file_descriptor is None
+
+
 def test_absent_output_target_is_expected_creation_and_preflight_passes():
     runtime = CentralFeatureRuntime(model_visible=True)
     proposal = adapt_proposed_action(

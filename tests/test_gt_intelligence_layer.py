@@ -288,8 +288,8 @@ def test_frontier_advances_from_represented_file_to_definition():
     assert "Repository intelligence" in decision.rendered
 
 
-def test_frontier_delivers_ranked_anchor_when_no_structural_role_exists():
-    """A healthy graph anchor is useful even without a CALLS/definition row."""
+def test_frontier_delivers_path_only_anchor_without_leaking_unrequested_symbol():
+    """A path need may receive a file location, but not an unrelated symbol."""
 
     evidence = {
         "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
@@ -321,8 +321,9 @@ def test_frontier_delivers_ranked_anchor_when_no_structural_role_exists():
     )
 
     assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
-    assert decision.facts[0].kind is ContextFrontierKind.SYMBOL
+    assert decision.facts[0].kind is ContextFrontierKind.FILE
     assert decision.facts[0].path == "legacy.cob"
+    assert decision.facts[0].symbol == ""
     assert "legacy.cob:42" in decision.rendered
 
 
@@ -689,7 +690,7 @@ def test_frontier_deduplicates_multiple_occurrences_of_one_semantic_claim():
 
     decision = compile_incremental_frontier(
         evidence,
-        [{"role": "user", "content": "Update interp.py."}],
+        [{"role": "user", "content": "Update parse_expr in interp.py."}],
         source_revision="s1",
         max_facts=3,
     )
@@ -734,6 +735,70 @@ def test_frontier_abstains_from_generic_task_start_symbol_match():
     assert decision.rendered == ""
     assert decision.disposition is FrontierDisposition.LOW_PRECISION
     assert decision.accounting[0]["disposition"] == "no_decision_anchor"
+
+
+def test_task_path_alone_does_not_expose_unrequested_generic_definition():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (),
+        "definitions": (
+            {
+                "path": "src/module.c",
+                "line": 20,
+                "symbol": "PyModuleDef",
+                "signature": "static struct PyModuleDef module_def",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Update src/module.c."}],
+        source_revision="s1",
+    )
+
+    assert decision.rendered == ""
+    assert decision.accounting[0]["disposition"] == "no_decision_anchor"
+
+
+def test_malformed_structural_symbol_is_rejected_before_provider_delivery():
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (),
+        "definitions": (
+            {
+                "path": "src/portfolio.c",
+                "line": 7,
+                "symbol": "* portfolio_risk_c(...) ",
+                "signature": "double * portfolio_risk_c(...) ",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+    }
+
+    decision = compile_incremental_frontier(
+        evidence,
+        [{"role": "user", "content": "Fix portfolio_risk_c in src/portfolio.c."}],
+        source_revision="s1",
+    )
+
+    assert decision.rendered == ""
+    assert decision.accounting[0]["disposition"] == "low_precision"
 
 
 def test_frontier_rejects_out_of_range_relevance_instead_of_delivering():

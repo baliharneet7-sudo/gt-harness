@@ -87,6 +87,27 @@ class ActionTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ShellRedirection:
+    """One top-level shell redirection, separate from executable argv."""
+
+    segment_index: int
+    file_descriptor: int | None
+    operator: str
+    target: str
+    duplicates_descriptor: bool = False
+    reads_filesystem: bool = False
+    mutates_filesystem: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedShellSegment:
+    """Executable argv plus redirections parsed from one shell segment."""
+
+    argv: tuple[str, ...]
+    redirections: tuple[ShellRedirection, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutableInvocation:
     """One wrapper-normalized executable invocation derived from shell words.
 
@@ -160,6 +181,7 @@ class ProposedAction:
     target_must_be_absent: bool = False
     shell_segments: tuple[tuple[str, ...], ...] = ()
     shell_connectors: tuple[str, ...] = ()
+    shell_redirections: tuple[ShellRedirection, ...] = ()
     parser_evidence: tuple[str, ...] = ()
 
     @property
@@ -333,16 +355,92 @@ def _strip_shell_comments(command: str) -> str:
     return "".join(kept)
 
 
-def _shell_parts(
+_REDIRECTION_OPERATORS = ("<<-", "<<<", ">>", "<<", "<>", ">|", ">&", "<&", ">", "<")
+_REDIRECTION_MARKER = "__GT_SHELL_REDIRECTION_"
+
+
+def _mark_shell_redirections(command: str) -> tuple[str, dict[str, tuple[int | None, str]]]:
+    """Replace unquoted redirection operators with shlex-safe markers.
+
+    Marking before lexing preserves the shell grammar distinction between
+    ``2>&1`` and ``2 >&1``.  The former owns fd 2; in the latter ``2`` remains
+    an executable argument and stdout is redirected separately.
+    """
+
+    output: list[str] = []
+    metadata: dict[str, tuple[int | None, str]] = {}
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            output.extend(("\\", char))
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            output.append(char)
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            output.append(char)
+            index += 1
+            continue
+
+        fd_start = index
+        fd_value: int | None = None
+        operator_index = index
+        if char.isdigit() and (index == 0 or not command[index - 1].isalnum()):
+            while operator_index < len(command) and command[operator_index].isdigit():
+                operator_index += 1
+            if operator_index == index or operator_index >= len(command):
+                operator_index = index
+            elif command[operator_index] not in {"<", ">"}:
+                operator_index = index
+            else:
+                fd_value = int(command[index:operator_index])
+        operator = next(
+            (
+                candidate
+                for candidate in _REDIRECTION_OPERATORS
+                if command.startswith(candidate, operator_index)
+            ),
+            "",
+        )
+        if operator:
+            marker = f"{_REDIRECTION_MARKER}{len(metadata):04d}__"
+            metadata[marker] = (fd_value, operator)
+            output.extend((" ", marker, " "))
+            index = operator_index + len(operator)
+            continue
+        output.append(char)
+        index = fd_start + 1
+    if escaped:
+        output.append("\\")
+    return "".join(output), metadata
+
+
+def _parsed_shell_parts(
     command: str,
-) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
-    """Parse executable segments and the connectors between them once."""
+) -> tuple[tuple[ParsedShellSegment, ...], tuple[str, ...]]:
+    """Parse executable argv, redirections, and top-level connectors once."""
 
     try:
+        marked, redirection_metadata = _mark_shell_redirections(
+            _strip_shell_comments(_without_heredoc_bodies(command))
+        )
         lexer = shlex.shlex(
-            _strip_shell_comments(_without_heredoc_bodies(command)),
+            marked,
             posix=True,
-            punctuation_chars=";|&<>\n",
+            punctuation_chars=";|&\n",
         )
         # Newlines are Bash list separators, not generic whitespace.  Keeping
         # them as punctuation prevents two commands from being fused.
@@ -352,21 +450,67 @@ def _shell_parts(
         tokens = list(lexer)
     except ValueError:
         return (), ()
-    segments: list[tuple[str, ...]] = []
+    token_segments: list[tuple[str, ...]] = []
     connectors: list[str] = []
     current: list[str] = []
     for token in tokens:
         normalized_connector = token.replace("\n", ";")
         if normalized_connector and set(normalized_connector) <= {";", "|", "&"}:
             if current:
-                segments.append(tuple(current))
+                token_segments.append(tuple(current))
                 current = []
                 connectors.append(normalized_connector)
             continue
         current.append(token)
     if current:
-        segments.append(tuple(current))
+        token_segments.append(tuple(current))
+
+    segments: list[ParsedShellSegment] = []
+    for segment_index, tokens in enumerate(token_segments):
+        argv: list[str] = []
+        redirections: list[ShellRedirection] = []
+        cursor = 0
+        while cursor < len(tokens):
+            token = tokens[cursor]
+            details = redirection_metadata.get(token)
+            if details is None:
+                argv.append(token)
+                cursor += 1
+                continue
+            fd_value, operator = details
+            if cursor + 1 >= len(tokens):
+                # Incomplete redirection is unsupported shell syntax.  Keep a
+                # sentinel operand so downstream classifiers abstain.
+                argv.append(token)
+                cursor += 1
+                continue
+            target = tokens[cursor + 1]
+            duplicates = operator in {">&", "<&"} and (
+                target.isdigit() or target == "-"
+            )
+            reads = operator in {"<", "<>"} and not duplicates
+            mutates = operator in {">", ">>", ">|", "<>"} and not duplicates
+            redirections.append(
+                ShellRedirection(
+                    segment_index=segment_index,
+                    file_descriptor=fd_value,
+                    operator=operator,
+                    target=target,
+                    duplicates_descriptor=duplicates,
+                    reads_filesystem=reads,
+                    mutates_filesystem=mutates,
+                )
+            )
+            cursor += 2
+        segments.append(ParsedShellSegment(tuple(argv), tuple(redirections)))
     return tuple(segments), tuple(connectors)
+
+
+def _shell_parts(
+    command: str,
+) -> tuple[tuple[tuple[str, ...], ...], tuple[str, ...]]:
+    parsed, connectors = _parsed_shell_parts(command)
+    return tuple(segment.argv for segment in parsed), connectors
 
 
 def shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
@@ -484,9 +628,10 @@ def normalize_executable_invocation(words: tuple[str, ...]) -> ExecutableInvocat
     )
 
 
-def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+def _mutation_signals(segments: tuple[ParsedShellSegment, ...]) -> tuple[str, ...]:
     signals: list[str] = []
-    for words in segments:
+    for segment in segments:
+        words = segment.argv
         if not words:
             continue
         invocation = normalize_executable_invocation(words)
@@ -504,7 +649,7 @@ def _mutation_signals(segments: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
             and semantic_words[1] in _MUTATING_GIT_SUBCOMMANDS
         ):
             signals.append(f"git:{semantic_words[1]}")
-        if any(token in {">", ">>"} or token.startswith(">>") for token in semantic_words):
+        if any(redirection.mutates_filesystem for redirection in segment.redirections):
             signals.append("shell_redirection")
     return tuple(dict.fromkeys(signals))
 
@@ -618,12 +763,27 @@ def _segment_operand_paths(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _redirection_targets(words: tuple[str, ...], cwd: str) -> tuple[str, ...]:
+def _redirection_targets(
+    redirections: tuple[ShellRedirection, ...], cwd: str
+) -> tuple[str, ...]:
     targets: list[str] = []
-    for index, token in enumerate(words[:-1]):
-        if token not in {">", ">>"}:
+    for redirection in redirections:
+        if not redirection.mutates_filesystem:
             continue
-        resolved = _resolve_segment_path(words[index + 1], cwd)
+        resolved = _resolve_segment_path(redirection.target, cwd)
+        if resolved and resolved not in targets and resolved != "/dev/null":
+            targets.append(resolved)
+    return tuple(targets)
+
+
+def _input_redirection_targets(
+    redirections: tuple[ShellRedirection, ...], cwd: str
+) -> tuple[str, ...]:
+    targets: list[str] = []
+    for redirection in redirections:
+        if not redirection.reads_filesystem:
+            continue
+        resolved = _resolve_segment_path(redirection.target, cwd)
         if resolved and resolved not in targets and resolved != "/dev/null":
             targets.append(resolved)
     return tuple(targets)
@@ -686,7 +846,7 @@ def _segment_role(
 
 def _classify_operations(
     command: str,
-    segments: tuple[tuple[str, ...], ...],
+    segments: tuple[ParsedShellSegment, ...],
     *,
     connectors: tuple[str, ...] = (),
     validation: Any | None,
@@ -694,7 +854,8 @@ def _classify_operations(
     operations: list[ObservedOperation] = []
     current_cwd = ""
     pending_pipeline_read_indices: list[int] = []
-    for segment_index, words in enumerate(segments):
+    for segment_index, parsed_segment in enumerate(segments):
+        words = parsed_segment.argv
         if not words:
             continue
         if segment_index and (
@@ -764,7 +925,10 @@ def _classify_operations(
             continue
 
         operands = _segment_operand_paths(semantic_words, current_cwd)
-        redirections = _redirection_targets(semantic_words, current_cwd)
+        redirections = _redirection_targets(parsed_segment.redirections, current_cwd)
+        input_redirections = _input_redirection_targets(
+            parsed_segment.redirections, current_cwd
+        )
         base_targets = tuple(ActionTarget(path) for path in operands)
         evidence = (
             f"head:{head or 'unknown'}",
@@ -776,37 +940,14 @@ def _classify_operations(
             ),
         )
 
-        if redirections:
-            source_operands = tuple(path for path in operands if path not in redirections)
-            if head in _READ_EXECUTABLES and source_operands:
-                spans = tuple(ReadSpan(path=path, whole_file=True) for path in source_operands)
-                operations.append(
-                    ObservedOperation(
-                        segment_index,
-                        head,
-                        ActionOperation.READ,
-                        tuple(ActionTarget(path) for path in source_operands),
-                        spans,
-                        confidence=0.98,
-                        parser_evidence=(*evidence, "source_before_redirection"),
-                    )
-                )
-            operations.append(
-                ObservedOperation(
-                    segment_index,
-                    head,
-                    ActionOperation.EDIT,
-                    tuple(ActionTarget(path, "redirection") for path in redirections),
-                    mutates_workspace=True,
-                    confidence=0.98,
-                    parser_evidence=(*evidence, "shell_redirection"),
-                )
-            )
-            pending_pipeline_read_indices.clear()
-            continue
-
         if _SUBMIT_MARKER in command and _SUBMIT_MARKER in " ".join(words):
             operation, confidence = ActionOperation.SUBMIT, 1.0
+        elif (
+            validation is not None
+            and bool(getattr(validation, "is_validation", False))
+            and getattr(validation, "validator_segment_index", None) == segment_index
+        ):
+            operation, confidence = ActionOperation.VALIDATE, 1.0
         elif head in _READ_EXECUTABLES:
             operation, confidence = ActionOperation.READ, 0.98
         elif head == "sed" and "-n" in semantic_words and "-i" not in semantic_words:
@@ -882,9 +1023,36 @@ def _classify_operations(
                 _segment_role(words, head, operation, redirections),
             )
         )
-        current_index = len(operations) - 1
+        base_operation_index = len(operations) - 1
+        if input_redirections:
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    head,
+                    ActionOperation.READ,
+                    tuple(
+                        ActionTarget(path, "input_redirection")
+                        for path in input_redirections
+                    ),
+                    tuple(ReadSpan(path=path, whole_file=True) for path in input_redirections),
+                    confidence=0.98,
+                    parser_evidence=(*evidence, "input_redirection"),
+                )
+            )
+        if redirections:
+            operations.append(
+                ObservedOperation(
+                    segment_index,
+                    head,
+                    ActionOperation.EDIT,
+                    tuple(ActionTarget(path, "redirection") for path in redirections),
+                    mutates_workspace=True,
+                    confidence=0.98,
+                    parser_evidence=(*evidence, "shell_redirection"),
+                )
+            )
         if operation == ActionOperation.READ and read_spans:
-            pending_pipeline_read_indices.append(current_index)
+            pending_pipeline_read_indices.append(base_operation_index)
         elif head == "sed" and operation == ActionOperation.READ and not operands:
             start, end = _sed_range(semantic_words)
             if start is not None and pending_pipeline_read_indices:
@@ -937,7 +1105,8 @@ def adapt_proposed_action(
         + hashlib.sha256(f"{model_call}:{batch_index}:{command}".encode()).hexdigest()[:12]
     )
     stripped = command.strip()
-    segments, connectors = _shell_parts(stripped)
+    parsed_segments, connectors = _parsed_shell_parts(stripped)
+    segments = tuple(segment.argv for segment in parsed_segments)
     invocation = (
         normalize_executable_invocation(segments[0])
         if len(segments) == 1
@@ -945,19 +1114,30 @@ def adapt_proposed_action(
     )
     words = list(invocation.words)
     head = invocation.executable or ""
-    mutation_signals = _mutation_signals(segments)
+    mutation_signals = _mutation_signals(parsed_segments)
     operations = _classify_operations(
         command,
-        segments,
+        parsed_segments,
         connectors=connectors,
         validation=validation,
     )
     meaningful = tuple(item for item in operations if item.operation != ActionOperation.OTHER)
-    primary = min(
-        meaningful or operations,
-        key=lambda item: (_PRIMARY_OPERATION_PRIORITY[item.operation], item.segment_index),
-        default=None,
+    validation_index = getattr(validation, "validator_segment_index", None)
+    primary = next(
+        (
+            item
+            for item in operations
+            if item.segment_index == validation_index
+            and item.operation is ActionOperation.VALIDATE
+        ),
+        None,
     )
+    if primary is None:
+        primary = min(
+            meaningful or operations,
+            key=lambda item: (_PRIMARY_OPERATION_PRIORITY[item.operation], item.segment_index),
+            default=None,
+        )
     operation = primary.operation if primary is not None else ActionOperation.OTHER
     action_operations = tuple(
         item
@@ -1045,7 +1225,10 @@ def adapt_proposed_action(
         requested_timeout_sec=next(
             (
                 item.requested_timeout_sec
-                for item in (normalize_executable_invocation(segment) for segment in segments)
+                for item in (
+                    normalize_executable_invocation(segment.argv)
+                    for segment in parsed_segments
+                )
                 if item.requested_timeout_sec is not None
             ),
             None,
@@ -1059,6 +1242,11 @@ def adapt_proposed_action(
         ),
         shell_segments=segments,
         shell_connectors=connectors,
+        shell_redirections=tuple(
+            redirection
+            for segment in parsed_segments
+            for redirection in segment.redirections
+        ),
         parser_evidence=(
             f"head:{head or 'unknown'}",
             f"segments:{len(segments)}",

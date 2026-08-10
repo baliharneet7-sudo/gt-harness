@@ -66,6 +66,11 @@ DIAGNOSTIC_METRICS = (
     "failed_actions",
     "repeated_commands",
     "no_action_assistant_steps",
+    "responses_with_actions",
+    "single_action_responses",
+    "multi_action_responses",
+    "max_actions_per_response",
+    "actions_per_api_call",
     "wasted_action_proxy",
     "steps_to_first_search",
     "steps_to_first_read",
@@ -174,6 +179,20 @@ DIAGNOSTIC_METRICS = (
     "auto_submits",
     "progress_transitions",
     "task_progress_changes",
+    "progress_observations",
+    "progress_distinct_attempts",
+    "progress_distinct_observations",
+    "progress_observation_gains",
+    "progress_task_gains",
+    "progress_same_state_updates_suppressed",
+    "failed_read_anchors_not_consumed",
+    "valid_nonzero_observations",
+    "declared_validator_proposals",
+    "declared_validators_with_redirection",
+    "declared_validators_preserved_with_redirection",
+    "adaptive_validation_timeouts",
+    "default_validation_timeouts",
+    "model_action_timeouts",
     "activity_events",
     "agent_wall_time_seconds",
     "trial_wall_time_seconds",
@@ -438,6 +457,7 @@ def extract_trajectory(
     provider_cost = 0.0
     context_chars_sent = 0
     running_context_chars = 0
+    max_actions_per_response = 0
     first: dict[str, int | None] = {
         name: None for name in ("search", "read", "edit", "check", "submit")
     }
@@ -465,6 +485,13 @@ def extract_trajectory(
         actions = extra.get("actions") or []
         if not actions:
             counts["no_action_assistant_steps"] += 1
+        else:
+            counts["responses_with_actions"] += 1
+            if len(actions) == 1:
+                counts["single_action_responses"] += 1
+            else:
+                counts["multi_action_responses"] += 1
+            max_actions_per_response = max(max_actions_per_response, len(actions))
         reasoning = str(message.get("reasoning_content") or content)
         for action in actions:
             counts["actions"] += 1
@@ -554,10 +581,16 @@ def extract_trajectory(
         "steps_to_first_edit": first["edit"],
         "steps_to_first_check": first["check"],
         "steps_to_submit": first["submit"],
+        "max_actions_per_response": max_actions_per_response,
     }
     result["api_calls"] = max(
         result.get("api_calls", 0),
         int(((payload.get("info") or {}).get("model_stats") or {}).get("api_calls") or 0),
+    )
+    result["actions_per_api_call"] = (
+        round(result.get("actions", 0) / result["api_calls"], 6)
+        if result["api_calls"]
+        else 0.0
     )
     result["wasted_action_proxy"] = (
         result.get("failed_actions", 0)
@@ -579,6 +612,9 @@ def extract_trajectory(
         "other_actions",
         "repeated_commands",
         "no_action_assistant_steps",
+        "responses_with_actions",
+        "single_action_responses",
+        "multi_action_responses",
     ):
         result.setdefault(key, 0)
     if receipt_path and receipt_path.exists():
@@ -807,6 +843,20 @@ def extract_trajectory(
             "auto_submits",
             "progress_transitions",
             "task_progress_changes",
+            "progress_observations",
+            "progress_distinct_attempts",
+            "progress_distinct_observations",
+            "progress_observation_gains",
+            "progress_task_gains",
+            "progress_same_state_updates_suppressed",
+            "failed_read_anchors_not_consumed",
+            "valid_nonzero_observations",
+            "declared_validator_proposals",
+            "declared_validators_with_redirection",
+            "declared_validators_preserved_with_redirection",
+            "adaptive_validation_timeouts",
+            "default_validation_timeouts",
+            "model_action_timeouts",
             "effective_actions",
             "effective_task_actions",
             "actual_environment_execs",
@@ -815,6 +865,11 @@ def extract_trajectory(
             "sensor_environment_execs",
         ):
             result[key] = receipt_metrics.get(key, result.get(key, 0))
+        if "model_query_invocations" in receipt_metrics:
+            result["api_calls"] = max(
+                int(result.get("api_calls") or 0),
+                int(receipt_metrics.get("model_query_invocations") or 0),
+            )
         result["total_gt_context_chars_added"] = (
             int(result.get("gt_context_chars_added") or 0)
             + int(result.get("context_frontier_chars_added") or 0)
@@ -843,6 +898,11 @@ def extract_trajectory(
         result["repository_intelligence_failures"] = list(
             repository_intelligence.get("failures") or ()
         )
+    result["actions_per_api_call"] = (
+        round(int(result.get("actions") or 0) / int(result["api_calls"]), 6)
+        if int(result.get("api_calls") or 0)
+        else 0.0
+    )
     return result
 
 
@@ -981,12 +1041,16 @@ def compare_arms(
         for metric in (
             "total_tokens",
             "api_calls",
+            "assistant_steps",
             "normalized_cost_usd",
         )
         if aggregate_deltas.get(metric) is None or aggregate_deltas[metric] >= 0
     ]
     if aggregate_deltas.get("actions") is None or aggregate_deltas["actions"] > 0:
         aggregate_gate_failures.append("actions")
+    effective_action_delta = controller_aggregate_deltas.get("effective_actions")
+    if effective_action_delta is None or effective_action_delta > 0:
+        aggregate_gate_failures.append("effective_actions")
     wall_delta = aggregate_deltas.get("agent_wall_time_seconds")
     if wall_delta is not None and wall_delta > 0:
         aggregate_gate_failures.append("agent_wall_time_seconds")

@@ -457,6 +457,30 @@ def test_literal_timeout_wrapper_preserves_declared_check_authority():
     assert classification.requested_timeout_sec == 90.0
 
 
+def test_declared_validator_identity_ignores_descriptor_redirection():
+    classification = classify_validation_command(
+        "cd /app && timeout 900 python3 benchmark.py 2>&1",
+        ("python3 benchmark.py",),
+    )
+
+    assert classification.authority is ValidationAuthority.DECLARED
+    assert classification.declared_check_id == "python3 benchmark.py"
+    assert classification.executable == "python3"
+    assert classification.requested_timeout_sec == 900.0
+    assert classification.validator_segment_index == 1
+
+
+def test_declared_validator_identity_ignores_file_output_redirection():
+    classification = classify_validation_command(
+        "cd /app && python3 benchmark.py >/tmp/benchmark.log 2>&1",
+        ("python3 benchmark.py",),
+    )
+
+    assert classification.authority is ValidationAuthority.DECLARED
+    assert classification.declared_check_id == "python3 benchmark.py"
+    assert classification.executable == "python3"
+
+
 def test_recovery_requires_the_same_validation_command_and_failure():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement the requested change", revision="r0")

@@ -828,7 +828,23 @@ def classify_validation_command(
     for check in checks:
         if check == normalized:
             declared_check_id = check
-            declared_segment_index = len(segments) - 1 if segments else None
+            declared_segment_index = (
+                recognized_indices[-1]
+                if recognized_indices
+                else next(
+                    (
+                        index
+                        for index in range(len(segments) - 1, -1, -1)
+                        if (
+                            segments[index][0].rsplit("/", 1)[-1].lower()
+                            if segments[index]
+                            else ""
+                        )
+                        not in {"cd", "echo", "printf", "true", "false"}
+                    ),
+                    len(segments) - 1 if segments else None,
+                )
+            )
             break
         try:
             check_segments = shell_segments(check)

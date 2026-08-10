@@ -717,3 +717,31 @@ new uncensored reward-0 deadline-reserve loss; `gpt2-codegolf` remained the
 baseline-known miss. Aggregate tokens fell 21.12%, but this is not an
 efficiency win after the solve regression. See
 `details_done/GT_SMOKE_31343081886_DEEP_AUDIT_20260809.md`; 89 remains blocked.
+
+## Call/step efficiency repair after smoke 31343081886 (2026-08-09)
+
+Do not accept token savings when common-solved model calls or assistant steps
+increase. Shell parsing separates executable argv from typed redirections:
+`2>&1` is descriptor duplication, output files are side effects, and input
+files are reads. Redirecting a declared validator cannot erase its validation
+authority or its bounded adaptive timeout.
+
+Progress accounting uses an `attempt_id` and an `observation_id`. Executable
+exit conventions are typed; grep/rg no-match and diff differences are valid
+observations, while shell code `124` and Mini-SWE's exact `return_code=-1`
+timeout protocol are timeouts. Failed reads do not consume anchors. Workspace
+activity, new observations, and actual task progress are distinct. Only an
+attributed validation pass or confirmed task output advances task progress,
+and a same-state stall/contradiction/budget update is private rather than a
+second provider frame.
+
+Graph facts are selected against the current decision boundary. A path alone
+can justify a file anchor, not an arbitrary symbol or definition in that file;
+structural facts need an exact symbol/relation anchor, and malformed symbols
+abstain. Deep metrics report batching, actions per actual invocation, progress
+identities, validator preservation/timeouts, and effective actions. The strict
+gate now fails on positive `assistant_steps` or positive `effective_actions`
+even when tokens fall.
+
+Provider-free tests and archived replay pass. No repaired paid smoke has run;
+the live efficiency effect is unverified and the 89-task run remains blocked.

@@ -379,8 +379,8 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
 
 
 @pytest.mark.asyncio
-async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request(tmp_path):
-    """Anchor-only graph evidence must cross the real model boundary once."""
+async def test_context_frontier_exposes_path_only_evidence_without_symbol_leak(tmp_path):
+    """A path need receives a location without an unrequested ranked symbol."""
 
     model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(
@@ -425,7 +425,8 @@ async def test_context_frontier_exposes_anchor_only_evidence_in_provider_request
     deliveries = receipt["repository_intelligence"]["frontier_deliveries"]
     assert len(deliveries) == 1
     assert deliveries[0]["delivered_before_call"] == 1
-    assert deliveries[0]["facts"][0]["kind"] == "symbol"
+    assert deliveries[0]["facts"][0]["kind"] == "file"
+    assert deliveries[0]["facts"][0]["symbol"] == ""
     call = receipt["model_call_contexts"][0]
     assert call["stock_provider_messages_sha256"] != call["provider_messages_sha256"]
     assert call["provider_changed_message_indices"]
@@ -1489,6 +1490,34 @@ def test_explicit_foreground_validation_may_receive_bounded_timeout_extension(tm
     assert reason == "literal_validation_timeout"
 
 
+def test_redirected_declared_validator_receives_bounded_timeout_extension(tmp_path):
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_adaptive_validation_timeout=True,
+    )
+    command = "cd /app && timeout 900 python3 benchmark.py 2>&1"
+    classification = classify_validation_command(command, ("python3 benchmark.py",))
+    proposal = adapt_proposed_action(
+        {"command": command},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classification,
+    )
+
+    timeout, reason = agent._select_action_timeout(
+        proposal,
+        classification,
+        remaining_agent_time_sec=700.0,
+    )
+
+    assert timeout == 120.0
+    assert reason == "literal_validation_timeout"
+
+
 def test_timeout_extension_abstains_for_custom_or_dynamic_probes(tmp_path):
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -2104,6 +2133,56 @@ async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice
     assert "Execution state STALLED" in visible
     stall_line = next(line for line in visible.splitlines() if "Execution state STALLED" in line)
     assert "should" not in stall_line.lower()
+
+
+@pytest.mark.asyncio
+async def test_failed_reader_does_not_consume_anchor_or_create_fallback_stall(tmp_path):
+    class ReaderEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command.startswith("xxd "):
+                return ExecResult(stdout="xxd: command not found", return_code=127)
+            if command.startswith("od "):
+                return ExecResult(stdout=f"bytes for {command.split()[-1]}", return_code=0)
+            return ExecResult(stdout="", return_code=0)
+
+    paths = ("a.cob", "b.cob", "c.cob", "d.cob")
+    model = _ScriptedModel(
+        [
+            *(f"xxd {path}" for path in paths),
+            *(f"od {path}" for path in paths),
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_repository_intelligence=False,
+        enable_progress_control=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the COBOL inputs and finish.", ReaderEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["progress_frame_deliveries"] == 0
+    assert receipt["metrics"]["failed_read_anchors_not_consumed"] == 4
+    assert receipt["metrics"]["semantic_progress_kinds"]["localization_gain"] == 4
+    assert len(receipt["progress"]["observations"]) == 9
+    assert all(
+        len(row["output_sha256"]) == 64
+        and "declared_check_id" in row
+        and "diagnostic_fingerprint" in row
+        for row in receipt["progress"]["observations"]
+    )
+    assert all(
+        "Execution state STALLED" not in "\n".join(history)
+        for history in model.observed_history
+    )
 
 
 @pytest.mark.asyncio

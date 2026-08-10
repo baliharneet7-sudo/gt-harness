@@ -960,3 +960,50 @@ new uncensored reward-0 deadline-reserve loss; `gpt2-codegolf` remained the
 baseline-known miss. Aggregate tokens fell 21.12%, but this is not an
 efficiency win after the solve regression. See
 `details_done/GT_SMOKE_31343081886_DEEP_AUDIT_20260809.md`; 89 remains blocked.
+
+## Call/step efficiency repair after smoke 31343081886 (2026-08-09)
+
+The common-solved token reduction in smoke `31343081886` did not satisfy the
+efficiency contract because model calls and assistant steps increased. The
+repair separates four boundaries that must never be collapsed into a generic
+"progress" signal.
+
+Shell parsing now separates executable argv from typed `ShellRedirection`
+records before both validation classification and preflight. Descriptor
+duplication such as `2>&1` is neither an argv operand nor a workspace mutation;
+file output remains a typed side effect, and file input is a typed read. A
+declared validator therefore remains `VALIDATE` when its output is redirected.
+The concrete portfolio command `cd /app && timeout 900 python3 benchmark.py
+2>&1` now retains declared authority and receives the bounded adaptive timeout
+instead of the historical 30-second default.
+
+Progress has two identities. `attempt_id` describes operation, normalized
+executable, targets, source revision, and declared check. `observation_id` adds
+the typed result and output hash. Exit status is executable-aware: search
+no-match and diff differences are valid observations, while Mini-SWE's
+`return_code=-1` timeout protocol and shell `124` are both `TIMEOUT`. A failed
+read never consumes a path anchor. Observation gain, task-progress gain, and
+workspace activity are separate; only an attributed validation pass or a
+confirmed task output is task progress. Repeated same-state
+`STALLED`/`CONTRADICTED`/`BUDGET_RISK` updates stay private and cannot emit
+duplicate progress frames.
+
+Repository delivery is decision-conditioned. A task-mentioned path may expose
+only the certified file location; it does not authorize arbitrary definitions
+inside that file. Structural roles require an exact symbol or relationship
+target already present at the Mini-SWE decision boundary, and malformed graph
+symbols are rejected before provider delivery. This is a precision boundary,
+not a requirement to make every task receive text.
+
+Deep metrics now report response batching, actions per actual model invocation,
+typed progress observations/gains, preserved redirected validators, adaptive
+versus default validator timeouts, and observed action timeouts. The strict
+aggregate gate includes `assistant_steps` and controller-inclusive
+`effective_actions`; lower tokens cannot hide extra calls, steps, or host work.
+The exact regressions are part of `central_pre_smoke_gate.py`.
+
+The focused repair tests, exact provider-free workflow scope, all-17 census,
+readiness audit, Ruff, compilation, and archived ten-task replay pass locally.
+This is provider-free implementation proof, not evidence that live call/step
+deltas have turned negative. No post-repair paid smoke has run, and the
+89-task benchmark remains blocked.

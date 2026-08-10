@@ -262,6 +262,36 @@ edges; 311 workflow-scope tests, structural readiness, and static checks
 passed. This certification does not establish a live outcome or efficiency
 gain; those remain matched-smoke acceptance gates.
 
+### Action-result and progress identity
+
+The shell proposal adapter does not give redirection syntax to the executable
+classifier as argv. It emits semantic argv plus typed redirections, preserving
+the distinction between descriptor duplication, file input, and file output.
+Validation authority, requested timeout, typed reads, and workspace mutation
+therefore derive from the same parse.
+
+Postflight assigns each command an executable-aware result kind. An attempt is
+identified by operation, executable, targets, source revision, and declared
+check; its observation additionally includes result kind and output hash. This
+prevents different fallback tools from collapsing into one failed action while
+also detecting a genuine repeated observation. Observation novelty does not
+equal task progress. The controller clears semantic budget risk only for an
+attributed validation pass or confirmed task-output change. Repeated
+same-state controller updates are accounted privately and do not add another
+model call or provider frame.
+
+Repository facts cross the provider boundary only when grounded in the current
+decision context. A path-only need may select a file location. A definition,
+caller, reference, test, or named symbol requires the exact symbol or relation
+target to be represented in Mini-SWE history; graph confidence alone is not
+decision relevance.
+
+Efficiency measurement includes response batching and uses actual model-query
+invocations as the denominator. Promotion fails if common-solved tokens, API
+calls, assistant steps, model actions, normalized cost, or controller-inclusive
+effective actions violate their configured aggregate boundary. Consequently a
+token reduction cannot mask more reasoning turns or more host work.
+
 ## Final regression-repair contract (2026-08-09)
 
 GT source identity is semantic. SourceRevisionReceipt hashes canonical source path plus full-content SHA-256 only; raw workspace metadata remains a separate audit revision. Missing source digests invalidate graph refresh and completion certification without blocking Mini-SWE. Internal revision hashes are never model-visible.

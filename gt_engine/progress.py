@@ -3,7 +3,152 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class ActionResultKind(StrEnum):
+    SUCCESS = "success"
+    SEARCH_NO_MATCH = "search_no_match"
+    DIFFERENCE = "difference"
+    VALIDATION_PASS = "validation_pass"
+    VALIDATION_FAIL = "validation_fail"
+    TIMEOUT = "timeout"
+    EXECUTION_ERROR = "execution_error"
+    UNKNOWN = "unknown"
+
+
+def classify_action_result(
+    *,
+    operation: str,
+    executable: str,
+    return_code: int | None,
+    output: str = "",
+) -> ActionResultKind:
+    """Interpret executable exit conventions without inferring task success."""
+
+    normalized_operation = str(operation or "").strip().lower()
+    normalized_executable = str(executable or "").rsplit("/", 1)[-1].lower()
+    if return_code is None:
+        return ActionResultKind.UNKNOWN
+    host_timeout = bool(
+        return_code == -1
+        and re.search(
+            r"(?:^|\n)RuntimeError: Command timed out after "
+            r"\d+(?:\.\d+)? seconds(?:\n|$)",
+            str(output),
+        )
+    )
+    if return_code == 124 or host_timeout:
+        return ActionResultKind.TIMEOUT
+    if normalized_operation == "validate":
+        return (
+            ActionResultKind.VALIDATION_PASS
+            if return_code == 0
+            else ActionResultKind.VALIDATION_FAIL
+        )
+    if normalized_operation == "search" and normalized_executable in {
+        "ack",
+        "ag",
+        "grep",
+        "rg",
+    }:
+        if return_code == 0:
+            return ActionResultKind.SUCCESS
+        if return_code == 1:
+            return ActionResultKind.SEARCH_NO_MATCH
+        return ActionResultKind.EXECUTION_ERROR
+    if normalized_executable in {"cmp", "diff"}:
+        if return_code == 0:
+            return ActionResultKind.SUCCESS
+        if return_code == 1:
+            return ActionResultKind.DIFFERENCE
+        return ActionResultKind.EXECUTION_ERROR
+    return (
+        ActionResultKind.SUCCESS
+        if return_code == 0
+        else ActionResultKind.EXECUTION_ERROR
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressObservation:
+    """Replayable attempt identity and its concrete observed result."""
+
+    attempt_id: str
+    observation_id: str
+    operation: str
+    executable: str
+    targets: tuple[str, ...]
+    source_revision: str
+    result_kind: ActionResultKind
+    output_sha256: str
+    declared_check_id: str = ""
+    diagnostic_fingerprint: str = ""
+    observation_gain: bool = False
+    task_progress_gain: bool = False
+    contradictory: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        operation: str,
+        executable: str,
+        targets: tuple[str, ...],
+        source_revision: str,
+        result_kind: ActionResultKind,
+        output: str,
+        declared_check_id: str = "",
+        diagnostic_fingerprint: str = "",
+        observation_gain: bool = False,
+        task_progress_gain: bool = False,
+        contradictory: bool = False,
+    ) -> ProgressObservation:
+        normalized_targets = tuple(
+            sorted({str(target).replace("\\", "/") for target in targets if target})
+        )
+        attempt_material = json.dumps(
+            [
+                str(operation),
+                str(executable).rsplit("/", 1)[-1],
+                normalized_targets,
+                str(source_revision),
+                str(declared_check_id),
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        attempt_id = hashlib.sha256(attempt_material.encode("utf-8", "replace")).hexdigest()
+        output_sha256 = hashlib.sha256(str(output).encode("utf-8", "replace")).hexdigest()
+        observation_material = json.dumps(
+            [
+                attempt_id,
+                result_kind.value,
+                output_sha256,
+                str(diagnostic_fingerprint),
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return cls(
+            attempt_id=attempt_id,
+            observation_id=hashlib.sha256(
+                observation_material.encode("utf-8", "replace")
+            ).hexdigest(),
+            operation=str(operation),
+            executable=str(executable).rsplit("/", 1)[-1],
+            targets=normalized_targets,
+            source_revision=str(source_revision),
+            result_kind=result_kind,
+            output_sha256=output_sha256,
+            declared_check_id=str(declared_check_id),
+            diagnostic_fingerprint=str(diagnostic_fingerprint),
+            observation_gain=bool(observation_gain),
+            task_progress_gain=bool(task_progress_gain),
+            contradictory=bool(contradictory),
+        )
 
 
 @dataclass(frozen=True)
@@ -131,6 +276,7 @@ class ProgressLedger:
         self._repeat_streak = 0
         self._signature_counts: dict[str, int] = {}
         self._history: list[str] = []
+        self.same_state_updates_suppressed = 0
 
     def observe(
         self,
@@ -228,7 +374,11 @@ class ProgressLedger:
             else:
                 self.state = "PROGRESS"
                 reason = "no_new_information"
-        if self.state == prior and self.state == "PROGRESS":
+        # Same-state updates are still counted privately above, but they do
+        # not create another controller edge or another provider payload.
+        if self.state == prior:
+            if self.state in {"STALLED", "CONTRADICTED", "BUDGET_RISK"}:
+                self.same_state_updates_suppressed += 1
             return None
         return ProgressTransition(
             prior=prior,

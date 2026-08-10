@@ -85,7 +85,13 @@ from gt_engine.preflight import (
     adapt_proposed_action,
     pass_decision,
 )
-from gt_engine.progress import ProgressLedger, StallAggregateFact
+from gt_engine.progress import (
+    ActionResultKind,
+    ProgressLedger,
+    ProgressObservation,
+    StallAggregateFact,
+    classify_action_result,
+)
 from gt_engine.provider_evidence import (
     ProviderEvidenceDisposition,
     ProviderEvidenceLedger,
@@ -1156,9 +1162,12 @@ class MiniSweCentralAgent(BaseAgent):
         pending_progress_fact: StallAggregateFact | None = None
         delivered_progress_fact_ids: set[str] = set()
         progress_fact_deliveries: list[dict[str, Any]] = []
-        seen_semantic_signatures: set[str] = set()
+        seen_observation_ids: set[str] = set()
         seen_validation_fingerprints: set[str] = set()
         seen_read_anchors: set[str] = set()
+        progress_observations: list[dict[str, Any]] = []
+        failed_read_anchors_not_consumed = 0
+        valid_nonzero_observations = 0
         semantic_progress_kinds: dict[str, int] = {}
         activity_events = 0
         task_progress_changes = 0
@@ -1255,6 +1264,10 @@ class MiniSweCentralAgent(BaseAgent):
         pending_preflight_evidence: dict[str, Any] | None = None
         deadline_reserve_exits = 0
         action_timeout_decisions: list[dict[str, Any]] = []
+        declared_validator_proposals = 0
+        declared_validators_with_redirection = 0
+        declared_validators_preserved_with_redirection = 0
+        model_action_timeouts = 0
         previous_provider_messages: list[dict[str, Any]] | None = None
         provider_view_session = ProviderViewSession()
         replay_bundle = ReplayBundleWriter(
@@ -1998,6 +2011,15 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     for index, action in enumerate(actions)
                 )
+                for classification, proposed in zip(
+                    action_classifications, proposed_actions, strict=True
+                ):
+                    if classification.authority is ValidationAuthority.DECLARED:
+                        declared_validator_proposals += 1
+                        if proposed.shell_redirections:
+                            declared_validators_with_redirection += 1
+                            if proposed.operation is ActionOperation.VALIDATE:
+                                declared_validators_preserved_with_redirection += 1
                 semantic_utilization.observe(
                     call=calls,
                     actions=proposed_actions,
@@ -2478,21 +2500,75 @@ class MiniSweCentralAgent(BaseAgent):
                             item.path
                             for item in classified_transition
                             if item.validation_relevant
-                            and item.origin
-                            in {
-                                ChangeOrigin.MODEL_AUTHORED,
-                                ChangeOrigin.TASK_DELIVERABLE,
-                            }
+                            and item.origin is ChangeOrigin.MODEL_AUTHORED
+                        )
+                    )
+                    deliverable_paths = tuple(
+                        sorted(
+                            item.path
+                            for item in classified_transition
+                            if item.origin is ChangeOrigin.TASK_DELIVERABLE
+                            and item.path in after.entries
+                            and item.path in (*transition.created, *transition.modified)
+                            and after.entries[item.path].size > 0
                         )
                     )
                     read_anchors = tuple(
-                        sorted(target.path for target in proposed.targets if target.path)
+                        sorted(
+                            {
+                                target.path
+                                for operation in proposed.operations
+                                if operation.operation
+                                in {ActionOperation.READ, ActionOperation.SEARCH}
+                                for target in operation.targets
+                                if target.path
+                            }
+                        )
                     )
+                    primary_operation = next(
+                        (
+                            operation
+                            for operation in proposed.operations
+                            if operation.operation is proposed.operation
+                        ),
+                        next(iter(proposed.operations), None),
+                    )
+                    result_kind = classify_action_result(
+                        operation=proposed.operation.value,
+                        executable=(
+                            primary_operation.executable
+                            if primary_operation is not None
+                            else ""
+                        ),
+                        return_code=result.return_code,
+                        output=output["output"],
+                    )
+                    if result_kind is ActionResultKind.TIMEOUT:
+                        model_action_timeouts += 1
+                    valid_observation = result_kind in {
+                        ActionResultKind.SUCCESS,
+                        ActionResultKind.SEARCH_NO_MATCH,
+                        ActionResultKind.DIFFERENCE,
+                        ActionResultKind.VALIDATION_PASS,
+                        ActionResultKind.VALIDATION_FAIL,
+                    }
                     new_read_anchor = bool(
                         proposed.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+                        and valid_observation
                         and any(anchor not in seen_read_anchors for anchor in read_anchors)
                     )
-                    seen_read_anchors.update(read_anchors)
+                    if valid_observation:
+                        seen_read_anchors.update(read_anchors)
+                    elif (
+                        proposed.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+                        and read_anchors
+                    ):
+                        failed_read_anchors_not_consumed += len(read_anchors)
+                    if result_kind in {
+                        ActionResultKind.SEARCH_NO_MATCH,
+                        ActionResultKind.DIFFERENCE,
+                    }:
+                        valid_nonzero_observations += 1
                     validation_gain = bool(
                         classification.is_validation
                         and classification.status.value == "pass"
@@ -2507,50 +2583,102 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     if classification.diagnostic_fingerprint:
                         seen_validation_fingerprints.add(classification.diagnostic_fingerprint)
+                    task_progress_gain = bool(validation_gain or deliverable_paths)
+                    progress_observation = ProgressObservation.create(
+                        operation=proposed.operation.value,
+                        executable=(
+                            primary_operation.executable
+                            if primary_operation is not None
+                            else ""
+                        ),
+                        targets=tuple(
+                            sorted(
+                                {
+                                    *read_anchors,
+                                    *source_paths,
+                                    *deliverable_paths,
+                                    *(
+                                        target.path
+                                        for target in proposed.targets
+                                        if target.path
+                                    ),
+                                }
+                            )
+                        ),
+                        source_revision=source_revision,
+                        result_kind=result_kind,
+                        output=output["output"],
+                        declared_check_id=classification.declared_check_id or "",
+                        diagnostic_fingerprint=(
+                            classification.diagnostic_fingerprint or ""
+                        ),
+                        task_progress_gain=task_progress_gain,
+                        contradictory=bool(
+                            classification.is_validation
+                            and classification.status.value == "fail"
+                            and classification.status_attributed
+                        ),
+                    )
+                    observation_gain = (
+                        progress_observation.observation_id not in seen_observation_ids
+                    )
+                    seen_observation_ids.add(progress_observation.observation_id)
+                    progress_observation = replace(
+                        progress_observation,
+                        observation_gain=observation_gain,
+                    )
+                    progress_observations.append(
+                        {
+                            "action_id": actions_count,
+                            "attempt_id": progress_observation.attempt_id,
+                            "observation_id": progress_observation.observation_id,
+                            "operation": progress_observation.operation,
+                            "executable": progress_observation.executable,
+                            "targets": list(progress_observation.targets),
+                            "result_kind": progress_observation.result_kind.value,
+                            "output_sha256": progress_observation.output_sha256,
+                            "declared_check_id": progress_observation.declared_check_id,
+                            "diagnostic_fingerprint": (
+                                progress_observation.diagnostic_fingerprint
+                            ),
+                            "observation_gain": observation_gain,
+                            "task_progress_gain": task_progress_gain,
+                            "contradictory": progress_observation.contradictory,
+                            "source_revision": source_revision,
+                        }
+                    )
                     if validation_gain:
                         semantic_kind = "validation_gain"
+                    elif deliverable_paths:
+                        semantic_kind = "task_output_gain"
                     elif diagnostic_gain:
-                        semantic_kind = "diagnostic_gain"
+                        semantic_kind = "diagnostic_observation"
                     elif new_read_anchor:
                         semantic_kind = "localization_gain"
                     elif source_paths:
                         semantic_kind = "patch_attempt"
+                    elif observation_gain:
+                        semantic_kind = "observation_gain"
                     else:
                         semantic_kind = "no_gain"
                     semantic_progress_kinds[semantic_kind] = (
                         semantic_progress_kinds.get(semantic_kind, 0) + 1
                     )
-                    semantic_gain = semantic_kind in {
-                        "validation_gain",
-                        "diagnostic_gain",
-                        "localization_gain",
-                    }
-                    semantic_signature = hashlib.sha256(
-                        _canonical_json(
-                            {
-                                "kind": semantic_kind,
-                                "validation_status": classification.status.value,
-                                "declared_check_id": classification.declared_check_id,
-                                "failure_fingerprint": classification.diagnostic_fingerprint,
-                                "source_paths": source_paths,
-                                "read_anchors": read_anchors if new_read_anchor else (),
-                            }
-                        )
-                    ).hexdigest()
-                    semantic_information_gain = semantic_signature not in seen_semantic_signatures
-                    seen_semantic_signatures.add(semantic_signature)
-                    if semantic_gain:
+                    if task_progress_gain:
                         task_progress_changes += 1
                     if self.enable_progress_control:
                         progress_transition = self._progress.observe(
-                            semantic_signature,
-                            information_gain=semantic_information_gain and semantic_gain,
+                            progress_observation.observation_id,
+                            information_gain=observation_gain,
                             changed=bool(source_paths),
-                            semantic_gain=semantic_gain,
-                            is_error=result.return_code != 0,
-                            contradictory=(
-                                classification.is_validation and result.return_code != 0
-                            ),
+                            semantic_gain=task_progress_gain,
+                            is_error=result_kind
+                            in {
+                                ActionResultKind.EXECUTION_ERROR,
+                                ActionResultKind.TIMEOUT,
+                                ActionResultKind.VALIDATION_FAIL,
+                            },
+                            contradictory=progress_observation.contradictory,
                         )
                         if progress_transition is not None:
                             progress_transitions.append(
@@ -2561,6 +2689,11 @@ class MiniSweCentralAgent(BaseAgent):
                                     "streak": progress_transition.streak,
                                     "signature": progress_transition.signature,
                                     "semantic_kind": semantic_kind,
+                                    "attempt_id": progress_observation.attempt_id,
+                                    "observation_id": progress_observation.observation_id,
+                                    "result_kind": result_kind.value,
+                                    "observation_gain": observation_gain,
+                                    "task_progress_gain": task_progress_gain,
                                     "action_id": actions_count,
                                 }
                             )
@@ -3411,11 +3544,46 @@ class MiniSweCentralAgent(BaseAgent):
                 "task_progress_changes": task_progress_changes,
                 "activity_events": activity_events,
                 "semantic_progress_kinds": dict(semantic_progress_kinds),
+                "progress_observations": len(progress_observations),
+                "progress_distinct_attempts": len(
+                    {row["attempt_id"] for row in progress_observations}
+                ),
+                "progress_distinct_observations": len(
+                    {row["observation_id"] for row in progress_observations}
+                ),
+                "progress_observation_gains": sum(
+                    bool(row["observation_gain"]) for row in progress_observations
+                ),
+                "progress_task_gains": sum(
+                    bool(row["task_progress_gain"]) for row in progress_observations
+                ),
+                "progress_same_state_updates_suppressed": (
+                    self._progress.same_state_updates_suppressed
+                ),
+                "failed_read_anchors_not_consumed": failed_read_anchors_not_consumed,
+                "valid_nonzero_observations": valid_nonzero_observations,
                 "deadline_configured": effective_budget is not None,
                 "execution_budget_sec": effective_budget,
                 "deadline_reserve_sec": self.deadline_reserve_sec,
                 "deadline_reserve_exits": deadline_reserve_exits,
                 "action_timeout_decisions": action_timeout_decisions,
+                "declared_validator_proposals": declared_validator_proposals,
+                "declared_validators_with_redirection": (
+                    declared_validators_with_redirection
+                ),
+                "declared_validators_preserved_with_redirection": (
+                    declared_validators_preserved_with_redirection
+                ),
+                "adaptive_validation_timeouts": sum(
+                    row.get("reason") == "literal_validation_timeout"
+                    for row in action_timeout_decisions
+                ),
+                "default_validation_timeouts": sum(
+                    row.get("operation") == ActionOperation.VALIDATE.value
+                    and row.get("reason") == "default_command_timeout"
+                    for row in action_timeout_decisions
+                ),
+                "model_action_timeouts": model_action_timeouts,
                 "context_compiler_calls": sum(
                     bool(row.get("context_compiler_ran")) for row in model_call_contexts
                 ),
@@ -4026,6 +4194,10 @@ class MiniSweCentralAgent(BaseAgent):
                         "progress": {
                             "state": self._progress.state,
                             "transitions": progress_transitions,
+                            "observations": progress_observations,
+                            "same_state_updates_suppressed": (
+                                self._progress.same_state_updates_suppressed
+                            ),
                             "fact_deliveries": progress_fact_deliveries,
                             "pending_fact": (
                                 None
