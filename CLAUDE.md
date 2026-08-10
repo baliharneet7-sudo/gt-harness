@@ -718,6 +718,47 @@ baseline-known miss. Aggregate tokens fell 21.12%, but this is not an
 efficiency win after the solve regression. See
 `details_done/GT_SMOKE_31343081886_DEEP_AUDIT_20260809.md`; 89 remains blocked.
 
+## Generalized regression repair after workflow 31421610097 (2026-08-10)
+
+Workflow `31421610097` is rejected evidence: GT-on solved 15/20 against the
+frozen reference's 17/20, and `prove-plus-comm` plus `sanitize-git-repo` had
+invalid graph substrate. Do not reduce the four solve losses to either
+temperature variance or GT causation. All four first model actions diverged
+before any GT evidence, but all four later received provider-visible progress
+frames; most of those frames falsely said `STALLED` because distinct searches
+and opaque experiments collapsed to one attempt identity.
+
+Progress attempt identity now includes a hash of the exact selected command.
+Command identity, observation identity, observation gain, and verified
+task-progress gain remain separate. A different command prevents a false
+repeated-action classification but is not itself task progress. Only an
+attributed validation pass or confirmed task output may clear `BUDGET_RISK` or
+support completion. Exact repetitions still produce the bounded one-shot stall
+frame.
+
+Action classification must not invert harmless and destructive behavior.
+Redirecting diagnostics to `/dev/null` is not a workspace mutation. Generic
+Git history/worktree mutations including `filter-branch`, `filter-repo`, `gc`,
+`reflog`, and `update-ref` are typed mutating before execution. Replaying the
+20 archived receipts under the repaired classifier removes 155 false mutating
+actions and recognizes one previously missed destructive action; this is a
+deterministic host-scan reduction projection, not a solve-rate claim.
+
+Repository archive members and transforms are rooted at the resolved task cwd,
+never hard-coded `/app`. Action targets are canonicalized against the same cwd,
+so `/workspace/...` and nested `/app/<repo>/...` tasks can transfer and query
+their graphs. Initially source-less tasks already retain an incremental
+repository session and may index model-created source while remaining excluded
+from the task-start graph denominator; do not add a second bootstrap path.
+
+The frozen stock Mini-SWE reference and the host-central treatment differ in
+loop/execution interface and therefore are not a clean causal GT ablation.
+Keep the frozen result as an outcome target, but isolate causal GT behavior
+with `integration_mode=off` versus `active` inside the same host loop when such
+evidence is required. The complete diagnosis, research basis, tests, and
+remaining release boundary are in
+`details_done/GT_GENERALIZED_REGRESSION_ROOT_CAUSE_AND_REPAIR_20260810.md`.
+
 ## Call/step efficiency repair after smoke 31343081886 (2026-08-09)
 
 Do not accept token savings when common-solved model calls or assistant steps

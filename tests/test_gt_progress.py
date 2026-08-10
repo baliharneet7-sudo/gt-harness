@@ -231,6 +231,7 @@ def test_action_result_recognizes_miniswe_timeout_protocol():
 
 def test_progress_observation_separates_attempt_identity_from_result_identity():
     failed = progress.ProgressObservation.create(
+        command="xxd legacy.cob",
         operation="read",
         executable="xxd",
         targets=("legacy.cob",),
@@ -239,6 +240,7 @@ def test_progress_observation_separates_attempt_identity_from_result_identity():
         output="xxd: command not found",
     )
     fallback = progress.ProgressObservation.create(
+        command="od legacy.cob",
         operation="read",
         executable="od",
         targets=("legacy.cob",),
@@ -247,6 +249,7 @@ def test_progress_observation_separates_attempt_identity_from_result_identity():
         output="0000000 123 456",
     )
     repeated = progress.ProgressObservation.create(
+        command="od legacy.cob",
         operation="read",
         executable="od",
         targets=("legacy.cob",),
@@ -258,3 +261,40 @@ def test_progress_observation_separates_attempt_identity_from_result_identity():
     assert failed.attempt_id != fallback.attempt_id
     assert failed.observation_id != fallback.observation_id
     assert fallback.observation_id == repeated.observation_id
+
+
+def test_progress_attempt_identity_distinguishes_different_commands_with_same_shape():
+    """Different experiments must not collapse into one repeated-action loop."""
+
+    first = progress.ProgressObservation.create(
+        command="rg -n password .",
+        operation="search",
+        executable="rg",
+        targets=(".",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.SEARCH_NO_MATCH,
+        output="",
+    )
+    second = progress.ProgressObservation.create(
+        command="rg -n api_key .",
+        operation="search",
+        executable="rg",
+        targets=(".",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.SEARCH_NO_MATCH,
+        output="",
+    )
+    repeated = progress.ProgressObservation.create(
+        command="rg -n password .",
+        operation="search",
+        executable="rg",
+        targets=(".",),
+        source_revision="s1",
+        result_kind=progress.ActionResultKind.SEARCH_NO_MATCH,
+        output="",
+    )
+
+    assert first.command_sha256 != second.command_sha256
+    assert first.attempt_id != second.attempt_id
+    assert first.command_sha256 == repeated.command_sha256
+    assert first.attempt_id == repeated.attempt_id

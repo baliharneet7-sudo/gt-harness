@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import posixpath
+import re
 import shlex
 import tarfile
 import time
@@ -142,10 +143,11 @@ def _message_context_chars(message: dict[str, Any]) -> int:
     return len(text)
 
 
-def _workspace_target_path(path: str) -> str:
+def _workspace_target_path(path: str, *, cwd: str | None = None) -> str:
     normalized = str(path or "").strip().replace("\\", "/")
-    if normalized.startswith("/app/"):
-        return normalized[5:]
+    resolved_cwd = posixpath.normpath(str(cwd or "/app"))
+    if resolved_cwd != "/" and normalized.startswith(resolved_cwd.rstrip("/") + "/"):
+        return normalized[len(resolved_cwd.rstrip("/")) + 1 :]
     if normalized.startswith("./"):
         return normalized[2:]
     return normalized
@@ -683,11 +685,17 @@ class MiniSweCentralAgent(BaseAgent):
     ) -> None:
         """Transfer selected source without leaving task-visible controller files."""
 
+        cwd = posixpath.normpath(str(self.cwd or "/"))
+        if not cwd.startswith("/"):
+            raise RuntimeError("TaskWorkingDirectoryInvalid")
+        cwd_prefix = cwd.lstrip("/").rstrip("/")
         archive_members = tuple(
             (
                 path[len("__external__/") :]
                 if path.startswith("__external__/")
-                else "app/" + path
+                else posixpath.join(cwd_prefix, path)
+                if cwd_prefix
+                else path
             )
             for path in mirror_plan.paths
         )
@@ -729,12 +737,27 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 if appended.return_code != 0:
                     raise RuntimeError("SourceMirrorManifestWriteFailed")
+            transforms = []
+            if cwd_prefix:
+                # GNU tar transforms use a basic regular expression.  Escape
+                # the resolved cwd so repository roots such as /workspace and
+                # nested roots such as /app/project are handled literally.
+                escaped_prefix = re.escape(cwd_prefix + "/")
+                transforms.append(
+                    "--transform=" + shlex.quote(f"s,^{escaped_prefix},,")
+                )
+            transforms.extend(
+                (
+                    "--transform='s,^etc/,__external__/etc/,'",
+                    "--transform='s,^var/,__external__/var/,'",
+                )
+            )
             archived = await self._host_executions.exec(
                 environment,
                 (
-                    "tar --null --verbatim-files-from --transform='s,^app/,,' "
-                    "--transform='s,^etc/,__external__/etc/,' "
-                    "--transform='s,^var/,__external__/var/,' -czf "
+                    "tar --null --verbatim-files-from "
+                    + " ".join(transforms)
+                    + " -czf "
                     f"{archive_q} -C / -T {manifest_q}"
                 ),
                 category=HostExecCategory.REPOSITORY_TRANSFER,
@@ -2691,7 +2714,9 @@ class MiniSweCentralAgent(BaseAgent):
                         dict.fromkeys(
                             normalized
                             for target in proposed.targets
-                            for normalized in [_workspace_target_path(target.path)]
+                            for normalized in [
+                                _workspace_target_path(target.path, cwd=self.cwd)
+                            ]
                             if normalized in snapshot.entries
                             and snapshot.entries[normalized].kind == "f"
                             and classify_change(
@@ -2832,6 +2857,7 @@ class MiniSweCentralAgent(BaseAgent):
                         seen_validation_fingerprints.add(classification.diagnostic_fingerprint)
                     task_progress_gain = bool(validation_gain or deliverable_paths)
                     progress_observation = ProgressObservation.create(
+                        command=command,
                         operation=proposed.operation.value,
                         executable=(
                             primary_operation.executable
@@ -2888,6 +2914,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "targets": list(progress_observation.targets),
                             "result_kind": progress_observation.result_kind.value,
                             "output_sha256": progress_observation.output_sha256,
+                            "command_sha256": progress_observation.command_sha256,
                             "declared_check_id": progress_observation.declared_check_id,
                             "diagnostic_fingerprint": (
                                 progress_observation.diagnostic_fingerprint

@@ -276,16 +276,21 @@ _MUTATING_GIT_SUBCOMMANDS = frozenset(
         "clean",
         "clone",
         "commit",
+        "filter-branch",
+        "filter-repo",
+        "gc",
         "init",
         "merge",
         "mv",
         "rebase",
         "reset",
         "restore",
+        "reflog",
         "revert",
         "rm",
         "stash",
         "switch",
+        "update-ref",
     }
 )
 
@@ -649,7 +654,11 @@ def _mutation_signals(segments: tuple[ParsedShellSegment, ...]) -> tuple[str, ..
             and semantic_words[1] in _MUTATING_GIT_SUBCOMMANDS
         ):
             signals.append(f"git:{semantic_words[1]}")
-        if any(redirection.mutates_filesystem for redirection in segment.redirections):
+        if any(
+            redirection.mutates_filesystem
+            and redirection.target.strip("'\"") != "/dev/null"
+            for redirection in segment.redirections
+        ):
             signals.append("shell_redirection")
     return tuple(dict.fromkeys(signals))
 

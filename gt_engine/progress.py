@@ -94,6 +94,7 @@ class ProgressObservation:
     source_revision: str
     result_kind: ActionResultKind
     output_sha256: str
+    command_sha256: str
     declared_check_id: str = ""
     diagnostic_fingerprint: str = ""
     observation_gain: bool = False
@@ -104,6 +105,7 @@ class ProgressObservation:
     def create(
         cls,
         *,
+        command: str,
         operation: str,
         executable: str,
         targets: tuple[str, ...],
@@ -119,8 +121,19 @@ class ProgressObservation:
         normalized_targets = tuple(
             sorted({str(target).replace("\\", "/") for target in targets if target})
         )
+        # Operation/target classification intentionally abstains on opaque
+        # programs and does not retain search patterns as targets.  Without
+        # the exact command identity, distinct searches and experiments
+        # therefore collapse into a false repeated-action loop.  Hash the
+        # exact bytes rather than persisting its text in private progress
+        # state.  Do not whitespace-normalize: whitespace inside a quoted or
+        # opaque program can be semantically significant.
+        command_sha256 = hashlib.sha256(
+            str(command).encode("utf-8", "replace")
+        ).hexdigest()
         attempt_material = json.dumps(
             [
+                command_sha256,
                 str(operation),
                 str(executable).rsplit("/", 1)[-1],
                 normalized_targets,
@@ -153,6 +166,7 @@ class ProgressObservation:
             source_revision=str(source_revision),
             result_kind=result_kind,
             output_sha256=output_sha256,
+            command_sha256=command_sha256,
             declared_check_id=str(declared_check_id),
             diagnostic_fingerprint=str(diagnostic_fingerprint),
             observation_gain=bool(observation_gain),

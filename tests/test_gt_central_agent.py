@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import inspect
 import io
@@ -23,6 +24,7 @@ from eval.gt_central_agent import (
     _message_context_chars,
     _partition_recovered_repository_failures,
     _stable_provider_prefix,
+    _workspace_target_path,
 )
 from gt_engine.central_runtime import (
     FileState,
@@ -32,11 +34,14 @@ from gt_engine.central_runtime import (
 )
 from gt_engine.preflight import (
     ActionDisposition,
+    ActionOperation,
+    MutationCertainty,
     PreflightDecision,
     PreflightMode,
     adapt_proposed_action,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
+from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
 
 
@@ -76,6 +81,19 @@ def test_current_frontier_failure_remains_fail_closed():
 
     assert current == ["frontier:substrate_failure"]
     assert transient == []
+
+
+@pytest.mark.parametrize(
+    ("path", "cwd", "expected"),
+    [
+        ("/workspace/src/main.py", "/workspace", "src/main.py"),
+        ("/app/dclm/ray/process.py", "/app/dclm", "ray/process.py"),
+        ("/etc/nginx/nginx.conf", "/app", "/etc/nginx/nginx.conf"),
+        ("./src/main.py", "/workspace", "src/main.py"),
+    ],
+)
+def test_workspace_target_path_is_relative_to_resolved_cwd(path, cwd, expected):
+    assert _workspace_target_path(path, cwd=cwd) == expected
 
 
 def test_recovered_initial_graph_failure_does_not_remain_degraded():
@@ -648,6 +666,65 @@ async def test_paid_environment_path_transfers_only_selected_source_files(tmp_pa
         receipt["host_execution"]["category_counts"]["repository_transfer"]
         >= 2
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cwd", "expected_member", "expected_transform"),
+    [
+        ("/workspace", "workspace/pkg/app.py", "s,^workspace/, ,"),
+        ("/app/dclm", "app/dclm/pkg/app.py", "s,^app/dclm/, ,"),
+    ],
+)
+async def test_source_archive_is_rooted_at_resolved_task_cwd(
+    tmp_path, cwd, expected_member, expected_transform
+):
+    """A source mirror must not assume that every task lives at /app."""
+
+    class CaptureEnvironment(_Environment):
+        async def download_file(self, source_path, target_path):
+            payload = b"def solve():\n    return 1\n"
+            with tarfile.open(target_path, "w:gz") as archive:
+                member = tarfile.TarInfo("pkg/app.py")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+
+    plan = SourceMirrorPlan(
+        paths=("pkg/app.py",),
+        total_bytes=25,
+        source_files=1,
+        metadata_files=0,
+        excluded_artifacts=0,
+        excluded_deliverables=0,
+        excluded_oversize=0,
+        excluded_source_oversize=0,
+        excluded_budget=0,
+        excluded_source_budget=0,
+        manifest_sha256="m",
+        complete=True,
+        reason_codes=(),
+    )
+    environment = CaptureEnvironment()
+    session = RepositorySession.temporary(instruction="Fix pkg/app.py")
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test", cwd=cwd)
+
+    try:
+        await agent._transfer_source_archive(
+            environment,
+            session,
+            plan,
+            source_revision="s1",
+        )
+    finally:
+        session.close()
+
+    commands = [command for command, _env in environment.commands]
+    append = next(command for command in commands if "base64 -d >>" in command)
+    encoded = append.split("printf '%s' '", 1)[1].split("' | base64", 1)[0]
+    assert base64.b64decode(encoded).decode("utf-8") == expected_member + "\0"
+    archive_command = next(command for command in commands if command.startswith("tar "))
+    assert expected_transform.replace(" ", "") in archive_command
+    assert "--transform='s,^app/,,'" not in archive_command
 
 
 @pytest.mark.asyncio
@@ -1645,6 +1722,47 @@ def test_timeout_extension_abstains_for_custom_or_dynamic_probes(tmp_path):
     assert reason == "default_command_timeout"
 
 
+def test_dev_null_diagnostics_do_not_turn_read_only_search_into_mutation():
+    command = "grep -rn needle . 2>/dev/null | head -20"
+    proposal = adapt_proposed_action(
+        {"command": command},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classify_validation_command(command),
+    )
+
+    assert proposal.operation is ActionOperation.SEARCH
+    assert proposal.mutates_workspace is False
+    assert proposal.mutation_certainty is MutationCertainty.PROVEN_READ_ONLY
+
+
+@pytest.mark.parametrize("subcommand", ["gc", "reflog", "update-ref", "filter-branch"])
+def test_irreversible_git_maintenance_is_typed_as_workspace_mutation(subcommand):
+    arguments = {
+        "gc": "--prune=now --aggressive",
+        "reflog": "expire --expire=now --all",
+        "update-ref": "-d refs/original/refs/heads/main",
+        "filter-branch": "-f -- --all",
+    }[subcommand]
+    command = f"git {subcommand} {arguments}"
+    proposal = adapt_proposed_action(
+        {"command": command},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+        validation=classify_validation_command(command),
+    )
+
+    assert proposal.mutates_workspace is True
+    assert proposal.mutation_certainty is MutationCertainty.PROVEN_MUTATING
+    assert proposal.operations[0].operation is ActionOperation.EDIT
+
+
 def test_context_accounting_includes_reasoning_and_tool_calls():
     message = {
         "role": "assistant",
@@ -2233,6 +2351,37 @@ async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice
     assert "Execution state STALLED" in visible
     stall_line = next(line for line in visible.splitlines() if "Execution state STALLED" in line)
     assert "should" not in stall_line.lower()
+
+
+@pytest.mark.asyncio
+async def test_distinct_successful_experiments_do_not_emit_false_stall(tmp_path):
+    model = _ScriptedModel(
+        [
+            "python3 -c 'print(1)'",
+            "python3 -c 'print(2)'",
+            "python3 -c 'print(3)'",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_repository_intelligence=False,
+        enable_progress_control=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Complete the task.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["progress_frame_deliveries"] == 0
+    assert not any(
+        row["current"] in {"STALLED", "CONTRADICTED"}
+        for row in receipt["progress"]["transitions"]
+    )
+    observations = receipt["progress"]["observations"][:3]
+    assert len({row["command_sha256"] for row in observations}) == 3
+    assert len({row["attempt_id"] for row in observations}) == 3
 
 
 @pytest.mark.asyncio
