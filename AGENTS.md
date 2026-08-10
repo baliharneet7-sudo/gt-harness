@@ -1068,6 +1068,19 @@ model actions fell, but controller-inclusive effective executions rose by
 
 ## Regression repair implementation (2026-08-10)
 
+## Final execution measurement contract (2026-08-10)
+
+Agent Retrieval Bench is a retrieval diagnostic, not proof that the model
+reasoned over GroundTruth or that tasks improved. Final evidence is layered:
+retrieval correctness, exact next-request delivery, paired decision-point
+utility, then end-to-end outcome. Decision-point evaluation uses identical
+control/treatment requests differing only by the bounded grounded GT payload;
+it does not add markers, request acknowledgements, or inspect hidden reasoning.
+Observable action changes are classified as beneficial, harmful, equivalent, or
+indeterminate. The durable execution ledger and 15-minute heartbeat are in
+`FINAL_EXECUTION_TODOS.md`; no paid run starts without its gate and explicit
+authorization.
+
 The next repair pass corrected the two misleading conclusions from the
 89-task treatment `31355487270`. `guidance_suppressed=2,264` was not a count of
 withheld model guidance: the old counter incremented for almost every private

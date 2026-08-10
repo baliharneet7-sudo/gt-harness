@@ -806,6 +806,17 @@ model actions fell, but controller-inclusive effective executions rose by
 
 ## Regression repair implementation (2026-08-10)
 
+## Final execution measurement contract (2026-08-10)
+
+ARB measures whether retrieval found useful repository evidence. It does not
+measure model reasoning, timing in the live loop, or task success. Those are
+separate proof layers. The decision-point evaluator compares exact provider
+requests with and without the production GT payload and grades only the next
+external action using mechanical repository/task facts. No marker,
+acknowledgement, or hidden-reasoning claim is permitted. Track execution in
+`FINAL_EXECUTION_TODOS.md`; emit a 15-minute heartbeat while active, and do not
+launch paid work without the relevant gate and authorization.
+
 The next repair pass corrected the two misleading conclusions from the
 89-task treatment `31355487270`. `guidance_suppressed=2,264` was not a count of
 withheld model guidance: the old counter incremented for almost every private
