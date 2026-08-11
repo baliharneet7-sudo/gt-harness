@@ -1203,9 +1203,11 @@ every call. `gt_engine.component_registry` is the machine-auditable inventory
 for the active engine and all 17 lifecycle contracts; historical files are not
 active merely because they exist.
 
-This is implementation and local provider-free proof. The exact GitHub
-provider-free workflow still must pass on the pushed tree before decision-point
-evaluation or any paid GT-on benchmark. DeepSWE-off already exists online and
+This is implementation and provider-free proof. Exact GitHub workflow
+`31526751148` passed the real dense witness, readiness, all-17 census, exact
+pushed-tree gate, and `SMOKE_APPROVED` at `e4eab72`. Paired decision-point
+utility remains required before any paid GT-on benchmark. DeepSWE-off already
+exists online and
 must not be rerun; after freeze, verify its metadata and run only the matched
 GT-on arm. The next generalization benchmark is Terminal-Bench 2.0 through
 Mini-SWE, not OpenHands or OpenAgents.

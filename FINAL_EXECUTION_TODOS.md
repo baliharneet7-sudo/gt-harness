@@ -20,12 +20,12 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-001 | complete | Four-layer proof contract documented | `FINAL_EXECUTION_PLAN.md` | continue baseline |
 | GT-FINAL-002 | complete | ARB retrieval-only claim and paired reasoning contract documented | `RETRIEVAL_BENCH_CONTRACT.md`, `DECISION_POINT_EVAL_CONTRACT.md` | verify current defect evidence |
 | GT-FINAL-003 | complete | Current SHA/config/environment captured | `artifacts/final_execution/baseline.md` | continue contract work |
-| GT-FINAL-004 | in_progress | Verified P0/P1 defects reproduced and provider-free gates recorded | live/ARB profile RED tests; real local ONNX live witness | run exact GitHub provider-free gate |
-| GT-FINAL-005 | pending | Runtime delivery/abstention/failure proof complete | typed contribution compiler; exact request tests | capture GitHub runtime receipt and decision-point cases |
+| GT-FINAL-004 | complete | Verified P0/P1 defects reproduced and provider-free gates recorded | live/ARB profile RED tests; GitHub run `31526751148` | continue runtime proof |
+| GT-FINAL-005 | complete | Runtime delivery/abstention/failure proof complete | real Snowflake local/GitHub witnesses; typed contribution compiler; `FINAL_RUNTIME_PROOF.md` | paired decision-point evaluation |
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
-| GT-FINAL-009 | pending | Paired decision-point reasoning evaluation complete | `DECISION_POINT_EVAL_RESULTS.md` | locate replay-ready cases |
+| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | `DECISION_POINT_EVAL_RESULTS.md` | locate replay-ready cases |
 | GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
@@ -34,16 +34,17 @@ the relevant gate and explicit authorization are recorded.
 
 ## Current stop state
 
-`GT-FINAL-004` is active. ARB is complete: workflow `31517629497` evaluated
+`GT-FINAL-009` is active. ARB is complete: workflow `31517629497` evaluated
 all 427 rows at frozen commit `433c330`, and `RETRIEVAL_BENCH_RESULTS.md` is the
 authoritative report. The live Mini-SWE defect was configuration drift: the
 accepted retriever was disabled, lacked the 32-span dense cap, used three
 selected files instead of the frozen eight-file packing policy, and had no
 pinned ONNX asset. The shared profile, durable GitHub release asset, live
 workflow configuration, real Snowflake integration witness, typed contribution
-compiler, and active component registry are implemented locally. The next gate
-is the exact GitHub provider-free workflow. No paid provider run has started;
-the 89-task run remains blocked.
+compiler, and active component registry passed exact GitHub provider-free run
+`31526751148` at `e4eab72`, including `READY` and `SMOKE_APPROVED`. The next gate
+is paired decision-point utility. No paid provider run has started; the 89-task
+run remains blocked.
 
 ## Work plan mapped to the GT objective
 
@@ -54,7 +55,7 @@ the 89-task run remains blocked.
 - [x] Record that ARB cannot prove model reasoning or end-to-end benefit.
 - [x] Pin the active branch/commit and preserve the historical baseline only as
   non-causal reference evidence.
-- [ ] Resolve the exact-pushed-tree publication gate without bypassing it.
+- [x] Resolve the exact-pushed-tree publication gate without bypassing it.
 - [x] Reproduce each current live-retrieval P0/P1 defect against executable code and mark it
   `must_fix`, `measurement_only`, or `not_reproduced`.
 
@@ -63,11 +64,11 @@ the 89-task run remains blocked.
 - [x] Verify all-17 producer/consumer/timing/payload/context-accounting gates.
 - [x] Verify graph substrate, parser coverage, and readiness provider-free.
 - [x] Capture local runtime proof for grounded dense delivery and warm abstention with exact request hashes.
-- [ ] Capture GitHub runtime proof for grounded delivery, correct abstention, and
+- [x] Capture GitHub runtime proof for grounded delivery, correct abstention, and
   graph failure with exact request hashes.
 - [x] Prove locally no extra agent action, no late delivery, no predictive delivery,
   no duplicate fact, and no stale-revision evidence.
-- [ ] Produce `FINAL_RUNTIME_PROOF.md`.
+- [x] Produce `FINAL_RUNTIME_PROOF.md`.
 
 ### Phase 2 — Prove retrieval quality independently of model sampling
 

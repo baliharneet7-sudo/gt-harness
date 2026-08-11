@@ -923,7 +923,9 @@ fact to fit. Private controller state remains private. The active subsystem and
 all-17 lifecycle inventory lives in `gt_engine.component_registry`; audit that
 registry instead of inferring activity from old modules or documents.
 
-The next release gate is the pushed GitHub provider-free workflow. Do not run a
-paid benchmark before it passes. Do not rerun the existing online DeepSWE-off
-arm. After freeze, verify its metadata, run GT-on, then use Terminal-Bench 2.0
+GitHub provider-free workflow `31526751148` passed at `e4eab72`, including the
+real dense witness, readiness, all-17 census, exact pushed-tree check, and
+`SMOKE_APPROVED`. The next release gate is paired decision-point utility. Do
+not rerun the existing online DeepSWE-off arm. After freeze, verify its
+metadata, run GT-on, then use Terminal-Bench 2.0
 with Mini-SWE. OpenHands/OpenAgents are outside this evaluation.

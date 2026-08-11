@@ -59,6 +59,7 @@ and provider delivery remain separate statuses.
 
 ARB workflow `31517629497` proves retrieval metrics only. Local real-ONNX
 tests prove live cold/warm execution, dense availability, exact first-request
-delivery, and zero extra calls/actions. GitHub provider-free certification and
-paired decision-point utility remain required before freeze. End-to-end solve
+delivery, and zero extra calls/actions. GitHub provider-free run `31526751148`
+passed at `e4eab72`; paired decision-point utility remains required before
+freeze. End-to-end solve
 uplift and non-regression remain unproven until the frozen GT-on evaluations.

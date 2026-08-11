@@ -101,12 +101,34 @@ same source revision, while query-conditioned retrieval remains per sample.
 This removes repeated preparation work without changing the ranked or delivered
 payloads.
 
-## What is not proven
+## Final live-retrieval parity proof (2026-08-11)
 
-- The actual 436 MB Snowflake ONNX artifact has not been executed locally;
-  GitHub provisions and verifies it before the benchmark shards run.
-- No post-repair ARB sample has been scored.
-- No claim of higher MRR, Recall@20, BCY@8k, selective quality, coding-agent
-  solve rate, or efficiency follows from these tests.
-- The runtime flag must remain off until retrieval quality and delivered-view
-  quality pass the benchmark gate.
+The earlier limitations above are superseded. Complete ARB workflow
+`31517629497` evaluated 427/427 rows and is reported in
+`RETRIEVAL_BENCH_RESULTS.md`. The live central agent and ARB now import one
+frozen retrieval profile: channel limit 100, top-K 20, selection limit 8,
+1,200 tokens, 12,000 task characters, and a 32-span dense pool.
+
+The actual pinned Snowflake ONNX model and tokenizer were executed through the
+central agent locally and in GitHub provider-free workflow `31526751148` at
+commit `e4eab72`. Both SHA-256 values passed. The local two-turn witness
+measured cold retrieval at 4.9–6.5 seconds under the 30-second cold gate and a
+cached next-turn retrieval at 303 ms under the two-second steady-state gate.
+The first evidence was present in the exact first eligible provider request;
+late/predictive delivery and extra model calls/actions were zero.
+
+All provider surfaces now pass through the typed contribution compiler. The
+GitHub run proved the real dense test, graph/index fixture, pinned language
+contract, contribution accounting, component registry, all-17 census,
+structural readiness (`READY`), exact pushed commit, strict lifecycle tests,
+and pre-smoke release gate (`SMOKE_APPROVED`). Static checks also passed.
+
+## What remains unproven
+
+- ARB and runtime integrity do not prove that a frontier model uses the
+  evidence beneficially.
+- Paired decision-point utility has not yet been evaluated on the frozen live
+  payload.
+- GT-on DeepSWE, Terminal-Bench 2.0, solve uplift, and outcome/resource
+  non-regression remain unproven.
+- No paid benchmark was launched by this implementation pass.
