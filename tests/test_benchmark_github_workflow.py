@@ -29,6 +29,10 @@ def test_arb_workflow_uses_gold_free_shards_and_github_baseline() -> None:
     assert "--expected-samples" in text
     assert "arb-gt-ranked-evaluation.json" in text
     assert "arb-gt-delivered-evaluation.json" in text
+    assert "arb-gt-ranked-evaluation.selective.json" in text
+    assert "arb-gt-ranked-evaluation.selective.md" in text
+    assert "arb-gt-delivered-evaluation.selective.json" in text
+    assert "arb-gt-delivered-evaluation.selective.md" in text
     assert "--view ranked" in text
     assert "--view delivered" in text
     assert "merge-corpus-manifests" in text

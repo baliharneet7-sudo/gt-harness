@@ -456,9 +456,13 @@ jobs:
             ${{ runner.temp }}/arb-gt-ranked-evaluation.json
             ${{ runner.temp }}/arb-gt-ranked-details.jsonl
             ${{ runner.temp }}/arb-gt-ranked-selective-details.jsonl
+            ${{ runner.temp }}/arb-gt-ranked-evaluation.selective.json
+            ${{ runner.temp }}/arb-gt-ranked-evaluation.selective.md
             ${{ runner.temp }}/arb-gt-delivered-evaluation.json
             ${{ runner.temp }}/arb-gt-delivered-details.jsonl
             ${{ runner.temp }}/arb-gt-delivered-selective-details.jsonl
+            ${{ runner.temp }}/arb-gt-delivered-evaluation.selective.json
+            ${{ runner.temp }}/arb-gt-delivered-evaluation.selective.md
             ${{ runner.temp }}/arb-baselines
           if-no-files-found: error
           retention-days: 90
