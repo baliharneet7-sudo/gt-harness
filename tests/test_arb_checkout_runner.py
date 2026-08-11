@@ -54,28 +54,40 @@ def test_shard_selection_is_deterministic() -> None:
     assert [key for key, _ in groups[1::2]] == [("owner/repo", "1"), ("owner/repo", "3")]
 
 
-def test_repository_sharding_keeps_all_commits_on_one_runner() -> None:
-    probes = (
-        _probe("a", "owner/large", "1"),
-        _probe("b", "owner/large", "2"),
-        _probe("c", "owner/small", "1"),
-        _probe("d", "owner/other", "1"),
+def test_snapshot_sharding_balances_large_repository_without_splitting_commit() -> None:
+    probes = tuple(
+        [
+            *(
+                _probe(f"large-{index}", "owner/large", str(index))
+                for index in range(8)
+            ),
+            _probe("shared-a", "owner/shared", "same"),
+            _probe("shared-b", "owner/shared", "same"),
+            _probe("small", "owner/small", "1"),
+            _probe("other", "owner/other", "1"),
+        ]
     )
 
-    assignments = assign_repository_shards(probes, shard_count=2)
+    assignments = assign_repository_shards(probes, shard_count=4)
 
     large_shards = {
         shard
         for shard, rows in enumerate(assignments)
         if any(probe.repository == "owner/large" for probe in rows)
     }
-    assert len(large_shards) == 1
-    assert sorted(probe.sample_id for rows in assignments for probe in rows) == [
-        "a",
-        "b",
-        "c",
-        "d",
-    ]
+    shared_shards = {
+        shard
+        for shard, rows in enumerate(assignments)
+        if any(probe.base_commit == "same" for probe in rows)
+    }
+    loads = [len(rows) for rows in assignments]
+
+    assert len(large_shards) > 1
+    assert len(shared_shards) == 1
+    assert max(loads) - min(loads) <= 1
+    assert sorted(probe.sample_id for rows in assignments for probe in rows) == sorted(
+        probe.sample_id for probe in probes
+    )
 
 
 def test_dense_backend_is_optional_but_required_mode_fails_closed(tmp_path) -> None:

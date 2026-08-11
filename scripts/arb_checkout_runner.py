@@ -58,21 +58,31 @@ def group_probes(
 def assign_repository_shards(
     probes: tuple[RetrievalProbe, ...], *, shard_count: int
 ) -> tuple[tuple[RetrievalProbe, ...], ...]:
-    """Balance work without splitting one repository's clone and dense cache."""
+    """Balance exact snapshots without splitting a reusable checkout group.
+
+    Repository-wide affinity made a large repository a serial bottleneck: the
+    complete ARB corpus produced 20-way shard loads ranging from 7 to 88 rows.
+    The real reusable unit is one ``(repository, base_commit)`` checkout and
+    index, so longest-processing-time assignment keeps that unit atomic while
+    allowing independent snapshots of a large repository to run in parallel.
+    """
 
     if shard_count < 1:
         raise ValueError("shard_count must be positive")
-    by_repository: dict[str, list[RetrievalProbe]] = defaultdict(list)
-    for probe in probes:
-        by_repository[probe.repository].append(probe)
     assignments: list[list[RetrievalProbe]] = [[] for _ in range(shard_count)]
     loads = [0 for _ in range(shard_count)]
-    for _repository, rows in sorted(
-        by_repository.items(),
-        key=lambda item: (-len(item[1]), item[0].lower(), item[0]),
+    snapshot_groups = group_probes(probes)
+    for (_repository, _base_commit), rows in sorted(
+        snapshot_groups.items(),
+        key=lambda item: (
+            -len(item[1]),
+            item[0][0].lower(),
+            item[0][0],
+            item[0][1],
+        ),
     ):
         target = min(range(shard_count), key=lambda index: (loads[index], index))
-        stable_rows = sorted(rows, key=lambda row: (row.base_commit, row.sample_id))
+        stable_rows = sorted(rows, key=lambda row: row.sample_id)
         assignments[target].extend(stable_rows)
         loads[target] += len(stable_rows)
     return tuple(tuple(rows) for rows in assignments)
