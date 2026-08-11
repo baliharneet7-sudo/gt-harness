@@ -30,6 +30,16 @@ on:
           - "16"
           - "20"
           - "32"
+      diagnostic_sample_limit:
+        description: Diagnostic-only row cap; 0 runs the complete selected release
+        required: true
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "5"
+          - "10"
+          - "20"
       run_baselines:
         description: Run official lexical/BM25 all-files baselines on GitHub
         required: true
@@ -136,11 +146,39 @@ jobs:
           expected_rows = sum(int(item["rows"]) for item in selected)
           if release == "all" and expected_rows != 427:
               raise SystemExit("unexpected complete redacted row count")
+          rows_by_release = [
+              [line for line in (root / item["file"]).read_text(encoding="utf-8").splitlines() if line]
+              for item in selected
+          ]
+          sample_limit = int("${{ inputs.diagnostic_sample_limit }}")
+          combined = []
+          if sample_limit > 0:
+              # Stable round-robin coverage across workflow subsets. This is
+              # explicitly diagnostic and never labeled a complete ARB run.
+              offset = 0
+              while len(combined) < sample_limit:
+                  added = False
+                  for release_rows in rows_by_release:
+                      if offset < len(release_rows) and len(combined) < sample_limit:
+                          combined.append(release_rows[offset])
+                          added = True
+                  if not added:
+                      break
+                  offset += 1
+              expected_rows = len(combined)
+          else:
+              combined = [line for release_rows in rows_by_release for line in release_rows]
           pathlib.Path(root / "selected.json").write_text(
-              json.dumps({"release": release, "files": selected, "rows": expected_rows}, indent=2) + "\n"
+              json.dumps({
+                  "release": release,
+                  "files": selected,
+                  "rows": expected_rows,
+                  "diagnostic_sample_limit": sample_limit,
+                  "complete_release": sample_limit == 0,
+              }, indent=2) + "\n"
           )
           pathlib.Path(root / "all.redacted.jsonl").write_text(
-              "".join((root / item["file"]).read_text(encoding="utf-8") for item in selected),
+              "\n".join(combined) + "\n",
               encoding="utf-8",
           )
           PY
@@ -159,6 +197,8 @@ jobs:
               "release": "${{ inputs.release }}",
               "shard_count": int("${{ inputs.shard_count }}"),
               "sample_rows": json.loads((root / "arb-redacted" / "selected.json").read_text())["rows"],
+              "diagnostic_sample_limit": int("${{ inputs.diagnostic_sample_limit }}"),
+              "complete_release": int("${{ inputs.diagnostic_sample_limit }}") == 0,
               "gold_isolation": True,
               "execution_location": "github-actions",
               "local_benchmark_execution": False,
