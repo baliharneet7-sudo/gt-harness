@@ -20,6 +20,9 @@ SNOWFLAKE_MODEL_NAME = "Snowflake/snowflake-arctic-embed-m"
 SNOWFLAKE_MODEL_SHA256 = (
     "564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971"
 )
+SNOWFLAKE_TOKENIZER_SHA256 = (
+    "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
+)
 SNOWFLAKE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 SNOWFLAKE_MAX_LENGTH = 512
 
@@ -152,6 +155,7 @@ class SnowflakeOnnxDenseBackend:
         directory: str | Path,
         *,
         expected_model_sha256: str = SNOWFLAKE_MODEL_SHA256,
+        expected_tokenizer_sha256: str = SNOWFLAKE_TOKENIZER_SHA256,
         batch_size: int = 32,
     ) -> SnowflakeOnnxDenseBackend:
         root = Path(directory).resolve()
@@ -167,6 +171,16 @@ class SnowflakeOnnxDenseBackend:
             raise ValueError(
                 "Snowflake model SHA-256 mismatch: "
                 f"expected {expected}, observed {actual_sha256}"
+            )
+        actual_tokenizer_sha256 = _sha256(tokenizer_path)
+        expected_tokenizer = str(expected_tokenizer_sha256 or "").lower()
+        if (
+            expected_tokenizer
+            and actual_tokenizer_sha256.lower() != expected_tokenizer
+        ):
+            raise ValueError(
+                "Snowflake tokenizer SHA-256 mismatch: "
+                f"expected {expected_tokenizer}, observed {actual_tokenizer_sha256}"
             )
         return cls(
             model=_SnowflakeOnnxModel(
@@ -243,5 +257,6 @@ __all__ = [
     "SNOWFLAKE_MODEL_NAME",
     "SNOWFLAKE_MODEL_SHA256",
     "SNOWFLAKE_QUERY_PREFIX",
+    "SNOWFLAKE_TOKENIZER_SHA256",
     "SnowflakeOnnxDenseBackend",
 ]

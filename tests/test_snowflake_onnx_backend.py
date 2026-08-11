@@ -78,6 +78,20 @@ def test_snowflake_backend_requires_exact_pinned_model_digest(tmp_path):
         )
 
 
+def test_snowflake_backend_requires_exact_pinned_tokenizer_digest(tmp_path):
+    model_path = tmp_path / "model.onnx"
+    tokenizer_path = tmp_path / "tokenizer.json"
+    model_path.write_bytes(b"model")
+    tokenizer_path.write_text('{"tampered":true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tokenizer SHA-256 mismatch"):
+        SnowflakeOnnxDenseBackend.from_directory(
+            tmp_path,
+            expected_model_sha256=hashlib.sha256(b"model").hexdigest(),
+            expected_tokenizer_sha256=hashlib.sha256(b"expected").hexdigest(),
+        )
+
+
 def test_snowflake_backend_unavailable_directory_fails_before_inference(tmp_path):
     with pytest.raises(FileNotFoundError, match="model.onnx"):
         SnowflakeOnnxDenseBackend.from_directory(tmp_path)

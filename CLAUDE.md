@@ -892,3 +892,38 @@ replay both pass; and the strict pre-smoke lifecycle tests pass. The exact
 pushed gate now prints `SMOKE_APPROVED` on `e38fa06`. That authorizes only a
 separately requested ten-task paid smoke; the 89-task run remains blocked until
 the smoke preserves outcome and passes outcome-first efficiency gates.
++
+## Frozen hybrid retrieval and contribution compiler (2026-08-11)
+
+Use Agent Retrieval Bench workflow `31517629497` and
+`RETRIEVAL_BENCH_RESULTS.md` as the retrieval-only authority. The complete run
+contains 427/427 rows at retrieval commit `433c330`. Do not reinterpret ARB as
+proof that a model used the evidence or that an agent solved more tasks.
+
+The benchmark adapter and live `MiniSweCentralAgent` share
+`gt_engine.retrieval_profile.FINAL_RETRIEVAL_PROFILE`: channel limit 100,
+top-K 20, selection limit 8, 1,200 evidence tokens, 12,000 task characters,
+and at most 32 dense spans. Dense retrieval is the pinned local Snowflake
+Arctic Embed M ONNX backend. The live GitHub workflows fetch its content-hashed
+files from release `gt-retrieval-runtime-v1`, verify the model SHA-256, and pass
+the local directory to the central agent. GT itself performs no network or
+provider call for embeddings.
+
+Cold retrieval receives a 30-second measured allowance; cached steady-state
+retrieval fails open after two seconds. A local real-ONNX central-agent witness
+completed cold retrieval in 4.9–6.5 seconds and the immediate next turn in
+303 ms, with zero extra model calls/actions and first-eligible, non-predictive
+delivery. These figures are runtime integrity witnesses, not outcome evidence.
+
+Before provider injection, retrieval, graph-frontier, feature, and progress
+payloads are normalized into typed `GTContribution` rows. The contribution
+compiler accounts every row once, rejects stale/expired evidence, suppresses
+duplicate claim/fact/text identities across surfaces, and never truncates a
+fact to fit. Private controller state remains private. The active subsystem and
+all-17 lifecycle inventory lives in `gt_engine.component_registry`; audit that
+registry instead of inferring activity from old modules or documents.
+
+The next release gate is the pushed GitHub provider-free workflow. Do not run a
+paid benchmark before it passes. Do not rerun the existing online DeepSWE-off
+arm. After freeze, verify its metadata, run GT-on, then use Terminal-Bench 2.0
+with Mini-SWE. OpenHands/OpenAgents are outside this evaluation.

@@ -77,6 +77,11 @@ from gt_engine.context_frontier import (
     RepositoryFactTracker,
     compile_incremental_frontier,
 )
+from gt_engine.contributions import (
+    ContributionKind,
+    GTContribution,
+    compile_contributions,
+)
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
@@ -136,6 +141,7 @@ from gt_engine.repository_intelligence import (
     graph_gate_failures,
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
+from gt_engine.retrieval_profile import FINAL_RETRIEVAL_PROFILE
 from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
 from gt_engine.trajectory_utilization import SemanticUtilizationTracker
@@ -463,9 +469,14 @@ class MiniSweCentralAgent(BaseAgent):
         enable_context_frontier: bool = True,
         context_frontier_task_budget_chars: int = 6_000,
         enable_preemptive_retrieval: bool = False,
-        preemptive_retrieval_token_budget: int = 1_200,
-        preemptive_retrieval_task_budget_chars: int = 12_000,
-        preemptive_retrieval_timeout_sec: float = 2.0,
+        preemptive_retrieval_token_budget: int | None = None,
+        preemptive_retrieval_task_budget_chars: int | None = None,
+        preemptive_retrieval_timeout_sec: float | None = None,
+        preemptive_retrieval_cold_start_timeout_sec: float | None = None,
+        preemptive_retrieval_channel_limit: int | None = None,
+        preemptive_retrieval_top_k: int | None = None,
+        preemptive_retrieval_selection_limit: int | None = None,
+        preemptive_retrieval_dense_candidate_limit: int | None = None,
         preemptive_retrieval_model_dir: str | None = None,
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
@@ -575,13 +586,68 @@ class MiniSweCentralAgent(BaseAgent):
         self.context_frontier_task_budget_chars = max(0, int(context_frontier_task_budget_chars))
         self.enable_preemptive_retrieval = bool(enable_preemptive_retrieval)
         self.preemptive_retrieval_token_budget = max(
-            0, int(preemptive_retrieval_token_budget)
+            0,
+            int(
+                FINAL_RETRIEVAL_PROFILE.token_budget
+                if preemptive_retrieval_token_budget is None
+                else preemptive_retrieval_token_budget
+            ),
         )
         self.preemptive_retrieval_task_budget_chars = max(
-            0, int(preemptive_retrieval_task_budget_chars)
+            0,
+            int(
+                FINAL_RETRIEVAL_PROFILE.task_budget_chars
+                if preemptive_retrieval_task_budget_chars is None
+                else preemptive_retrieval_task_budget_chars
+            ),
         )
         self.preemptive_retrieval_timeout_sec = max(
-            0.01, float(preemptive_retrieval_timeout_sec)
+            0.01,
+            float(
+                FINAL_RETRIEVAL_PROFILE.steady_state_timeout_sec
+                if preemptive_retrieval_timeout_sec is None
+                else preemptive_retrieval_timeout_sec
+            ),
+        )
+        self.preemptive_retrieval_cold_start_timeout_sec = max(
+            self.preemptive_retrieval_timeout_sec,
+            float(
+                FINAL_RETRIEVAL_PROFILE.cold_start_timeout_sec
+                if preemptive_retrieval_cold_start_timeout_sec is None
+                else preemptive_retrieval_cold_start_timeout_sec
+            ),
+        )
+        self.preemptive_retrieval_channel_limit = max(
+            1,
+            int(
+                FINAL_RETRIEVAL_PROFILE.channel_limit
+                if preemptive_retrieval_channel_limit is None
+                else preemptive_retrieval_channel_limit
+            ),
+        )
+        self.preemptive_retrieval_top_k = max(
+            1,
+            int(
+                FINAL_RETRIEVAL_PROFILE.top_k
+                if preemptive_retrieval_top_k is None
+                else preemptive_retrieval_top_k
+            ),
+        )
+        self.preemptive_retrieval_selection_limit = max(
+            1,
+            int(
+                FINAL_RETRIEVAL_PROFILE.selection_limit
+                if preemptive_retrieval_selection_limit is None
+                else preemptive_retrieval_selection_limit
+            ),
+        )
+        self.preemptive_retrieval_dense_candidate_limit = max(
+            1,
+            int(
+                FINAL_RETRIEVAL_PROFILE.dense_candidate_limit
+                if preemptive_retrieval_dense_candidate_limit is None
+                else preemptive_retrieval_dense_candidate_limit
+            ),
         )
         self.preemptive_retrieval_model_dir = str(
             preemptive_retrieval_model_dir or ""
@@ -1643,6 +1709,7 @@ class MiniSweCentralAgent(BaseAgent):
             max_bundle_bytes=self.replay_capture_max_bundle_bytes,
         )
         provider_evidence = ProviderEvidenceLedger()
+        contribution_compilations: list[dict[str, Any]] = []
         preemptive_retrieval_decisions: list[dict[str, Any]] = []
         preemptive_retrieval_deliveries: list[dict[str, Any]] = []
         delivered_preemptive_claim_ids: set[str] = set()
@@ -1812,6 +1879,18 @@ class MiniSweCentralAgent(BaseAgent):
                     and self.runtime_mode == "treatment"
                 ):
                     retrieval_started = time.perf_counter()
+                    retrieval_cold_start = (
+                        preemptive_repository is None
+                        or preemptive_repository_revision != graph_source_revision
+                        or preemptive_retriever is None
+                    )
+                    retrieval_timeout_sec = (
+                        self.preemptive_retrieval_cold_start_timeout_sec
+                        if retrieval_cold_start
+                        else self.preemptive_retrieval_timeout_sec
+                    )
+                    preemptive_decision["timeout_sec"] = retrieval_timeout_sec
+                    preemptive_decision["cold_start"] = retrieval_cold_start
                     preemptive_decision["status"] = "abstained"
                     preemptive_decision["reason_codes"] = []
                     if (
@@ -1838,7 +1917,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         repository_evidence.index.graph_db,
                                         source_revision=graph_source_revision,
                                     ),
-                                    timeout=self.preemptive_retrieval_timeout_sec,
+                                    timeout=retrieval_timeout_sec,
                                 )
                                 preemptive_repository_revision = graph_source_revision
                                 preemptive_retriever = None
@@ -1875,19 +1954,26 @@ class MiniSweCentralAgent(BaseAgent):
                                             preemptive_repository.structural_links
                                         ),
                                         dense_backend=self._snowflake_dense_backend(),
+                                        dense_candidate_limit=(
+                                            self.preemptive_retrieval_dense_candidate_limit
+                                        ),
                                     )
                                 retrieval_result = await asyncio.wait_for(
                                     asyncio.to_thread(
                                         preemptive_retriever.retrieve,
                                         state,
-                                        channel_limit=100,
-                                        top_k=20,
-                                        selection_limit=3,
+                                        channel_limit=(
+                                            self.preemptive_retrieval_channel_limit
+                                        ),
+                                        top_k=self.preemptive_retrieval_top_k,
+                                        selection_limit=(
+                                            self.preemptive_retrieval_selection_limit
+                                        ),
                                         token_budget=(
                                             self.preemptive_retrieval_token_budget
                                         ),
                                     ),
-                                    timeout=self.preemptive_retrieval_timeout_sec,
+                                    timeout=retrieval_timeout_sec,
                                 )
                                 preemptive_decision.update(
                                     {
@@ -2035,6 +2121,169 @@ class MiniSweCentralAgent(BaseAgent):
                 prepared_progress_fact = (
                     pending_progress_fact if progress_payload else None
                 )
+                contribution_candidates: list[GTContribution] = []
+                contribution_by_surface: dict[str, str] = {}
+
+                def register_contribution(
+                    *,
+                    surface: str,
+                    payload: str,
+                    claim_ids: tuple[str, ...],
+                    fact_ids: tuple[str, ...],
+                    evidence_action: int,
+                    eligible_call: int,
+                    revision: str,
+                    priority: int,
+                    _candidates: list[GTContribution] = contribution_candidates,
+                    _by_surface: dict[str, str] = contribution_by_surface,
+                ) -> None:
+                    if not payload:
+                        return
+                    kind = (
+                        ContributionKind.EVIDENCE
+                        if claim_ids or fact_ids
+                        else ContributionKind.CONTROLLER_STATE
+                    )
+                    contribution = GTContribution.create(
+                        surface=surface,
+                        kind=kind,
+                        payload=payload,
+                        claim_ids=claim_ids,
+                        fact_ids=fact_ids,
+                        evidence_action=evidence_action,
+                        eligible_call=eligible_call,
+                        source_revision=revision,
+                        priority=priority,
+                    )
+                    _candidates.append(contribution)
+                    _by_surface[surface] = contribution.contribution_id
+
+                if preemptive_frame is not None:
+                    register_contribution(
+                        surface="preemptive_retrieval",
+                        payload=preemptive_frame.text,
+                        claim_ids=preemptive_frame.claim_ids,
+                        fact_ids=preemptive_frame.evidence_ids,
+                        evidence_action=preemptive_frame.evidence_action,
+                        eligible_call=preemptive_frame.eligible_call,
+                        revision=preemptive_frame.source_revision,
+                        priority=10,
+                    )
+                frontier_fact_ids = tuple(
+                    str(row.get("fact_id") or "")
+                    for row in frontier_decision.accounting
+                    if row.get("fact_id")
+                )
+                frontier_claim_ids = tuple(
+                    str(row.get("claim_id") or "")
+                    for row in frontier_decision.accounting
+                    if row.get("claim_id")
+                )
+                register_contribution(
+                    surface="graph_frontier",
+                    payload=frontier_payload,
+                    claim_ids=frontier_claim_ids,
+                    fact_ids=frontier_fact_ids,
+                    evidence_action=repository_evidence_action,
+                    eligible_call=repository_evidence_eligible_call,
+                    revision=source_revision,
+                    priority=20,
+                )
+                register_contribution(
+                    surface="feature_fact",
+                    payload=guidance_payload,
+                    claim_ids=tuple(
+                        str(item)
+                        for item in prepared_guidance_metadata.get("claim_ids") or ()
+                        if str(item)
+                    ),
+                    fact_ids=tuple(
+                        str(item)
+                        for item in prepared_guidance_metadata.get("effect_ids") or ()
+                        if str(item)
+                    ),
+                    evidence_action=int(
+                        prepared_guidance_metadata.get("evidence_action") or 0
+                    ),
+                    eligible_call=max(1, pending_prepared_after_call + 1),
+                    revision=source_revision,
+                    priority=30,
+                )
+                register_contribution(
+                    surface="progress_frame",
+                    payload=progress_payload,
+                    claim_ids=(
+                        (prepared_progress_fact.fact_id,)
+                        if prepared_progress_fact is not None
+                        else ()
+                    ),
+                    fact_ids=(),
+                    evidence_action=(
+                        prepared_progress_fact.evidence_action
+                        if prepared_progress_fact is not None
+                        else actions_count
+                    ),
+                    eligible_call=(
+                        prepared_progress_fact.eligible_call
+                        if prepared_progress_fact is not None
+                        else calls
+                    ),
+                    revision=source_revision,
+                    priority=40,
+                )
+                contribution_budget = (
+                    max(
+                        0,
+                        self.preemptive_retrieval_task_budget_chars
+                        - preemptive_retrieval_chars_delivered,
+                    )
+                    + len(frontier_payload)
+                    + len(guidance_payload)
+                    + len(progress_payload)
+                    + 6
+                )
+                compiled_contributions = compile_contributions(
+                    tuple(contribution_candidates),
+                    current_source_revision=source_revision,
+                    current_call=calls,
+                    budget_chars=contribution_budget,
+                )
+                selected_contribution_ids = set(compiled_contributions.selected_ids)
+
+                def contribution_selected(
+                    surface: str,
+                    _by_surface: dict[str, str] = contribution_by_surface,
+                    _selected: set[str] = selected_contribution_ids,
+                ) -> bool:
+                    contribution_id = _by_surface.get(surface)
+                    return bool(
+                        contribution_id and contribution_id in _selected
+                    )
+
+                if preemptive_frame is not None and not contribution_selected(
+                    "preemptive_retrieval"
+                ):
+                    preemptive_frame = None
+                if frontier_payload and not contribution_selected("graph_frontier"):
+                    frontier_payload = ""
+                if guidance_payload and not contribution_selected("feature_fact"):
+                    guidance_payload = ""
+                if progress_payload and not contribution_selected("progress_frame"):
+                    progress_payload = ""
+                    prepared_progress_fact = None
+                contribution_receipt = compiled_contributions.as_dict()
+                contribution_receipt.update(
+                    {
+                        "call": calls,
+                        "source_revision": source_revision,
+                        "selected_surfaces": [
+                            surface
+                            for surface, contribution_id in contribution_by_surface.items()
+                            if contribution_id in selected_contribution_ids
+                        ],
+                    }
+                )
+                contribution_compilations.append(contribution_receipt)
                 legacy_runtime_parts = [
                     item
                     for item in (frontier_payload, guidance_payload, progress_payload)
@@ -4490,6 +4739,23 @@ class MiniSweCentralAgent(BaseAgent):
                 "preemptive_dense_backend_error": (
                     self._preemptive_dense_backend_error
                 ),
+                "contribution_compiler_candidates": sum(
+                    int(row.get("candidate_count") or 0)
+                    for row in contribution_compilations
+                ),
+                "contribution_compiler_accounted": sum(
+                    int(row.get("accounted_count") or 0)
+                    for row in contribution_compilations
+                ),
+                "contribution_compiler_selected": sum(
+                    len(row.get("selected_ids") or ())
+                    for row in contribution_compilations
+                ),
+                "contribution_compiler_duplicate_suppressions": sum(
+                    str(item.get("disposition") or "").startswith("duplicate_")
+                    for row in contribution_compilations
+                    for item in row.get("accounting") or ()
+                ),
                 "context_frontier_candidate_languages": len(
                     frontier_candidate_language_counts
                 ),
@@ -5040,6 +5306,12 @@ class MiniSweCentralAgent(BaseAgent):
                             "preemptive_retrieval_timeout_sec": (
                                 self.preemptive_retrieval_timeout_sec
                             ),
+                            "preemptive_retrieval_cold_start_timeout_sec": (
+                                self.preemptive_retrieval_cold_start_timeout_sec
+                            ),
+                            "preemptive_retrieval_dense_candidate_limit": (
+                                self.preemptive_retrieval_dense_candidate_limit
+                            ),
                             "preemptive_retrieval_dense_model_configured": bool(
                                 self.preemptive_retrieval_model_dir
                             ),
@@ -5149,6 +5421,18 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "dense_backend_error": (
                                 self._preemptive_dense_backend_error
+                            ),
+                        },
+                        "contribution_compiler": {
+                            "schema": "gt.contribution_compiler.runtime.v1",
+                            "calls": contribution_compilations,
+                            "candidate_count": sum(
+                                int(row.get("candidate_count") or 0)
+                                for row in contribution_compilations
+                            ),
+                            "accounted_count": sum(
+                                int(row.get("accounted_count") or 0)
+                                for row in contribution_compilations
                             ),
                         },
                         "host_execution": host_execution,

@@ -73,7 +73,10 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
+      GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+      SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
+      SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,8 +103,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           chmod +x vendor/gt-index-linux-amd64
-          pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
+          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" \
             vendor/groundtruth_mcp-*.whl
+
+      - name: Provision pinned Snowflake ONNX runtime asset
+        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
+        run: |
+          set -euo pipefail
+          model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
+          mkdir -p "$model_dir"
+          gh release download gt-retrieval-runtime-v1 \
+            --repo harneet2512/gt-harness \
+            --pattern model.onnx --pattern tokenizer.json --pattern manifest.json \
+            --dir "$model_dir"
+          echo "$SNOWFLAKE_MODEL_SHA256  $model_dir/model.onnx" | sha256sum -c -
+          echo "$SNOWFLAKE_TOKENIZER_SHA256  $model_dir/tokenizer.json" | sha256sum -c -
 
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
@@ -340,6 +356,7 @@ jobs:
             off)
               FEATURE_ARGS+=(
                 --ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
+                --ak enable_preemptive_retrieval=false
                 --ak enable_all_features=false --ak enable_submit_readiness=false
                 --ak enable_lint=false --ak enable_feature_guidance=false
                 --ak enable_context_frontier=false --ak enable_context_compaction=false
@@ -349,6 +366,7 @@ jobs:
             audit)
               FEATURE_ARGS+=(
                 --ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
+                --ak enable_preemptive_retrieval=false
                 --ak enable_all_features=true --ak enable_submit_readiness=true
                 --ak enable_repository_intelligence=true
                 --ak enable_lint=false --ak enable_feature_guidance=false
@@ -363,6 +381,8 @@ jobs:
                 --ak enable_repository_intelligence=true
                 --ak preflight_mode=shadow --ak enable_lint=false
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
+                --ak enable_preemptive_retrieval=true
+                --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=false --ak enable_completion_controller=false
                 --ak enable_progress_control=false --ak enable_adaptive_validation_timeout=false
                 --ak require_graph_ready=true
@@ -374,6 +394,7 @@ jobs:
                 --ak enable_repository_intelligence=false
                 --ak preflight_mode=shadow --ak enable_lint=true
                 --ak enable_feature_guidance=false --ak enable_context_frontier=false
+                --ak enable_preemptive_retrieval=false
                 --ak enable_context_compaction=false --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
                 --ak require_graph_ready=false
@@ -385,6 +406,8 @@ jobs:
                 --ak enable_repository_intelligence=true
                 --ak preflight_mode=shadow --ak enable_lint=true
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
+                --ak enable_preemptive_retrieval=true
+                --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=true --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
                 --ak require_graph_ready=true

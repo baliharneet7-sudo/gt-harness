@@ -26,6 +26,7 @@ from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from eval.gt_central_agent import GTIntegrationMode, MiniSweCentralAgent
 from gt_engine.central_runtime import CentralFeatureRuntime, ValidationClassification
+from gt_engine.component_registry import audit_component_registry
 from gt_engine.host_execution import HostExecutionRecorder
 from gt_engine.preflight import PreflightMode
 from scripts.central_feature_census import census as central_feature_census
@@ -75,6 +76,7 @@ def audit() -> dict[str, bool]:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
         model = agent._build_model()
     feature_result = central_feature_census()
+    component_result = audit_component_registry()
     return {
         "host_base_agent": issubclass(MiniSweCentralAgent, BaseAgent),
         "not_installed_agent": not issubclass(MiniSweCentralAgent, BaseInstalledAgent),
@@ -180,6 +182,30 @@ def audit() -> dict[str, bool]:
             and "gt_engine/hybrid_repository.py" in provider_free_workflow
             and "gt_engine/snowflake_onnx.py" in provider_free_workflow
         ),
+        "paid_live_retrieval_matches_arb_profile": all(
+            item.count("--ak enable_preemptive_retrieval=true") == 2
+            and item.count("preemptive_retrieval_model_dir=") == 2
+            and "python -m pip install -e '.[retrieval]'" in item
+            and "Provision pinned Snowflake ONNX runtime asset" in item
+            for item in workflows
+        )
+        and "FINAL_RETRIEVAL_PROFILE" in source
+        and "preemptive_retrieval_dense_candidate_limit" in run_source,
+        "provider_free_gate_uses_real_live_dense_asset": (
+            "GT_TEST_SNOWFLAKE_MODEL_DIR" in provider_free_workflow
+            and "tests/test_live_retrieval_profile.py" in provider_free_workflow
+            and "test_live_snowflake_retrieval_is_cold_once_then_steady_state"
+            in (ROOT / "tests/test_gt_central_agent.py").read_text(encoding="utf-8")
+        ),
+        "provider_contributions_are_typed_and_accounted": (
+            "compile_contributions(" in run_source
+            and "contribution_compilations" in run_source
+            and "tests/test_gt_contributions.py" in provider_free_workflow
+            and "gt_engine/contributions.py" in provider_free_workflow
+        ),
+        "active_component_registry_is_complete": bool(component_result["ready"])
+        and int(component_result["feature_count"]) == 17
+        and "tests/test_gt_component_registry.py" in provider_free_workflow,
         "provider_free_gate_covers_pinned_benchmark_languages": (
             "tests/test_gt_language_resolution.py" in provider_free_workflow
             and "tests/test_gt_benchmark_language_contract.py" in provider_free_workflow

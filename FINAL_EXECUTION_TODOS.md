@@ -20,30 +20,30 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-001 | complete | Four-layer proof contract documented | `FINAL_EXECUTION_PLAN.md` | continue baseline |
 | GT-FINAL-002 | complete | ARB retrieval-only claim and paired reasoning contract documented | `RETRIEVAL_BENCH_CONTRACT.md`, `DECISION_POINT_EVAL_CONTRACT.md` | verify current defect evidence |
 | GT-FINAL-003 | complete | Current SHA/config/environment captured | `artifacts/final_execution/baseline.md` | continue contract work |
-| GT-FINAL-004 | pending | Verified P0/P1 defects reproduced and provider-free gates recorded | `artifacts/final_execution/baseline.md`; full pytest 1,180 passed / 3 skips | resume after exact-tree publication gate; map defects before paid evaluation |
-| GT-FINAL-005 | pending | Runtime delivery/abstention/failure proof complete | `FINAL_RUNTIME_PROOF.md` | capture three cases |
+| GT-FINAL-004 | in_progress | Verified P0/P1 defects reproduced and provider-free gates recorded | live/ARB profile RED tests; real local ONNX live witness | run exact GitHub provider-free gate |
+| GT-FINAL-005 | pending | Runtime delivery/abstention/failure proof complete | typed contribution compiler; exact request tests | capture GitHub runtime receipt and decision-point cases |
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
-| GT-FINAL-007 | in_progress | ARB data is pinned, redacted, and executing on GitHub with lossless snapshot shards and no HF dependency | `artifacts/final_execution/ARB_SETUP_AUDIT.md`; `.github/workflows/arb_gt_retrieval.yml`; run `31440894747` | monitor shards, verify artifacts, classify retrieval misses |
-| GT-FINAL-008 | pending | At most one generalized retrieval repair, if justified | repair receipt | analyze dominant defect |
+| GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
+| GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
 | GT-FINAL-009 | pending | Paired decision-point reasoning evaluation complete | `DECISION_POINT_EVAL_RESULTS.md` | locate replay-ready cases |
 | GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
-| GT-FINAL-012 | pending | DeepSWE evaluated if SWE-Live gate passes | `DEEPSWE_FINAL_RESULTS.md` | conditional |
-| GT-FINAL-013 | pending | Terminal-Bench 2.1 evaluated last | `TERMINAL_BENCH_21_RESULTS.md` | conditional |
+| GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
+| GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
 | GT-FINAL-014 | pending | Final causal report and verdict complete | `GROUNDTRUTH_FINAL_REPORT.md` | close project |
 
 ## Current stop state
 
-`GT-FINAL-007` is active. Documentation, the ARB contract/adapter, the full
-local suite, provider-free integrity gates, official ARB pinning, gold-free
-projection, and the GitHub-only sharded runner are complete locally. A
-memory-heavy local ARB baseline was intentionally stopped and is not evidence.
-No paid provider run has started. The next work is to validate the workflow on
-GitHub, dispatch the retrieval shards, and retain the artifacts. The 89-task
-run remains blocked. GitHub Actions run `31440151863` failed before execution
-because the HF CLI was missing and is discarded. Corrected run `31440894747`
-uses pinned GitHub Release assets instead; it is retrieval-only and does not
-spend model-provider credits.
+`GT-FINAL-004` is active. ARB is complete: workflow `31517629497` evaluated
+all 427 rows at frozen commit `433c330`, and `RETRIEVAL_BENCH_RESULTS.md` is the
+authoritative report. The live Mini-SWE defect was configuration drift: the
+accepted retriever was disabled, lacked the 32-span dense cap, used three
+selected files instead of the frozen eight-file packing policy, and had no
+pinned ONNX asset. The shared profile, durable GitHub release asset, live
+workflow configuration, real Snowflake integration witness, typed contribution
+compiler, and active component registry are implemented locally. The next gate
+is the exact GitHub provider-free workflow. No paid provider run has started;
+the 89-task run remains blocked.
 
 ## Work plan mapped to the GT objective
 
@@ -55,16 +55,17 @@ spend model-provider credits.
 - [x] Pin the active branch/commit and preserve the historical baseline only as
   non-causal reference evidence.
 - [ ] Resolve the exact-pushed-tree publication gate without bypassing it.
-- [ ] Reproduce each P0/P1 defect against current executable code and mark it
+- [x] Reproduce each current live-retrieval P0/P1 defect against executable code and mark it
   `must_fix`, `measurement_only`, or `not_reproduced`.
 
 ### Phase 1 — Prove the deterministic GT engine
 
 - [x] Verify all-17 producer/consumer/timing/payload/context-accounting gates.
 - [x] Verify graph substrate, parser coverage, and readiness provider-free.
-- [ ] Capture runtime proof for grounded delivery, correct abstention, and
+- [x] Capture local runtime proof for grounded dense delivery and warm abstention with exact request hashes.
+- [ ] Capture GitHub runtime proof for grounded delivery, correct abstention, and
   graph failure with exact request hashes.
-- [ ] Prove no extra agent action, no late delivery, no predictive delivery,
+- [x] Prove locally no extra agent action, no late delivery, no predictive delivery,
   no duplicate fact, and no stale-revision evidence.
 - [ ] Produce `FINAL_RUNTIME_PROOF.md`.
 
@@ -80,24 +81,25 @@ spend model-provider credits.
   given files.
 - [x] Move corpus/index/baseline execution to the pinned GitHub workflow;
   local memory-heavy evaluation is prohibited.
-- [ ] Dispatch GitHub lexical/BM25/RepoMap-compatible baselines with
+- [x] Evaluate the complete 427-row GitHub run and compare against official leaderboard baselines.
+- [x] Dispatch GitHub lexical/BM25/RepoMap-compatible baselines with
   `all_files` and retain run artifacts.
-- [ ] Dispatch GitHub GT candidates and bounded delivered evidence; report
+- [x] Dispatch GitHub GT candidates and bounded delivered evidence; report
   both.
-- [ ] Classify misses as query, index, graph, ranking, redundancy, over-
+- [x] Classify misses as query, index, graph, ranking, redundancy, over-
   retrieval, failed abstention, or unrepresentable input.
-- [ ] Allow at most one generalized retrieval repair if the repeated-defect
+- [x] Allow at most one generalized retrieval repair if the repeated-defect
   rule is satisfied.
-- [ ] Produce `RETRIEVAL_BENCH_RESULTS.md`.
+- [x] Produce `RETRIEVAL_BENCH_RESULTS.md`.
 
 ### GitHub execution controls
 
 - [x] Use immutable action SHAs and the pinned ARB source commit.
-- [x] Use eight independent exact-base snapshot shards.
+- [x] Use twenty balanced independent exact-base snapshot shards.
 - [x] Keep gold/fix/patch/evaluator fields out of GT inputs.
 - [x] Upload per-shard receipts and optional official baseline details.
-- [ ] Push the workflow and dispatch it from the intended harness SHA.
-- [ ] Verify uploaded artifacts and write the retrieval results report.
+- [x] Push the workflow and dispatch it from the intended harness SHA.
+- [x] Verify uploaded artifacts and write the retrieval results report.
 
 ### Phase 3 — Prove whether the model’s next decision changes usefully
 

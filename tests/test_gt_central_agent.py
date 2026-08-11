@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import tarfile
 import time
 from pathlib import Path
@@ -506,6 +507,7 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
             )
 
     model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    model_dir = os.environ.get("GT_TEST_SNOWFLAKE_MODEL_DIR") or None
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
@@ -514,6 +516,7 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
         enable_task_start_advisory=False,
         enable_context_frontier=False,
         enable_feature_guidance=False,
+        preemptive_retrieval_model_dir=model_dir,
     )
     agent._model_factory = lambda: model
 
@@ -540,6 +543,81 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 1
     assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] >= 1
     assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
+    compiler = receipt["contribution_compiler"]
+    assert compiler["candidate_count"] == compiler["accounted_count"]
+    assert compiler["calls"][0]["selected_surfaces"] == [
+        "preemptive_retrieval"
+    ]
+    if model_dir:
+        dense = next(
+            row
+            for row in receipt["preemptive_retrieval"]["decisions"][0][
+                "channel_receipts"
+            ]
+            if row["channel"] == "dense"
+        )
+        assert dense["available"] is True
+        assert dense["failed"] is False
+        assert dense["backend_identity"].startswith(
+            "snowflake_onnx:Snowflake/snowflake-arctic-embed-m@sha256:"
+        )
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GT_TEST_SNOWFLAKE_MODEL_DIR"),
+    reason="real pinned Snowflake ONNX asset is not provisioned",
+)
+@pytest.mark.asyncio
+async def test_live_snowflake_retrieval_is_cold_once_then_steady_state(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "tests").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+            (root / "tests" / "test_greeter.py").write_text(
+                "from src.greeter import greet\n\ndef test_greet():\n    assert greet('Ada')\n"
+            )
+
+    model = _ScriptedModel(
+        [
+            "sed -n '1,80p' src/greeter.py",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+        preemptive_retrieval_model_dir=os.environ["GT_TEST_SNOWFLAKE_MODEL_DIR"],
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Change greet in src/greeter.py and preserve the regression test.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decisions = receipt["preemptive_retrieval"]["decisions"]
+    assert len(decisions) == 2
+    assert decisions[0]["cold_start"] is True
+    assert decisions[0]["timeout_sec"] == 30.0
+    assert decisions[1]["cold_start"] is False
+    assert decisions[1]["timeout_sec"] == 2.0
+    assert "preemptive_retrieval_timeout" not in decisions[1]["reason_codes"]
+    dense = next(
+        row for row in decisions[1]["channel_receipts"] if row["channel"] == "dense"
+    )
+    assert dense["available"] is True
+    assert dense["failed"] is False
 
 
 @pytest.mark.asyncio

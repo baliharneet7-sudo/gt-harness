@@ -21,3 +21,7 @@ def test_paid_central_workflow_installs_and_proves_repository_runtime():
     assert result["replay_capture_is_opt_in"] is True
     assert result["paid_replay_capture_switch_is_explicit"] is True
     assert result["action_conditioned_graph_query_precedes_postflight"] is True
+    assert result["paid_live_retrieval_matches_arb_profile"] is True
+    assert result["provider_free_gate_uses_real_live_dense_asset"] is True
+    assert result["provider_contributions_are_typed_and_accounted"] is True
+    assert result["active_component_registry_is_complete"] is True

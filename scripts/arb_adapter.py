@@ -41,8 +41,11 @@ from gt_engine.hybrid_retrieval import (
 )
 from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
 from gt_engine.repository_intelligence import inspect_index
+from gt_engine.retrieval_profile import FINAL_RETRIEVAL_PROFILE
 
-ARB_DENSE_CANDIDATE_LIMIT = 32
+ARB_RETRIEVAL_PROFILE = FINAL_RETRIEVAL_PROFILE
+# Backward-compatible public constant for existing result compilers/tests.
+ARB_DENSE_CANDIDATE_LIMIT = ARB_RETRIEVAL_PROFILE.dense_candidate_limit
 
 
 class RedactedSampleError(ValueError):
@@ -508,14 +511,14 @@ def run_probe(
         repository.documents,
         structural_links=repository.structural_links,
         dense_backend=dense_backend,
-        dense_candidate_limit=ARB_DENSE_CANDIDATE_LIMIT,
+        dense_candidate_limit=ARB_RETRIEVAL_PROFILE.dense_candidate_limit,
     )
     retrieval = retriever.retrieve(
         state,
-        channel_limit=100,
-        top_k=20,
-        selection_limit=8,
-        token_budget=1_200,
+        channel_limit=ARB_RETRIEVAL_PROFILE.channel_limit,
+        top_k=ARB_RETRIEVAL_PROFILE.top_k,
+        selection_limit=ARB_RETRIEVAL_PROFILE.selection_limit,
+        token_budget=ARB_RETRIEVAL_PROFILE.token_budget,
     )
     phases["retrieval_ms"] = (time.perf_counter() - phase_started) * 1000.0
     dense_receipt_after = dict(dense_receipt()) if callable(dense_receipt) else None

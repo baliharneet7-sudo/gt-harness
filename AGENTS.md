@@ -1168,3 +1168,44 @@ replay both pass; and the strict pre-smoke lifecycle tests pass. The exact
 pushed gate now prints `SMOKE_APPROVED` on `e38fa06`. That authorizes only a
 separately requested ten-task paid smoke; the 89-task run remains blocked until
 the smoke preserves outcome and passes outcome-first efficiency gates.
++
+## Frozen hybrid retrieval and contribution compiler (2026-08-11)
+
+Agent Retrieval Bench run `31517629497` is the authoritative retrieval-only
+measurement. It evaluated all 427 rows at retrieval commit `433c330`; the
+stored report is `RETRIEVAL_BENCH_RESULTS.md`. ARB proves ranked/delivered file
+selection and bounded context packing. It does not prove model utilization,
+solve uplift, or causal benefit.
+
+ARB and the live central agent must import the single immutable
+`gt_engine.retrieval_profile.FINAL_RETRIEVAL_PROFILE`. The profile fixes
+channel limit 100, top-K 20, complete-evidence selection limit 8, 1,200 tokens,
+12,000 task characters, and a 32-span dense candidate pool. The dense backend
+is the pinned local Snowflake Arctic Embed M ONNX model. It never downloads or
+calls a provider from the agent. GitHub workflows provision the content-hashed
+asset from release `gt-retrieval-runtime-v1`; the expected model SHA-256 is
+enforced before Mini-SWE starts.
+
+Live retrieval has two measured deadlines. A cold repository/retriever receives
+30 seconds because the accepted ARB p99 was approximately 23.1 seconds. After
+the backend's content-hash passage cache is populated, every turn has a strict
+two-second fail-open deadline. The local real-model witness completed cold in
+4.9–6.5 seconds on a two-document repository and the next turn in 303 ms. A
+timeout or backend failure abstains and preserves the ordinary model loop.
+
+All model-visible GT surfaces now enter the typed
+`gt_engine.contributions.GTContribution` boundary before provider injection.
+The compiler assigns every contribution exactly one disposition, rejects stale
+or late facts, suppresses duplicate claim/fact/text identities across surfaces,
+and packs only complete contributions. Controller-only work is accounted but
+never rendered as text. `candidate_count == accounted_count` is mandatory on
+every call. `gt_engine.component_registry` is the machine-auditable inventory
+for the active engine and all 17 lifecycle contracts; historical files are not
+active merely because they exist.
+
+This is implementation and local provider-free proof. The exact GitHub
+provider-free workflow still must pass on the pushed tree before decision-point
+evaluation or any paid GT-on benchmark. DeepSWE-off already exists online and
+must not be rerun; after freeze, verify its metadata and run only the matched
+GT-on arm. The next generalization benchmark is Terminal-Bench 2.0 through
+Mini-SWE, not OpenHands or OpenAgents.
