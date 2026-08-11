@@ -81,6 +81,38 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
+      - name: Set up Go for the checked-out GT index source
+        if: ${{ inputs.run_gt == true }}
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version-file: vendor/gt-index-src/go.mod
+          cache-dependency-path: vendor/gt-index-src/go.sum
+
+      - name: Build and verify the checked-out GT index source once
+        if: ${{ inputs.run_gt == true }}
+        working-directory: vendor/gt-index-src
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+          gofmt -w internal/parser/benchmark_structured.go \
+            internal/parser/parser.go internal/parser/structured.go \
+            internal/parser/structured_test.go internal/specs/benchmark_structured.go
+          git diff --exit-code -- internal/parser internal/specs
+          go test -tags sqlite_fts5 ./internal/parser ./internal/specs
+          go build -tags sqlite_fts5 -o "$RUNNER_TEMP/gt-index" ./cmd/gt-index/
+          chmod +x "$RUNNER_TEMP/gt-index"
+
+      - name: Upload certified GT index for shards
+        if: ${{ inputs.run_gt == true }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: arb-gt-index-${{ github.run_id }}
+          path: ${{ runner.temp }}/gt-index
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
       - name: Verify pinned gold-free inputs (no HF/API access)
         run: |
           mkdir -p "$RUNNER_TEMP/arb-redacted"
@@ -213,10 +245,16 @@ jobs:
       - name: Install pinned GroundTruth runtime
         run: python -m pip install --no-deps vendor/groundtruth_mcp-1.0.0-py3-none-any.whl
 
-      - name: Configure pinned GT index binary
+      - name: Download certified GT index
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: arb-gt-index-${{ github.run_id }}
+          path: ${{ runner.temp }}/gt-index-bin
+
+      - name: Configure certified GT index binary
         run: |
-          chmod +x vendor/gt-index-linux-amd64
-          echo "GT_INDEX_BINARY=$GITHUB_WORKSPACE/vendor/gt-index-linux-amd64" >> "$GITHUB_ENV"
+          chmod +x "$RUNNER_TEMP/gt-index-bin/gt-index"
+          echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index-bin/gt-index" >> "$GITHUB_ENV"
 
       - name: Download gold-free inputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093

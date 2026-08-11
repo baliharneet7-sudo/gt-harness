@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import gt_engine.hybrid_retrieval as hybrid_module
 from gt_engine.hybrid_retrieval import (
     BM25RetrievalChannel,
     DenseRetrievalChannel,
@@ -63,8 +64,7 @@ class FakeDenseBackend:
 
     def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
         return tuple(
-            (1.0, 0.0) if "releases reserved storage" in text else (0.0, 1.0)
-            for text in texts
+            (1.0, 0.0) if "releases reserved storage" in text else (0.0, 1.0) for text in texts
         )
 
 
@@ -119,6 +119,24 @@ def test_exact_lexical_and_bm25_channels_are_independent_rankers():
     assert {row.channel for row in exact} == {RetrievalChannel.EXACT}
     assert {row.channel for row in lexical} == {RetrievalChannel.LEXICAL}
     assert {row.channel for row in bm25} == {RetrievalChannel.BM25}
+
+
+def test_prepared_sparse_channels_do_not_retokenize_documents_per_query(monkeypatch):
+    marker = "unique_document_marker"
+    documents = (RepositoryDocument("src/allocator.py", f"cleanup allocator {marker}"),)
+    retriever = HybridRetriever(documents, dense_backend=None)
+    original = hybrid_module._tokens
+    observed: list[str] = []
+
+    def recording_tokens(text: str) -> tuple[str, ...]:
+        observed.append(text)
+        return original(text)
+
+    monkeypatch.setattr(hybrid_module, "_tokens", recording_tokens)
+    retriever.retrieve(_state(task_text="cleanup allocator"), token_budget=200)
+    retriever.retrieve(_state(task_text="cleanup allocator again"), token_budget=200)
+
+    assert not any(marker in text for text in observed)
 
 
 def test_exact_channel_splits_snake_and_camel_case_symbols():
@@ -303,7 +321,10 @@ def test_hybrid_selection_excludes_active_paths_and_prior_claims():
         RepositoryDocument("tests/test_allocator.py", "cleanup allocator regression test"),
     )
     first = HybridRetriever(documents, dense_backend=FakeDenseBackend()).retrieve(
-        _state(active_paths=("src/allocator.py",)),
+        _state(
+            task_text="repair allocator cleanup in src/reclaimer.py",
+            active_paths=("src/allocator.py",),
+        ),
         selection_limit=3,
         token_budget=200,
     )
@@ -311,6 +332,7 @@ def test_hybrid_selection_excludes_active_paths_and_prior_claims():
 
     second = HybridRetriever(documents, dense_backend=FakeDenseBackend()).retrieve(
         _state(
+            task_text="repair allocator cleanup in src/reclaimer.py",
             active_paths=("src/allocator.py",),
             previously_exposed_claims=(exposed,),
         ),
@@ -400,6 +422,29 @@ def test_lexical_and_bm25_are_one_sparse_family_for_abstention():
     assert result.reason_codes == ("insufficient_independent_support",)
 
 
+def test_dense_rerank_of_sparse_candidates_is_not_independent_delivery_support():
+    class CandidateChannel:
+        def __init__(self, channel: RetrievalChannel) -> None:
+            self.channel = channel
+
+        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
+            del state, limit
+            return (_candidate("src/candidate.py", self.channel, 1),)
+
+    result = HybridRetriever(
+        (),
+        channels=(
+            CandidateChannel(RetrievalChannel.BM25),
+            CandidateChannel(RetrievalChannel.DENSE),
+        ),
+    ).retrieve(_state())
+
+    assert result.ranked_files[0].path == "src/candidate.py"
+    assert result.selected_context == ()
+    assert result.abstained is True
+    assert result.reason_codes == ("insufficient_independent_support",)
+
+
 def test_stale_revision_candidates_are_rejected_before_fusion():
     class StaleChannel:
         channel = RetrievalChannel.EXACT
@@ -430,26 +475,29 @@ def test_stale_revision_candidates_are_rejected_before_fusion():
 
 def test_selection_keeps_complete_evidence_and_never_truncates_to_fit_budget():
     class SupportedChannel:
-        def __init__(self, channel: RetrievalChannel) -> None:
-            self.channel = channel
+        channel = RetrievalChannel.EXACT
 
         def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
             del state, limit
             return (
-                _candidate(
-                    "src/large.py",
-                    self.channel,
-                    1,
+                RetrievalCandidate(
+                    path="src/large.py",
+                    start_line=1,
+                    end_line=2,
+                    symbol=None,
                     text=" ".join(f"token{i}" for i in range(80)),
+                    channel=self.channel,
+                    channel_rank=1,
+                    relation=None,
+                    provenance=("exact_path",),
+                    source_revision="source-1",
+                    channel_score=1.0,
                 ),
             )
 
     result = HybridRetriever(
         (),
-        channels=(
-            SupportedChannel(RetrievalChannel.LEXICAL),
-            SupportedChannel(RetrievalChannel.DENSE),
-        ),
+        channels=(SupportedChannel(),),
     ).retrieve(_state(), token_budget=10)
 
     assert result.selected_context == ()

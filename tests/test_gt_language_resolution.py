@@ -69,6 +69,10 @@ def test_benchmark_required_languages_have_structural_capabilities() -> None:
         "apply_macros.vim": ("vim", "function! Apply()\nendfunction\n"),
         "benchmark-site.conf": ("nginx", "server { listen 8080; }\n"),
         "text.gcode": ("gcode", "G1 X1 Y1\n"),
+        "worker.m": (
+            "objective_c",
+            "@interface Worker : NSObject\n@end\n@implementation Worker\n- (void)run { }\n@end\n",
+        ),
     }
 
     for path, (expected, content) in fixtures.items():
@@ -167,13 +171,12 @@ def test_graph_parser_telemetry_is_required_for_complete_coverage(tmp_path: Path
 
 
 def test_coverage_reads_content_only_when_language_identity_requires_it(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
     (tmp_path / "proof.v").write_text(COQ_SOURCE, encoding="utf-8")
-    (tmp_path / "runner").write_text(
-        "#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8"
-    )
+    (tmp_path / "runner").write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
     (tmp_path / "dataset.csv").write_text("value\n1\n", encoding="utf-8")
 
     observed_reads: list[str] = []

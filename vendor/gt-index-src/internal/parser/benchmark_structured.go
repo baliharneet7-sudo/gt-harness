@@ -55,6 +55,78 @@ func appendStructuralNode(result *ParseResult, sf walker.SourceFile, isTest bool
 	return len(result.Nodes) - 1
 }
 
+// parseObjectiveC is deliberately a declaration adapter, not a C-family text
+// search. It recognizes only Objective-C container declarations and method
+// definitions whose selector is mechanically present before the method body.
+// Message sends remain unindexed because proving their receiver type requires
+// a full Objective-C semantic frontend.
+func parseObjectiveC(sf walker.SourceFile, source string, isTest bool) *ParseResult {
+	result := &ParseResult{}
+	clean := stripCStyleComments(source)
+	currentOwner := ""
+	inImplementation := false
+	seenContainers := map[string]bool{}
+	seenMethods := map[string]bool{}
+	for lineNo, raw := range strings.Split(clean, "\n") {
+		line := strings.TrimSpace(raw)
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if fields[0] == "@interface" || fields[0] == "@implementation" || fields[0] == "@protocol" {
+			if len(fields) < 2 {
+				currentOwner = ""
+				inImplementation = false
+				continue
+			}
+			name := strings.TrimFunc(fields[1], func(r rune) bool {
+				return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+			})
+			currentOwner = name
+			inImplementation = fields[0] == "@implementation"
+			if name != "" && !seenContainers[name] {
+				appendStructuralNode(result, sf, isTest, "Class", name, fields[0], lineNo+1)
+				seenContainers[name] = true
+			}
+			continue
+		}
+		if fields[0] == "@end" {
+			currentOwner = ""
+			inImplementation = false
+			continue
+		}
+		if !inImplementation || currentOwner == "" || (line[0] != '-' && line[0] != '+') {
+			continue
+		}
+		closeType := strings.IndexByte(line, ')')
+		if closeType < 0 || closeType+1 >= len(line) {
+			continue
+		}
+		remainder := strings.TrimSpace(line[closeType+1:])
+		selectorEnd := strings.IndexFunc(remainder, func(r rune) bool {
+			return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
+		})
+		if selectorEnd < 0 {
+			selectorEnd = len(remainder)
+		}
+		selector := remainder[:selectorEnd]
+		if selector == "" {
+			continue
+		}
+		if selectorEnd < len(remainder) && remainder[selectorEnd] == ':' {
+			selector += ":"
+		}
+		qualified := currentOwner + "." + selector
+		if seenMethods[qualified] {
+			continue
+		}
+		index := appendStructuralNode(result, sf, isTest, "Function", selector, line, lineNo+1)
+		result.Nodes[index].QualifiedName = qualified
+		seenMethods[qualified] = true
+	}
+	return result
+}
+
 func parseCoq(sf walker.SourceFile, source string, isTest bool) *ParseResult {
 	result := &ParseResult{}
 	source = stripNestedComments(source, "(*", "*)")

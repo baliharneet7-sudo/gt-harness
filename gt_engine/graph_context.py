@@ -178,6 +178,7 @@ def build_graph_projection(
     *,
     limit: int = 24,
     active_paths: tuple[str, ...] = (),
+    include_tests: bool = False,
 ) -> GraphProjection:
     """Use lexical, body, relation, closure, property, test, and cochange surfaces."""
     con = _connect(graph_db)
@@ -241,7 +242,8 @@ def build_graph_projection(
                     "COALESCE(n.signature,''),"
                     "snippet(nodes_fts,-1,'','',' ',12) FROM nodes_fts f "
                     "JOIN nodes n ON n.id=f.rowid WHERE nodes_fts MATCH ? "
-                    "AND COALESCE(n.is_test,0)=0 ORDER BY bm25(nodes_fts) LIMIT ?",
+                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
+                    + "ORDER BY bm25(nodes_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["nodes_fts"] += len(rows)
@@ -278,8 +280,9 @@ def build_graph_projection(
                     "snippet(symbol_content_fts,0,'','',' ',12) "
                     "FROM symbol_content_fts f "
                     "JOIN nodes n ON n.id=f.rowid "
-                    "WHERE symbol_content_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
-                    "ORDER BY bm25(symbol_content_fts) LIMIT ?",
+                    "WHERE symbol_content_fts MATCH ? "
+                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
+                    + "ORDER BY bm25(symbol_content_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["symbol_content_fts"] += len(rows)
@@ -311,8 +314,9 @@ def build_graph_projection(
                     "FROM content_passages_fts f "
                     "JOIN content_passages p ON p.passage_id=f.rowid "
                     "JOIN nodes n ON n.id=p.node_id "
-                    "WHERE content_passages_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
-                    "ORDER BY bm25(content_passages_fts) LIMIT ?",
+                    "WHERE content_passages_fts MATCH ? "
+                    + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
+                    + "ORDER BY bm25(content_passages_fts) LIMIT ?",
                     (query, limit),
                 ).fetchall()
                 hits["content_passages_fts"] += len(rows)
@@ -526,6 +530,8 @@ def build_graph_projection(
                     )
                     for node_id, path, symbol, kind, value, line, confidence, target_path in rows
                 )
+                files.update(str(row[1]).replace("\\", "/") for row in rows)
+                node_ids.update(int(row[0]) for row in rows)
             except sqlite3.Error:
                 pass
         if seed_ids and {"edge_metadata", "edges", "nodes"} <= tables:

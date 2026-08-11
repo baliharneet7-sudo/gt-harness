@@ -13,7 +13,6 @@ from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
-from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import DenseEmbeddingBackend
 from gt_engine.repository_intelligence import inspect_index
 from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
@@ -56,10 +55,32 @@ def group_probes(
     return {key: tuple(value) for key, value in sorted(groups.items())}
 
 
+def assign_repository_shards(
+    probes: tuple[RetrievalProbe, ...], *, shard_count: int
+) -> tuple[tuple[RetrievalProbe, ...], ...]:
+    """Balance work without splitting one repository's clone and dense cache."""
+
+    if shard_count < 1:
+        raise ValueError("shard_count must be positive")
+    by_repository: dict[str, list[RetrievalProbe]] = defaultdict(list)
+    for probe in probes:
+        by_repository[probe.repository].append(probe)
+    assignments: list[list[RetrievalProbe]] = [[] for _ in range(shard_count)]
+    loads = [0 for _ in range(shard_count)]
+    for _repository, rows in sorted(
+        by_repository.items(),
+        key=lambda item: (-len(item[1]), item[0].lower(), item[0]),
+    ):
+        target = min(range(shard_count), key=lambda index: (loads[index], index))
+        stable_rows = sorted(rows, key=lambda row: (row.base_commit, row.sample_id))
+        assignments[target].extend(stable_rows)
+        loads[target] += len(stable_rows)
+    return tuple(tuple(rows) for rows in assignments)
+
+
 def _repo_cache_path(cache_dir: Path, repository: str) -> Path:
-    if (
-        not _REPO_RE.fullmatch(repository)
-        or any(part in {".", ".."} for part in repository.split("/"))
+    if not _REPO_RE.fullmatch(repository) or any(
+        part in {".", ".."} for part in repository.split("/")
     ):
         raise ValueError(f"invalid repository slug: {repository!r}")
     return cache_dir / (repository.replace("/", "__") + ".git")
@@ -112,8 +133,8 @@ def run_groups(
         require_dense=require_dense,
     )
     count = 0
-    groups = list(group_probes(probes).items())
-    selected_groups = groups[shard_index::shard_count]
+    assigned = assign_repository_shards(probes, shard_count=shard_count)[shard_index]
+    selected_groups = list(group_probes(assigned).items())
     total_groups = len(selected_groups)
     started = time.perf_counter()
     print(
@@ -121,9 +142,7 @@ def run_groups(
         f"{sum(len(rows) for _, rows in selected_groups)} status=started",
         flush=True,
     )
-    for group_number, ((repository, base_commit), rows) in enumerate(
-        selected_groups, 1
-    ):
+    for group_number, ((repository, base_commit), rows) in enumerate(selected_groups, 1):
         group_started = time.perf_counter()
         print(
             f"[arb-progress] shard={shard_index} group={group_number}/{total_groups} "
@@ -137,24 +156,17 @@ def run_groups(
         snapshot_output = output / f"{slug}--{base_commit}.jsonl"
         materialize_worktree(bare, worktree, base_commit)
         try:
-            # All rows in a snapshot group share the same checkout.  Build the
-            # expensive graph/database projection and source-span corpus once,
-            # then let each probe perform only its task-conditioned inspection
-            # and retrieval.  A mixed source revision is not cache-safe.
+            # All rows in a snapshot group share one certified graph build.
+            # Each probe then performs a bounded FTS/structural query against
+            # that graph; it never materializes the whole repository corpus.
+            # A mixed source revision is not cache-safe.
             source_revisions = {row.source_revision for row in rows}
             prepared_index = None
-            prepared_repository: HybridRepository | None = None
             if len(source_revisions) == 1:
                 shared_revision = next(iter(source_revisions))
                 prepared_index = inspect_index(
                     worktree,
                     state_dir=snapshot_state,
-                    source_revision=shared_revision,
-                )
-                prepared_repository = build_hybrid_repository(
-                    worktree,
-                    prepared_index.graph_db
-                    or (snapshot_state / "graph.unavailable"),
                     source_revision=shared_revision,
                 )
             snapshot_output.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +178,6 @@ def run_groups(
                         state_dir=snapshot_state,
                         dense_backend=dense_backend,
                         index_receipt=prepared_index,
-                        prepared_repository=prepared_repository,
                     )
                     handle.write(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))
                     handle.write("\n")
@@ -214,17 +225,19 @@ def main() -> int:
     )
     args = parser.parse_args()
     probes = load_redacted_samples(args.samples)
-    print(run_groups(
-        probes,
-        cache_dir=args.cache_dir,
-        work_dir=args.work_dir,
-        state_dir=args.state_dir,
-        output_dir=args.output_dir,
-        shard_index=args.shard_index,
-        shard_count=args.shard_count,
-        dense_model_dir=args.dense_model_dir,
-        require_dense=args.require_dense,
-    ))
+    print(
+        run_groups(
+            probes,
+            cache_dir=args.cache_dir,
+            work_dir=args.work_dir,
+            state_dir=args.state_dir,
+            output_dir=args.output_dir,
+            shard_index=args.shard_index,
+            shard_count=args.shard_count,
+            dense_model_dir=args.dense_model_dir,
+            require_dense=args.require_dense,
+        )
+    )
     return 0
 
 

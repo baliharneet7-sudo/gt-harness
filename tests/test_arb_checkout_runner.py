@@ -8,6 +8,7 @@ from scripts.arb_adapter import RetrievalProbe, RetrievalProbeResult
 from scripts.arb_checkout_runner import (
     _load_dense_backend,
     _repo_cache_path,
+    assign_repository_shards,
     group_probes,
     run_groups,
 )
@@ -53,15 +54,37 @@ def test_shard_selection_is_deterministic() -> None:
     assert [key for key, _ in groups[1::2]] == [("owner/repo", "1"), ("owner/repo", "3")]
 
 
+def test_repository_sharding_keeps_all_commits_on_one_runner() -> None:
+    probes = (
+        _probe("a", "owner/large", "1"),
+        _probe("b", "owner/large", "2"),
+        _probe("c", "owner/small", "1"),
+        _probe("d", "owner/other", "1"),
+    )
+
+    assignments = assign_repository_shards(probes, shard_count=2)
+
+    large_shards = {
+        shard
+        for shard, rows in enumerate(assignments)
+        if any(probe.repository == "owner/large" for probe in rows)
+    }
+    assert len(large_shards) == 1
+    assert sorted(probe.sample_id for rows in assignments for probe in rows) == [
+        "a",
+        "b",
+        "c",
+        "d",
+    ]
+
+
 def test_dense_backend_is_optional_but_required_mode_fails_closed(tmp_path) -> None:
     assert _load_dense_backend(None, require_dense=False) is None
     with pytest.raises(ValueError, match="dense model directory"):
         _load_dense_backend(None, require_dense=True)
 
 
-def test_dense_backend_loads_the_pinned_snowflake_onnx_model_once(
-    tmp_path, monkeypatch
-) -> None:
+def test_dense_backend_loads_the_pinned_snowflake_onnx_model_once(tmp_path, monkeypatch) -> None:
     sentinel = object()
     calls: list[object] = []
 
@@ -97,21 +120,12 @@ def test_runner_emits_flushed_group_and_sample_progress(tmp_path, monkeypatch, c
     monkeypatch.setattr("scripts.arb_checkout_runner.materialize_worktree", materialize)
     monkeypatch.setattr("scripts.arb_checkout_runner._run_git", lambda *args, **kwargs: "")
     index_calls: list[tuple[object, ...]] = []
-    repository_calls: list[tuple[object, ...]] = []
 
     def fake_inspect_index(*args, **kwargs):
         index_calls.append((args, kwargs))
         return SimpleNamespace(graph_db=None)
 
-    def fake_build_repository(*args, **kwargs):
-        repository_calls.append((args, kwargs))
-        return object()
-
     monkeypatch.setattr("scripts.arb_checkout_runner.inspect_index", fake_inspect_index)
-    monkeypatch.setattr(
-        "scripts.arb_checkout_runner.build_hybrid_repository",
-        fake_build_repository,
-    )
     monkeypatch.setattr(
         "scripts.arb_checkout_runner.run_probe",
         lambda probe, **kwargs: RetrievalProbeResult(
@@ -132,15 +146,17 @@ def test_runner_emits_flushed_group_and_sample_progress(tmp_path, monkeypatch, c
         ),
     )
 
-    assert run_groups(
-        probes,
-        cache_dir=tmp_path / "cache",
-        work_dir=tmp_path / "work",
-        state_dir=tmp_path / "state",
-        output_dir=tmp_path / "out",
-    ) == 2
+    assert (
+        run_groups(
+            probes,
+            cache_dir=tmp_path / "cache",
+            work_dir=tmp_path / "work",
+            state_dir=tmp_path / "state",
+            output_dir=tmp_path / "out",
+        )
+        == 2
+    )
     assert len(index_calls) == 1
-    assert len(repository_calls) == 1
     output = capsys.readouterr().out
     assert "status=started" in output
     assert "sample=a" in output

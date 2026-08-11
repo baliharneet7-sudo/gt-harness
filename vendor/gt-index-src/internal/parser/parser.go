@@ -149,7 +149,7 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 		return nil, err
 	}
 	switch sf.Language {
-	case "red", "povray", "coq", "stan", "sparql", "turtle", "latex", "vim", "nginx", "gcode", "make", "dockerfile", "cmake", "meson", "autotools":
+	case "red", "povray", "coq", "stan", "sparql", "turtle", "latex", "vim", "nginx", "gcode", "make", "dockerfile", "cmake", "meson", "autotools", "objective_c":
 		return parseStructuredSource(sf, src, isTest)
 	}
 

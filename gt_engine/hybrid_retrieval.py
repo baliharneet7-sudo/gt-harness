@@ -14,7 +14,7 @@ import math
 import re
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
@@ -66,18 +66,14 @@ def _tokens(value: str) -> tuple[str, ...]:
         expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", expanded)
         expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", expanded)
         tokens.extend(
-            part.lower()
-            for part in expanded.split()
-            if part and part.lower() != raw.lower()
+            part.lower() for part in expanded.split() if part and part.lower() != raw.lower()
         )
     return tuple(tokens)
 
 
 def _path_tokens(path: str) -> tuple[str, ...]:
     return tuple(
-        token
-        for part in _PATH_SPLIT_RE.split(_normalize_path(path))
-        for token in _tokens(part)
+        token for part in _PATH_SPLIT_RE.split(_normalize_path(path)) for token in _tokens(part)
     )
 
 
@@ -338,9 +334,7 @@ def _rank_documents(
             relation=relation,
             provenance=provenance,
         )
-        for rank, (score, document, relation, provenance) in enumerate(
-            ordered[: max(0, limit)], 1
-        )
+        for rank, (score, document, relation, provenance) in enumerate(ordered[: max(0, limit)], 1)
     )
 
 
@@ -349,6 +343,19 @@ class ExactRetrievalChannel:
 
     def __init__(self, documents: Sequence[RepositoryDocument]) -> None:
         self._documents = tuple(documents)
+        self._prepared = tuple(
+            (
+                document,
+                frozenset(_path_tokens(document.path)),
+                frozenset(_tokens(document.symbol or "")),
+                str(document.text or "").lower(),
+            )
+            for document in self._documents
+        )
+        self._path_document_frequency = Counter(
+            token for _, path_tokens, _, _ in self._prepared for token in path_tokens
+        )
+        self._distinctive_path_frequency = max(1, math.ceil(len(self._documents) * 0.20))
 
     def retrieve(
         self,
@@ -358,23 +365,14 @@ class ExactRetrievalChannel:
     ) -> tuple[RetrievalCandidate, ...]:
         query_tokens = set(_tokens(state.query_text()))
         query_text = state.query_text().lower()
-        path_document_frequency = Counter(
-            token
-            for document in self._documents
-            for token in set(_path_tokens(document.path))
-        )
-        distinctive_path_frequency = max(1, math.ceil(len(self._documents) * 0.20))
         scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document in self._documents:
-            path_tokens = set(_path_tokens(document.path))
-            symbol_tokens = set(_tokens(document.symbol or ""))
-            text = str(document.text or "").lower()
+        for document, path_tokens, symbol_tokens, text in self._prepared:
             score = 0.0
             reasons: list[str] = []
             path_overlap = {
                 token
                 for token in query_tokens & path_tokens
-                if path_document_frequency[token] <= distinctive_path_frequency
+                if self._path_document_frequency[token] <= self._distinctive_path_frequency
             }
             symbol_overlap = query_tokens & symbol_tokens
             if path_overlap:
@@ -407,6 +405,19 @@ class LexicalRetrievalChannel:
 
     def __init__(self, documents: Sequence[RepositoryDocument]) -> None:
         self._documents = tuple(documents)
+        self._prepared = tuple(
+            (
+                document,
+                Counter(
+                    (
+                        *_path_tokens(document.path),
+                        *_tokens(document.symbol or ""),
+                        *_tokens(document.text),
+                    )
+                ),
+            )
+            for document in self._documents
+        )
 
     def retrieve(
         self,
@@ -416,14 +427,7 @@ class LexicalRetrievalChannel:
     ) -> tuple[RetrievalCandidate, ...]:
         query = Counter(_tokens(state.sparse_query_text()))
         scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document in self._documents:
-            terms = Counter(
-                (
-                    *_path_tokens(document.path),
-                    *_tokens(document.symbol or ""),
-                    *_tokens(document.text),
-                )
-            )
+        for document, terms in self._prepared:
             overlap = set(query) & set(terms)
             numerator = sum(min(query[token], terms[token]) for token in overlap)
             denominator = sum(query.values()) + sum(terms.values()) - numerator
@@ -445,18 +449,10 @@ class BM25RetrievalChannel:
         self._documents = tuple(documents)
         self._k1 = float(k1)
         self._b = float(b)
-
-    def retrieve(
-        self,
-        state: RetrievalState,
-        *,
-        limit: int,
-    ) -> tuple[RetrievalCandidate, ...]:
-        query_terms = tuple(dict.fromkeys(_tokens(state.sparse_query_text())))
-        tokenized = tuple(
+        self._prepared = tuple(
             (
                 document,
-                tuple(
+                Counter(
                     (
                         *_path_tokens(document.path),
                         *_tokens(document.symbol or ""),
@@ -466,26 +462,36 @@ class BM25RetrievalChannel:
             )
             for document in self._documents
         )
-        if not tokenized or not query_terms:
+        self._document_count = len(self._prepared)
+        self._average_length = (
+            sum(sum(counts.values()) for _, counts in self._prepared) / self._document_count
+            if self._document_count
+            else 0.0
+        )
+        self._document_frequency = Counter(term for _, counts in self._prepared for term in counts)
+
+    def retrieve(
+        self,
+        state: RetrievalState,
+        *,
+        limit: int,
+    ) -> tuple[RetrievalCandidate, ...]:
+        query_terms = tuple(dict.fromkeys(_tokens(state.sparse_query_text())))
+        if not self._prepared or not query_terms:
             return ()
-        document_count = len(tokenized)
-        average_length = sum(len(terms) for _, terms in tokenized) / document_count
-        frequencies = {
-            term: sum(1 for _, terms in tokenized if term in set(terms))
-            for term in query_terms
-        }
         scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, terms in tokenized:
-            counts = Counter(terms)
-            length_ratio = len(terms) / average_length if average_length else 1.0
+        for document, counts in self._prepared:
+            document_length = sum(counts.values())
+            length_ratio = document_length / self._average_length if self._average_length else 1.0
             score = 0.0
             for term in query_terms:
                 frequency = counts[term]
                 if frequency <= 0:
                     continue
-                document_frequency = frequencies[term]
+                document_frequency = self._document_frequency[term]
                 inverse_frequency = math.log(
-                    1.0 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5)
+                    1.0
+                    + (self._document_count - document_frequency + 0.5) / (document_frequency + 0.5)
                 )
                 denominator = frequency + self._k1 * (1.0 - self._b + self._b * length_ratio)
                 score += inverse_frequency * (frequency * (self._k1 + 1.0)) / denominator
@@ -502,6 +508,10 @@ class DenseRetrievalChannel:
         backend: DenseEmbeddingBackend | None,
     ) -> None:
         self._documents = tuple(documents)
+        documents_by_path: dict[str, list[RepositoryDocument]] = defaultdict(list)
+        for document in self._documents:
+            documents_by_path[document.path.lower()].append(document)
+        self._documents_by_path = {path: tuple(rows) for path, rows in documents_by_path.items()}
         self._backend = backend
         self._candidate_paths: frozenset[str] | None = None
         self._candidate_path_order: tuple[str, ...] = ()
@@ -536,9 +546,7 @@ class DenseRetrievalChannel:
     def backend_identity(self) -> str:
         if self._backend is None:
             return ""
-        return str(
-            getattr(self._backend, "identity", type(self._backend).__qualname__)
-        )
+        return str(getattr(self._backend, "identity", type(self._backend).__qualname__))
 
     def retrieve(
         self,
@@ -552,21 +560,16 @@ class DenseRetrievalChannel:
         if self._candidate_paths is None:
             selected_documents = self._documents
         else:
-            documents_by_path: dict[str, list[RepositoryDocument]] = {}
-            for document in self._documents:
-                key = document.path.lower()
-                if key in self._candidate_paths:
-                    documents_by_path.setdefault(key, []).append(document)
             selected: list[RepositoryDocument] = []
             # Preserve coverage across files before taking additional spans
             # from any one file.  This is deterministic and bounds ONNX work
             # by documents, not merely by path names.
             limit = self._candidate_document_limit or sum(
-                len(rows) for rows in documents_by_path.values()
+                len(self._documents_by_path.get(path, ())) for path in self._candidate_paths
             )
             for offset in range(limit):
                 for path in self._candidate_path_order:
-                    rows = documents_by_path.get(path, ())
+                    rows = self._documents_by_path.get(path, ())
                     if offset < len(rows):
                         selected.append(rows[offset])
                         if len(selected) >= limit:
@@ -673,13 +676,11 @@ class StructuralRetrievalChannel:
             previous = best.get(candidate_path)
             if previous is None or (row[0], relation) > (previous[0], previous[2]):
                 best[candidate_path] = row
-        return _rank_documents(
-            tuple(best.values()), state=state, channel=self.channel, limit=limit
-        )
+        return _rank_documents(tuple(best.values()), state=state, channel=self.channel, limit=limit)
 
 
 def reciprocal_rank_fusion(
-    channel_results: dict[RetrievalChannel, Sequence[RetrievalCandidate]],
+    channel_results: Mapping[RetrievalChannel, Sequence[RetrievalCandidate]],
     *,
     k: int = 60,
 ) -> tuple[RankedFile, ...]:
@@ -703,15 +704,47 @@ def reciprocal_rank_fusion(
             (channel, by_channel[channel].channel_rank)
             for channel in sorted(by_channel, key=lambda item: _CHANNEL_ORDER[item])
         )
-        score = sum(1.0 / (k + rank) for _, rank in channel_ranks)
-        representative = min(
-            by_channel.values(),
-            key=lambda row: (
+        sparse_ranks = [
+            rank
+            for channel, rank in channel_ranks
+            if channel
+            in {
+                RetrievalChannel.EXACT,
+                RetrievalChannel.LEXICAL,
+                RetrievalChannel.BM25,
+            }
+        ]
+        independent_ranks = [min(sparse_ranks)] if sparse_ranks else []
+        independent_ranks.extend(
+            rank
+            for channel, rank in channel_ranks
+            if channel in {RetrievalChannel.STRUCTURAL, RetrievalChannel.DENSE}
+        )
+        score = sum(1.0 / (k + rank) for rank in independent_ranks)
+
+        def representative_key(
+            row: RetrievalCandidate,
+        ) -> tuple[float, int, int, str]:
+            provenance = set(row.provenance)
+            evidence_priority = 0.0
+            if "structural_certified" in provenance:
+                evidence_priority = 5.0
+            elif "exact_path" in provenance or "exact_symbol" in provenance:
+                evidence_priority = 4.0
+            elif row.relation:
+                evidence_priority = 3.0
+            elif row.channel is RetrievalChannel.DENSE:
+                evidence_priority = 2.0
+            return (
+                -evidence_priority,
                 row.channel_rank,
-                _CHANNEL_ORDER[row.channel],
                 row.start_line or 0,
                 row.claim_hash,
-            ),
+            )
+
+        representative = min(
+            by_channel.values(),
+            key=representative_key,
         )
         provenance = tuple(
             dict.fromkeys(
@@ -748,10 +781,7 @@ def _render_candidate(candidate: RetrievalCandidate) -> str:
 
 def _delivery_supported(ranked: RankedFile) -> bool:
     channels = {channel for channel, _ in ranked.channel_ranks}
-    if (
-        RetrievalChannel.STRUCTURAL in channels
-        and "structural_certified" in ranked.provenance
-    ):
+    if RetrievalChannel.STRUCTURAL in channels and "structural_certified" in ranked.provenance:
         return True
     if RetrievalChannel.EXACT in channels and (
         "exact_path" in ranked.provenance or "exact_symbol" in ranked.provenance
@@ -766,8 +796,8 @@ def _delivery_supported(ranked: RankedFile) -> bool:
         RetrievalChannel.BM25,
     }:
         families.add("sparse")
-    if RetrievalChannel.DENSE in channels:
-        families.add("dense")
+    # Dense reranks a pool produced by sparse and structural retrieval.  It is
+    # useful for ordering, but cannot independently certify its own input.
     if RetrievalChannel.STRUCTURAL in channels:
         families.add("structural")
     return len(families) >= 2
@@ -805,16 +835,10 @@ class HybridRetriever:
         self._token_counter = token_counter
         self._rrf_k = int(rrf_k)
         self._dense_candidate_limit = (
-            None
-            if dense_candidate_limit is None
-            else max(1, int(dense_candidate_limit))
+            None if dense_candidate_limit is None else max(1, int(dense_candidate_limit))
         )
         self._dense_channel = next(
-            (
-                channel
-                for channel in self._channels
-                if isinstance(channel, DenseRetrievalChannel)
-            ),
+            (channel for channel in self._channels if isinstance(channel, DenseRetrievalChannel)),
             None,
         )
 
@@ -832,9 +856,8 @@ class HybridRetriever:
         receipts: list[ChannelReceipt] = []
         stale_candidates_rejected = 0
         for channel in self._channels:
-            if (
-                self._dense_candidate_limit is not None
-                and isinstance(channel, DenseRetrievalChannel)
+            if self._dense_candidate_limit is not None and isinstance(
+                channel, DenseRetrievalChannel
             ):
                 non_dense = tuple(
                     result
@@ -868,9 +891,7 @@ class HybridRetriever:
             failed = False
             reason = ""
             try:
-                raw_candidates = tuple(
-                    channel.retrieve(state, limit=max(0, channel_limit))
-                )
+                raw_candidates = tuple(channel.retrieve(state, limit=max(0, channel_limit)))
                 candidates = tuple(
                     candidate
                     for candidate in raw_candidates
@@ -881,9 +902,7 @@ class HybridRetriever:
                 if stale_count:
                     reason = f"stale_revision_rejected={stale_count}"
                 if channel.channel is RetrievalChannel.DENSE:
-                    reason = reason or str(
-                        getattr(channel, "availability_reason", "") or ""
-                    )
+                    reason = reason or str(getattr(channel, "availability_reason", "") or "")
             except Exception as exc:  # noqa: BLE001 - retrieval must fail open
                 candidates = ()
                 failed = True
@@ -897,9 +916,7 @@ class HybridRetriever:
                     reason=reason,
                     latency_ms=(time.perf_counter() - channel_started) * 1_000.0,
                     available=not failed and reason != "backend_unavailable",
-                    backend_identity=str(
-                        getattr(channel, "backend_identity", "") or ""
-                    ),
+                    backend_identity=str(getattr(channel, "backend_identity", "") or ""),
                 )
             )
 
@@ -909,9 +926,9 @@ class HybridRetriever:
             for path in (*state.active_paths, *state.changed_paths)
             if _normalize_path(path)
         }
-        ranked_files = tuple(
-            row for row in fused if row.path.lower() not in known_paths
-        )[: max(0, top_k)]
+        ranked_files = tuple(row for row in fused if row.path.lower() not in known_paths)[
+            : max(0, top_k)
+        ]
         ranked_spans = tuple(row.representative for row in ranked_files)
         exposed = set(state.previously_exposed_claims)
         selected: list[RetrievalCandidate] = []

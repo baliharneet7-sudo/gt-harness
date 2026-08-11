@@ -18,6 +18,7 @@ func init() {
 		{Name: "cmake", Extensions: []string{".cmake"}, Basenames: []string{"CMakeLists.txt"}},
 		{Name: "meson", Basenames: []string{"meson.build", "meson_options.txt"}},
 		{Name: "autotools", Extensions: []string{".ac", ".am"}, Basenames: []string{"configure.ac", "Makefile.am"}},
+		{Name: "objective_c", Extensions: []string{".m", ".mm"}},
 	} {
 		spec.IsExported = func(name string) bool { return name != "" }
 		Register(spec)

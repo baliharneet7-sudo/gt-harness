@@ -46,6 +46,8 @@ func parseStructuredSource(sf walker.SourceFile, src []byte, isTest bool) (*Pars
 		return ensureStructuredFileNode(parseMeson(sf, string(src), isTest), sf, src, isTest), nil
 	case "autotools":
 		return ensureStructuredFileNode(parseAutotools(sf, string(src), isTest), sf, src, isTest), nil
+	case "objective_c":
+		return ensureStructuredFileNode(parseObjectiveC(sf, string(src), isTest), sf, src, isTest), nil
 	default:
 		return nil, nil
 	}

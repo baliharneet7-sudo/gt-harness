@@ -11,7 +11,14 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from gt_engine.hybrid_retrieval import RepositoryDocument, StructuralLink
+from gt_engine.graph_context import build_graph_projection
+from gt_engine.hybrid_retrieval import (
+    RepositoryDocument,
+    RetrievalIntent,
+    RetrievalState,
+    StructuralLink,
+)
+from gt_engine.task_contract import Obligation, TaskContract, extract_task_contract
 
 
 @dataclass(frozen=True)
@@ -48,10 +55,7 @@ _DEFAULT_BUILD_LIMITS = RepositoryBuildLimits()
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     try:
-        return {
-            str(row[1])
-            for row in connection.execute(f'PRAGMA table_info("{table}")')
-        }
+        return {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')}
     except sqlite3.Error:
         return set()
 
@@ -126,6 +130,8 @@ def build_hybrid_repository(
     *,
     source_revision: str,
     limits: RepositoryBuildLimits = _DEFAULT_BUILD_LIMITS,
+    include_paths: tuple[str, ...] | None = None,
+    include_node_ids: tuple[int, ...] | None = None,
 ) -> HybridRepository:
     """Build deterministic retrieval documents and directed structural links."""
 
@@ -211,13 +217,57 @@ def build_hybrid_repository(
                 document_chars=0,
             )
         signature = "COALESCE(signature,'')" if "signature" in node_columns else "''"
+        canonical_include_paths = tuple(
+            dict.fromkeys(
+                path
+                for raw_path in (include_paths or ())
+                if (path := _canonical_repo_path(root, raw_path)) is not None
+            )
+        )
+        path_clause = ""
+        path_parameters: tuple[object, ...] = ()
+        canonical_node_ids = tuple(
+            dict.fromkeys(int(node_id) for node_id in (include_node_ids or ()) if int(node_id) > 0)
+        )
+        if include_node_ids is not None:
+            if not canonical_node_ids:
+                return HybridRepository(
+                    documents=(),
+                    structural_links=(),
+                    source_revision=source_revision,
+                    complete=True,
+                    reason_codes=("query_no_candidates",),
+                    source_file_count=0,
+                    document_chars=0,
+                )
+            path_clause = "WHERE id IN (" + ",".join("?" for _ in canonical_node_ids) + ") "
+            path_parameters = canonical_node_ids
+        elif include_paths is not None:
+            if not canonical_include_paths:
+                return HybridRepository(
+                    documents=(),
+                    structural_links=(),
+                    source_revision=source_revision,
+                    complete=True,
+                    reason_codes=("query_no_candidates",),
+                    source_file_count=0,
+                    document_chars=0,
+                )
+            path_clause = (
+                "WHERE file_path IN (" + ",".join("?" for _ in canonical_include_paths) + ") "
+            )
+            path_parameters = canonical_include_paths
         node_query = (
             "SELECT id,name,file_path,start_line,end_line,"
-            f"{signature} FROM nodes "
-            "ORDER BY lower(file_path),start_line,id LIMIT ?"
+            + f"{signature} FROM nodes "
+            + path_clause
+            + "ORDER BY lower(file_path),start_line,id LIMIT ?"
         )
         node_rows = tuple(
-            connection.execute(node_query, (limits.max_documents + 1,))
+            connection.execute(
+                node_query,
+                (*path_parameters, limits.max_documents + 1),
+            )
         )
         if len(node_rows) > limits.max_documents:
             reasons.append("document_limit")
@@ -277,12 +327,24 @@ def build_hybrid_repository(
         if required_edges <= edge_columns:
             confidence = "COALESCE(confidence,0.0)" if "confidence" in edge_columns else "0.0"
             trust_tier = "COALESCE(trust_tier,'')" if "trust_tier" in edge_columns else "''"
+            loaded_ids = tuple(loaded_node_paths)
+            relation_clause = ""
+            relation_parameters: tuple[object, ...] = ()
+            if include_paths is not None and loaded_ids:
+                placeholders = ",".join("?" for _ in loaded_ids)
+                relation_clause = (
+                    f"WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders}) "
+                )
+                relation_parameters = (*loaded_ids, *loaded_ids)
             edge_query = (
                 "SELECT id,source_id,target_id,type,"
-                f"{confidence},{trust_tier} FROM edges ORDER BY id LIMIT ?"
+                f"{confidence},{trust_tier} FROM edges " + relation_clause + "ORDER BY id LIMIT ?"
             )
             edge_rows = tuple(
-                connection.execute(edge_query, (limits.max_links + 1,))
+                connection.execute(
+                    edge_query,
+                    (*relation_parameters, limits.max_links + 1),
+                )
             )
             if len(edge_rows) > limits.max_links:
                 reasons.append("link_limit")
@@ -315,12 +377,21 @@ def build_hybrid_repository(
             "resolution_score",
         }
         if required_assertions <= assertion_columns:
-            rows = connection.execute(
+            assertion_clause = ""
+            assertion_parameters: tuple[object, ...] = ()
+            if include_paths is not None and loaded_node_paths:
+                loaded_ids = tuple(loaded_node_paths)
+                placeholders = ",".join("?" for _ in loaded_ids)
+                assertion_clause = (
+                    f"WHERE test_node_id IN ({placeholders}) OR target_node_id IN ({placeholders}) "
+                )
+                assertion_parameters = (*loaded_ids, *loaded_ids)
+            assertion_rows = connection.execute(
                 "SELECT id,test_node_id,target_node_id,resolution_score "
-                "FROM assertions ORDER BY id LIMIT ?",
-                (limits.max_links + 1,),
+                "FROM assertions " + assertion_clause + "ORDER BY id LIMIT ?",
+                (*assertion_parameters, limits.max_links + 1),
             )
-            for assertion_id, test_id, target_id, score in rows:
+            for assertion_id, test_id, target_id, score in assertion_rows:
                 append_link(
                     loaded_node_paths.get(int(target_id or 0)),
                     loaded_node_paths.get(int(test_id or 0)),
@@ -338,12 +409,20 @@ def build_hybrid_repository(
             "min_confidence",
         }
         if required_closure <= closure_columns:
-            rows = connection.execute(
+            closure_clause = ""
+            closure_parameters: tuple[object, ...] = ()
+            if include_paths is not None and loaded_node_paths:
+                loaded_ids = tuple(loaded_node_paths)
+                placeholders = ",".join("?" for _ in loaded_ids)
+                closure_clause = f"WHERE source_id IN ({placeholders}) "
+                closure_parameters = loaded_ids
+            closure_rows = connection.execute(
                 "SELECT source_id,target_id,depth,min_confidence FROM closure "
-                "ORDER BY source_id,target_id,depth LIMIT ?",
-                (limits.max_links + 1,),
+                + closure_clause
+                + "ORDER BY source_id,target_id,depth LIMIT ?",
+                (*closure_parameters, limits.max_links + 1),
             )
-            for source_id, target_id, depth, confidence_value in rows:
+            for source_id, target_id, depth, confidence_value in closure_rows:
                 append_link(
                     loaded_node_paths.get(int(source_id or 0)),
                     loaded_node_paths.get(int(target_id or 0)),
@@ -355,39 +434,43 @@ def build_hybrid_repository(
 
         cochange_columns = _columns(connection, "cochanges")
         if {"file_a", "file_b", "count"} <= cochange_columns:
-            rows = connection.execute(
+            cochange_clause = ""
+            cochange_parameters: tuple[object, ...] = ()
+            if include_paths is not None and canonical_include_paths:
+                placeholders = ",".join("?" for _ in canonical_include_paths)
+                cochange_clause = f"WHERE file_a IN ({placeholders}) OR file_b IN ({placeholders}) "
+                cochange_parameters = (*canonical_include_paths, *canonical_include_paths)
+            cochange_rows = connection.execute(
                 "SELECT file_a,file_b,count FROM cochanges "
-                "ORDER BY count DESC,file_a,file_b LIMIT ?",
-                (limits.max_links + 1,),
+                + cochange_clause
+                + "ORDER BY count DESC,file_a,file_b LIMIT ?",
+                (*cochange_parameters, limits.max_links + 1),
             )
-            for raw_a, raw_b, count in rows:
+            for raw_a, raw_b, count in cochange_rows:
                 source_path = _canonical_repo_path(root, str(raw_a or ""))
                 target_path = _canonical_repo_path(root, str(raw_b or ""))
                 append_link(
                     source_path,
                     target_path,
                     "COCHANGE",
-                    (
-                        max(0, int(count or 0))
-                        / (max(0, int(count or 0)) + 1.0)
-                    ),
+                    (max(0, int(count or 0)) / (max(0, int(count or 0)) + 1.0)),
                     (f"graph_cochange:count={int(count or 0)}", "git_cochange"),
                 )
 
         cochange_set_columns = _columns(connection, "cochange_sets")
         if {"commit_hash", "file_path"} <= cochange_set_columns:
-            rows = tuple(
+            cochange_set_rows = tuple(
                 connection.execute(
                     "SELECT commit_hash,file_path FROM cochange_sets "
                     "ORDER BY commit_hash,file_path LIMIT ?",
                     (limits.max_links + 1,),
                 )
             )
-            if len(rows) > limits.max_links:
+            if len(cochange_set_rows) > limits.max_links:
                 reasons.append("link_limit")
-                rows = rows[: limits.max_links]
+                cochange_set_rows = cochange_set_rows[: limits.max_links]
             grouped: dict[str, list[str]] = {}
-            for commit_hash, raw_path in rows:
+            for commit_hash, raw_path in cochange_set_rows:
                 path = _canonical_repo_path(root, str(raw_path or ""))
                 if path:
                     grouped.setdefault(str(commit_hash or ""), []).append(path)
@@ -426,8 +509,59 @@ def build_hybrid_repository(
     )
 
 
+def build_query_hybrid_repository(
+    repo_root: str | Path,
+    graph_db: str | Path,
+    state: RetrievalState,
+    *,
+    candidate_limit: int = 128,
+    limits: RepositoryBuildLimits = _DEFAULT_BUILD_LIMITS,
+) -> HybridRepository:
+    """Materialize only task-conditioned graph/FTS candidates.
+
+    This is the online retrieval path. It preserves the full repository
+    builder for audits, while preventing each query from rescanning every
+    indexed source span merely to discard almost all of them afterward.
+    """
+
+    contract = extract_task_contract(state.sparse_query_text())
+    if not contract.obligations and state.sparse_query_text().strip():
+        contract = TaskContract(
+            role=contract.role,
+            task_mode=contract.task_mode,
+            predicates=contract.predicates,
+            obligations=(
+                Obligation(
+                    obligation_id="retrieval:state",
+                    text=" ".join(state.sparse_query_text().split())[:2_000],
+                    source="retrieval_state",
+                ),
+            ),
+        )
+    graph = Path(graph_db)
+    projection = build_graph_projection(
+        str(graph),
+        contract,
+        limit=max(8, int(candidate_limit)),
+        active_paths=tuple(dict.fromkeys((*state.active_paths, *state.changed_paths))),
+        include_tests=state.intent is RetrievalIntent.VALIDATION_CONTEXT,
+    )
+    ordered_node_ids = tuple(
+        dict.fromkeys(fact.node_id for fact in projection.semantic_facts if int(fact.node_id) > 0)
+    )[: max(8, int(candidate_limit) * 4)]
+    return build_hybrid_repository(
+        repo_root,
+        graph,
+        source_revision=state.source_revision,
+        limits=limits,
+        include_paths=tuple(sorted(projection.files)),
+        include_node_ids=ordered_node_ids,
+    )
+
+
 __all__ = [
     "HybridRepository",
     "RepositoryBuildLimits",
     "build_hybrid_repository",
+    "build_query_hybrid_repository",
 ]

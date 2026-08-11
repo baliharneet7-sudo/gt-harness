@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import sqlite3
 
-from gt_engine.hybrid_repository import RepositoryBuildLimits, build_hybrid_repository
+from gt_engine.hybrid_repository import (
+    RepositoryBuildLimits,
+    build_hybrid_repository,
+    build_query_hybrid_repository,
+)
+from gt_engine.hybrid_retrieval import RetrievalIntent, RetrievalState
 
 
 def _graph(path) -> None:
@@ -149,9 +154,7 @@ def test_builder_exposes_assertion_closure_and_cochange_relations(tmp_path):
     (tmp_path / "src" / "service.py").write_text(
         "def service():\n    return helper()\n", encoding="utf-8"
     )
-    (tmp_path / "src" / "helper.py").write_text(
-        "def helper():\n    return 1\n", encoding="utf-8"
-    )
+    (tmp_path / "src" / "helper.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
     (tmp_path / "tests" / "test_service.py").write_text(
         "def test_service():\n    assert service() == 1\n", encoding="utf-8"
     )
@@ -175,23 +178,15 @@ def test_builder_exposes_assertion_closure_and_cochange_relations(tmp_path):
             "target_node_id INTEGER,resolution_score REAL,kind TEXT,expression TEXT,"
             "expected TEXT,line INTEGER)"
         )
-        connection.execute(
-            "INSERT INTO assertions VALUES (7,3,1,0.99,'equals','service()','1',2)"
-        )
+        connection.execute("INSERT INTO assertions VALUES (7,3,1,0.99,'equals','service()','1',2)")
         connection.execute(
             "CREATE TABLE closure (source_id INTEGER,target_id INTEGER,depth INTEGER,"
             "min_confidence REAL)"
         )
         connection.execute("INSERT INTO closure VALUES (1,2,2,0.97)")
-        connection.execute(
-            "CREATE TABLE cochanges (file_a TEXT,file_b TEXT,count INTEGER)"
-        )
-        connection.execute(
-            "INSERT INTO cochanges VALUES ('src/service.py','src/helper.py',4)"
-        )
-        connection.execute(
-            "CREATE TABLE cochange_sets (commit_hash TEXT,file_path TEXT)"
-        )
+        connection.execute("CREATE TABLE cochanges (file_a TEXT,file_b TEXT,count INTEGER)")
+        connection.execute("INSERT INTO cochanges VALUES ('src/service.py','src/helper.py',4)")
+        connection.execute("CREATE TABLE cochange_sets (commit_hash TEXT,file_path TEXT)")
         connection.executemany(
             "INSERT INTO cochange_sets VALUES (?,?)",
             (
@@ -210,15 +205,78 @@ def test_builder_exposes_assertion_closure_and_cochange_relations(tmp_path):
     )
 
     links = {
-        (row.source_path, row.target_path, row.relation): row
-        for row in repository.structural_links
+        (row.source_path, row.target_path, row.relation): row for row in repository.structural_links
     }
     assert links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].confidence == 0.99
     assert links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].certified is True
     assert links[("src/service.py", "src/helper.py", "CALLS_TRANSITIVE")].confidence == 0.97
     assert links[("src/service.py", "src/helper.py", "CALLS_TRANSITIVE")].certified is True
     assert links[("src/service.py", "src/helper.py", "COCHANGE")].certified is False
-    assert (
-        links[("src/service.py", "tests/test_service.py", "COCHANGE_SET")].certified
-        is False
+    assert links[("src/service.py", "tests/test_service.py", "COCHANGE_SET")].certified is False
+
+
+def test_query_builder_materializes_only_bounded_fts_and_structural_candidates(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "allocator.py").write_text(
+        "def allocate():\n    return 1\n", encoding="utf-8"
     )
+    (tmp_path / "src" / "network.py").write_text(
+        "def connect():\n    return True\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_allocator.py").write_text(
+        "def test_allocate():\n    assert allocate()\n", encoding="utf-8"
+    )
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT,language TEXT,is_test BOOLEAN)"
+        )
+        rows = (
+            (1, "allocate", "src/allocator.py", 1, 2, "def allocate()", "python", 0),
+            (2, "connect", "src/network.py", 1, 2, "def connect()", "python", 0),
+            (
+                3,
+                "test_allocate",
+                "tests/test_allocator.py",
+                1,
+                2,
+                "def test_allocate()",
+                "python",
+                1,
+            ),
+        )
+        connection.executemany("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)", rows)
+        connection.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)")
+        connection.executemany(
+            "INSERT INTO nodes_fts(rowid,name,file_path) VALUES (?,?,?)",
+            ((row[0], row[1], row[2]) for row in rows),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,confidence REAL,trust_tier TEXT)"
+        )
+        connection.execute("INSERT INTO edges VALUES (1,1,3,'TESTED_BY',0.99,'CERTIFIED')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = build_query_hybrid_repository(
+        tmp_path,
+        graph,
+        RetrievalState(
+            task_text="find allocator regression tests",
+            intent=RetrievalIntent.VALIDATION_CONTEXT,
+            active_paths=("src/allocator.py",),
+            source_revision="source-1",
+        ),
+        candidate_limit=8,
+    )
+
+    paths = {row.path for row in repository.documents}
+    assert "src/allocator.py" in paths
+    assert "tests/test_allocator.py" in paths
+    assert "src/network.py" not in paths
+    assert any(row.relation == "TESTED_BY" for row in repository.structural_links)

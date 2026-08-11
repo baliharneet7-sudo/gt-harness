@@ -152,6 +152,7 @@ func TestBenchmarkStructuredAdaptersEmitConcreteAnchors(t *testing.T) {
 		{"cmake", "CMakeLists.txt", "function(helper)\nendfunction()\nfunction(target)\n  helper()\nendfunction()\n", "helper"},
 		{"meson", "meson.build", "project('example', 'c')\nexecutable('app', 'main.c')\n", "app"},
 		{"autotools", "configure.ac", "AC_INIT([example], [1.0])\nAC_CONFIG_FILES([Makefile])\n", "example"},
+		{"objective_c", ".m", "@interface Worker : NSObject\n- (void)run;\n@end\n@implementation Worker\n- (void)run { }\n@end\n", "run"},
 	}
 	for _, test := range tests {
 		t.Run(test.language, func(t *testing.T) {

@@ -253,10 +253,9 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
     LanguageCapability(
         "objective_c",
         (".m", ".mm"),
-        structural_index=False,
-        symbol_support=False,
+        symbol_support=True,
         caller_support=False,
-        structural_mode="none",
+        structural_mode="bounded_adapter",
     ),
     LanguageCapability(
         "erlang",

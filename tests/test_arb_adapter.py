@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from gt_engine.hybrid_repository import build_hybrid_repository
 from gt_engine.hybrid_retrieval import RetrievalIntent
+from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
 from scripts.arb_adapter import (
     RedactedSampleError,
     RetrievalProbe,
@@ -117,9 +119,7 @@ def test_source_chunks_use_the_indexed_symbol_range(tmp_path) -> None:
             "CREATE TABLE nodes (id INTEGER PRIMARY KEY,file_path TEXT,name TEXT,"
             "start_line INTEGER,end_line INTEGER,signature TEXT)"
         )
-        connection.execute(
-            "INSERT INTO nodes VALUES (1,'src.py','fn',2,3,'def fn()')"
-        )
+        connection.execute("INSERT INTO nodes VALUES (1,'src.py','fn',2,3,'def fn()')")
         connection.commit()
     finally:
         connection.close()
@@ -157,22 +157,46 @@ def test_run_probe_uses_hybrid_result_and_persists_channel_receipts(
     try:
         connection.execute(
             "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
-            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+            "start_line INTEGER,end_line INTEGER,signature TEXT,language TEXT,is_test BOOLEAN)"
         )
         connection.execute(
             "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
             "type TEXT,confidence REAL,trust_tier TEXT)"
         )
         connection.executemany(
-            "INSERT INTO nodes VALUES (?,?,?,?,?,?)",
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)",
             (
-                (1, "allocate", "src/allocator.py", 1, 2, "def allocate()"),
-                (2, "test_allocate", "tests/test_allocator.py", 1, 2, "def test_allocate()"),
+                (
+                    1,
+                    "allocate",
+                    "src/allocator.py",
+                    1,
+                    2,
+                    "def allocate()",
+                    "python",
+                    0,
+                ),
+                (
+                    2,
+                    "test_allocate",
+                    "tests/test_allocator.py",
+                    1,
+                    2,
+                    "def test_allocate()",
+                    "python",
+                    1,
+                ),
             ),
         )
-        connection.execute(
-            "INSERT INTO edges VALUES (1,1,2,'TESTED_BY',0.99,'CERTIFIED')"
+        connection.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)")
+        connection.executemany(
+            "INSERT INTO nodes_fts(rowid,name,file_path) VALUES (?,?,?)",
+            (
+                (1, "allocate", "src/allocator.py"),
+                (2, "test_allocate", "tests/test_allocator.py"),
+            ),
         )
+        connection.execute("INSERT INTO edges VALUES (1,1,2,'TESTED_BY',0.99,'CERTIFIED')")
         connection.commit()
     finally:
         connection.close()
@@ -190,13 +214,8 @@ def test_run_probe_uses_hybrid_result_and_persists_channel_receipts(
         binary_sha256="binary-hash",
     )
     monkeypatch.setattr(
-        "scripts.arb_adapter.inspect_repository",
-        lambda *args, **kwargs: SimpleNamespace(
-            index=index,
-            substrate_ready=True,
-            status="source_backed",
-            graph_revision="graph-1",
-        ),
+        "scripts.arb_adapter.inspect_index",
+        lambda *args, **kwargs: index,
     )
     probe = RetrievalProbe(
         sample_id="sample-1",
@@ -249,9 +268,7 @@ def test_run_probe_records_the_exact_dense_backend_identity(tmp_path, monkeypatc
             "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
             "start_line INTEGER,end_line INTEGER,signature TEXT)"
         )
-        connection.execute(
-            "INSERT INTO nodes VALUES (1,'target','src.py',1,2,'def target()')"
-        )
+        connection.execute("INSERT INTO nodes VALUES (1,'target','src.py',1,2,'def target()')")
         connection.commit()
     finally:
         connection.close()
@@ -268,13 +285,8 @@ def test_run_probe_records_the_exact_dense_backend_identity(tmp_path, monkeypatc
         binary_sha256="binary",
     )
     monkeypatch.setattr(
-        "scripts.arb_adapter.inspect_repository",
-        lambda *args, **kwargs: SimpleNamespace(
-            index=index,
-            substrate_ready=True,
-            status="source_backed",
-            graph_revision="graph-1",
-        ),
+        "scripts.arb_adapter.inspect_index",
+        lambda *args, **kwargs: index,
     )
 
     result = run_probe(
@@ -291,9 +303,7 @@ def test_run_probe_records_the_exact_dense_backend_identity(tmp_path, monkeypatc
         dense_backend=DenseBackend(),
     )
 
-    dense_channel = next(
-        row for row in result.channel_receipts if row["channel"] == "dense"
-    )
+    dense_channel = next(row for row in result.channel_receipts if row["channel"] == "dense")
     assert dense_channel["backend_identity"] == "snowflake_onnx:model@sha256:abc"
     assert result.dense_backend_receipt == {
         "backend": "snowflake_onnx",
@@ -301,3 +311,64 @@ def test_run_probe_records_the_exact_dense_backend_identity(tmp_path, monkeypatc
         "model_sha256": "abc",
         "provider_calls": 0,
     }
+
+
+def test_cached_probe_does_not_run_the_discarded_repository_inspection(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / "src.py").write_text("def target():\n    pass\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+        )
+        connection.execute("INSERT INTO nodes VALUES (1,'target','src.py',1,2,'def target()')")
+        connection.commit()
+    finally:
+        connection.close()
+    index = IndexBuildReceipt(
+        status=IndexBuildStatus.AVAILABLE,
+        graph_db=str(graph),
+        graph_revision="graph-1",
+        source_revision="source-1",
+        schema_valid=True,
+        source_files=1,
+        indexable_files=1,
+        node_count=1,
+    )
+    repository = build_hybrid_repository(
+        tmp_path,
+        graph,
+        source_revision="source-1",
+    )
+    monkeypatch.setattr(
+        "scripts.arb_adapter.inspect_index",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cached probe rebuilt the index")
+        ),
+    )
+
+    result = run_probe(
+        RetrievalProbe(
+            "s1",
+            "owner/repo",
+            "abc",
+            "Find target in src.py",
+            (),
+            "source-1",
+        ),
+        repo_root=tmp_path,
+        state_dir=tmp_path / "state",
+        index_receipt=index,
+        prepared_repository=repository,
+    )
+
+    assert result.graph_status == "source_backed"
+    assert result.graph_revision == "graph-1"
+    assert result.index_cache_hit is True
+    assert result.phase_latency_ms
+    assert abs(result.query_latency_ms - sum(result.phase_latency_ms.values())) <= max(
+        5.0, result.query_latency_ms * 0.01
+    )

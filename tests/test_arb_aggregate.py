@@ -20,6 +20,15 @@ def test_aggregate_reads_only_shard_files(tmp_path) -> None:
                 "abstention_reason": "index_unavailable",
                 "index_latency_ms": 2,
                 "query_latency_ms": 1,
+                "phase_latency_ms": {
+                    "repository_prepare_ms": 0.25,
+                    "retrieval_ms": 0.75,
+                },
+                "channel_receipts": [{"channel": "dense", "latency_ms": 0.5, "candidate_count": 2}],
+                "dense_backend_receipt": {
+                    "document_cache_hits_delta": 1,
+                    "document_cache_misses_delta": 2,
+                },
             }
         )
         + "\n",
@@ -37,6 +46,15 @@ def test_aggregate_reads_only_shard_files(tmp_path) -> None:
                 "abstention_reason": None,
                 "index_latency_ms": 4,
                 "query_latency_ms": 3,
+                "phase_latency_ms": {
+                    "repository_prepare_ms": 1.0,
+                    "retrieval_ms": 2.0,
+                },
+                "channel_receipts": [{"channel": "dense", "latency_ms": 1.5, "candidate_count": 3}],
+                "dense_backend_receipt": {
+                    "document_cache_hits_delta": 4,
+                    "document_cache_misses_delta": 1,
+                },
             }
         )
         + "\n",
@@ -47,6 +65,11 @@ def test_aggregate_reads_only_shard_files(tmp_path) -> None:
     assert result["complete"] is True
     assert result["delivered_rows"] == 1
     assert result["graph_status_counts"] == {"index_unavailable": 1, "source_backed": 1}
+    assert result["query_latency_ms"]["p50"] == 1.0
+    assert result["query_latency_ms"]["p95"] == 3.0
+    assert result["phase_latency_ms"]["retrieval_ms"]["total"] == 2.75
+    assert result["channel_metrics"]["dense"]["candidate_count"] == 5
+    assert result["dense_cache_deltas"]["document_cache_hits_delta"] == 5
 
 
 def test_aggregate_can_publish_partial_progress(tmp_path) -> None:

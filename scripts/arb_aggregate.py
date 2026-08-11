@@ -5,9 +5,66 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+
+def _distribution(values: list[float]) -> dict[str, float | int]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {
+            "count": 0,
+            "total": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+        }
+
+    def percentile(fraction: float) -> float:
+        index = max(0, min(len(ordered) - 1, math.ceil(fraction * len(ordered)) - 1))
+        return ordered[index]
+
+    return {
+        "count": len(ordered),
+        "total": round(sum(ordered), 6),
+        "mean": round(sum(ordered) / len(ordered), 6),
+        "p50": round(percentile(0.50), 6),
+        "p95": round(percentile(0.95), 6),
+        "p99": round(percentile(0.99), 6),
+    }
+
+
+def _phase_distributions(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int]]:
+    phases: dict[str, list[float]] = {}
+    for row in rows:
+        for name, value in (row.get("phase_latency_ms") or {}).items():
+            phases.setdefault(str(name), []).append(float(value or 0.0))
+    return {name: _distribution(values) for name, values in sorted(phases.items())}
+
+
+def _channel_distributions(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latency: dict[str, list[float]] = {}
+    candidates: Counter[str] = Counter()
+    failures: Counter[str] = Counter()
+    for row in rows:
+        for receipt in row.get("channel_receipts") or ():
+            name = str(receipt.get("channel") or "unknown")
+            latency.setdefault(name, []).append(float(receipt.get("latency_ms") or 0.0))
+            candidates[name] += int(receipt.get("candidate_count") or 0)
+            failures[name] += int(bool(receipt.get("failed")))
+    return {
+        name: {
+            "latency_ms": _distribution(values),
+            "candidate_count": candidates[name],
+            "failure_count": failures[name],
+        }
+        for name, values in sorted(latency.items())
+    }
 
 
 def aggregate(
@@ -61,6 +118,16 @@ def aggregate(
         raise ValueError(f"extra sample ids: {extra_ids[:5]}")
     if expected_ids:
         complete = not missing_ids
+    dense_deltas: Counter[str] = Counter()
+    for row in rows:
+        receipt = row.get("dense_backend_receipt") or {}
+        for key in (
+            "document_cache_hits_delta",
+            "document_cache_misses_delta",
+            "query_cache_hits_delta",
+            "query_cache_misses_delta",
+        ):
+            dense_deltas[key] += int(receipt.get(key) or 0)
     return {
         "schema": "gt.arb.aggregate.v1",
         "rows": len(rows),
@@ -78,14 +145,34 @@ def aggregate(
         "abstention_reason_counts": dict(sorted(reasons.items())),
         "mean_index_latency_ms": round(
             sum(float(row.get("index_latency_ms") or 0.0) for row in rows) / len(rows), 6
-        ) if rows else 0.0,
+        )
+        if rows
+        else 0.0,
         "mean_query_latency_ms": round(
             sum(float(row.get("query_latency_ms") or 0.0) for row in rows) / len(rows), 6
-        ) if rows else 0.0,
-        "index_cache_hits": sum(bool(row.get("index_cache_hit")) for row in rows),
-        "repository_cache_hits": sum(
-            bool(row.get("repository_cache_hit")) for row in rows
+        )
+        if rows
+        else 0.0,
+        "query_latency_ms": _distribution(
+            [float(row.get("query_latency_ms") or 0.0) for row in rows]
         ),
+        "index_latency_ms": _distribution(
+            [float(row.get("index_latency_ms") or 0.0) for row in rows]
+        ),
+        "phase_latency_ms": _phase_distributions(rows),
+        "channel_metrics": _channel_distributions(rows),
+        "repository_document_count": _distribution(
+            [float(row.get("repository_document_count") or 0.0) for row in rows]
+        ),
+        "repository_document_chars": _distribution(
+            [float(row.get("repository_document_chars") or 0.0) for row in rows]
+        ),
+        "repository_structural_link_count": _distribution(
+            [float(row.get("repository_structural_link_count") or 0.0) for row in rows]
+        ),
+        "dense_cache_deltas": dict(sorted(dense_deltas.items())),
+        "index_cache_hits": sum(bool(row.get("index_cache_hit")) for row in rows),
+        "repository_cache_hits": sum(bool(row.get("repository_cache_hit")) for row in rows),
         "rows_detail": rows,
     }
 

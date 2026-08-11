@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -23,7 +24,11 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
+from gt_engine.hybrid_repository import (
+    HybridRepository,
+    build_hybrid_repository,
+    build_query_hybrid_repository,
+)
 from gt_engine.hybrid_retrieval import (
     DenseEmbeddingBackend,
     HybridRetrievalResult,
@@ -34,10 +39,10 @@ from gt_engine.hybrid_retrieval import (
     RetrievalState,
     build_preemptive_frame,
 )
-from gt_engine.indexer import IndexBuildReceipt
-from gt_engine.repository_intelligence import inspect_repository
+from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
+from gt_engine.repository_intelligence import inspect_index
 
-ARB_DENSE_CANDIDATE_LIMIT = 128
+ARB_DENSE_CANDIDATE_LIMIT = 32
 
 
 class RedactedSampleError(ValueError):
@@ -116,6 +121,7 @@ class RetrievalProbeResult:
     index_node_count: int = 0
     index_edge_count: int = 0
     index_binary_sha256: str = ""
+    phase_latency_ms: dict[str, float] | None = None
 
 
 def _walk_keys(value: Any) -> set[str]:
@@ -148,9 +154,7 @@ def normalize_sample(raw: dict[str, Any]) -> RetrievalProbe:
 
     forbidden = sorted(_FORBIDDEN_KEYS & _walk_keys(raw))
     if forbidden:
-        raise RedactedSampleError(
-            "gold/fix leakage in redacted sample: " + ", ".join(forbidden)
-        )
+        raise RedactedSampleError("gold/fix leakage in redacted sample: " + ", ".join(forbidden))
     sample_id = str(raw.get("sample_id") or raw.get("id") or "").strip()
     repository = str(raw.get("repository") or raw.get("repo") or "").strip()
     base_commit = str(raw.get("base_commit") or "").strip()
@@ -182,6 +186,92 @@ def _intent_for_task_type(task_type: str) -> RetrievalIntent:
         "trace2code": RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
         "edit2ripple": RetrievalIntent.CHANGE_IMPACT,
     }.get(str(task_type or "").strip().lower(), RetrievalIntent.OTHER)
+
+
+_TRACE_PATH = re.compile(r"(?<![A-Za-z0-9_])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)(?::\d+)?")
+_TRACE_SYMBOL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\b")
+
+
+def _state_for_probe(probe: RetrievalProbe, intent: RetrievalIntent) -> RetrievalState:
+    """Compile literal workflow evidence into the production retrieval state."""
+
+    lines = tuple(line.strip() for line in probe.instruction.splitlines() if line.strip())
+    instruction_paths = tuple(
+        dict.fromkeys(
+            match.group(1).replace("\\", "/").lstrip("./")
+            for match in _TRACE_PATH.finditer(probe.instruction)
+            if ".." not in Path(match.group(1)).parts
+        )
+    )
+    diagnostic_lines = tuple(
+        line[:500]
+        for line in lines
+        if re.search(
+            r"(?i)(?:\b(?:error|failed?|exception|undefined|traceback)\b|"
+            r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+:\d+)",
+            line,
+        )
+    )[:12]
+    symbols = tuple(
+        dict.fromkeys(
+            match.group(1) for text in diagnostic_lines for match in _TRACE_SYMBOL.finditer(text)
+        )
+    )[:12]
+    proposed_action = next(
+        (
+            line
+            for line in lines[:4]
+            if re.match(
+                r"^(?:python(?:3)?\s+-m\s+pytest|pytest|go\s+test|cargo\s+test|"
+                r"npm\s+test|mvn\s+test|gradle\s+test)\b",
+                line,
+                re.IGNORECASE,
+            )
+        ),
+        None,
+    )
+    return RetrievalState(
+        task_text=probe.instruction,
+        intent=intent,
+        proposed_action=proposed_action,
+        active_paths=tuple(dict.fromkeys((*probe.active_paths, *instruction_paths))),
+        active_symbols=symbols,
+        changed_paths=(probe.active_paths if intent is RetrievalIntent.CHANGE_IMPACT else ()),
+        diagnostics=diagnostic_lines,
+        validation_state=("fail" if intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE else "unknown"),
+        source_revision=probe.source_revision,
+    )
+
+
+def _graph_status(index: IndexBuildReceipt | Any) -> str:
+    status = getattr(index, "status", None)
+    if status is IndexBuildStatus.AVAILABLE or (
+        status is None and bool(getattr(index, "graph_db", None))
+    ):
+        return "source_backed"
+    return str(getattr(status, "value", status) or "index_unavailable")
+
+
+def _dense_receipt_delta(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if after is None:
+        return None
+    result = dict(after)
+    before = before or {}
+    for key in (
+        "document_cache_hits",
+        "document_cache_misses",
+        "query_cache_hits",
+        "query_cache_misses",
+    ):
+        if key in after:
+            result[f"{key}_delta"] = max(
+                0,
+                int(after.get(key) or 0) - int(before.get(key) or 0),
+            )
+    return result
 
 
 def load_redacted_samples(path: str | Path) -> tuple[RetrievalProbe, ...]:
@@ -354,8 +444,7 @@ def _hybrid_rows(
     result: HybridRetrievalResult,
 ) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
     ranked_rows = tuple(
-        _ranked_row(ranked, rank=rank)
-        for rank, ranked in enumerate(result.ranked_files, 1)
+        _ranked_row(ranked, rank=rank) for rank, ranked in enumerate(result.ranked_files, 1)
     )
     rows_by_claim = {str(row["claim_hash"]): row for row in ranked_rows}
     delivered = tuple(
@@ -374,67 +463,81 @@ def run_probe(
     dense_backend: DenseEmbeddingBackend | None = None,
     index_receipt: IndexBuildReceipt | None = None,
     prepared_repository: HybridRepository | None = None,
+    prepared_retriever: HybridRetriever | None = None,
 ) -> RetrievalProbeResult:
     """Run the shared hybrid retrieval path for one checked-out snapshot."""
 
-    started = time.perf_counter()
-    evidence = inspect_repository(
+    index_started = time.perf_counter()
+    index = index_receipt or inspect_index(
         repo_root,
-        probe.instruction,
         state_dir=state_dir,
-        limit=12,
-        source_revision=probe.source_revision,
-        active_paths=probe.active_paths,
-        boundary="arb_retrieval",
-        index_receipt=index_receipt,
-    )
-    indexed_at = time.perf_counter()
-    graph_db = evidence.index.graph_db if evidence.index is not None else None
-    repository = prepared_repository or build_hybrid_repository(
-        repo_root,
-        graph_db or (Path(state_dir) / "graph.unavailable"),
         source_revision=probe.source_revision,
     )
+    index_finished = time.perf_counter()
+    query_started = index_finished
+    phases: dict[str, float] = {}
+
+    phase_started = time.perf_counter()
     intent = _intent_for_task_type(probe.task_type)
-    state = RetrievalState(
-        task_text=probe.instruction,
-        intent=intent,
-        active_paths=probe.active_paths,
-        changed_paths=(
-            probe.active_paths if intent is RetrievalIntent.CHANGE_IMPACT else ()
-        ),
-        validation_state=(
-            "fail" if intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE else "unknown"
-        ),
-        source_revision=probe.source_revision,
-    )
-    retrieval = HybridRetriever(
+    state = _state_for_probe(probe, intent)
+    phases["state_build_ms"] = (time.perf_counter() - phase_started) * 1000.0
+
+    phase_started = time.perf_counter()
+    graph_db = getattr(index, "graph_db", None)
+    if prepared_repository is not None:
+        repository = prepared_repository
+    elif graph_db:
+        repository = build_query_hybrid_repository(
+            repo_root,
+            graph_db,
+            state,
+            candidate_limit=128,
+        )
+    else:
+        repository = build_hybrid_repository(
+            repo_root,
+            Path(state_dir) / "graph.unavailable",
+            source_revision=probe.source_revision,
+        )
+    phases["repository_prepare_ms"] = (time.perf_counter() - phase_started) * 1000.0
+
+    phase_started = time.perf_counter()
+    dense_receipt = getattr(dense_backend, "receipt", None)
+    dense_receipt_before = dict(dense_receipt()) if callable(dense_receipt) else None
+    retriever = prepared_retriever or HybridRetriever(
         repository.documents,
         structural_links=repository.structural_links,
         dense_backend=dense_backend,
         dense_candidate_limit=ARB_DENSE_CANDIDATE_LIMIT,
-    ).retrieve(
+    )
+    retrieval = retriever.retrieve(
         state,
         channel_limit=100,
         top_k=20,
-        selection_limit=3,
+        selection_limit=8,
         token_budget=1_200,
     )
+    phases["retrieval_ms"] = (time.perf_counter() - phase_started) * 1000.0
+    dense_receipt_after = dict(dense_receipt()) if callable(dense_receipt) else None
+
+    phase_started = time.perf_counter()
     ranked_rows, delivered = _hybrid_rows(retrieval)
     preemptive_frame = build_preemptive_frame(
         retrieval,
         state,
         trigger=f"arb_{probe.task_type or 'retrieval'}",
     )
+    phases["frame_pack_ms"] = (time.perf_counter() - phase_started) * 1000.0
     if delivered:
         abstention_reason = None
-    elif evidence.status != "source_backed":
-        abstention_reason = str(evidence.status)
+    elif _graph_status(index) != "source_backed":
+        abstention_reason = _graph_status(index)
     else:
-        abstention_reason = ",".join(
-            (*retrieval.reason_codes, *repository.reason_codes)
-        ) or "no_retrieval_evidence"
-    index = evidence.index
+        abstention_reason = (
+            ",".join((*retrieval.reason_codes, *repository.reason_codes)) or "no_retrieval_evidence"
+        )
+    query_latency_ms = (time.perf_counter() - query_started) * 1000.0
+    phases["receipt_compile_ms"] = max(0.0, query_latency_ms - sum(phases.values()))
     return RetrievalProbeResult(
         sample_id=probe.sample_id,
         repository=probe.repository,
@@ -445,27 +548,19 @@ def run_probe(
         delivered_evidence=delivered,
         abstained=not bool(delivered),
         abstention_reason=abstention_reason,
-        graph_status=str(evidence.status),
-        graph_revision=str(evidence.graph_revision),
+        graph_status=_graph_status(index),
+        graph_revision=str(getattr(index, "graph_revision", "")),
         source_revision=probe.source_revision,
         index_latency_ms=round(
-            0.0
-            if index_receipt is not None
-            else (
-                float(evidence.index.elapsed_ms)
-                if evidence.index is not None
-                else (indexed_at - started) * 1000.0
-            ),
+            0.0 if index_receipt is not None else (index_finished - index_started) * 1000.0,
             6,
         ),
-        query_latency_ms=round((time.perf_counter() - indexed_at) * 1000.0, 6),
+        query_latency_ms=round(query_latency_ms, 6),
         index_cache_hit=index_receipt is not None,
         repository_cache_hit=prepared_repository is not None,
         query_hash=retrieval.query_hash,
         selected_token_count=retrieval.selected_token_count,
-        payload_chars=(
-            len(preemptive_frame.rendered_text) if preemptive_frame is not None else 0
-        ),
+        payload_chars=(len(preemptive_frame.rendered_text) if preemptive_frame is not None else 0),
         payload_tokens=retrieval.selected_token_count,
         channel_receipts=tuple(
             {
@@ -474,11 +569,9 @@ def run_probe(
             }
             for receipt in retrieval.channel_receipts
         ),
-        dense_backend_receipt=(
-            dict(dense_backend.receipt())
-            if dense_backend is not None
-            and callable(getattr(dense_backend, "receipt", None))
-            else None
+        dense_backend_receipt=_dense_receipt_delta(
+            dense_receipt_before,
+            dense_receipt_after,
         ),
         retrieval_reason_codes=retrieval.reason_codes,
         repository_complete=repository.complete,
@@ -486,14 +579,15 @@ def run_probe(
         repository_document_count=len(repository.documents),
         repository_document_chars=repository.document_chars,
         repository_structural_link_count=len(repository.structural_links),
-        index_error_type=str(index.error_type) if index and index.error_type else None,
-        index_error_diagnostic=str(index.error_diagnostic) if index else "",
-        index_source_files=int(index.source_files) if index else 0,
-        index_indexable_files=int(index.indexable_files) if index else 0,
-        index_schema_valid=bool(index.schema_valid) if index else False,
-        index_node_count=int(index.node_count) if index else 0,
-        index_edge_count=int(index.edge_count) if index else 0,
-        index_binary_sha256=str(index.binary_sha256) if index else "",
+        index_error_type=(str(index.error_type) if getattr(index, "error_type", None) else None),
+        index_error_diagnostic=str(getattr(index, "error_diagnostic", "")),
+        index_source_files=int(getattr(index, "source_files", 0)),
+        index_indexable_files=int(getattr(index, "indexable_files", 0)),
+        index_schema_valid=bool(getattr(index, "schema_valid", False)),
+        index_node_count=int(getattr(index, "node_count", 0)),
+        index_edge_count=int(getattr(index, "edge_count", 0)),
+        index_binary_sha256=str(getattr(index, "binary_sha256", "")),
+        phase_latency_ms={key: round(value, 6) for key, value in phases.items()},
     )
 
 
