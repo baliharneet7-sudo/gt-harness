@@ -111,6 +111,8 @@ started; the 89-task run remains blocked.
   `31421610097` has 0/1,051 because the legacy bundle omitted exact controls.
 - [x] Implement opt-in exact control/treatment capture and reject pairs whose
   provider-visible difference is not exactly the compiled GT payload.
+- [x] Make the paid GitHub capture bound explicit (`step_limit=1`) while
+  preserving the normal workflow default of 100 calls.
 - [ ] If unavailable, obtain explicit authorization for bounded SHADOW capture;
   do not run a full paid benchmark merely to collect these points.
 - [ ] Build exact control/treatment provider requests differing only by the
