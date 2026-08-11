@@ -143,7 +143,6 @@ jobs:
       MODEL: ${{ inputs.model }}
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
-      GT_INDEX_BINARY: ${{ runner.temp }}/gt-index
       GT_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
@@ -170,6 +169,7 @@ jobs:
           set -euo pipefail
           go build -tags sqlite_fts5 -o "$RUNNER_TEMP/gt-index" ./cmd/gt-index/
           chmod +x "$RUNNER_TEMP/gt-index"
+          echo "GT_INDEX_BINARY=$RUNNER_TEMP/gt-index" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/gt-index" -h >/dev/null 2>&1 || true
       - name: Install current central runtime
         run: |
