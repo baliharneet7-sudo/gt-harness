@@ -43,6 +43,8 @@ def test_arb_workflow_runs_the_pinned_local_snowflake_onnx_dense_channel() -> No
         "SNOWFLAKE_MODEL_SHA256: "
         "564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971"
     ) in text
+    assert 'GT_DENSE_INTRA_OP_THREADS: "4"' in text
+    assert 'GT_DENSE_INTER_OP_THREADS: "1"' in text
     assert "arb-snowflake-onnx-${{ github.run_id }}" in text
     assert "--dense-model-dir" in text
     assert "--require-dense" in text

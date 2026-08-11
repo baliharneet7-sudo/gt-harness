@@ -50,6 +50,10 @@ env:
   ARB_RELEASE_TAG: arb-v2-pinned-07014c9
   SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
   SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
+  # Codespace benchmark: bounded ONNX parallelism avoids oversubscription on
+  # 32-GB runners while keeping the receipt-recorded backend deterministic.
+  GT_DENSE_INTRA_OP_THREADS: "4"
+  GT_DENSE_INTER_OP_THREADS: "1"
 
 jobs:
   prepare:
