@@ -168,8 +168,20 @@ def graph_query_terms(
     return tuple(ordered[: max(1, int(limit))])
 
 
-def _fts_query(contract: TaskContract) -> str:
-    return " OR ".join(f'"{token}"' for token in graph_query_terms(contract))
+def _fts_query(
+    contract: TaskContract,
+    *,
+    query_terms: tuple[str, ...] | None = None,
+) -> str:
+    terms = graph_query_terms(contract) if query_terms is None else query_terms
+    safe_terms = tuple(
+        dict.fromkeys(
+            str(token or "").replace('"', "").strip().lower()
+            for token in terms
+            if str(token or "").replace("_", "").replace(".", "").isalnum()
+        )
+    )
+    return " OR ".join(f'"{token}"' for token in safe_terms if token)
 
 
 def build_graph_projection(
@@ -179,6 +191,7 @@ def build_graph_projection(
     limit: int = 24,
     active_paths: tuple[str, ...] = (),
     include_tests: bool = False,
+    query_terms: tuple[str, ...] | None = None,
 ) -> GraphProjection:
     """Use lexical, body, relation, closure, property, test, and cochange surfaces."""
     con = _connect(graph_db)
@@ -234,7 +247,7 @@ def build_graph_projection(
                     )
             except sqlite3.Error:
                 pass
-        query = _fts_query(contract)
+        query = _fts_query(contract, query_terms=query_terms)
         if query and "nodes_fts" in tables:
             try:
                 rows = con.execute(

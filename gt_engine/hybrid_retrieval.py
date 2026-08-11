@@ -15,12 +15,40 @@ import re
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+")
 _PATH_SPLIT_RE = re.compile(r"[/\\.\-]+")
+_QUERY_GLUE = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "their",
+        "this",
+        "through",
+        "to",
+        "up",
+        "with",
+    }
+)
 
 
 class RetrievalIntent(StrEnum):
@@ -145,6 +173,57 @@ class RetrievalState:
     @property
     def query_hash(self) -> str:
         return _stable_hash(self.query_text(), self.source_revision)
+
+
+def retrieval_query_terms(
+    state: RetrievalState,
+    *,
+    limit: int = 32,
+) -> tuple[str, ...]:
+    """Compile literal FTS seeds from the same typed runtime state.
+
+    Task-contract extraction intentionally drops common words because it is an
+    obligation parser. Repository retrieval cannot do that: identifiers such
+    as ``default``, ``help``, and ``empty`` are often the only vocabulary
+    shared by an issue and the relevant source or test body. This compiler
+    removes only grammatical glue and controller labels, then ranks terms
+    deterministically by identifier specificity, frequency, length, and first
+    occurrence.
+    """
+
+    maximum = max(0, int(limit))
+    if maximum == 0:
+        return ()
+    raw_tokens = _tokens(state.sparse_query_text())
+    controller_tokens = {
+        *_tokens(state.intent.value),
+        *_tokens(state.validation_state),
+        "unknown",
+    }
+    first_seen: dict[str, int] = {}
+    frequency: Counter[str] = Counter()
+    for position, token in enumerate(raw_tokens):
+        normalized = str(token or "").lower()
+        if (
+            len(normalized) < 2
+            or normalized.isdigit()
+            or normalized in _QUERY_GLUE
+            or normalized in controller_tokens
+        ):
+            continue
+        first_seen.setdefault(normalized, position)
+        frequency[normalized] += 1
+    ranked = sorted(
+        frequency,
+        key=lambda token: (
+            -int("_" in token or "." in token),
+            -frequency[token],
+            -len(token),
+            first_seen[token],
+            token,
+        ),
+    )
+    return tuple(ranked[:maximum])
 
 
 @dataclass(frozen=True)
@@ -776,17 +855,52 @@ def _render_candidate(candidate: RetrievalCandidate) -> str:
         metadata.append(f"symbol={candidate.symbol}")
     if candidate.relation:
         metadata.append(f"relation={candidate.relation}")
-    return f"[GT repository evidence: {'; '.join(metadata)}]\n{candidate.text.strip()}"
+    label = (
+        "GT candidate repository context"
+        if "validation_candidate" in candidate.provenance
+        else "GT repository evidence"
+    )
+    return f"[{label}: {'; '.join(metadata)}]\n{candidate.text.strip()}"
 
 
-def _delivery_supported(ranked: RankedFile) -> bool:
+def _is_test_path(path: str) -> bool:
+    normalized = "/" + str(path or "").lower().replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    return (
+        any(segment in normalized for segment in ("/test/", "/tests/", "/__tests__/"))
+        or basename.startswith("test_")
+        or "_test." in basename
+        or ".test." in basename
+        or ".spec." in basename
+    )
+
+
+def _delivery_support_kind(ranked: RankedFile, state: RetrievalState) -> str | None:
     channels = {channel for channel, _ in ranked.channel_ranks}
     if RetrievalChannel.STRUCTURAL in channels and "structural_certified" in ranked.provenance:
-        return True
+        return "certified"
     if RetrievalChannel.EXACT in channels and (
         "exact_path" in ranked.provenance or "exact_symbol" in ranked.provenance
     ):
-        return True
+        return "certified"
+    if (
+        state.intent is RetrievalIntent.VALIDATION_CONTEXT
+        and _is_test_path(ranked.path)
+        and RetrievalChannel.DENSE in channels
+        and bool(
+            channels
+            & {
+                RetrievalChannel.EXACT,
+                RetrievalChannel.LEXICAL,
+                RetrievalChannel.BM25,
+            }
+        )
+    ):
+        # Dense reranking of a sparse candidate is not independent proof of
+        # relevance. For typed validation retrieval it is nevertheless useful
+        # candidate context when the file is mechanically a test. Mark it as a
+        # candidate so the provider sees no false certification claim.
+        return "validation_candidate"
     # Lexical, BM25, and weak exact-token overlap are correlated sparse
     # signals, not three independent confirmations.
     families: set[str] = set()
@@ -800,7 +914,7 @@ def _delivery_supported(ranked: RankedFile) -> bool:
     # useful for ordering, but cannot independently certify its own input.
     if RetrievalChannel.STRUCTURAL in channels:
         families.add("structural")
-    return len(families) >= 2
+    return "corroborated" if len(families) >= 2 else None
 
 
 def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
@@ -808,16 +922,7 @@ def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
 
     if state.intent is not RetrievalIntent.VALIDATION_CONTEXT:
         return 0
-    normalized = "/" + ranked.path.lower().replace("\\", "/")
-    basename = normalized.rsplit("/", 1)[-1]
-    is_test = (
-        any(segment in normalized for segment in ("/test/", "/tests/", "/__tests__/"))
-        or basename.startswith("test_")
-        or "_test." in basename
-        or ".test." in basename
-        or ".spec." in basename
-    )
-    return 0 if is_test else 1
+    return 0 if _is_test_path(ranked.path) else 1
 
 
 class HybridRetriever:
@@ -883,6 +988,33 @@ class HybridRetriever:
                 )
                 pool: list[str] = []
                 seen: set[str] = set()
+                if state.intent is RetrievalIntent.VALIDATION_CONTEXT:
+                    validation_ranked = sorted(
+                        reciprocal_rank_fusion(
+                            {
+                                key: result
+                                for key, result in channel_results.items()
+                                if key is not RetrievalChannel.DENSE
+                            },
+                            k=self._rrf_k,
+                        ),
+                        key=lambda row: (
+                            _intent_priority(row, state),
+                            -row.fused_score,
+                            row.path.lower(),
+                            row.path,
+                        ),
+                    )
+                    for ranked in validation_ranked:
+                        if not _is_test_path(ranked.path):
+                            continue
+                        key = ranked.path.lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        pool.append(ranked.path)
+                        if len(pool) >= self._dense_candidate_limit:
+                            break
                 width = max(
                     1,
                     self._dense_candidate_limit // max(1, len(non_dense)),
@@ -967,10 +1099,18 @@ class HybridRetriever:
         for ranked in ranked_files:
             if len(selected) >= max(0, selection_limit):
                 break
-            if not _delivery_supported(ranked):
+            support_kind = _delivery_support_kind(ranked, state)
+            if support_kind is None:
                 continue
             saw_supported = True
             candidate = ranked.representative
+            if support_kind == "validation_candidate":
+                candidate = replace(
+                    candidate,
+                    provenance=tuple(
+                        dict.fromkeys((*candidate.provenance, "validation_candidate"))
+                    ),
+                )
             if candidate.claim_hash in exposed:
                 skipped_duplicate = True
                 continue
@@ -1062,4 +1202,5 @@ __all__ = [
     "StructuralRetrievalChannel",
     "build_preemptive_frame",
     "reciprocal_rank_fusion",
+    "retrieval_query_terms",
 ]

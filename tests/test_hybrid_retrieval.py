@@ -18,6 +18,7 @@ from gt_engine.hybrid_retrieval import (
     StructuralRetrievalChannel,
     build_preemptive_frame,
     reciprocal_rank_fusion,
+    retrieval_query_terms,
 )
 
 
@@ -445,6 +446,31 @@ def test_dense_rerank_of_sparse_candidates_is_not_independent_delivery_support()
     assert result.reason_codes == ("insufficient_independent_support",)
 
 
+def test_validation_dense_rerank_can_deliver_honest_test_candidate_context():
+    class CandidateChannel:
+        def __init__(self, channel: RetrievalChannel) -> None:
+            self.channel = channel
+
+        def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
+            del state, limit
+            return (_candidate("tests/test_candidate.py", self.channel, 1),)
+
+    state = _state(intent=RetrievalIntent.VALIDATION_CONTEXT)
+    result = HybridRetriever(
+        (),
+        channels=(
+            CandidateChannel(RetrievalChannel.BM25),
+            CandidateChannel(RetrievalChannel.DENSE),
+        ),
+    ).retrieve(state)
+    frame = build_preemptive_frame(result, state, trigger="validation_context")
+
+    assert [row.path for row in result.selected_context] == ["tests/test_candidate.py"]
+    assert "validation_candidate" in result.selected_context[0].provenance
+    assert frame is not None
+    assert "GT candidate repository context" in frame.rendered_text
+
+
 def test_validation_intent_prioritizes_mechanically_recognized_test_paths():
     documents = (
         RepositoryDocument(
@@ -469,6 +495,25 @@ def test_validation_intent_prioritizes_mechanically_recognized_test_paths():
 
     assert implementation.ranked_files[0].path == "src/help.py"
     assert validation.ranked_files[0].path == "tests/test_help.py"
+
+
+def test_retrieval_query_terms_preserve_literal_workflow_vocabulary():
+    state = RetrievalState(
+        task_text=(
+            "Quote empty default values in help output and add a regression test "
+            "for default_value_t"
+        ),
+        intent=RetrievalIntent.VALIDATION_CONTEXT,
+        source_revision="source-1",
+    )
+
+    terms = retrieval_query_terms(state)
+
+    assert "empty" in terms
+    assert "default" in terms
+    assert "help" in terms
+    assert "default_value_t" in terms
+    assert "validation_context" not in terms
 
 
 def test_stale_revision_candidates_are_rejected_before_fusion():

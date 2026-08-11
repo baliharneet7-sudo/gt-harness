@@ -17,6 +17,7 @@ from gt_engine.hybrid_retrieval import (
     RetrievalIntent,
     RetrievalState,
     StructuralLink,
+    retrieval_query_terms,
 )
 from gt_engine.task_contract import Obligation, TaskContract, extract_task_contract
 
@@ -545,6 +546,7 @@ def build_query_hybrid_repository(
         limit=max(8, int(candidate_limit)),
         active_paths=tuple(dict.fromkeys((*state.active_paths, *state.changed_paths))),
         include_tests=state.intent is RetrievalIntent.VALIDATION_CONTEXT,
+        query_terms=retrieval_query_terms(state),
     )
     ordered_node_ids = tuple(
         dict.fromkeys(fact.node_id for fact in projection.semantic_facts if int(fact.node_id) > 0)

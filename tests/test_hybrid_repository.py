@@ -280,3 +280,73 @@ def test_query_builder_materializes_only_bounded_fts_and_structural_candidates(t
     assert "tests/test_allocator.py" in paths
     assert "src/network.py" not in paths
     assert any(row.relation == "TESTED_BY" for row in repository.structural_links)
+
+
+def test_query_builder_uses_test_body_content_only_for_validation_intent(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "format.py").write_text(
+        "def render_value(value):\n    return value\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_help.py").write_text(
+        "def test_empty_default():\n    assert render_value('') == '\"\"'\n",
+        encoding="utf-8",
+    )
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT,language TEXT,is_test BOOLEAN)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)",
+            (
+                (1, "render_value", "src/format.py", 1, 2, "def render_value(value)", "python", 0),
+                (
+                    2,
+                    "test_empty_default",
+                    "tests/test_help.py",
+                    1,
+                    2,
+                    "def test_empty_default()",
+                    "python",
+                    1,
+                ),
+            ),
+        )
+        connection.execute("CREATE VIRTUAL TABLE symbol_content_fts USING fts5(content)")
+        connection.executemany(
+            "INSERT INTO symbol_content_fts(rowid,content) VALUES (?,?)",
+            (
+                (1, "render value"),
+                (2, "empty default help quote render value"),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    validation = build_query_hybrid_repository(
+        tmp_path,
+        graph,
+        RetrievalState(
+            task_text="quote empty default values in help output",
+            intent=RetrievalIntent.VALIDATION_CONTEXT,
+            source_revision="source-1",
+        ),
+        candidate_limit=8,
+    )
+    implementation = build_query_hybrid_repository(
+        tmp_path,
+        graph,
+        RetrievalState(
+            task_text="quote empty default values in help output",
+            intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+            source_revision="source-1",
+        ),
+        candidate_limit=8,
+    )
+
+    assert "tests/test_help.py" in {row.path for row in validation.documents}
+    assert "tests/test_help.py" not in {row.path for row in implementation.documents}

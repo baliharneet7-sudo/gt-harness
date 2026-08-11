@@ -282,14 +282,15 @@ func (d *DB) PopulateContentFTS(root string) error {
 	}
 	// file_path ordered so all of a file's symbols are contiguous (one open per file);
 	// id as the secondary key keeps the insert order deterministic.
-	// is_test = 0: NEVER index test bodies. Test assertion text + FAIL_TO_PASS names
-	// are the strongest lexical echo of an issue — indexing them would let the content
-	// leg rank a test symbol top and brush the leak invariant. Tests are also never the
-	// edit target, so excluding them is both leak-safe AND correct for localization.
+	// Test bodies are repository source. They are indexed here, while ordinary
+	// localization consumers continue to filter is_test=0. The typed validation-
+	// context path may opt into them to retrieve existing regression tests. This
+	// preserves production localization behavior without making code-to-test
+	// retrieval depend on gold or fix-diff input.
 	rows, err := d.db.Query(
 		`SELECT id, file_path, COALESCE(start_line,0), COALESCE(end_line,0)
 		   FROM nodes
-		  WHERE label IN ('Function','Method') AND COALESCE(is_test,0) = 0
+		  WHERE label IN ('Function','Method')
 		  ORDER BY file_path, id`,
 	)
 	if err != nil {
@@ -415,7 +416,7 @@ func (d *DB) RepopulateContentFTSForFile(root, relpath string) error {
 	rows, err := d.db.Query(
 		`SELECT id, COALESCE(start_line,0), COALESCE(end_line,0)
 		   FROM nodes WHERE file_path = ? AND label IN ('Function','Method')
-		     AND COALESCE(is_test,0) = 0 ORDER BY id`,
+		     ORDER BY id`,
 		rel,
 	)
 	if err != nil {
