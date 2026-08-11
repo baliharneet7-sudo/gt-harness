@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts.arb_aggregate import aggregate
 
 
@@ -55,3 +57,33 @@ def test_aggregate_can_publish_partial_progress(tmp_path) -> None:
     result = aggregate(tmp_path, expected_rows=2, allow_incomplete=True)
     assert result["complete"] is False
     assert result["rows"] == 1
+
+
+def test_aggregate_reports_shard_inventory_and_missing_ids(tmp_path) -> None:
+    (tmp_path / "arb-shard-3.jsonl").write_text(
+        json.dumps({"sample_id": "a", "abstained": True}) + "\n",
+        encoding="utf-8",
+    )
+    expected = tmp_path / "expected.jsonl"
+    expected.write_text(
+        json.dumps({"sample_id": "a"}) + "\n" + json.dumps({"sample_id": "b"}) + "\n",
+        encoding="utf-8",
+    )
+    result = aggregate(tmp_path, expected_rows=2, expected_samples=expected, allow_incomplete=True)
+    assert result["shards_seen"] == 1
+    assert result["shard_rows"] == {"arb-shard-3.jsonl": 1}
+    assert result["missing_sample_ids"] == ["b"]
+
+
+def test_aggregate_rejects_extra_sample_ids_even_for_partial_progress(tmp_path) -> None:
+    (tmp_path / "arb-shard-0.jsonl").write_text(
+        json.dumps({"sample_id": "a", "abstained": True})
+        + "\n"
+        + json.dumps({"sample_id": "unexpected", "abstained": True})
+        + "\n",
+        encoding="utf-8",
+    )
+    expected = tmp_path / "expected.jsonl"
+    expected.write_text(json.dumps({"sample_id": "a"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="extra sample ids"):
+        aggregate(tmp_path, expected_rows=1, expected_samples=expected, allow_incomplete=True)

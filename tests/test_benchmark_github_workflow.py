@@ -25,5 +25,29 @@ def test_arb_workflow_uses_gold_free_shards_and_github_baseline() -> None:
     assert "Install pinned GroundTruth runtime" in text
     assert "fromJSON(needs.prepare.outputs.shards)" in text
     assert "arb-complete-report-${{ github.run_id }}" in text
+    assert "scripts/arb_evaluate.py" in text
+    assert "--expected-samples" in text
+    assert "arb-gt-ranked-evaluation.json" in text
+    assert "arb-gt-delivered-evaluation.json" in text
+    assert "--view ranked" in text
+    assert "--view delivered" in text
+    assert "merge-corpus-manifests" in text
     assert "ln -sfn \"$RUNNER_TEMP/arb-data/corpus\" \"$RUNNER_TEMP/arb-data/data/corpus\"" in text
     assert "run_gt" in text
+
+
+def test_arb_workflow_runs_the_pinned_local_snowflake_onnx_dense_channel() -> None:
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7" in text
+    assert (
+        "SNOWFLAKE_MODEL_SHA256: "
+        "564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971"
+    ) in text
+    assert "arb-snowflake-onnx-${{ github.run_id }}" in text
+    assert "--dense-model-dir" in text
+    assert "--require-dense" in text
+    assert ".[dev,retrieval]" in text
+    assert "inference_api\": False" in text
+    assert "huggingface_hub" not in text
+    assert "hf download" not in text
+    assert '\n          done\n      - name: Run official all-files lexical baselines' not in text

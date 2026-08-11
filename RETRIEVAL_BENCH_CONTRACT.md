@@ -24,18 +24,34 @@ optional given_files/active_paths
 ```
 
 Gold, expected files, patches, fixes, labels, and evaluator fields are rejected
-recursively. The adapter runs the active GT task-contract extraction, graph
-projection, evidence-need construction, and graph ranker. It records both the
-full ranked candidates and the bounded three-item selected evidence set.
+recursively. The adapter constructs the same typed `RetrievalState` and
+`HybridRepository` used by the optional central-runtime retrieval frame. It
+runs exact path/symbol, lexical, BM25, local Snowflake ONNX dense, and GraphDB
+structural channels independently, applies equal RRF (`k=60`) over unique
+files, and records both the top-20 ranked candidates and the bounded
+three-item selected evidence set. It contains no task IDs, gold paths, or
+benchmark-specific ranking weights.
+
+The Snowflake asset is provisioned once by GitHub Actions from immutable model
+revision `7802add0519e4bf94c46ef23552176697c7a1ac7`; model SHA-256 must equal
+`564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971`.
+Inference is local ONNX CPU inference, never an embedding API. Dense absence
+fails the full-hybrid workflow instead of silently reporting graph-only
+results as hybrid.
 
 Index construction latency and post-index retrieval latency are separate.
 Predictions are deterministic JSONL and include graph status, graph/source
-revision, provenance-bearing candidate rows, abstention reason, and timing.
+revision, exact checkout spans/text, per-channel ranks and receipts, dense
+backend identity/digest, abstention reason, selected token/payload size, and
+index/query timing.
 
 ## Evaluation rules
 
 - Positive subsets use official file-level MRR, Recall@K, Precision/F0.5, and
   budgeted BCY metrics.
+- The report also publishes top-3 precision/recall/F1, Any@1/5/10/20,
+  nDCG@5/10/20, task/repository macro views, channel contributions, payload
+  characters/tokens, and latency p50/p95/p99.
 - Natural and counterfactual no-gold rows are evaluated only in the selective
   retrieval track.
 - Candidate universe is the official all-files corpus; task-aware filtering is
@@ -45,6 +61,9 @@ revision, provenance-bearing candidate rows, abstention reason, and timing.
 - Empty certified retrieval is an explicit abstention.
 - ARB results prove retrieval behavior only; they do not prove model reasoning,
   timing in a live agent loop, or task success.
+- Ranked and delivered views are both mandatory. Ranking quality cannot hide
+  an over-strict delivery gate, and permissive delivery cannot hide poor rank
+  order.
 
 ## Gate
 

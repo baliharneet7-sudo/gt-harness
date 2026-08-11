@@ -79,6 +79,19 @@ from gt_engine.context_frontier import (
 )
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
+from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
+from gt_engine.hybrid_retrieval import (
+    HybridRetriever,
+    RetrievalIntent,
+    RetrievalState,
+    build_preemptive_frame,
+)
+from gt_engine.preemptive_retrieval import (
+    PreemptiveFrame,
+    PreemptiveFrameCompilation,
+    PreemptiveFrameStatus,
+    compile_preemptive_frame,
+)
 from gt_engine.preflight import (
     PREFLIGHT_FEATURE_PLACEMENT,
     ActionDisposition,
@@ -123,6 +136,7 @@ from gt_engine.repository_intelligence import (
     graph_gate_failures,
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
+from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
 from gt_engine.trajectory_utilization import SemanticUtilizationTracker
 from gt_engine.uplift_policy import (
@@ -310,6 +324,35 @@ def _inject_runtime_evidence(
     return prepared, len(prepared) - 1, len(evidence)
 
 
+def _retrieval_intent(
+    *,
+    operation: str,
+    validation_state: str,
+    changed_paths: tuple[str, ...],
+    diagnostics: tuple[str, ...],
+) -> RetrievalIntent:
+    """Map observed trajectory state to the relationship needed next."""
+
+    normalized_operation = str(operation or "").strip().lower()
+    normalized_validation = str(validation_state or "").strip().lower()
+    if diagnostics or normalized_validation == "fail":
+        return RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE
+    if normalized_operation == ActionOperation.VALIDATE.value:
+        return RetrievalIntent.VALIDATION_CONTEXT
+    if changed_paths or normalized_operation in {
+        ActionOperation.EDIT.value,
+        ActionOperation.CREATE.value,
+        ActionOperation.DELETE.value,
+    }:
+        return RetrievalIntent.CHANGE_IMPACT
+    if normalized_operation in {
+        ActionOperation.READ.value,
+        ActionOperation.SEARCH.value,
+    }:
+        return RetrievalIntent.MISSING_CONTEXT
+    return RetrievalIntent.IMPLEMENTATION_CONTEXT
+
+
 def _mini_config() -> dict[str, Any]:
     import yaml
 
@@ -340,6 +383,61 @@ class MiniSweCentralAgent(BaseAgent):
     runtime_mode = "treatment"
     SUPPORTS_ATIF = True
 
+    @staticmethod
+    def _prepare_preemptive_retrieval_request(
+        messages: list[dict[str, Any]],
+        *,
+        frame: PreemptiveFrame | None,
+        legacy_payload: str,
+        enabled: bool,
+        current_source_revision: str,
+        current_call: int,
+        budget_chars: int,
+        now_ms: float,
+        deadline_ms: float | None = None,
+        model_query_count: int = 0,
+        agent_action_count: int = 0,
+    ) -> PreemptiveFrameCompilation:
+        """Prepare one additive frame at the host-owned provider boundary.
+
+        Keeping this seam on the central agent proves the transformation is
+        part of Mini-SWE's in-process model loop.  The pure compiler performs
+        no provider call and executes no action; disabled or invalid inputs
+        preserve the supplied provider view exactly.
+        """
+
+        return compile_preemptive_frame(
+            messages,
+            frame=frame,
+            legacy_payload=legacy_payload,
+            enabled=enabled,
+            current_source_revision=current_source_revision,
+            current_call=current_call,
+            budget_chars=budget_chars,
+            now_ms=now_ms,
+            deadline_ms=deadline_ms,
+            model_query_count=model_query_count,
+            agent_action_count=agent_action_count,
+        )
+
+    def _snowflake_dense_backend(self) -> SnowflakeOnnxDenseBackend | None:
+        """Load the explicitly provisioned local model once, never download it."""
+
+        if self._preemptive_dense_backend is not None:
+            return self._preemptive_dense_backend
+        if self._preemptive_dense_backend_error or not self.preemptive_retrieval_model_dir:
+            return None
+        try:
+            self._preemptive_dense_backend = SnowflakeOnnxDenseBackend.from_directory(
+                self.preemptive_retrieval_model_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - optional dense channel fails open
+            self._preemptive_dense_backend_error = (
+                f"{type(exc).__name__}: {exc}"
+            )[:500]
+            return None
+        return self._preemptive_dense_backend
+
     def __init__(
         self,
         logs_dir: Path,
@@ -364,6 +462,11 @@ class MiniSweCentralAgent(BaseAgent):
         enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
         context_frontier_task_budget_chars: int = 6_000,
+        enable_preemptive_retrieval: bool = False,
+        preemptive_retrieval_token_budget: int = 1_200,
+        preemptive_retrieval_task_budget_chars: int = 12_000,
+        preemptive_retrieval_timeout_sec: float = 2.0,
+        preemptive_retrieval_model_dir: str | None = None,
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
         completion_check_timeout_sec: float = 10.0,
@@ -441,6 +544,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_task_start_advisory = False
             enable_feature_guidance = False
             enable_context_frontier = False
+            enable_preemptive_retrieval = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_progress_control = False
@@ -448,6 +552,7 @@ class MiniSweCentralAgent(BaseAgent):
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
             enable_feature_guidance = False
+            enable_preemptive_retrieval = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -455,6 +560,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_lint = False
             enable_task_start_advisory = False
             enable_feature_guidance = False
+            enable_preemptive_retrieval = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -467,6 +573,21 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_feature_guidance = bool(enable_feature_guidance)
         self.enable_context_frontier = bool(enable_context_frontier)
         self.context_frontier_task_budget_chars = max(0, int(context_frontier_task_budget_chars))
+        self.enable_preemptive_retrieval = bool(enable_preemptive_retrieval)
+        self.preemptive_retrieval_token_budget = max(
+            0, int(preemptive_retrieval_token_budget)
+        )
+        self.preemptive_retrieval_task_budget_chars = max(
+            0, int(preemptive_retrieval_task_budget_chars)
+        )
+        self.preemptive_retrieval_timeout_sec = max(
+            0.01, float(preemptive_retrieval_timeout_sec)
+        )
+        self.preemptive_retrieval_model_dir = str(
+            preemptive_retrieval_model_dir or ""
+        ).strip()
+        self._preemptive_dense_backend: SnowflakeOnnxDenseBackend | None = None
+        self._preemptive_dense_backend_error = ""
         self.enable_context_compaction = enable_context_compaction
         self.enable_completion_controller = enable_completion_controller
         self.completion_check_timeout_sec = max(0.05, float(completion_check_timeout_sec))
@@ -1522,6 +1643,21 @@ class MiniSweCentralAgent(BaseAgent):
             max_bundle_bytes=self.replay_capture_max_bundle_bytes,
         )
         provider_evidence = ProviderEvidenceLedger()
+        preemptive_retrieval_decisions: list[dict[str, Any]] = []
+        preemptive_retrieval_deliveries: list[dict[str, Any]] = []
+        delivered_preemptive_claim_ids: set[str] = set()
+        preemptive_retrieval_chars_delivered = 0
+        preemptive_repository: HybridRepository | None = None
+        preemptive_repository_revision = ""
+        preemptive_retriever: HybridRetriever | None = None
+        retrieval_last_command = ""
+        retrieval_last_operation = ""
+        retrieval_active_paths: tuple[str, ...] = ()
+        retrieval_changed_paths: tuple[str, ...] = ()
+        retrieval_diagnostics: tuple[str, ...] = ()
+        retrieval_validation_state = "unknown"
+        retrieval_evidence_action = 0
+        retrieval_eligible_call = 1
 
         if (
             repository_evidence.available
@@ -1653,6 +1789,210 @@ class MiniSweCentralAgent(BaseAgent):
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
+                preemptive_frame: PreemptiveFrame | None = None
+                preemptive_compilation: PreemptiveFrameCompilation | None = None
+                preemptive_decision: dict[str, Any] = {
+                    "call": calls,
+                    "evidence_action": retrieval_evidence_action,
+                    "eligible_call": retrieval_eligible_call,
+                    "source_revision": graph_source_revision,
+                    "enabled": self.enable_preemptive_retrieval,
+                    "status": "disabled",
+                    "reason_codes": ["preemptive_retrieval_disabled"],
+                    "intent": RetrievalIntent.OTHER.value,
+                    "ranked_files": [],
+                    "selected_evidence": [],
+                    "channel_receipts": [],
+                    "latency_ms": 0.0,
+                }
+                if (
+                    self.enable_preemptive_retrieval
+                    and self.integration_mode is GTIntegrationMode.ACTIVE
+                    and self.policy_active
+                    and self.runtime_mode == "treatment"
+                ):
+                    retrieval_started = time.perf_counter()
+                    preemptive_decision["status"] = "abstained"
+                    preemptive_decision["reason_codes"] = []
+                    if (
+                        repository_session is None
+                        or repository_evidence.index is None
+                        or not repository_evidence.index.graph_db
+                        or not repository_evidence.substrate_ready
+                        or repository_session.indexed_source_revision
+                        != graph_source_revision
+                    ):
+                        preemptive_decision["reason_codes"] = [
+                            "repository_substrate_unavailable"
+                        ]
+                    else:
+                        try:
+                            if (
+                                preemptive_repository is None
+                                or preemptive_repository_revision != graph_source_revision
+                            ):
+                                preemptive_repository = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        build_hybrid_repository,
+                                        repository_session.root,
+                                        repository_evidence.index.graph_db,
+                                        source_revision=graph_source_revision,
+                                    ),
+                                    timeout=self.preemptive_retrieval_timeout_sec,
+                                )
+                                preemptive_repository_revision = graph_source_revision
+                                preemptive_retriever = None
+                            if not preemptive_repository.complete:
+                                preemptive_decision["reason_codes"] = list(
+                                    preemptive_repository.reason_codes
+                                    or ("repository_corpus_incomplete",)
+                                )
+                            else:
+                                intent = _retrieval_intent(
+                                    operation=retrieval_last_operation,
+                                    validation_state=retrieval_validation_state,
+                                    changed_paths=retrieval_changed_paths,
+                                    diagnostics=retrieval_diagnostics,
+                                )
+                                preemptive_decision["intent"] = intent.value
+                                state = RetrievalState(
+                                    task_text=instruction,
+                                    intent=intent,
+                                    proposed_action=retrieval_last_command or None,
+                                    active_paths=retrieval_active_paths,
+                                    changed_paths=retrieval_changed_paths,
+                                    diagnostics=retrieval_diagnostics,
+                                    validation_state=retrieval_validation_state,
+                                    source_revision=graph_source_revision,
+                                    previously_exposed_claims=tuple(
+                                        sorted(delivered_preemptive_claim_ids)
+                                    ),
+                                )
+                                if preemptive_retriever is None:
+                                    preemptive_retriever = HybridRetriever(
+                                        preemptive_repository.documents,
+                                        structural_links=(
+                                            preemptive_repository.structural_links
+                                        ),
+                                        dense_backend=self._snowflake_dense_backend(),
+                                    )
+                                retrieval_result = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        preemptive_retriever.retrieve,
+                                        state,
+                                        channel_limit=100,
+                                        top_k=20,
+                                        selection_limit=3,
+                                        token_budget=(
+                                            self.preemptive_retrieval_token_budget
+                                        ),
+                                    ),
+                                    timeout=self.preemptive_retrieval_timeout_sec,
+                                )
+                                preemptive_decision.update(
+                                    {
+                                        "status": (
+                                            "abstained"
+                                            if retrieval_result.abstained
+                                            else "selected"
+                                        ),
+                                        "query_hash": retrieval_result.query_hash,
+                                        "reason_codes": list(
+                                            retrieval_result.reason_codes
+                                        ),
+                                        "ranked_files": [
+                                            {
+                                                "path": row.path,
+                                                "fused_score": row.fused_score,
+                                                "channel_ranks": [
+                                                    {
+                                                        "channel": channel.value,
+                                                        "rank": rank,
+                                                    }
+                                                    for channel, rank in row.channel_ranks
+                                                ],
+                                                "provenance": list(row.provenance),
+                                            }
+                                            for row in retrieval_result.ranked_files
+                                        ],
+                                        "selected_evidence": [
+                                            {
+                                                "path": row.path,
+                                                "start_line": row.start_line,
+                                                "end_line": row.end_line,
+                                                "symbol": row.symbol,
+                                                "relation": row.relation,
+                                                "claim_hash": row.claim_hash,
+                                                "provenance": list(row.provenance),
+                                            }
+                                            for row in retrieval_result.selected_context
+                                        ],
+                                        "selected_token_count": (
+                                            retrieval_result.selected_token_count
+                                        ),
+                                        "channel_receipts": [
+                                            {
+                                                "channel": row.channel.value,
+                                                "candidate_count": row.candidate_count,
+                                                "failed": row.failed,
+                                                "reason": row.reason,
+                                                "latency_ms": row.latency_ms,
+                                                "available": row.available,
+                                                "backend_identity": (
+                                                    row.backend_identity
+                                                ),
+                                            }
+                                            for row in retrieval_result.channel_receipts
+                                        ],
+                                    }
+                                )
+                                frame = build_preemptive_frame(
+                                    retrieval_result,
+                                    state,
+                                    trigger=(
+                                        "task_start"
+                                        if retrieval_evidence_action == 0
+                                        else f"post_{retrieval_last_operation or 'action'}"
+                                    ),
+                                )
+                                remaining_chars = max(
+                                    0,
+                                    self.preemptive_retrieval_task_budget_chars
+                                    - preemptive_retrieval_chars_delivered,
+                                )
+                                if (
+                                    frame is not None
+                                    and len(frame.rendered_text) <= remaining_chars
+                                ):
+                                    preemptive_frame = PreemptiveFrame(
+                                        frame_id=(
+                                            "preemptive-" + frame.query_hash[:20]
+                                        ),
+                                        text=frame.rendered_text,
+                                        source_revision=frame.source_revision,
+                                        eligible_call=retrieval_eligible_call,
+                                        evidence_action=retrieval_evidence_action,
+                                        evidence_ids=frame.claim_hashes,
+                                        claim_ids=frame.claim_hashes,
+                                    )
+                                elif frame is not None:
+                                    preemptive_decision["status"] = "abstained"
+                                    preemptive_decision["reason_codes"] = [
+                                        *preemptive_decision["reason_codes"],
+                                        "task_character_budget",
+                                    ]
+                        except TimeoutError:
+                            preemptive_decision["reason_codes"] = [
+                                "preemptive_retrieval_timeout"
+                            ]
+                        except Exception as exc:  # noqa: BLE001 - fail open
+                            preemptive_decision["reason_codes"] = [
+                                f"preemptive_retrieval_error:{type(exc).__name__}"
+                            ]
+                    preemptive_decision["latency_ms"] = round(
+                        (time.perf_counter() - retrieval_started) * 1_000.0,
+                        6,
+                    )
                 frontier_decision = compile_incremental_frontier(
                     repository_evidence,
                     query_messages,
@@ -1695,12 +2035,14 @@ class MiniSweCentralAgent(BaseAgent):
                 prepared_progress_fact = (
                     pending_progress_fact if progress_payload else None
                 )
-                runtime_parts = [
+                legacy_runtime_parts = [
                     item
                     for item in (frontier_payload, guidance_payload, progress_payload)
                     if item
                 ]
-                runtime_payload = "\n\n".join(runtime_parts)
+                legacy_runtime_payload = "\n\n".join(legacy_runtime_parts)
+                preemptive_payload = ""
+                runtime_payload = legacy_runtime_payload
                 frontier_decisions.append(
                     {
                         "call": calls,
@@ -1711,12 +2053,71 @@ class MiniSweCentralAgent(BaseAgent):
                         **frontier_decision.as_dict(),
                     }
                 )
-                if runtime_payload:
+                if preemptive_frame is not None:
+                    preemptive_input_chars = sum(
+                        len(str(item.get("content") or "")) for item in query_messages
+                    )
+                    preemptive_compilation = self._prepare_preemptive_retrieval_request(
+                        query_messages,
+                        frame=preemptive_frame,
+                        legacy_payload=legacy_runtime_payload,
+                        enabled=True,
+                        current_source_revision=graph_source_revision,
+                        current_call=calls,
+                        budget_chars=(
+                            self.preemptive_retrieval_task_budget_chars
+                            - preemptive_retrieval_chars_delivered
+                            + len(legacy_runtime_payload)
+                        ),
+                        now_ms=time.monotonic() * 1_000.0,
+                        model_query_count=model_query_invocations,
+                        agent_action_count=actions_count,
+                    )
+                    if preemptive_compilation.status is PreemptiveFrameStatus.DELIVERED:
+                        query_messages = [
+                            dict(item) for item in preemptive_compilation.provider_messages
+                        ]
+                        indices = preemptive_compilation.receipt.get(
+                            "provider_message_indices"
+                        ) or []
+                        runtime_message_index = int(indices[0]) if indices else None
+                        preemptive_payload = preemptive_frame.text.strip()
+                        runtime_payload = "\n\n".join(
+                            item
+                            for item in (
+                                preemptive_payload,
+                                legacy_runtime_payload,
+                            )
+                            if item
+                        )
+                        runtime_enrichment_chars = max(
+                            0,
+                            sum(
+                                len(str(item.get("content") or ""))
+                                for item in query_messages
+                            )
+                            - preemptive_input_chars,
+                        )
+                        preemptive_decision["status"] = "prepared"
+                        preemptive_decision["delivery_receipt"] = dict(
+                            preemptive_compilation.receipt
+                        )
+                    else:
+                        preemptive_decision["status"] = "abstained"
+                        preemptive_decision["reason_codes"] = [
+                            *preemptive_decision.get("reason_codes", []),
+                            str(
+                                preemptive_compilation.receipt.get("reason_code")
+                                or "preemptive_frame_abstained"
+                            ),
+                        ]
+                if runtime_message_index is None and legacy_runtime_payload:
                     (
                         query_messages,
                         runtime_message_index,
                         runtime_enrichment_chars,
-                    ) = _inject_runtime_evidence(query_messages, runtime_payload)
+                    ) = _inject_runtime_evidence(query_messages, legacy_runtime_payload)
+                preemptive_retrieval_decisions.append(preemptive_decision)
                 logical_messages_sha256 = hashlib.sha256(
                     _canonical_json(query_messages)
                 ).hexdigest()
@@ -1827,6 +2228,42 @@ class MiniSweCentralAgent(BaseAgent):
                     request_payload_sha256=request_payload_sha256,
                     fact_accounting=provider_view_metrics.fact_accounting,
                 )
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
+                    and preemptive_payload
+                    and preemptive_frame is not None
+                ):
+                    delivered_preemptive_claim_ids.update(preemptive_frame.claim_ids)
+                    preemptive_retrieval_chars_delivered += len(preemptive_payload)
+                    delivery_receipt = dict(
+                        preemptive_compilation.receipt
+                        if preemptive_compilation
+                        else {}
+                    )
+                    delivery_receipt.update(
+                        {
+                            "status": "delivered",
+                            "prepared_call": calls,
+                            "delivered_before_call": calls,
+                            "provider_message_indices": [runtime_message_index],
+                            "request_payload_sha256": request_payload_sha256,
+                            "provider_messages_sha256": provider_messages_sha256,
+                            "first_eligible_request": (
+                                calls == preemptive_frame.eligible_call
+                            ),
+                            "one_step_late": calls != preemptive_frame.eligible_call,
+                            "predictive": (
+                                preemptive_frame.evidence_action > actions_count
+                            ),
+                            "chars": len(preemptive_payload),
+                        }
+                    )
+                    preemptive_retrieval_deliveries.append(delivery_receipt)
+                    preemptive_retrieval_decisions[-1]["status"] = "delivered"
+                    preemptive_retrieval_decisions[-1]["delivery_receipt"] = (
+                        delivery_receipt
+                    )
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
@@ -1945,12 +2382,14 @@ class MiniSweCentralAgent(BaseAgent):
                     "system_user_chars": 0,
                     "assistant_chars": 0,
                     "tool_observation_chars": 0,
+                    "preemptive_retrieval_chars": len(preemptive_payload),
                     "runtime_advisory_chars": len(guidance_payload),
                     "context_frontier_chars": len(frontier_payload),
                     "progress_frame_chars": len(progress_payload),
                     "runtime_separator_chars": max(
                         0,
                         runtime_enrichment_chars
+                        - len(preemptive_payload)
                         - len(guidance_payload)
                         - len(frontier_payload)
                         - len(progress_payload),
@@ -1976,7 +2415,8 @@ class MiniSweCentralAgent(BaseAgent):
                     reason
                     for reason, applies in (
                         ("provider_budget_compaction", provider_view_metrics.compacted),
-                        ("certified_evidence", bool(runtime_enrichment_chars)),
+                        ("preemptive_retrieval", bool(preemptive_payload)),
+                        ("certified_evidence", bool(legacy_runtime_payload)),
                     )
                     if applies
                 ]
@@ -2018,6 +2458,8 @@ class MiniSweCentralAgent(BaseAgent):
                         "request_budget_effective_tokens": request_budget.effective_tokens,
                         "request_budget_remaining_tokens": request_budget.remaining_tokens,
                         "runtime_message_index": runtime_message_index,
+                        "preemptive_retrieval": dict(preemptive_decision),
+                        "preemptive_retrieval_delivered": bool(preemptive_payload),
                         "context_frontier": frontier_decision.as_dict(),
                         "context_frontier_delivered": bool(frontier_payload),
                         "provider_view_compacted": provider_view_metrics.compacted,
@@ -2066,6 +2508,31 @@ class MiniSweCentralAgent(BaseAgent):
                         ProviderEvidenceDisposition.BUDGET
                     ),
                 }.get(frontier_decision.disposition)
+                if preemptive_frame is not None:
+                    provider_evidence.prepare(
+                        surface=ProviderEvidenceSurface.PREEMPTIVE_RETRIEVAL,
+                        fact_ids=preemptive_frame.evidence_ids,
+                        claim_ids=preemptive_frame.claim_ids,
+                        evidence_action=preemptive_frame.evidence_action,
+                        eligible_call=preemptive_frame.eligible_call,
+                        prepared_call=calls,
+                        message_indices=(
+                            (runtime_message_index,)
+                            if preemptive_payload and runtime_message_index is not None
+                            else ()
+                        ),
+                        chars=len(preemptive_payload),
+                        disposition=(
+                            None
+                            if preemptive_payload
+                            else ProviderEvidenceDisposition.CONTROLLER_ONLY
+                        ),
+                        reason_codes=tuple(
+                            str(item)
+                            for item in preemptive_decision.get("reason_codes") or ()
+                        ),
+                        source_revision=graph_source_revision,
+                    )
                 if frontier_decision.candidate_count or frontier_decision.facts:
                     provider_evidence.prepare(
                         surface=ProviderEvidenceSurface.GRAPH_FRONTIER,
@@ -2762,6 +3229,29 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=source_revision,
                         workspace_revision=snapshot.revision,
                     )
+                    retrieval_last_command = command
+                    retrieval_last_operation = proposed.operation.value
+                    retrieval_active_paths = action_graph_paths
+                    retrieval_changed_paths = tuple(model_authored_source_paths)
+                    diagnostic_text = str(output["output"] or "").strip()
+                    if len(diagnostic_text) > 4_000:
+                        diagnostic_text = (
+                            diagnostic_text[:2_000]
+                            + "\n...[bounded diagnostic]...\n"
+                            + diagnostic_text[-2_000:]
+                        )
+                    retrieval_diagnostics = (
+                        (diagnostic_text,)
+                        if diagnostic_text
+                        and (
+                            result.return_code != 0
+                            or classification.status.value == "fail"
+                        )
+                        else ()
+                    )
+                    retrieval_validation_state = classification.status.value
+                    retrieval_evidence_action = actions_count
+                    retrieval_eligible_call = calls + 1
                     # Workspace activity remains useful for stale-batch safety,
                     # but it is not proof of task progress.  A fixture reset,
                     # scratch-file rewrite, or novel command must not clear
@@ -3919,6 +4409,87 @@ class MiniSweCentralAgent(BaseAgent):
                     - len(delivered_frontier_claim_ids)
                 ),
                 "context_frontier_zero_tasks": int(frontier_required and not frontier_deliveries),
+                "preemptive_retrieval_enabled": int(
+                    self.enable_preemptive_retrieval
+                ),
+                "preemptive_retrieval_calls": len(preemptive_retrieval_decisions),
+                "preemptive_retrieval_selected_calls": sum(
+                    row.get("status") in {"selected", "prepared", "delivered"}
+                    for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_abstained_calls": sum(
+                    row.get("status") == "abstained"
+                    for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_deliveries": len(
+                    preemptive_retrieval_deliveries
+                ),
+                "preemptive_retrieval_ranked_files": sum(
+                    len(row.get("ranked_files") or ())
+                    for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_selected_evidence": sum(
+                    len(row.get("selected_evidence") or ())
+                    for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_claims_delivered": len(
+                    delivered_preemptive_claim_ids
+                ),
+                "preemptive_retrieval_duplicate_claims": (
+                    sum(
+                        len(row.get("claim_ids") or ())
+                        for row in preemptive_retrieval_deliveries
+                    )
+                    - len(delivered_preemptive_claim_ids)
+                ),
+                "preemptive_retrieval_chars_added": (
+                    preemptive_retrieval_chars_delivered
+                ),
+                "preemptive_retrieval_task_budget_chars": (
+                    self.preemptive_retrieval_task_budget_chars
+                ),
+                "preemptive_retrieval_budget_remaining_chars": max(
+                    0,
+                    self.preemptive_retrieval_task_budget_chars
+                    - preemptive_retrieval_chars_delivered,
+                ),
+                "preemptive_retrieval_late_deliveries": sum(
+                    bool(row.get("one_step_late"))
+                    for row in preemptive_retrieval_deliveries
+                ),
+                "preemptive_retrieval_predictive_deliveries": sum(
+                    bool(row.get("predictive"))
+                    for row in preemptive_retrieval_deliveries
+                ),
+                "preemptive_retrieval_latency_ms": {
+                    "p50": _percentile(
+                        [
+                            float(row.get("latency_ms") or 0.0)
+                            for row in preemptive_retrieval_decisions
+                        ],
+                        0.50,
+                    ),
+                    "p95": _percentile(
+                        [
+                            float(row.get("latency_ms") or 0.0)
+                            for row in preemptive_retrieval_decisions
+                        ],
+                        0.95,
+                    ),
+                    "p99": _percentile(
+                        [
+                            float(row.get("latency_ms") or 0.0)
+                            for row in preemptive_retrieval_decisions
+                        ],
+                        0.99,
+                    ),
+                },
+                "preemptive_dense_backend_available": int(
+                    self._preemptive_dense_backend is not None
+                ),
+                "preemptive_dense_backend_error": (
+                    self._preemptive_dense_backend_error
+                ),
                 "context_frontier_candidate_languages": len(
                     frontier_candidate_language_counts
                 ),
@@ -4315,6 +4886,10 @@ class MiniSweCentralAgent(BaseAgent):
                     int(row.get("runtime_advisory_chars") or 0)
                     for row in dispatched_model_call_contexts
                 ),
+                "preemptive_retrieval_context_chars_added": sum(
+                    int(row.get("preemptive_retrieval_chars") or 0)
+                    for row in dispatched_model_call_contexts
+                ),
                 "context_state_frame_chars_added": sum(
                     int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
                     for row in dispatched_model_call_contexts
@@ -4325,6 +4900,7 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "total_gt_context_chars_added": sum(
                     int(row.get("runtime_advisory_chars") or 0)
+                    + int(row.get("preemptive_retrieval_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
                     + int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
@@ -4332,6 +4908,7 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "newly_inserted_context_chars": sum(
                     int(row.get("runtime_advisory_chars") or 0)
+                    + int(row.get("preemptive_retrieval_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
                     + int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
@@ -4453,6 +5030,19 @@ class MiniSweCentralAgent(BaseAgent):
                             "replay_capture": self.enable_replay_capture,
                             "lint": self.enable_lint,
                             "repository_intelligence": self.enable_repository_intelligence,
+                            "preemptive_retrieval": self.enable_preemptive_retrieval,
+                            "preemptive_retrieval_token_budget": (
+                                self.preemptive_retrieval_token_budget
+                            ),
+                            "preemptive_retrieval_task_budget_chars": (
+                                self.preemptive_retrieval_task_budget_chars
+                            ),
+                            "preemptive_retrieval_timeout_sec": (
+                                self.preemptive_retrieval_timeout_sec
+                            ),
+                            "preemptive_retrieval_dense_model_configured": bool(
+                                self.preemptive_retrieval_model_dir
+                            ),
                             "graph_required": self.require_graph_ready,
                         },
                         "calls": model_query_invocations,
@@ -4543,6 +5133,23 @@ class MiniSweCentralAgent(BaseAgent):
                                 "failures": list(final_graph_gate_reasons),
                                 "initial_failures": list(graph_gate_reasons),
                             },
+                        },
+                        "preemptive_retrieval": {
+                            "schema": "gt.preemptive_retrieval_runtime.v1",
+                            "enabled": self.enable_preemptive_retrieval,
+                            "decisions": preemptive_retrieval_decisions,
+                            "deliveries": preemptive_retrieval_deliveries,
+                            "delivered_claim_ids": sorted(
+                                delivered_preemptive_claim_ids
+                            ),
+                            "dense_backend": (
+                                self._preemptive_dense_backend.receipt()
+                                if self._preemptive_dense_backend is not None
+                                else None
+                            ),
+                            "dense_backend_error": (
+                                self._preemptive_dense_backend_error
+                            ),
                         },
                         "host_execution": host_execution,
                         "features": feature_summary,

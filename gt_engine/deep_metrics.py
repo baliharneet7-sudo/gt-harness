@@ -78,6 +78,7 @@ DIAGNOSTIC_METRICS = (
     "steps_to_first_check",
     "steps_to_submit",
     "gt_context_chars_added",
+    "preemptive_retrieval_chars_added",
     "context_state_frame_chars_added",
     "context_frontier_chars_added",
     "progress_frame_chars_added",
@@ -664,12 +665,19 @@ def extract_trajectory(
                 "gt_context_chars_added": sum(
                     int(item.get("runtime_advisory_chars") or 0) for item in call_contexts
                 ),
+                "preemptive_retrieval_chars_added": sum(
+                    int(item.get("preemptive_retrieval_chars") or 0)
+                    for item in call_contexts
+                ),
                 "context_state_frame_chars_added": sum(
                     int((item.get("context_compiler") or {}).get("active_state_chars") or 0)
                     for item in call_contexts
                 ),
                 "context_frontier_chars_added": sum(
                     int(item.get("context_frontier_chars") or 0) for item in call_contexts
+                ),
+                "progress_frame_chars_added": sum(
+                    int(item.get("progress_frame_chars") or 0) for item in call_contexts
                 ),
                 "stock_context_chars_from_receipt": sum(
                     int(item.get("stock_context_chars") or 0) for item in call_contexts
@@ -718,6 +726,7 @@ def extract_trajectory(
         )
         for key in (
             "gt_context_chars_added",
+            "preemptive_retrieval_chars_added",
             "context_state_frame_chars_added",
             "progress_frame_chars_added",
             "newly_inserted_context_chars",
@@ -872,6 +881,7 @@ def extract_trajectory(
             )
         result["total_gt_context_chars_added"] = (
             int(result.get("gt_context_chars_added") or 0)
+            + int(result.get("preemptive_retrieval_chars_added") or 0)
             + int(result.get("context_frontier_chars_added") or 0)
             + int(result.get("context_state_frame_chars_added") or 0)
             + int(result.get("progress_frame_chars_added") or 0)

@@ -23,6 +23,14 @@ miniswe = ["mini-swe-agent>=2.2.8,<2.4"]
 # numpy: required by the task-start v1r brief leg (pretask.anchor_select);
 # absent, the brief abstains correct-or-quiet and every other GT path still runs.
 gt = ["groundtruth-mcp==1.0.0", "numpy==2.5.1"]
+# Local dense retrieval used by the ARB workflow and optional runtime seam.
+# The model weights are separately content-addressed; these are inference-only
+# packages and never contact a provider.
+retrieval = [
+  "numpy==2.5.1",
+  "onnxruntime==1.28.0",
+  "tokenizers==0.23.1",
+]
 
 [project.scripts]
 nano = "nano.cli:main"

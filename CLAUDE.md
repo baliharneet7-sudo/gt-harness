@@ -45,6 +45,41 @@ missing capture or failed refresh is fail-closed; GT must never present a
 previous graph as current.  This lifecycle is the contract for all supported
 languages and basename/shebang forms.
 
+### Hybrid retrieval and additive preemptive frame (2026-08-10)
+
+The current shared retriever is `gt_engine.hybrid_retrieval.HybridRetriever`,
+used by both ARB and the optional in-process Mini-SWE provider boundary. It
+runs exact path/symbol, lexical, BM25, local Snowflake Arctic ONNX dense, and
+GraphDB structural channels independently, then applies equal RRF (`k=60`) at
+the unique-file level. It selects at most three complete checkout-backed spans
+within budget. Graph structure includes directed edges, test assertions,
+verified closure, and co-change facts.
+
+Do not equate rank evidence with delivery certification. Active/changed paths
+seed exact and graph retrieval, but generic path tokens are excluded from
+lexical/BM25 and exact token overlap must be repository-distinctive. A separate
+structural certification bit is required; co-change ranks but never certifies
+by itself. Dense/sparse/structural evidence families must be kept distinct.
+Stale, ambiguous, incomplete, failed, or over-budget evidence abstains without
+inventing a fact.
+
+`enable_preemptive_retrieval` defaults false and OFF/AUDIT/certified-shadow
+force it off. Explicit active mode may append one bounded grounded
+`PreemptiveFrame` to the exact next provider request while retaining every
+existing 17-feature/context-frontier payload. It adds no agent action or model
+call and cannot rewrite, suppress, execute, or predict an action. Its receipt
+binds candidate/channel ranks, evidence/action/call timing, provider message
+index and hash, latency, payload size, deduplication, and model identity.
+
+The GitHub ARB path uses local
+`Snowflake/snowflake-arctic-embed-m@7802add0519e4bf94c46ef23552176697c7a1ac7`,
+verifying ONNX SHA-256
+`564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971`.
+It uses the published query prefix, CLS pooling, 512-token limit, L2
+normalization, and no inference/provider API. Ranked and delivered ARB views
+are separate. Until the 427-row run completes, this is implementation proof,
+not evidence of retrieval or coding-agent uplift.
+
 The active benchmark path is a host-owned engine in
 `eval/gt_central_agent.py`, not the legacy installed inline runtime. It owns
 the model/action loop, observes every execution transition, and keeps GT code,

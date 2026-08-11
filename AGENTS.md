@@ -38,6 +38,53 @@ but never advance source revision or enter the graph.  A refresh is complete
 before the next provider request, and a failed/incomplete capture fails closed
 instead of serving stale graph evidence.
 
+## Hybrid retrieval and additive preemptive frame (2026-08-10)
+
+The shared retrieval mechanism is `gt_engine.hybrid_retrieval.HybridRetriever`.
+The ARB adapter and the optional Mini-SWE provider-boundary frame must call this
+same implementation; benchmark-only rankers are forbidden. One typed
+`RetrievalState` is evaluated by five independent channels: exact path/symbol,
+lexical overlap, BM25, the explicitly provisioned local Snowflake Arctic ONNX
+embedder, and certified GraphDB structure. Equal-weight reciprocal-rank fusion
+uses `k=60`, fuses unique files, and then packs at most three complete evidence
+spans inside the configured token budget. Source bytes always come from the
+exact checkout. The structural corpus includes directed edges, resolved test
+assertions, verified closure, pair co-change, and commit-set co-change.
+
+Ranking support is not automatically delivery authority. Raw active/changed
+paths seed exact and structural retrieval but their generic directory and
+extension tokens do not enter lexical/BM25 queries. Exact path-token overlap
+counts only when the token is repository-distinctive. Graph edges,
+assertions, and closure receive a separate `certified` bit only at their
+mechanical trust threshold; co-change can improve rank but can never certify a
+delivery by itself. Dense, sparse, and structural support remain distinct
+families. Missing dense assets, channel errors, stale revisions, incomplete
+source spans, ambiguity, and budget pressure abstain or fail open; they never
+fabricate evidence.
+
+`enable_preemptive_retrieval` is default-false and is forcibly disabled by the
+OFF, AUDIT, and certified-shadow shields. When explicitly active, the engine
+retrieves from task plus current trajectory state before the next provider
+request and may append one bounded `PreemptiveFrame` to the same tool
+observation as existing GT evidence. It does not remove the 17-feature path,
+does not replace the context frontier, does not add a model/tool call, and does
+not execute, rewrite, suppress, or predict an action. Stale, duplicate, late,
+over-budget, timed-out, or ungrounded frames abstain. Every attempt and delivery
+records candidate ranks, channel receipts, evidence hashes, exact provider
+request hash/message index, action/call timing, model identity, latency,
+payload characters/tokens, and no-late/no-predictive status.
+
+The GitHub ARB workflow provisions
+`Snowflake/snowflake-arctic-embed-m` at immutable revision
+`7802add0519e4bf94c46ef23552176697c7a1ac7` and verifies ONNX SHA-256
+`564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971`.
+The model is local inference only: query prefix, CLS pooling, 512-token
+truncation, L2 normalization, zero provider/API calls. ARB must publish both
+the top-20 ranked view and the actually selected/delivered view. Provider-free
+tests and runtime request proof establish implementation integrity only; no
+retrieval or solve-rate improvement may be claimed until the full 427-row ARB
+evaluation completes.
+
 Keep these states distinct in every audit:
 
 1. **Receipt:** a FACT or CAP payload was produced at the correct action and

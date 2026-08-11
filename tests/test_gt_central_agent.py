@@ -489,6 +489,60 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
 
 
 @pytest.mark.asyncio
+async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
+    tmp_path,
+):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "tests").mkdir(parents=True)
+            (root / "pyproject.toml").write_text("[project]\nname='demo'\n")
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+            (root / "tests" / "test_greeter.py").write_text(
+                "from src.greeter import greet\n\ndef test_greet():\n    assert greet('Ada')\n"
+            )
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Change the greet implementation in src/greeter.py and preserve its test contract.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    assert len(model.observed_history) == 1
+    first_request = "\n".join(model.observed_history[0])
+    assert "[GT repository evidence:" in first_request
+    assert "src/greeter.py" in first_request
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    retrieval = receipt["preemptive_retrieval"]
+    assert len(retrieval["deliveries"]) == 1
+    delivery = retrieval["deliveries"][0]
+    assert delivery["first_eligible_request"] is True
+    assert delivery["one_step_late"] is False
+    assert delivery["predictive"] is False
+    assert delivery["request_payload_sha256"] == receipt["model_call_contexts"][0][
+        "request_payload_sha256"
+    ]
+    assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 1
+    assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] >= 1
+    assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
+
+
+@pytest.mark.asyncio
 async def test_context_frontier_exposes_path_only_evidence_without_symbol_leak(tmp_path):
     """A path need receives a location without an unrequested ranked symbol."""
 

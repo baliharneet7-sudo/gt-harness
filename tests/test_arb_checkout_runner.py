@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from scripts.arb_adapter import RetrievalProbe
-from scripts.arb_checkout_runner import _repo_cache_path, group_probes, run_groups
+from scripts.arb_checkout_runner import (
+    _load_dense_backend,
+    _repo_cache_path,
+    group_probes,
+    run_groups,
+)
 
 
 def _probe(sample_id: str, repo: str, commit: str) -> RetrievalProbe:
@@ -44,3 +49,30 @@ def test_shard_selection_is_deterministic() -> None:
     probes = tuple(_probe(str(i), "owner/repo", str(i)) for i in range(5))
     groups = list(group_probes(probes).items())
     assert [key for key, _ in groups[1::2]] == [("owner/repo", "1"), ("owner/repo", "3")]
+
+
+def test_dense_backend_is_optional_but_required_mode_fails_closed(tmp_path) -> None:
+    assert _load_dense_backend(None, require_dense=False) is None
+    with pytest.raises(ValueError, match="dense model directory"):
+        _load_dense_backend(None, require_dense=True)
+
+
+def test_dense_backend_loads_the_pinned_snowflake_onnx_model_once(
+    tmp_path, monkeypatch
+) -> None:
+    sentinel = object()
+    calls: list[object] = []
+
+    def fake_from_directory(path):
+        calls.append(path)
+        return sentinel
+
+    monkeypatch.setattr(
+        "scripts.arb_checkout_runner.SnowflakeOnnxDenseBackend.from_directory",
+        fake_from_directory,
+    )
+
+    loaded = _load_dense_backend(tmp_path, require_dense=True)
+
+    assert loaded is sentinel
+    assert calls == [tmp_path]

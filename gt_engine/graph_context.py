@@ -339,46 +339,123 @@ def build_graph_projection(
             except sqlite3.Error:
                 pass
 
-        seed_ids = sorted(node_ids)[:limit]
+        # Preserve the retrieval order that produced the seed.  Sorting node
+        # identifiers here silently replaced FTS/BM25 relevance order with an
+        # index-allocation accident.
+        seed_ids = list(
+            dict.fromkeys(
+                fact.node_id
+                for fact in semantic_facts
+                if fact.node_id > 0
+                and fact.surface
+                in {
+                    "nodes",
+                    "nodes_fts",
+                    "symbol_content_fts",
+                    "content_passages_fts",
+                }
+            )
+        )[:limit]
         if seed_ids and {"edges", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
                 rows = con.execute(
-                    "SELECT DISTINCT n.id,n.file_path,n.name FROM edges e "
+                    "SELECT DISTINCT n.id,n.file_path,n.name,"
+                    "COALESCE(n.start_line,0),e.type,COALESCE(e.confidence,0.0),"
+                    "COALESCE(e.trust_tier,''),e.source_id,e.target_id,"
+                    "src.file_path,dst.file_path FROM edges e "
                     "JOIN nodes n ON n.id=CASE WHEN e.source_id IN ("
                     + placeholders
                     + ") THEN e.target_id ELSE e.source_id END "
+                    "JOIN nodes src ON src.id=e.source_id "
+                    "JOIN nodes dst ON dst.id=e.target_id "
                     "WHERE (e.source_id IN ("
                     + placeholders
                     + ") OR e.target_id IN ("
                     + placeholders
-                    + ")) AND e.confidence>=0.7 AND COALESCE(n.is_test,0)=0 "
-                    "LIMIT ?",
+                    + ")) AND e.confidence>=0.7 "
+                    "ORDER BY COALESCE(e.confidence,0.0) DESC,e.id LIMIT ?",
                     (*seed_ids, *seed_ids, *seed_ids, limit),
                 ).fetchall()
                 hits["edges"] += len(rows)
-                for node_id, file_path, name in rows:
+                for (
+                    node_id,
+                    file_path,
+                    name,
+                    start_line,
+                    edge_type,
+                    confidence,
+                    _trust_tier,
+                    _source_id,
+                    _target_id,
+                    source_path,
+                    target_path,
+                ) in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            "edges",
+                            int(node_id),
+                            str(file_path).replace("\\", "/"),
+                            str(name),
+                            str(edge_type),
+                            f"{edge_type}:{source_path}->{target_path}",
+                            int(start_line or 0),
+                            float(confidence or 0.0),
+                            revision,
+                            semantic_certainty=float(confidence or 0.0),
+                            retrieval_relevance=0.0,
+                        )
+                    )
             except sqlite3.Error:
                 pass
         if seed_ids and {"closure", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
                 rows = con.execute(
-                    "SELECT DISTINCT n.id,n.file_path,n.name FROM closure c "
-                    "JOIN nodes n ON n.id=c.target_id WHERE c.source_id IN ("
+                    "SELECT DISTINCT n.id,n.file_path,n.name,"
+                    "COALESCE(n.start_line,0),c.depth,"
+                    "COALESCE(c.min_confidence,0.0),c.source_id,c.target_id,"
+                    "src.file_path FROM closure c "
+                    "JOIN nodes n ON n.id=c.target_id "
+                    "JOIN nodes src ON src.id=c.source_id WHERE c.source_id IN ("
                     + placeholders
                     + ") AND c.depth<=2 AND c.min_confidence>=0.5 "
-                    "AND COALESCE(n.is_test,0)=0 LIMIT ?",
+                    "ORDER BY c.depth,COALESCE(c.min_confidence,0.0) DESC,c.target_id LIMIT ?",
                     (*seed_ids, limit),
                 ).fetchall()
                 hits["closure"] += len(rows)
-                for node_id, file_path, name in rows:
+                for (
+                    node_id,
+                    file_path,
+                    name,
+                    start_line,
+                    depth,
+                    confidence,
+                    _source_id,
+                    _target_id,
+                    source_path,
+                ) in rows:
                     node_ids.add(int(node_id))
                     files.add(str(file_path).replace("\\", "/"))
                     symbols.add(str(name))
+                    semantic_facts.append(
+                        GraphSemanticFact(
+                            "closure",
+                            int(node_id),
+                            str(file_path).replace("\\", "/"),
+                            str(name),
+                            "closure",
+                            f"depth={depth}:{source_path}->{file_path}",
+                            int(start_line or 0),
+                            float(confidence or 0.0),
+                            revision,
+                            semantic_certainty=float(confidence or 0.0),
+                            retrieval_relevance=0.0,
+                        )
+                    )
             except sqlite3.Error:
                 pass
         if seed_ids and "properties" in tables:
@@ -426,10 +503,11 @@ def build_graph_projection(
                     ).fetchone()[0]
                 )
                 rows = con.execute(
-                    "SELECT a.target_node_id,n.file_path,n.name,a.kind,"
+                    "SELECT a.test_node_id,n.file_path,n.name,a.kind,"
                     "a.expression,COALESCE(a.line,0),"
-                    "COALESCE(a.resolution_score,0.0) "
-                    "FROM assertions a JOIN nodes n ON n.id=a.target_node_id "
+                    "COALESCE(a.resolution_score,0.0),target.file_path "
+                    "FROM assertions a JOIN nodes n ON n.id=a.test_node_id "
+                    "JOIN nodes target ON target.id=a.target_node_id "
                     "WHERE a.target_node_id IN (" + placeholders + ") "
                     "ORDER BY COALESCE(a.resolution_score,0.0) DESC LIMIT ?",
                     (*seed_ids, limit),
@@ -441,12 +519,12 @@ def build_graph_projection(
                         str(path).replace("\\", "/"),
                         str(symbol),
                         str(kind),
-                        str(value)[:500],
+                        f"{value} [target:{target_path}]"[:500],
                         int(line or 0),
                         float(confidence or 0.0),
                         revision,
                     )
-                    for node_id, path, symbol, kind, value, line, confidence in rows
+                    for node_id, path, symbol, kind, value, line, confidence, target_path in rows
                 )
             except sqlite3.Error:
                 pass
@@ -529,7 +607,7 @@ def build_graph_projection(
             placeholders = ",".join("?" for _ in base_files)
             try:
                 rows = con.execute(
-                    "SELECT file_a,file_b FROM cochanges WHERE file_a IN ("
+                    "SELECT file_a,file_b,count FROM cochanges WHERE file_a IN ("
                     + placeholders
                     + ") OR file_b IN ("
                     + placeholders
@@ -537,8 +615,31 @@ def build_graph_projection(
                     (*base_files, *base_files, limit),
                 ).fetchall()
                 hits["cochanges"] += len(rows)
-                for left, right in rows:
-                    files.update({str(left).replace("\\", "/"), str(right).replace("\\", "/")})
+                seed_files = set(base_files)
+                for left, right, count in rows:
+                    normalized_left = str(left).replace("\\", "/")
+                    normalized_right = str(right).replace("\\", "/")
+                    files.update({normalized_left, normalized_right})
+                    for partner, seed in (
+                        (normalized_right, normalized_left),
+                        (normalized_left, normalized_right),
+                    ):
+                        if seed not in seed_files or partner in seed_files:
+                            continue
+                        semantic_facts.append(
+                            GraphSemanticFact(
+                                "cochanges",
+                                0,
+                                partner,
+                                "",
+                                "cochange",
+                                f"cochange_with:{seed}:count={int(count or 0)}",
+                                confidence=1.0,
+                                revision=revision,
+                                semantic_certainty=1.0,
+                                retrieval_relevance=0.0,
+                            )
+                        )
             except sqlite3.Error:
                 pass
         if files and "cochange_sets" in tables:
@@ -556,12 +657,30 @@ def build_graph_projection(
                 if commits:
                     commit_ph = ",".join("?" for _ in commits)
                     rows = con.execute(
-                        "SELECT DISTINCT file_path FROM cochange_sets "
+                        "SELECT DISTINCT file_path,commit_hash FROM cochange_sets "
                         "WHERE commit_hash IN (" + commit_ph + ") LIMIT ?",
                         (*commits, limit),
                     ).fetchall()
                     hits["cochange_sets"] += len(rows)
-                    files.update(str(row[0]).replace("\\", "/") for row in rows)
+                    for file_path, commit_hash in rows:
+                        normalized = str(file_path).replace("\\", "/")
+                        files.add(normalized)
+                        if normalized in base_files:
+                            continue
+                        semantic_facts.append(
+                            GraphSemanticFact(
+                                "cochange_sets",
+                                0,
+                                normalized,
+                                "",
+                                "cochange_set",
+                                f"commit:{commit_hash}",
+                                confidence=1.0,
+                                revision=revision,
+                                semantic_certainty=1.0,
+                                retrieval_relevance=0.0,
+                            )
+                        )
             except sqlite3.Error:
                 pass
         retrieval_surfaces = {
@@ -587,7 +706,9 @@ def build_graph_projection(
                 prior.retrieval_relevance,
             ):
                 canonical_retrieval[fact.node_id] = fact
-        retained.extend(canonical_retrieval[node_id] for node_id in sorted(canonical_retrieval))
+        # Dict insertion order retains FTS/BM25 order while still collapsing
+        # duplicate node surfaces.  Node ids have no relevance semantics.
+        retained.extend(canonical_retrieval.values())
         return GraphProjection(
             files=frozenset(files),
             symbols=frozenset(symbols),

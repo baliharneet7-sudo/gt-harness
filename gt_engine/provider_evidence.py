@@ -9,6 +9,7 @@ from typing import Any
 
 
 class ProviderEvidenceSurface(StrEnum):
+    PREEMPTIVE_RETRIEVAL = "preemptive_retrieval"
     GRAPH_FRONTIER = "graph_frontier"
     FEATURE_FACT = "feature_fact"
     STATE_FRAME = "state_frame"

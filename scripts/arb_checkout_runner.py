@@ -12,9 +12,25 @@ from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
+from gt_engine.hybrid_retrieval import DenseEmbeddingBackend
+from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from scripts.arb_adapter import RetrievalProbe, load_redacted_samples, run_probe
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _load_dense_backend(
+    model_dir: str | Path | None,
+    *,
+    require_dense: bool,
+) -> DenseEmbeddingBackend | None:
+    """Load one local, pinned dense model for the entire shard process."""
+
+    if model_dir is None or not str(model_dir).strip():
+        if require_dense:
+            raise ValueError("a dense model directory is required")
+        return None
+    return SnowflakeOnnxDenseBackend.from_directory(model_dir)
 
 
 def _run_git(args: list[str], *, cwd: Path | None = None) -> str:
@@ -79,6 +95,8 @@ def run_groups(
     output_dir: str | Path,
     shard_index: int = 0,
     shard_count: int = 1,
+    dense_model_dir: str | Path | None = None,
+    require_dense: bool = False,
 ) -> int:
     if shard_count < 1 or shard_index < 0 or shard_index >= shard_count:
         raise ValueError("shard_index must be in [0, shard_count)")
@@ -86,6 +104,10 @@ def run_groups(
     work = Path(work_dir).resolve()
     state = Path(state_dir).resolve()
     output = Path(output_dir).resolve()
+    dense_backend = _load_dense_backend(
+        dense_model_dir,
+        require_dense=require_dense,
+    )
     count = 0
     groups = list(group_probes(probes).items())
     selected_groups = groups[shard_index::shard_count]
@@ -100,7 +122,12 @@ def run_groups(
             snapshot_output.parent.mkdir(parents=True, exist_ok=True)
             with snapshot_output.open("w", encoding="utf-8", newline="\n") as handle:
                 for probe in rows:
-                    result = run_probe(probe, repo_root=worktree, state_dir=snapshot_state)
+                    result = run_probe(
+                        probe,
+                        repo_root=worktree,
+                        state_dir=snapshot_state,
+                        dense_backend=dense_backend,
+                    )
                     handle.write(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))
                     handle.write("\n")
                     count += 1
@@ -118,6 +145,15 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument(
+        "--dense-model-dir",
+        help="local directory containing pinned Snowflake model.onnx/tokenizer.json",
+    )
+    parser.add_argument(
+        "--require-dense",
+        action="store_true",
+        help="fail instead of silently evaluating a hybrid configuration without dense",
+    )
     args = parser.parse_args()
     probes = load_redacted_samples(args.samples)
     print(run_groups(
@@ -128,6 +164,8 @@ def main() -> int:
         output_dir=args.output_dir,
         shard_index=args.shard_index,
         shard_count=args.shard_count,
+        dense_model_dir=args.dense_model_dir,
+        require_dense=args.require_dense,
     ))
     return 0
 

@@ -170,3 +170,42 @@ adaptive/default validation timeouts, and action timeouts. Strict efficiency
 promotion includes assistant steps and effective actions.
 
 Provider-free implementation evidence is recorded in details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md. The archived ten-task replay passed; this is not live outcome proof. The next permitted paid step is the exact ten-task certified_full/integrated GT-on smoke after the exact pushed commit prints SMOKE_APPROVED. Preflight remains SHADOW. The 89-task run remains blocked until that smoke has no uncensored outcome regression/censor, valid graph substrate, complete provider-evidence accounting, zero invalid/late/predictive/duplicate delivery, and an aggregate common-solved provider/model efficiency win.
+# Hybrid repository evidence path (2026-08-10)
+
+The final retrieval path is shared rather than benchmark-specific:
+
+```text
+task + current trajectory + source revision
+    -> RetrievalState
+    -> exact | lexical | BM25 | local Snowflake ONNX | GraphDB structure
+    -> equal reciprocal-rank fusion (k=60, unique files)
+    -> certification/support gate
+    -> complete-evidence token packing (<=3 spans)
+    -> ranked receipt + optional PreemptiveFrame
+    -> exact next Mini-SWE provider request
+```
+
+`build_hybrid_repository()` adapts the certified GraphDB and exact checkout
+into source-span documents plus directed structural links. Edges, assertions,
+and verified closure can carry explicit delivery certification. Co-change
+pair/set facts are deterministic ranking evidence only. Active and changed
+files are excluded from final results because the model already has those
+anchors; graph links retrieve callers, tests, and ripple files beyond them.
+
+The local dense channel is
+`Snowflake/snowflake-arctic-embed-m` at immutable revision
+`7802add0519e4bf94c46ef23552176697c7a1ac7`; its ONNX bytes are bound to SHA-256
+`564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971`.
+The GitHub prepare job downloads and verifies the asset once, then passes the
+same artifact to all shards. No inference API is used. Query/document roles,
+CLS pooling, truncation, normalization, cache hits/misses, and backend identity
+are receipt-visible.
+
+The additive provider transformation is gated by
+`enable_preemptive_retrieval=false` by default. When active, it runs inside
+`MiniSweCentralAgent` before `model.query()`, preserves legacy feature/frontier
+payloads, and adds no model or tool turn. Exact request hashes prove exposure.
+Invalid timing, revision, duplication, budget, timeout, or substrate state
+abstains. This path is not enabled in paid coding workflows until ARB and an
+authorized runtime smoke pass; therefore the architecture is implemented but
+end-to-end benefit remains unproven.

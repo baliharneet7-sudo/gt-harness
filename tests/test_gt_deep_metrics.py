@@ -152,6 +152,50 @@ def test_receipt_model_invocations_are_authoritative_for_call_efficiency(tmp_pat
     assert metrics["actions_per_api_call"] == 0.4
 
 
+def test_preemptive_retrieval_chars_are_counted_once_in_total_gt_context(tmp_path):
+    path = tmp_path / "preemptive_trajectory.json"
+    receipt_path = tmp_path / "central_receipt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "Submitted"},
+                "messages": [_assistant("pytest -q", prompt=20, completion=2)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "metrics": {},
+                "features": {},
+                "repository_intelligence": {},
+                "model_call_contexts": [
+                    {
+                        "dispatch_status": "dispatched",
+                        "runtime_advisory_chars": 10,
+                        "preemptive_retrieval_chars": 30,
+                        "context_frontier_chars": 20,
+                        "progress_frame_chars": 5,
+                        "context_compiler": {"active_state_chars": 7},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    metrics = extract_trajectory(
+        path,
+        task="preemptive",
+        reward=1,
+        receipt_path=receipt_path,
+    )
+
+    assert metrics["preemptive_retrieval_chars_added"] == 30
+    assert metrics["total_gt_context_chars_added"] == 72
+
+
 def test_extract_trajectory_includes_outer_harbor_timeout_and_wall_time(tmp_path):
     path = tmp_path / "task_trajectory.json"
     path.write_text(

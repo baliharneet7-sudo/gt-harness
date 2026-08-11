@@ -148,6 +148,14 @@ def rank_graph_evidence(
         "init",
     }
     task_paths = set(need.task_paths)
+    relation_surfaces = {
+        "edges",
+        "closure",
+        "assertions",
+        "cochanges",
+        "cochange_sets",
+        "edge_metadata",
+    }
     scored: list[
         tuple[
             tuple[float, ...],
@@ -177,7 +185,14 @@ def rank_graph_evidence(
         links = tuple(item[0] for item in linked)
         strongest_link = max((item[1] for item in linked), default=0.0)
         path_active = fact.file_path.lower() in active
-        if not links and not path_active:
+        relation_material = " ".join(
+            (fact.value, fact.kind, fact.symbol, fact.file_path)
+        ).replace("\\", "/").lower()
+        relation_active = bool(
+            fact.surface in relation_surfaces
+            and any(path and path in relation_material for path in active)
+        )
+        if not links and not path_active and not relation_active:
             continue
         normalized_path = fact.file_path.replace("\\", "/").lower()
         path_task = normalized_path in task_paths
@@ -201,6 +216,12 @@ def rank_graph_evidence(
         if path_active:
             relevance = 1.0
             reasons.append("exact_active_path")
+        elif relation_active and fact.semantic_certainty >= 0.95:
+            relevance = 0.95
+            reasons.append("certified_relation_to_active_path")
+        elif relation_active:
+            relevance = 0.85
+            reasons.append("relation_to_active_path")
         elif path_task:
             relevance = 1.0
             reasons.append("exact_task_resource_path")

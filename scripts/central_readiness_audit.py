@@ -169,6 +169,17 @@ def audit() -> dict[str, bool]:
             and "gt_engine/language_registry.py" in provider_free_workflow
             and "gt_engine/repository_mirror.py" in provider_free_workflow
         ),
+        "provider_free_gate_covers_preemptive_hybrid_retrieval": (
+            "tests/test_preemptive_retrieval_frame.py" in provider_free_workflow
+            and "tests/test_hybrid_retrieval.py" in provider_free_workflow
+            and "tests/test_hybrid_repository.py" in provider_free_workflow
+            and "tests/test_graph_retrieval_repairs.py" in provider_free_workflow
+            and "tests/test_snowflake_onnx_backend.py" in provider_free_workflow
+            and "gt_engine/preemptive_retrieval.py" in provider_free_workflow
+            and "gt_engine/hybrid_retrieval.py" in provider_free_workflow
+            and "gt_engine/hybrid_repository.py" in provider_free_workflow
+            and "gt_engine/snowflake_onnx.py" in provider_free_workflow
+        ),
         "provider_free_gate_covers_pinned_benchmark_languages": (
             "tests/test_gt_language_resolution.py" in provider_free_workflow
             and "tests/test_gt_benchmark_language_contract.py" in provider_free_workflow
@@ -212,6 +223,13 @@ def audit() -> dict[str, bool]:
             0
             <= run_source.find("compile_incremental_frontier(")
             < run_source.find("model.query, query_messages")
+        ),
+        "preemptive_hybrid_retrieval_precedes_model_query": (
+            0
+            <= run_source.find("preemptive_retriever.retrieve,")
+            < run_source.find("model.query, query_messages")
+            and "ProviderEvidenceSurface.PREEMPTIVE_RETRIEVAL" in run_source
+            and "preemptive_retrieval_deliveries" in run_source
         ),
         "action_conditioned_graph_query_precedes_postflight": (
             0
