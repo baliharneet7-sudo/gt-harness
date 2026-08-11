@@ -95,6 +95,12 @@ The ARB checkout runner now emits flushed per-shard, per-group, and per-sample
 progress lines. This makes long-running checkout/index/embedding work visible
 without changing prediction output or evaluation metrics.
 
+The runner also prepares each immutable checkout snapshot once: the certified
+index receipt and hybrid graph/source corpus are reused across rows with the
+same source revision, while query-conditioned retrieval remains per sample.
+This removes repeated preparation work without changing the ranked or delivered
+payloads.
+
 ## What is not proven
 
 - The actual 436 MB Snowflake ONNX artifact has not been executed locally;

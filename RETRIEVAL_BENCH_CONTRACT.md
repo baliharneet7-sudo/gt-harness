@@ -52,6 +52,14 @@ time. These lines are observability only and are not parsed as predictions or
 included in any benchmark metric. A shard artifact remains complete only after
 all of its groups finish.
 
+Preparation is snapshot-scoped: for rows sharing one `(repository,
+base_commit)` and source revision, the graph/index receipt and checkout-backed
+hybrid document/link corpus are built once and reused. Each row still runs its
+own typed intent, query, ranking, selection, and payload compilation. Mixed
+source revisions deliberately bypass this cache. This keeps progress timing
+honest while preventing repeated index/corpus construction from dominating
+the dense retrieval measurement.
+
 ## Evaluation rules
 
 - Positive subsets use official file-level MRR, Recall@K, Precision/F0.5, and
