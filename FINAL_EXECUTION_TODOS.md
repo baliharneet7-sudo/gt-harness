@@ -25,7 +25,7 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
-| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | exact validator; captures `31530343093` (11 valid), `31531620414` (4 valid), `31532480146` (1 valid; one graph-invalid task) | run matched controls through the GitHub workflow |
+| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | captures `31530343093` (11 valid), `31531620414` (4 valid), `31532480146` (1 valid; one graph-invalid task); controls `31534502404`, `31534732127`, `31534734333` | write paired utility report; no more paid capture |
 | GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
@@ -50,10 +50,17 @@ pair for the frozen mechanism. The bounded captures at `31530343093`,
 24 legitimate no-intervention abstentions, with zero corrupt bundles. The last
 slice's merge failed closed for `crack-7z-hash` because its repository graph
 was invalid; that task is excluded from any utility claim. The control replay
-workflow is committed at `2cd0dfd` but GitHub only registers new workflow files
-from the default branch, so it is prepared but not dispatchable until the
-normal merge path is used. No end-to-end outcome claim is made and the 89-task
-run remains blocked.
+workflow is committed at `2cd0dfd` and was registered through the normal merge
+path. No end-to-end outcome claim is made and the 89-task run remains blocked.
+
+The workflow-registration PR was merged as PR #14, and the provider-environment
+fixes were applied on `main` and the evaluation branch. The first two control
+attempts failed before provider dispatch because the raw secret was reintroduced
+after sanitation; those runs are infrastructure failures, not cases. Corrected
+controls `31534502404`, `31534732127`, and `31534734333` completed all 16 cases:
+2 treatment-anchor proxies, 1 control-anchor proxy, 1 equivalent action, and
+12 different-action indeterminate cases. This is an action-level behavioral
+proxy only; it is not model acknowledgement or causal success evidence.
 
 ## Work plan mapped to the GT objective
 
