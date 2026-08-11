@@ -35,6 +35,11 @@ on:
         required: true
         default: false
         type: boolean
+      run_gt:
+        description: Run the production GT retrieval shards
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -137,6 +142,7 @@ jobs:
           retention-days: 14
 
   gt:
+    if: ${{ inputs.run_gt == true }}
     needs: prepare
     strategy:
       fail-fast: false
@@ -289,6 +295,14 @@ jobs:
             python scripts/arb_extract.py "$archive" "$RUNNER_TEMP/arb-data" \
               --sha256 "$archive.sha256"
             echo "extracted $release"
+          # ARB manifests store chunk paths relative to the dataset root
+          # (data/corpus/...).  The archives unpack corpus/ at the temp root;
+          # expose the canonical data/corpus path before invoking the official
+          # evaluator so its baseline is not a silent zero-corpus run.
+          mkdir -p "$RUNNER_TEMP/arb-data/data"
+          ln -sfn "$RUNNER_TEMP/arb-data/corpus" "$RUNNER_TEMP/arb-data/data/corpus"
+          ln -sfn "$RUNNER_TEMP/arb-data/benchmark" "$RUNNER_TEMP/arb-data/data/benchmark"
+          ln -sfn "$RUNNER_TEMP/arb-data/reports" "$RUNNER_TEMP/arb-data/data/reports"
           done
       - name: Run official all-files lexical baselines on GitHub
         run: |
@@ -298,12 +312,12 @@ jobs:
             releases="v2_code2test v2_comment2context v2_trace2code v2_edit2ripple v2_abstention"
           fi
           for release in $releases; do
-            arb eval-baseline \
-              --derived "$RUNNER_TEMP/arb-data/benchmark/$release" \
-              --corpus "$RUNNER_TEMP/arb-data/corpus/$release" \
+            (cd "$RUNNER_TEMP/arb-data" && arb eval-baseline \
+              --derived "benchmark/$release" \
+              --corpus "corpus/$release" \
               --ranker lexical --candidate-filter all_files --no-keep-list \
               --out "$RUNNER_TEMP/arb-baselines/${release}.summary.json" \
-              --details "$RUNNER_TEMP/arb-baselines/${release}.details.jsonl"
+              --details "$RUNNER_TEMP/arb-baselines/${release}.details.jsonl")
           done
       - name: Upload official baseline artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

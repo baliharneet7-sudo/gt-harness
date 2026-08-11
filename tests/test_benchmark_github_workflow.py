@@ -25,3 +25,5 @@ def test_arb_workflow_uses_gold_free_shards_and_github_baseline() -> None:
     assert "Install pinned GroundTruth runtime" in text
     assert "fromJSON(needs.prepare.outputs.shards)" in text
     assert "arb-complete-report-${{ github.run_id }}" in text
+    assert "ln -sfn \"$RUNNER_TEMP/arb-data/corpus\" \"$RUNNER_TEMP/arb-data/data/corpus\"" in text
+    assert "run_gt" in text
