@@ -25,8 +25,8 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
-| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | captures `31530343093` (11 valid), `31531620414` (4 valid), `31532480146` (1 valid; one graph-invalid task); controls `31534502404`, `31534732127`, `31534734333` | write paired utility report; no more paid capture |
-| GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
+| GT-FINAL-009 | complete | Bounded paired decision-point utility evaluation and report complete | `DECISION_POINT_UTILITY_RESULTS.md`; captures `31530343093`, `31531620414`, `31532480146`; controls `31534502404`, `31534732127`, `31534734333` | outcome smoke gate |
+| GT-FINAL-010 | blocked | GT and harness frozen | outcome smoke `31535815764` vs `31535955624` regressed 7/10 vs 8/10; common-solved tokens +9.43% | adjudicate discordant trajectories before any freeze |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
 | GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
@@ -61,6 +61,18 @@ controls `31534502404`, `31534732127`, and `31534734333` completed all 16 cases:
 2 treatment-anchor proxies, 1 control-anchor proxy, 1 equivalent action, and
 12 different-action indeterminate cases. This is an action-level behavioral
 proxy only; it is not model acknowledgement or causal success evidence.
+
+The authorized matched outcome smoke is complete: treatment
+`certified_context` run `31535815764` versus central GT-off `31535955624`, both
+at commit `9ca48b9` and the frozen ten-task repair mix. Treatment resolved 7/10
+versus 8/10 baseline, gaining `regex-chess` but losing `qemu-alpine-ssh` and
+`sanitize-git-repo`. Total tokens fell 1.22%, but common-solved tokens rose
+9.43%, model calls/steps rose 5.62%, and effective task actions rose 14.59%.
+The deterministic treatment audit passed with zero timing/grounding failures;
+model causality remains unidentifiable. See
+`SMOKE_OUTCOME_CONTRACT_20260811.md` and `SMOKE_OUTCOME_RESULTS_20260811.md`.
+The 89-task run is still blocked; next action is trajectory adjudication, not
+another paid benchmark.
 
 ## Work plan mapped to the GT objective
 
