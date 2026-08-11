@@ -172,7 +172,28 @@ def test_dense_channel_can_use_a_bounded_cascade_candidate_pool():
 
     assert [row.path for row in result] == ["src/0.py", "src/2.py"]
     assert len(backend.documents) == 2
-    assert "candidate_pool=2/4" in channel.availability_reason
+    assert "candidate_pool=2/4_docs/2_paths" in channel.availability_reason
+
+
+def test_dense_candidate_limit_bounds_spans_when_a_path_has_many_documents():
+    class CapturingBackend(FakeDenseBackend):
+        documents: tuple[str, ...] = ()
+
+        def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+            self.documents = texts
+            return super().embed_documents(texts)
+
+    backend = CapturingBackend()
+    documents = tuple(
+        RepositoryDocument(f"src/{index // 4}.py", "releases reserved storage after use")
+        for index in range(12)
+    )
+    channel = DenseRetrievalChannel(documents, backend)
+    channel.set_candidate_paths(("src/0.py", "src/1.py", "src/2.py"), document_limit=5)
+
+    channel.retrieve(_state(), limit=10)
+
+    assert len(backend.documents) == 5
 
 
 def test_dense_backend_receives_path_symbol_and_exact_source_text():

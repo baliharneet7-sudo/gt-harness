@@ -504,15 +504,32 @@ class DenseRetrievalChannel:
         self._documents = tuple(documents)
         self._backend = backend
         self._candidate_paths: frozenset[str] | None = None
+        self._candidate_path_order: tuple[str, ...] = ()
+        self._candidate_document_limit: int | None = None
         self.availability_reason = ""
 
-    def set_candidate_paths(self, paths: Sequence[str] | None) -> None:
+    def set_candidate_paths(
+        self,
+        paths: Sequence[str] | None,
+        *,
+        document_limit: int | None = None,
+    ) -> None:
         """Restrict this pass to a deterministic cascade candidate pool."""
 
         self._candidate_paths = (
             None
             if paths is None
             else frozenset(str(path).strip().lower() for path in paths if str(path).strip())
+        )
+        self._candidate_path_order = (
+            ()
+            if paths is None
+            else tuple(
+                dict.fromkeys(str(path).strip().lower() for path in paths if str(path).strip())
+            )
+        )
+        self._candidate_document_limit = (
+            None if document_limit is None else max(1, int(document_limit))
         )
 
     @property
@@ -532,22 +549,41 @@ class DenseRetrievalChannel:
         if self._backend is None:
             self.availability_reason = "backend_unavailable"
             return ()
-        selected_documents = (
-            self._documents
-            if self._candidate_paths is None
-            else tuple(
-                document
-                for document in self._documents
-                if document.path.lower() in self._candidate_paths
+        if self._candidate_paths is None:
+            selected_documents = self._documents
+        else:
+            documents_by_path: dict[str, list[RepositoryDocument]] = {}
+            for document in self._documents:
+                key = document.path.lower()
+                if key in self._candidate_paths:
+                    documents_by_path.setdefault(key, []).append(document)
+            selected: list[RepositoryDocument] = []
+            # Preserve coverage across files before taking additional spans
+            # from any one file.  This is deterministic and bounds ONNX work
+            # by documents, not merely by path names.
+            limit = self._candidate_document_limit or sum(
+                len(rows) for rows in documents_by_path.values()
             )
-        )
+            for offset in range(limit):
+                for path in self._candidate_path_order:
+                    rows = documents_by_path.get(path, ())
+                    if offset < len(rows):
+                        selected.append(rows[offset])
+                        if len(selected) >= limit:
+                            break
+                if len(selected) >= limit:
+                    break
+            selected_documents = tuple(selected)
         if not selected_documents:
             self.availability_reason = "candidate_pool_empty"
             return ()
         self.availability_reason = (
             ""
             if self._candidate_paths is None
-            else f"candidate_pool={len(selected_documents)}/{len(self._documents)}"
+            else (
+                f"candidate_pool={len(selected_documents)}/{len(self._documents)}"
+                f"_docs/{len(self._candidate_paths)}_paths"
+            )
         )
         query = tuple(float(item) for item in self._backend.embed_query(state.query_text()))
         document_texts = tuple(
@@ -824,7 +860,10 @@ class HybridRetriever:
                                 break
                     if len(pool) >= self._dense_candidate_limit:
                         break
-                channel.set_candidate_paths(pool)
+                channel.set_candidate_paths(
+                    pool,
+                    document_limit=self._dense_candidate_limit,
+                )
             channel_started = time.perf_counter()
             failed = False
             reason = ""
