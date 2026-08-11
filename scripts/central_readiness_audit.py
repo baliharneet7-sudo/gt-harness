@@ -52,6 +52,24 @@ def _vendored_runtime_surface_available() -> bool:
         return False
 
 
+def _has_explicit_policy_arms(workflow: str) -> bool:
+    """Accept YAML-safe quoting without weakening the exact arm contract."""
+
+    choices = (
+        'options: ["off", audit, certified_context, certified_controllers, certified_full]',
+        "options: [off, audit, certified_context, certified_controllers, certified_full]",
+    )
+    return (
+        any(line in workflow for line in choices)
+        and "default: audit" in workflow
+        and "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off"
+        in workflow
+        and "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow"
+        in workflow
+        and "--ak policy_mode=certified_active" in workflow
+    )
+
+
 def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
     run_source = inspect.getsource(MiniSweCentralAgent.run)
@@ -105,15 +123,7 @@ def audit() -> dict[str, bool]:
             for item in workflows
         ),
         "staged_policy_arms_are_explicit_and_default_safe": all(
-            "options: [off, audit, certified_context, certified_controllers, certified_full]"
-            in item
-            and "default: audit" in item
-            and "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off"
-            in item
-            and "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow"
-            in item
-            and "--ak policy_mode=certified_active" in item
-            for item in workflows
+            _has_explicit_policy_arms(item) for item in workflows
         ),
         "one_switch_off_is_provider_neutral": (
             GTIntegrationMode.OFF.value == "off"

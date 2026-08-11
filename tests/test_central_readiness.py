@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from scripts.central_readiness_audit import audit
+from scripts.central_readiness_audit import _has_explicit_policy_arms, audit
+
+
+def test_policy_arm_audit_accepts_yaml_safe_quoted_off_choice():
+    workflow = """
+options: ["off", audit, certified_context, certified_controllers, certified_full]
+default: audit
+--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
+--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
+--ak policy_mode=certified_active
+"""
+
+    assert _has_explicit_policy_arms(workflow) is True
 
 
 def test_readiness_rejects_an_incomplete_groundtruth_runtime_surface():

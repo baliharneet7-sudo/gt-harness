@@ -84,6 +84,13 @@ evidence.
 - The larger provider-free local suite has exactly six failures, all flowing
   from the stale checked-in Windows `gt-index.exe` missing `objective_c`.
   Changed runtime/audit/workflow tests do not fail.
+- First exact GitHub attempt `31544619116` passed the current-source graph,
+  real ONNX asset, language contract, and complete central runtime suite. It
+  then failed the structural readiness audit because that audit accepted only
+  the old unquoted YAML spelling `off`, while the dispatch workflow correctly
+  uses YAML-safe `"off"`. The audit now accepts either spelling while still
+  requiring the exact five arms, default, and mode arguments; a focused RED/GREEN
+  test covers the quoted form.
 
 ## Remaining TODOs
 
