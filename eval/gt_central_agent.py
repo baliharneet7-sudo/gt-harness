@@ -258,13 +258,18 @@ def _provider_request_receipt(
         prepared = [
             {key: value for key, value in item.items() if key != "extra"} for item in messages
         ]
+    # Mini-SWE's LitellmModel passes the built-in Bash schema directly to
+    # litellm rather than exposing a ``model.tools`` attribute.  The hash must
+    # include the actual provider tool schema; otherwise control/treatment
+    # requests are not reproducible even when their messages match.
+    provider_tools = getattr(model, "tools", None) or [BASH_TOOL]
     envelope = {
         "model": str(
             getattr(getattr(model, "config", None), "model_name", "")
             or getattr(model, "model_name", "")
         ),
         "model_kwargs": getattr(model, "model_kwargs", {}) or {},
-        "tools": getattr(model, "tools", None),
+        "tools": provider_tools,
         "messages": prepared,
     }
     messages_bytes = _canonical_json(prepared)
@@ -2501,7 +2506,7 @@ class MiniSweCentralAgent(BaseAgent):
                     provider_messages=provider_messages,
                     control_provider_messages=control_provider_messages,
                     intervention=intervention_capture,
-                    provider_tools=getattr(model, "tools", None),
+                    provider_tools=getattr(model, "tools", None) or [BASH_TOOL],
                     request_payload_sha256=request_payload_sha256,
                     provider_messages_sha256=provider_messages_sha256,
                     model_name=str(self.model_name or ""),

@@ -113,6 +113,9 @@ started; the 89-task run remains blocked.
   provider-visible difference is not exactly the compiled GT payload.
 - [x] Make the paid GitHub capture bound explicit (`step_limit=1`) while
   preserving the normal workflow default of 100 calls.
+- [x] Reject and cancel capture run `31529376771`: its first artifacts exposed
+  that Mini-SWE's built-in Bash schema was not included in the pair receipt;
+  no result from that run is evidence.
 - [ ] If unavailable, obtain explicit authorization for bounded SHADOW capture;
   do not run a full paid benchmark merely to collect these points.
 - [ ] Build exact control/treatment provider requests differing only by the
