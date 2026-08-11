@@ -16,7 +16,6 @@ jobs:
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
-      GT_TEST_SNOWFLAKE_MODEL_DIR: ${{ runner.temp }}/snowflake-arctic-embed-m
       SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
       SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
     steps:
@@ -53,15 +52,17 @@ jobs:
       - name: Provision pinned Snowflake ONNX runtime asset
         run: |
           set -euo pipefail
-          mkdir -p "$GT_TEST_SNOWFLAKE_MODEL_DIR"
+          model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
+          mkdir -p "$model_dir"
           gh release download gt-retrieval-runtime-v1 \
             --repo harneet2512/gt-harness \
             --pattern model.onnx --pattern tokenizer.json --pattern manifest.json \
-            --dir "$GT_TEST_SNOWFLAKE_MODEL_DIR"
-          echo "$SNOWFLAKE_MODEL_SHA256  $GT_TEST_SNOWFLAKE_MODEL_DIR/model.onnx" \
+            --dir "$model_dir"
+          echo "$SNOWFLAKE_MODEL_SHA256  $model_dir/model.onnx" \
             | sha256sum -c -
-          echo "$SNOWFLAKE_TOKENIZER_SHA256  $GT_TEST_SNOWFLAKE_MODEL_DIR/tokenizer.json" \
+          echo "$SNOWFLAKE_TOKENIZER_SHA256  $model_dir/tokenizer.json" \
             | sha256sum -c -
+          echo "GT_TEST_SNOWFLAKE_MODEL_DIR=$model_dir" >> "$GITHUB_ENV"
 
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py

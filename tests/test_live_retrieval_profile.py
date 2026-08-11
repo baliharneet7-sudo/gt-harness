@@ -62,3 +62,14 @@ def test_paid_context_arms_enable_the_pinned_live_retriever():
             '--ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"'
         ) == 2
         assert "--ak enable_preemptive_retrieval=false" in workflow
+
+
+def test_provider_free_workflow_sets_runner_temp_at_step_runtime():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "central_provider_free.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "${{ runner.temp }}" not in workflow
+    assert 'model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"' in workflow
+    assert 'echo "GT_TEST_SNOWFLAKE_MODEL_DIR=$model_dir" >> "$GITHUB_ENV"' in workflow
