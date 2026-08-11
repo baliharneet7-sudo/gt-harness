@@ -45,6 +45,13 @@ revision, exact checkout spans/text, per-channel ranks and receipts, dense
 backend identity/digest, abstention reason, selected token/payload size, and
 index/query timing.
 
+The checkout runner also emits flushed `[arb-progress]` lines while a shard is
+running: shard/group assignment, repository and commit, sample ID, completed
+row count, graph status, delivered-evidence count, query latency, and elapsed
+time. These lines are observability only and are not parsed as predictions or
+included in any benchmark metric. A shard artifact remains complete only after
+all of its groups finish.
+
 ## Evaluation rules
 
 - Positive subsets use official file-level MRR, Recall@K, Precision/F0.5, and

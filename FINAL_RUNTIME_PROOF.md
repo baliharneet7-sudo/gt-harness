@@ -91,6 +91,10 @@ intelligence witness pass after the repair.
   grounding, consumption, context-accounting, substrate, frontier, and
   non-blocking markers present.
 
+The ARB checkout runner now emits flushed per-shard, per-group, and per-sample
+progress lines. This makes long-running checkout/index/embedding work visible
+without changing prediction output or evaluation metrics.
+
 ## What is not proven
 
 - The actual 436 MB Snowflake ONNX artifact has not been executed locally;

@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -111,7 +112,22 @@ def run_groups(
     count = 0
     groups = list(group_probes(probes).items())
     selected_groups = groups[shard_index::shard_count]
-    for (repository, base_commit), rows in selected_groups:
+    total_groups = len(selected_groups)
+    started = time.perf_counter()
+    print(
+        f"[arb-progress] shard={shard_index} groups={total_groups} rows="
+        f"{sum(len(rows) for _, rows in selected_groups)} status=started",
+        flush=True,
+    )
+    for group_number, ((repository, base_commit), rows) in enumerate(
+        selected_groups, 1
+    ):
+        group_started = time.perf_counter()
+        print(
+            f"[arb-progress] shard={shard_index} group={group_number}/{total_groups} "
+            f"repository={repository} commit={base_commit} rows={len(rows)} status=started",
+            flush=True,
+        )
         bare = ensure_bare_cache(cache, repository, base_commit)
         slug = repository.replace("/", "__")
         worktree = work / f"{slug}--{base_commit}"
@@ -131,8 +147,26 @@ def run_groups(
                     handle.write(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))
                     handle.write("\n")
                     count += 1
+                    print(
+                        f"[arb-progress] shard={shard_index} group={group_number}/{total_groups} "
+                        f"sample={probe.sample_id} rows_done={count} "
+                        f"graph={result.graph_status} selected={len(result.delivered_evidence)} "
+                        f"query_ms={result.query_latency_ms:.1f}",
+                        flush=True,
+                    )
         finally:
             _run_git(["worktree", "remove", "--force", str(worktree)], cwd=bare)
+        print(
+            f"[arb-progress] shard={shard_index} group={group_number}/{total_groups} "
+            f"repository={repository} rows_done={count} "
+            f"elapsed_s={time.perf_counter() - group_started:.1f} status=complete",
+            flush=True,
+        )
+    print(
+        f"[arb-progress] shard={shard_index} rows_done={count} "
+        f"elapsed_s={time.perf_counter() - started:.1f} status=complete",
+        flush=True,
+    )
     return count
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.arb_adapter import RetrievalProbe
+from scripts.arb_adapter import RetrievalProbe, RetrievalProbeResult
 from scripts.arb_checkout_runner import (
     _load_dense_backend,
     _repo_cache_path,
@@ -76,3 +76,53 @@ def test_dense_backend_loads_the_pinned_snowflake_onnx_model_once(
 
     assert loaded is sentinel
     assert calls == [tmp_path]
+
+
+def test_runner_emits_flushed_group_and_sample_progress(tmp_path, monkeypatch, capsys):
+    probes = (
+        _probe("a", "owner/repo", "1"),
+        _probe("b", "owner/repo", "1"),
+    )
+
+    monkeypatch.setattr(
+        "scripts.arb_checkout_runner.ensure_bare_cache",
+        lambda cache, repository, base_commit: tmp_path / "bare.git",
+    )
+
+    def materialize(_bare, worktree, _base_commit):
+        worktree.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("scripts.arb_checkout_runner.materialize_worktree", materialize)
+    monkeypatch.setattr("scripts.arb_checkout_runner._run_git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        "scripts.arb_checkout_runner.run_probe",
+        lambda probe, **kwargs: RetrievalProbeResult(
+            sample_id=probe.sample_id,
+            repository=probe.repository,
+            base_commit=probe.base_commit,
+            task_type=probe.task_type,
+            retrieval_intent="other",
+            ranked_candidates=(),
+            delivered_evidence=(),
+            abstained=True,
+            abstention_reason="test",
+            graph_status="available",
+            graph_revision="g",
+            source_revision=probe.source_revision,
+            index_latency_ms=1.0,
+            query_latency_ms=2.0,
+        ),
+    )
+
+    assert run_groups(
+        probes,
+        cache_dir=tmp_path / "cache",
+        work_dir=tmp_path / "work",
+        state_dir=tmp_path / "state",
+        output_dir=tmp_path / "out",
+    ) == 2
+    output = capsys.readouterr().out
+    assert "status=started" in output
+    assert "sample=a" in output
+    assert "sample=b" in output
+    assert "status=complete" in output
