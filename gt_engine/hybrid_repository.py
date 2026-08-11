@@ -11,7 +11,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from gt_engine.graph_context import build_graph_projection
+from gt_engine.graph_context import GraphProjection, build_graph_projection
 from gt_engine.hybrid_retrieval import (
     RepositoryDocument,
     RetrievalIntent,
@@ -38,6 +38,35 @@ class RepositoryBuildLimits:
         ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"{name} must be positive")
+
+
+def _merge_graph_projections(
+    legacy: GraphProjection,
+    augmentation: GraphProjection,
+) -> GraphProjection:
+    """Preserve the existing retrieval surface and append literal-query hits.
+
+    The literal workflow query is an additive recall channel. It must not
+    replace candidates selected by the established task-contract query. A
+    graph revision change between the two bounded reads invalidates the older
+    projection, so only the later projection is retained in that rare case.
+    """
+
+    if legacy.revision and augmentation.revision and legacy.revision != augmentation.revision:
+        return augmentation
+    surface_hits: dict[str, int] = dict(legacy.surface_hits)
+    for surface, count in augmentation.surface_hits:
+        surface_hits[surface] = max(surface_hits.get(surface, 0), int(count))
+    return GraphProjection(
+        files=legacy.files | augmentation.files,
+        symbols=legacy.symbols | augmentation.symbols,
+        node_ids=legacy.node_ids | augmentation.node_ids,
+        surface_hits=tuple(sorted(surface_hits.items())),
+        semantic_facts=tuple(
+            dict.fromkeys((*legacy.semantic_facts, *augmentation.semantic_facts))
+        ),
+        revision=augmentation.revision or legacy.revision,
+    )
 
 
 @dataclass(frozen=True)
@@ -540,14 +569,29 @@ def build_query_hybrid_repository(
             ),
         )
     graph = Path(graph_db)
-    projection = build_graph_projection(
+    projection_kwargs = {
+        "limit": max(8, int(candidate_limit)),
+        "active_paths": tuple(
+            dict.fromkeys((*state.active_paths, *state.changed_paths))
+        ),
+        "include_tests": state.intent is RetrievalIntent.VALIDATION_CONTEXT,
+    }
+    legacy_projection = build_graph_projection(
         str(graph),
         contract,
-        limit=max(8, int(candidate_limit)),
-        active_paths=tuple(dict.fromkeys((*state.active_paths, *state.changed_paths))),
-        include_tests=state.intent is RetrievalIntent.VALIDATION_CONTEXT,
-        query_terms=retrieval_query_terms(state),
+        **projection_kwargs,
     )
+    literal_terms = retrieval_query_terms(state)
+    if literal_terms:
+        literal_projection = build_graph_projection(
+            str(graph),
+            contract,
+            query_terms=literal_terms,
+            **projection_kwargs,
+        )
+        projection = _merge_graph_projections(legacy_projection, literal_projection)
+    else:
+        projection = legacy_projection
     ordered_node_ids = tuple(
         dict.fromkeys(fact.node_id for fact in projection.semantic_facts if int(fact.node_id) > 0)
     )[: max(8, int(candidate_limit) * 4)]

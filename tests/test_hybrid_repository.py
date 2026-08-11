@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import gt_engine.hybrid_repository as hybrid_repository
+from gt_engine.graph_context import GraphProjection, GraphSemanticFact
 from gt_engine.hybrid_repository import (
     RepositoryBuildLimits,
     build_hybrid_repository,
@@ -350,3 +352,66 @@ def test_query_builder_uses_test_body_content_only_for_validation_intent(tmp_pat
 
     assert "tests/test_help.py" in {row.path for row in validation.documents}
     assert "tests/test_help.py" not in {row.path for row in implementation.documents}
+
+
+def test_query_builder_augments_without_displacing_legacy_graph_candidates(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "allocator.py").write_text(
+        "def allocate():\n    return 1\n", encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_allocator.py").write_text(
+        "def test_allocate():\n    assert allocate()\n", encoding="utf-8"
+    )
+    graph = tmp_path / "graph.db"
+    _graph(graph)
+
+    calls: list[tuple[str, ...] | None] = []
+
+    def projection(*_args, query_terms=None, **_kwargs):
+        calls.append(query_terms)
+        node_id = 1 if query_terms is None else 2
+        path = "src/allocator.py" if node_id == 1 else "tests/test_allocator.py"
+        symbol = "allocate" if node_id == 1 else "test_allocate"
+        fact = GraphSemanticFact(
+            surface="nodes_fts",
+            node_id=node_id,
+            file_path=path,
+            symbol=symbol,
+            kind="ranked_symbol",
+            value=symbol,
+            line=1,
+            confidence=1.0,
+            revision="graph-1",
+            semantic_certainty=1.0,
+        )
+        return GraphProjection(
+            files=frozenset({path}),
+            symbols=frozenset({symbol}),
+            node_ids=frozenset({node_id}),
+            surface_hits=(("nodes_fts", 1),),
+            semantic_facts=(fact,),
+            revision="graph-1",
+        )
+
+    monkeypatch.setattr(hybrid_repository, "build_graph_projection", projection)
+
+    repository = build_query_hybrid_repository(
+        tmp_path,
+        graph,
+        RetrievalState(
+            task_text="find the affected implementation and its regression test",
+            intent=RetrievalIntent.VALIDATION_CONTEXT,
+            source_revision="source-1",
+        ),
+        candidate_limit=8,
+    )
+
+    assert calls[0] is None
+    assert calls[1]
+    assert {row.path for row in repository.documents} == {
+        "src/allocator.py",
+        "tests/test_allocator.py",
+    }
