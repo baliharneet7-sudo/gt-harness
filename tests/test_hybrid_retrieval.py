@@ -152,6 +152,29 @@ def test_dense_channel_finds_semantic_candidate_sparse_terms_do_not_name():
     assert dense[0].channel is RetrievalChannel.DENSE
 
 
+def test_dense_channel_can_use_a_bounded_cascade_candidate_pool():
+    class CapturingBackend(FakeDenseBackend):
+        documents: tuple[str, ...] = ()
+
+        def embed_documents(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+            self.documents = texts
+            return super().embed_documents(texts)
+
+    backend = CapturingBackend()
+    documents = tuple(
+        RepositoryDocument(f"src/{index}.py", "releases reserved storage after use")
+        for index in range(4)
+    )
+    channel = DenseRetrievalChannel(documents, backend)
+    channel.set_candidate_paths(("src/2.py", "src/0.py"))
+
+    result = channel.retrieve(_state(), limit=10)
+
+    assert [row.path for row in result] == ["src/0.py", "src/2.py"]
+    assert len(backend.documents) == 2
+    assert "candidate_pool=2/4" in channel.availability_reason
+
+
 def test_dense_backend_receives_path_symbol_and_exact_source_text():
     class CapturingBackend(FakeDenseBackend):
         documents: tuple[str, ...] = ()

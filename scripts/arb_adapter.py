@@ -37,6 +37,8 @@ from gt_engine.hybrid_retrieval import (
 from gt_engine.indexer import IndexBuildReceipt
 from gt_engine.repository_intelligence import inspect_repository
 
+ARB_DENSE_CANDIDATE_LIMIT = 128
+
 
 class RedactedSampleError(ValueError):
     """Raised when the benchmark input could leak evaluator information."""
@@ -410,6 +412,7 @@ def run_probe(
         repository.documents,
         structural_links=repository.structural_links,
         dense_backend=dense_backend,
+        dense_candidate_limit=ARB_DENSE_CANDIDATE_LIMIT,
     ).retrieve(
         state,
         channel_limit=100,

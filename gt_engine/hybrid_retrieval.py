@@ -503,7 +503,17 @@ class DenseRetrievalChannel:
     ) -> None:
         self._documents = tuple(documents)
         self._backend = backend
+        self._candidate_paths: frozenset[str] | None = None
         self.availability_reason = ""
+
+    def set_candidate_paths(self, paths: Sequence[str] | None) -> None:
+        """Restrict this pass to a deterministic cascade candidate pool."""
+
+        self._candidate_paths = (
+            None
+            if paths is None
+            else frozenset(str(path).strip().lower() for path in paths if str(path).strip())
+        )
 
     @property
     def backend_identity(self) -> str:
@@ -522,9 +532,25 @@ class DenseRetrievalChannel:
         if self._backend is None:
             self.availability_reason = "backend_unavailable"
             return ()
-        self.availability_reason = ""
+        selected_documents = (
+            self._documents
+            if self._candidate_paths is None
+            else tuple(
+                document
+                for document in self._documents
+                if document.path.lower() in self._candidate_paths
+            )
+        )
+        if not selected_documents:
+            self.availability_reason = "candidate_pool_empty"
+            return ()
+        self.availability_reason = (
+            ""
+            if self._candidate_paths is None
+            else f"candidate_pool={len(selected_documents)}/{len(self._documents)}"
+        )
         query = tuple(float(item) for item in self._backend.embed_query(state.query_text()))
-        documents = tuple(
+        document_texts = tuple(
             "\n".join(
                 part
                 for part in (
@@ -534,17 +560,17 @@ class DenseRetrievalChannel:
                 )
                 if part
             )
-            for document in self._documents
+            for document in selected_documents
         )
         embeddings = tuple(
             tuple(float(item) for item in row)
-            for row in self._backend.embed_documents(documents)
+            for row in self._backend.embed_documents(document_texts)
         )
-        if len(embeddings) != len(self._documents):
+        if len(embeddings) != len(selected_documents):
             raise ValueError("dense backend returned a different number of document embeddings")
         query_norm = math.sqrt(sum(value * value for value in query))
         scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
-        for document, embedding in zip(self._documents, embeddings, strict=True):
+        for document, embedding in zip(selected_documents, embeddings, strict=True):
             if len(embedding) != len(query):
                 raise ValueError("dense backend returned inconsistent embedding dimensions")
             document_norm = math.sqrt(sum(value * value for value in embedding))
@@ -723,6 +749,7 @@ class HybridRetriever:
         channels: Sequence[RetrievalChannelBackend] | None = None,
         token_counter: Callable[[str], int] = _default_token_counter,
         rrf_k: int = 60,
+        dense_candidate_limit: int | None = None,
     ) -> None:
         documents = tuple(documents)
         self._channels: tuple[RetrievalChannelBackend, ...] = (
@@ -732,8 +759,8 @@ class HybridRetriever:
                 ExactRetrievalChannel(documents),
                 LexicalRetrievalChannel(documents),
                 BM25RetrievalChannel(documents),
-                DenseRetrievalChannel(documents, dense_backend),
                 StructuralRetrievalChannel(documents, structural_links),
+                DenseRetrievalChannel(documents, dense_backend),
             )
         )
         present = [channel.channel for channel in self._channels]
@@ -741,6 +768,19 @@ class HybridRetriever:
             raise ValueError("each retrieval channel may be registered at most once")
         self._token_counter = token_counter
         self._rrf_k = int(rrf_k)
+        self._dense_candidate_limit = (
+            None
+            if dense_candidate_limit is None
+            else max(1, int(dense_candidate_limit))
+        )
+        self._dense_channel = next(
+            (
+                channel
+                for channel in self._channels
+                if isinstance(channel, DenseRetrievalChannel)
+            ),
+            None,
+        )
 
     def retrieve(
         self,
@@ -756,6 +796,35 @@ class HybridRetriever:
         receipts: list[ChannelReceipt] = []
         stale_candidates_rejected = 0
         for channel in self._channels:
+            if (
+                self._dense_candidate_limit is not None
+                and isinstance(channel, DenseRetrievalChannel)
+            ):
+                non_dense = tuple(
+                    result
+                    for key, result in channel_results.items()
+                    if key is not RetrievalChannel.DENSE
+                )
+                pool: list[str] = []
+                seen: set[str] = set()
+                width = max(
+                    1,
+                    self._dense_candidate_limit // max(1, len(non_dense)),
+                )
+                for rank in range(width):
+                    for result in non_dense:
+                        if rank >= len(result):
+                            continue
+                        path = result[rank].path
+                        key = path.lower()
+                        if key not in seen:
+                            seen.add(key)
+                            pool.append(path)
+                            if len(pool) >= self._dense_candidate_limit:
+                                break
+                    if len(pool) >= self._dense_candidate_limit:
+                        break
+                channel.set_candidate_paths(pool)
             channel_started = time.perf_counter()
             failed = False
             reason = ""
