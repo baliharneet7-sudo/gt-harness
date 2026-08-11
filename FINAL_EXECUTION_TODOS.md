@@ -25,7 +25,7 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
-| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | exact pair capture/validator implemented; archived run `31421610097` has 0 current pairs | authorize bounded capture |
+| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | exact validator; captures `31530343093` (11 valid), `31531620414` (4 valid), `31532480146` (1 valid; one graph-invalid task) | run matched controls through the GitHub workflow |
 | GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
@@ -45,9 +45,15 @@ compiler, and active component registry passed exact GitHub provider-free run
 `31527155811` at `90896d4`, including `READY` and `SMOKE_APPROVED`. The next gate
 is paired decision-point utility. Archived run `31421610097` contains 1,051
 complete treatment calls but zero exact control requests, so none is a valid
-pair for the frozen mechanism. Opt-in exact control/treatment capture and its
-fail-closed validator are implemented provider-free. No paid provider run has
-started; the 89-task run remains blocked.
+pair for the frozen mechanism. The bounded captures at `31530343093`,
+`31531620414`, and `31532480146` contain 16 valid first-intervention pairs and
+24 legitimate no-intervention abstentions, with zero corrupt bundles. The last
+slice's merge failed closed for `crack-7z-hash` because its repository graph
+was invalid; that task is excluded from any utility claim. The control replay
+workflow is committed at `2cd0dfd` but GitHub only registers new workflow files
+from the default branch, so it is prepared but not dispatchable until the
+normal merge path is used. No end-to-end outcome claim is made and the 89-task
+run remains blocked.
 
 ## Work plan mapped to the GT objective
 
