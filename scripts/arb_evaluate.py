@@ -133,18 +133,13 @@ def _percentiles(values: Iterable[float]) -> dict[str, float | int]:
 def _latency_summary(predictions: Iterable[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
     rows = list(predictions)
     query_values = [
-        float(row["query_latency_ms"])
-        for row in rows
-        if row.get("query_latency_ms") is not None
+        float(row["query_latency_ms"]) for row in rows if row.get("query_latency_ms") is not None
     ]
     index_values = [
-        float(row["index_latency_ms"])
-        for row in rows
-        if row.get("index_latency_ms") is not None
+        float(row["index_latency_ms"]) for row in rows if row.get("index_latency_ms") is not None
     ]
     total_values = [
-        float(row.get("query_latency_ms") or 0.0)
-        + float(row.get("index_latency_ms") or 0.0)
+        float(row.get("query_latency_ms") or 0.0) + float(row.get("index_latency_ms") or 0.0)
         for row in rows
         if row.get("query_latency_ms") is not None or row.get("index_latency_ms") is not None
     ]
@@ -159,9 +154,7 @@ def _channel_summary(predictions: Iterable[dict[str, Any]]) -> dict[str, dict[st
     summary: dict[str, dict[str, Any]] = {}
     for prediction in predictions:
         channels = (
-            prediction.get("retrieval_channels")
-            or prediction.get("channel_contributions")
-            or {}
+            prediction.get("retrieval_channels") or prediction.get("channel_contributions") or {}
         )
         if isinstance(channels, dict) and channels:
             channel_items = channels.items()
@@ -204,9 +197,7 @@ def _channel_summary(predictions: Iterable[dict[str, Any]]) -> dict[str, dict[st
                 row["available_rows"] = int(row["available_rows"]) + int(
                     bool(value.get("available", True))
                 )
-                row["failed_rows"] = int(row["failed_rows"]) + int(
-                    bool(value.get("failed"))
-                )
+                row["failed_rows"] = int(row["failed_rows"]) + int(bool(value.get("failed")))
                 row["latency_ms_total"] = float(row["latency_ms_total"]) + float(
                     value.get("latency_ms") or 0.0
                 )
@@ -230,15 +221,11 @@ def _channel_summary(predictions: Iterable[dict[str, Any]]) -> dict[str, dict[st
                 for channel in channel_names:
                     if channel not in summary:
                         continue
-                    summary[channel][contribution_key] = int(
-                        summary[channel][contribution_key]
-                    ) + 1
+                    summary[channel][contribution_key] = int(summary[channel][contribution_key]) + 1
     for row in summary.values():
         row["backend_identities"] = sorted(row["backend_identities"])
         row["latency_ms_mean"] = (
-            float(row["latency_ms_total"]) / int(row["rows"])
-            if int(row["rows"])
-            else 0.0
+            float(row["latency_ms_total"]) / int(row["rows"]) if int(row["rows"]) else 0.0
         )
     return summary
 
@@ -256,9 +243,7 @@ def _group_top3(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, flo
     }
 
 
-def _payload_summary(
-    predictions: Iterable[dict[str, Any]], key: str
-) -> dict[str, float | int]:
+def _payload_summary(predictions: Iterable[dict[str, Any]], key: str) -> dict[str, float | int]:
     values = [
         float(prediction.get(key) or 0.0)
         for prediction in predictions
@@ -270,6 +255,29 @@ def _payload_summary(
         "mean": mean(values) if values else 0.0,
         "max": max(values) if values else 0.0,
     }
+
+
+def _run_selective_cv(
+    reporter: Any,
+    *,
+    selective_path: Path,
+    output: Path,
+    allow_incomplete: bool,
+) -> dict[str, Any]:
+    try:
+        return reporter(
+            {"GT": selective_path},
+            output.with_name(output.stem + ".selective.md"),
+            output.with_name(output.stem + ".selective.json"),
+            fold_count=5,
+        )
+    except ValueError as exc:
+        if not allow_incomplete:
+            raise
+        return {
+            "status": "insufficient_class_balance",
+            "reason": str(exc),
+        }
 
 
 def _macro(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, float]]:
@@ -372,13 +380,11 @@ def evaluate(
     extra_ids = sorted(prediction_ids - gold_ids)
     if extra_ids:
         raise ValueError(
-            "prediction ID set mismatch: "
-            f"missing={missing_ids[:5]} extra={extra_ids[:5]}"
+            f"prediction ID set mismatch: missing={missing_ids[:5]} extra={extra_ids[:5]}"
         )
     if missing_ids and not allow_incomplete:
         raise ValueError(
-            "prediction ID set mismatch: "
-            f"missing={missing_ids[:5]} extra={extra_ids[:5]}"
+            f"prediction ID set mismatch: missing={missing_ids[:5]} extra={extra_ids[:5]}"
         )
 
     details: list[dict[str, Any]] = []
@@ -483,11 +489,11 @@ def evaluate(
     labels = {str(row["label"]) for row in selective_details}
     selective_repos = {str(row["repo"]) for row in selective_details}
     if {"positive", "no_gold"} <= labels and len(selective_repos) >= 5:
-        selective_result = report_selective_group_cv(
-            {"GT": selective_path},
-            output.with_name(output.stem + ".selective.md"),
-            output.with_name(output.stem + ".selective.json"),
-            fold_count=5,
+        selective_result = _run_selective_cv(
+            report_selective_group_cv,
+            selective_path=selective_path,
+            output=output,
+            allow_incomplete=allow_incomplete,
         )
     elif {"positive", "no_gold"} <= labels:
         selective_result = {

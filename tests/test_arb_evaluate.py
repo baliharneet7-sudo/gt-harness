@@ -152,21 +152,23 @@ def test_evaluator_reports_top3_latency_and_channel_payload_metrics(tmp_path: Pa
     ]
     _write_jsonl(
         predictions,
-        [{
-            "sample_id": "s1",
-            "repository": "owner/repo",
-            "ranked_candidates": ranked,
-            "query_latency_ms": 30.0,
-            "index_latency_ms": 10.0,
-            "payload_chars": 123,
-            "retrieval_channels": {
-                "structural": {
-                    "candidates": 3,
-                    "selected": 1,
-                    "payload_chars": 80,
-                }
-            },
-        }],
+        [
+            {
+                "sample_id": "s1",
+                "repository": "owner/repo",
+                "ranked_candidates": ranked,
+                "query_latency_ms": 30.0,
+                "index_latency_ms": 10.0,
+                "payload_chars": 123,
+                "retrieval_channels": {
+                    "structural": {
+                        "candidates": 3,
+                        "selected": 1,
+                        "payload_chars": 80,
+                    }
+                },
+            }
+        ],
     )
     result = evaluate(
         arb_source=Path("artifacts/final_execution/arb-upstream/src"),
@@ -234,6 +236,32 @@ def test_channel_metrics_consume_the_actual_hybrid_adapter_receipts() -> None:
     assert summary["dense"]["selected_count"] == 1
     assert summary["dense"]["backend_identities"] == ["snowflake@sha256:abc"]
     assert summary["structural"]["candidate_count"] == 3
+
+
+def test_partial_selective_evaluation_receipts_insufficient_fold_balance(tmp_path):
+    from scripts.arb_evaluate import _run_selective_cv
+
+    def imbalanced(*args, **kwargs):
+        del args, kwargs
+        raise ValueError("fold 0 lacks a class after repo grouping")
+
+    receipt = _run_selective_cv(
+        imbalanced,
+        selective_path=tmp_path / "selective.jsonl",
+        output=tmp_path / "summary.json",
+        allow_incomplete=True,
+    )
+
+    assert receipt["status"] == "insufficient_class_balance"
+    assert "lacks a class" in receipt["reason"]
+
+    with pytest.raises(ValueError, match="lacks a class"):
+        _run_selective_cv(
+            imbalanced,
+            selective_path=tmp_path / "selective.jsonl",
+            output=tmp_path / "summary.json",
+            allow_incomplete=False,
+        )
 
 
 def test_evaluator_rejects_missing_and_extra_prediction_ids(tmp_path: Path) -> None:
