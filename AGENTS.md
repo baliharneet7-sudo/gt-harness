@@ -600,6 +600,17 @@ never injects a provider-specific seed or sampling control; model causality
 remains `UNIDENTIFIABLE`. Capture must not alter provider messages or the model
 loop.
 
+For a provider-visible GT call, current capture also stores the exact provider-
+prepared control messages before GT text, the exact treatment messages, the
+compiled payload and contribution IDs, first-visible count, revisions, timing,
+and the content-addressed provider tool schema. The fail-closed decision-point
+validator accepts a pair only when applying that payload at the recorded message
+index reconstructs the treatment byte-for-byte. Prior GT context, stale or late
+evidence, missing responses/tools, and any non-GT byte difference reject the
+case. `paired_decision_capture_ready` proves only that exact pairs were captured;
+it is not a model-utility or causal result. Archived run `31421610097` has
+0/1,051 valid pairs because its legacy bundles omitted exact controls.
+
 ## Conservative uplift policy and provider baseline shield (2026-08-08)
 
 The latest paid smoke `31282615178` is rejected outcome evidence: it resolved

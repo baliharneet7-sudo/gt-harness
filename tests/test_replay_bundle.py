@@ -63,6 +63,61 @@ def test_capture_records_exact_requests_without_provider_specific_controls(tmp_p
     assert loaded["calls"][0]["provider_messages"] == _request()
 
 
+def test_capture_records_exact_control_and_treatment_decision_point(tmp_path):
+    path = tmp_path / "gt_replay"
+    control = [
+        {"role": "user", "content": "Fix app.py"},
+        {"role": "tool", "content": "validation failed"},
+    ]
+    payload = "GroundTruth evidence:\n- app.py:12 direct caller test_app.py:8"
+    treatment = [dict(item) for item in control]
+    treatment[-1]["content"] += "\n\n" + payload
+    writer = ReplayBundleWriter(path, enabled=True)
+
+    writer.record_request(
+        call=2,
+        provider_messages=treatment,
+        control_provider_messages=control,
+        intervention={
+            "payload": payload,
+            "message_index": 1,
+            "prior_visible_gt_count": 0,
+            "selected_contribution_ids": ["gt-contribution-1"],
+        },
+        provider_tools=[
+            {
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"type": "object"}},
+            }
+        ],
+        request_payload_sha256="request-2",
+        provider_messages_sha256="messages-2",
+        model_name="test-model",
+        model_kwargs={"temperature": 1.0},
+        temperature=1.0,
+        active_state={"source_revision": "s1"},
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+    writer.record_response(
+        call=2,
+        response={"role": "assistant", "extra": {"actions": [{"command": "pytest -q"}]}},
+    )
+
+    metadata = writer.finalize()
+    loaded = load_replay_bundle(path)
+    row = loaded["calls"][0]
+
+    assert metadata["paired_decision_point_count"] == 1
+    assert metadata["paired_decision_capture_ready"] is True
+    assert row["control_provider_messages"] == control
+    assert row["provider_messages"] == treatment
+    assert row["intervention"]["payload"] == payload
+    assert row["provider_tools"][0]["function"]["name"] == "bash"
+    assert row["provider_tools_captured"] is True
+    assert row["control_provider_messages_sha256"] != row["provider_messages_sha256"]
+
+
 def test_capture_is_content_addressed_instead_of_bounding_out_large_requests(tmp_path):
     writer = ReplayBundleWriter(tmp_path / "gt_replay", enabled=True, max_call_chars=1_000)
     writer.record_request(

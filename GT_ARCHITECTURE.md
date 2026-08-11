@@ -46,6 +46,15 @@ The compiler does not turn private engine work into model text. The provider
 ledger remains the authority for actual dispatch, message indices, exact
 request hash, and first-eligible timing.
 
+## Paired decision-point capture
+
+When replay capture is explicitly enabled, a visible GT call stores both the
+provider-prepared control view before GT text and the dispatched treatment
+view, plus the exact tool schema and compiled contribution metadata. The
+validator reconstructs the treatment from the control and recorded payload;
+any other byte difference rejects the case. This measurement path is inert
+when capture is disabled and never adds a model or agent action.
+
 ## Active component authority
 
 `gt_engine.component_registry` enumerates the active central subsystems and
@@ -59,7 +68,8 @@ and provider delivery remain separate statuses.
 
 ARB workflow `31517629497` proves retrieval metrics only. Local real-ONNX
 tests prove live cold/warm execution, dense availability, exact first-request
-delivery, and zero extra calls/actions. GitHub provider-free run `31526751148`
-passed at `e4eab72`; paired decision-point utility remains required before
-freeze. End-to-end solve
+delivery, and zero extra calls/actions. Exact-tree GitHub provider-free run
+`31527155811` passed at `90896d4`; paired decision-point utility remains
+required before freeze. Archived run `31421610097` has zero eligible pairs
+because it omitted exact controls. End-to-end solve
 uplift and non-regression remain unproven until the frozen GT-on evaluations.

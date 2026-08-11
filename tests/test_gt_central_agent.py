@@ -33,6 +33,10 @@ from gt_engine.central_runtime import (
     WorkspaceTransition,
     classify_validation_command,
 )
+from gt_engine.decision_point_eval import (
+    DecisionPointValidity,
+    validate_decision_point_row,
+)
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -41,6 +45,7 @@ from gt_engine.preflight import (
     PreflightMode,
     adapt_proposed_action,
 )
+from gt_engine.replay_bundle import load_replay_bundle
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
@@ -259,6 +264,12 @@ def test_stable_provider_prefix_counts_only_exact_append_stable_messages():
 
 class _ScriptedModel:
     config = type("Config", (), {"model_name": "test"})()
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "bash", "parameters": {"type": "object"}},
+        }
+    ]
 
     def __init__(self, commands):
         self.commands = iter(commands)
@@ -377,6 +388,7 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
         model_name="test",
         enable_task_start_advisory=True,
         enable_context_frontier=False,
+        enable_replay_capture=True,
     )
     agent._model_factory = lambda: model
 
@@ -398,6 +410,15 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     assert delivery["not_predictive"] is True
     assert receipt["metrics"]["semantic_utilization_deliveries"] == 1
     assert receipt["metrics"]["semantic_utilization_no_match"] == 1
+    replay = load_replay_bundle(tmp_path / "gt_replay")
+    pair = replay["calls"][0]
+    assert pair["intervention"]["prior_visible_gt_count"] == 0
+    assert pair["intervention"]["payload"]
+    assert pair["control_provider_messages"] != pair["provider_messages"]
+    assert (
+        validate_decision_point_row(pair, task_id="localization").validity
+        is DecisionPointValidity.VALID
+    )
 
 
 @pytest.mark.asyncio
@@ -516,6 +537,7 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
         enable_task_start_advisory=False,
         enable_context_frontier=False,
         enable_feature_guidance=False,
+        enable_replay_capture=True,
         preemptive_retrieval_model_dir=model_dir,
     )
     agent._model_factory = lambda: model
@@ -548,6 +570,11 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     assert compiler["calls"][0]["selected_surfaces"] == [
         "preemptive_retrieval"
     ]
+    replay = load_replay_bundle(tmp_path / "gt_replay")
+    pair_validation = validate_decision_point_row(
+        replay["calls"][0], task_id="preemptive-retrieval"
+    )
+    assert pair_validation.validity is DecisionPointValidity.VALID
     if model_dir:
         dense = next(
             row

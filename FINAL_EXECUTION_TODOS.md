@@ -25,7 +25,7 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-006 | complete | Gold-isolated ARB adapter exercises production retrieval | `scripts/arb_adapter.py`, `tests/test_arb_adapter.py` | prepare official data |
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
-| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | `DECISION_POINT_EVAL_RESULTS.md` | locate replay-ready cases |
+| GT-FINAL-009 | in_progress | Paired decision-point reasoning evaluation complete | exact pair capture/validator implemented; archived run `31421610097` has 0 current pairs | authorize bounded capture |
 | GT-FINAL-010 | pending | GT and harness frozen | `FINAL_GT_MANIFEST.md` | freeze only after gates |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
@@ -42,9 +42,12 @@ selected files instead of the frozen eight-file packing policy, and had no
 pinned ONNX asset. The shared profile, durable GitHub release asset, live
 workflow configuration, real Snowflake integration witness, typed contribution
 compiler, and active component registry passed exact GitHub provider-free run
-`31526751148` at `e4eab72`, including `READY` and `SMOKE_APPROVED`. The next gate
-is paired decision-point utility. No paid provider run has started; the 89-task
-run remains blocked.
+`31527155811` at `90896d4`, including `READY` and `SMOKE_APPROVED`. The next gate
+is paired decision-point utility. Archived run `31421610097` contains 1,051
+complete treatment calls but zero exact control requests, so none is a valid
+pair for the frozen mechanism. Opt-in exact control/treatment capture and its
+fail-closed validator are implemented provider-free. No paid provider run has
+started; the 89-task run remains blocked.
 
 ## Work plan mapped to the GT objective
 
@@ -104,7 +107,10 @@ run remains blocked.
 
 ### Phase 3 — Prove whether the model’s next decision changes usefully
 
-- [ ] Locate replay-ready first-visible-intervention points.
+- [x] Locate replay-ready first-visible-intervention points; archived run
+  `31421610097` has 0/1,051 because the legacy bundle omitted exact controls.
+- [x] Implement opt-in exact control/treatment capture and reject pairs whose
+  provider-visible difference is not exactly the compiled GT payload.
 - [ ] If unavailable, obtain explicit authorization for bounded SHADOW capture;
   do not run a full paid benchmark merely to collect these points.
 - [ ] Build exact control/treatment provider requests differing only by the

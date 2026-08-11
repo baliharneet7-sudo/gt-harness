@@ -97,6 +97,9 @@ class ReplayBundleWriter:
         *,
         call: int,
         provider_messages: list[dict[str, Any]],
+        control_provider_messages: list[dict[str, Any]] | None = None,
+        intervention: dict[str, Any] | None = None,
+        provider_tools: Any = None,
         request_payload_sha256: str,
         provider_messages_sha256: str,
         model_name: str,
@@ -126,6 +129,29 @@ class ReplayBundleWriter:
             "response_captured": False,
             "dispatch_status": "prepared",
         }
+        if control_provider_messages is not None:
+            control_body = _canonical(control_provider_messages)
+            row.update(
+                {
+                    "control_request_blob_sha256": self._blob(
+                        control_provider_messages
+                    ),
+                    "control_provider_messages_sha256": hashlib.sha256(
+                        control_body
+                    ).hexdigest(),
+                    "control_request_captured": True,
+                    "intervention": dict(intervention or {}),
+                }
+            )
+        if provider_tools is not None:
+            tools_body = _canonical(provider_tools)
+            row.update(
+                {
+                    "provider_tools_blob_sha256": self._blob(provider_tools),
+                    "provider_tools_sha256": hashlib.sha256(tools_body).hexdigest(),
+                    "provider_tools_captured": True,
+                }
+            )
         self._calls[int(call)] = row
 
     def record_invocation(self, *, call: int) -> None:
@@ -162,6 +188,11 @@ class ReplayBundleWriter:
         self._complete = False
 
     def finalize(self) -> dict[str, Any]:
+        paired_rows = [
+            row
+            for row in self._calls.values()
+            if row.get("control_request_captured") and row.get("intervention")
+        ]
         metadata = {
             "enabled": self.enabled,
             "path": str(self.path.name) if self.enabled else "",
@@ -192,6 +223,13 @@ class ReplayBundleWriter:
                 )
             ),
             "model_causal_replay_ready": False,
+            "paired_decision_point_count": len(paired_rows),
+            "paired_decision_capture_ready": bool(
+                self.enabled
+                and paired_rows
+                and all(row.get("request_captured") for row in paired_rows)
+                and all(row.get("control_request_captured") for row in paired_rows)
+            ),
             "blob_count": len(self._blobs),
         }
         if not self.enabled:
@@ -243,6 +281,8 @@ def load_replay_bundle(path: str | Path) -> dict[str, Any]:
             raise ValueError("replay call row invalid") from exc
         for field, output_key in (
             ("request_blob_sha256", "provider_messages"),
+            ("control_request_blob_sha256", "control_provider_messages"),
+            ("provider_tools_blob_sha256", "provider_tools"),
             ("response_blob_sha256", "response"),
         ):
             digest = str(row.get(field) or "")

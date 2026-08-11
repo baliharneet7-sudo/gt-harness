@@ -852,6 +852,15 @@ acknowledgement, or hidden-reasoning claim is permitted. Track execution in
 `FINAL_EXECUTION_TODOS.md`; emit a 15-minute heartbeat while active, and do not
 launch paid work without the relevant gate and authorization.
 
+Opt-in replay capture now records the exact pre-GT control messages, exact
+treatment messages, compiled payload, contribution IDs, revisions, timing, and
+provider tool schema. A pair is eligible only if the recorded payload alone
+reconstructs the treatment byte-for-byte and it is the first visible GT
+intervention. `paired_decision_capture_ready` is capture integrity, not utility.
+Run `31421610097` contains 1,051 treatment calls but zero eligible pairs because
+the legacy capture did not retain exact controls; do not use it for the final
+decision-point result.
+
 The next repair pass corrected the two misleading conclusions from the
 89-task treatment `31355487270`. `guidance_suppressed=2,264` was not a count of
 withheld model guidance: the old counter incremented for almost every private

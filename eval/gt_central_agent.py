@@ -1848,6 +1848,10 @@ class MiniSweCentralAgent(BaseAgent):
                         keep_recent_turns=2,
                         transform=False,
                     )
+                # Preserve the exact provider-view control before any GT text is
+                # attached. Replay capture is opt-in, but when enabled this is
+                # the only defensible paired decision-point control.
+                control_query_messages = [dict(item) for item in query_messages]
                 compaction_epoch_started = False
                 # Character-count compaction used to change otherwise safe
                 # provider requests long before the model's measured context
@@ -2407,6 +2411,7 @@ class MiniSweCentralAgent(BaseAgent):
                         trigger_kind="provider_budget",
                         trigger_chars=provider_view_metrics.output_chars,
                     )
+                    control_query_messages = [dict(item) for item in query_messages]
                     runtime_enrichment_chars = 0
                     runtime_message_index = None
                     if runtime_payload:
@@ -2454,9 +2459,49 @@ class MiniSweCentralAgent(BaseAgent):
                         or planned_query_timeout > 0
                     )
                 )
+                control_provider_messages: list[dict[str, Any]] | None = None
+                intervention_capture: dict[str, Any] | None = None
+                if runtime_payload:
+                    (
+                        control_provider_messages,
+                        _control_request_payload_sha256,
+                        _control_provider_messages_sha256,
+                        _control_provider_request_chars,
+                    ) = _provider_request_receipt(model, control_query_messages)
+                    intervention_capture = {
+                        "payload": runtime_payload,
+                        "message_index": runtime_message_index,
+                        "prior_visible_gt_count": sum(
+                            1
+                            for row in model_call_contexts
+                            if row.get("runtime_message_index") is not None
+                            and row.get("dispatch_status")
+                            in {"invoked", "response_received"}
+                        ),
+                        "selected_contribution_ids": list(
+                            compiled_contributions.selected_ids
+                        ),
+                        "selected_surfaces": list(
+                            contribution_receipt.get("selected_surfaces") or []
+                        ),
+                        "source_revision": source_revision,
+                        "eligible_call": calls,
+                        "evidence_action": max(
+                            (
+                                int(item.evidence_action)
+                                for item in contribution_candidates
+                                if item.contribution_id
+                                in selected_contribution_ids
+                            ),
+                            default=actions_count,
+                        ),
+                    }
                 replay_bundle.record_request(
                     call=calls,
                     provider_messages=provider_messages,
+                    control_provider_messages=control_provider_messages,
+                    intervention=intervention_capture,
+                    provider_tools=getattr(model, "tools", None),
                     request_payload_sha256=request_payload_sha256,
                     provider_messages_sha256=provider_messages_sha256,
                     model_name=str(self.model_name or ""),
