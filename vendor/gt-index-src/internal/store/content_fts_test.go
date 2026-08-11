@@ -26,6 +26,9 @@ func TestPopulateContentFTSIndexesTestBodiesForTypedValidationRetrieval(t *testi
 		t.Fatal(err)
 	}
 	defer db.Close()
+	if err := db.EnsureContentFTS(); err != nil {
+		t.Fatal(err)
+	}
 	id, err := db.InsertNode(&Node{
 		Label:     "Function",
 		Name:      "TestEmptyDefault",
