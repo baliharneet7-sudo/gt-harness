@@ -445,6 +445,32 @@ def test_dense_rerank_of_sparse_candidates_is_not_independent_delivery_support()
     assert result.reason_codes == ("insufficient_independent_support",)
 
 
+def test_validation_intent_prioritizes_mechanically_recognized_test_paths():
+    documents = (
+        RepositoryDocument(
+            "src/help.py",
+            "render help default value regression coverage help default value",
+        ),
+        RepositoryDocument("tests/test_help.py", "regression"),
+    )
+
+    implementation = HybridRetriever(documents, dense_backend=None).retrieve(
+        _state(
+            task_text="add help default value regression coverage",
+            intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+        )
+    )
+    validation = HybridRetriever(documents, dense_backend=None).retrieve(
+        _state(
+            task_text="add help default value regression coverage",
+            intent=RetrievalIntent.VALIDATION_CONTEXT,
+        )
+    )
+
+    assert implementation.ranked_files[0].path == "src/help.py"
+    assert validation.ranked_files[0].path == "tests/test_help.py"
+
+
 def test_stale_revision_candidates_are_rejected_before_fusion():
     class StaleChannel:
         channel = RetrievalChannel.EXACT

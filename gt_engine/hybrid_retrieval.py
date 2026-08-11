@@ -803,6 +803,23 @@ def _delivery_supported(ranked: RankedFile) -> bool:
     return len(families) >= 2
 
 
+def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
+    """Return a mechanically derived workflow priority, never task labels."""
+
+    if state.intent is not RetrievalIntent.VALIDATION_CONTEXT:
+        return 0
+    normalized = "/" + ranked.path.lower().replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    is_test = (
+        any(segment in normalized for segment in ("/test/", "/tests/", "/__tests__/"))
+        or basename.startswith("test_")
+        or "_test." in basename
+        or ".test." in basename
+        or ".spec." in basename
+    )
+    return 0 if is_test else 1
+
+
 class HybridRetriever:
     """Run independent channels, fuse files, then pack bounded new evidence."""
 
@@ -920,7 +937,17 @@ class HybridRetriever:
                 )
             )
 
-        fused = reciprocal_rank_fusion(channel_results, k=self._rrf_k)
+        fused = tuple(
+            sorted(
+                reciprocal_rank_fusion(channel_results, k=self._rrf_k),
+                key=lambda row: (
+                    _intent_priority(row, state),
+                    -row.fused_score,
+                    row.path.lower(),
+                    row.path,
+                ),
+            )
+        )
         known_paths = {
             _normalize_path(path).lower()
             for path in (*state.active_paths, *state.changed_paths)
