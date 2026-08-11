@@ -12,10 +12,11 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import shlex
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import InitVar, dataclass, replace
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -48,6 +49,37 @@ _QUERY_GLUE = frozenset(
         "up",
         "with",
     }
+)
+_COMMON_SYMBOLS = frozenset(
+    {
+        "app",
+        "data",
+        "get",
+        "id",
+        "init",
+        "item",
+        "main",
+        "model",
+        "n",
+        "repr",
+        "result",
+        "run",
+        "set",
+        "str",
+        "test",
+        "value",
+        "x",
+    }
+)
+_PROGRAM_ARGUMENT_FLAGS = frozenset(
+    {"-c", "-e", "--command", "--eval", "--execute", "-command", "/c"}
+)
+_SHELL_OPERATORS = frozenset({";", "&&", "||", "|", "&"})
+_SAFE_ACTION_TOKEN = re.compile(r"^[A-Za-z0-9_./:+@%=-]{1,160}$")
+_PATH_LITERAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:(?:[A-Za-z]:)?[\\/])?"
+    r"(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+"
+    r"(?![A-Za-z0-9_.-])"
 )
 
 
@@ -105,6 +137,45 @@ def _path_tokens(path: str) -> tuple[str, ...]:
     )
 
 
+def _canonical_symbol(symbol: str | None) -> str:
+    value = str(symbol or "").strip()
+    if not value:
+        return ""
+    leaf = re.split(r"(?:::|[.#])", value)[-1]
+    return leaf.lower() if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", leaf) else ""
+
+
+def _explicit_identifiers(state: RetrievalState) -> frozenset[str]:
+    action_tokens = state.action.semantic_tokens if state.action else ()
+    material = "\n".join(
+        (
+            state.task_text,
+            " ".join(state.active_symbols),
+            " ".join(state.diagnostics),
+            " ".join(action_tokens),
+        )
+    )
+    return frozenset(token.lower() for token in _TOKEN_RE.findall(material))
+
+
+def _canonical_explicit_path(path: str) -> str:
+    value = _normalize_path(path).lower()
+    return value[len("/app/") :] if value.startswith("/app/") else value
+
+
+def _explicit_paths(state: RetrievalState) -> frozenset[str]:
+    action_targets = state.action.targets if state.action else ()
+    material = "\n".join((state.task_text, *state.diagnostics))
+    paths = {
+        _canonical_explicit_path(match.group(0))
+        for match in _PATH_LITERAL_RE.finditer(material.replace("\\", "/"))
+    }
+    paths.update(_canonical_explicit_path(path) for path in action_targets)
+    paths.update(_canonical_explicit_path(path) for path in state.active_paths)
+    paths.update(_canonical_explicit_path(path) for path in state.changed_paths)
+    return frozenset(path for path in paths if path)
+
+
 def _stable_hash(*parts: str) -> str:
     material = "\0".join(str(part) for part in parts)
     return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()
@@ -121,11 +192,135 @@ def _default_token_counter(text: str) -> int:
     return len(re.findall(r"\w+|[^\w\s]", str(text or ""), re.UNICODE))
 
 
+def _bounded_action_tokens(raw_command: str) -> tuple[str, ...]:
+    header = str(raw_command or "").splitlines()[0][:2_048].strip()
+    if not header:
+        return ()
+    header = re.split(r"\s+<<-?\s*", header, maxsplit=1)[0].strip()
+    try:
+        tokens = tuple(shlex.split(header, posix=True))
+    except ValueError:
+        tokens = tuple(header.split())
+    bounded: list[str] = []
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in _PROGRAM_ARGUMENT_FLAGS or token in _SHELL_OPERATORS:
+            break
+        if token.startswith(("<<", ">", "<")):
+            break
+        if _SAFE_ACTION_TOKEN.fullmatch(token):
+            bounded.append(token)
+        if len(bounded) >= 32:
+            break
+    return tuple(bounded)
+
+
+def _action_operation(executable: str, tokens: tuple[str, ...]) -> tuple[str, str | None]:
+    lowered = executable.lower()
+    arguments = tuple(token.lower() for token in tokens[1:])
+    if lowered in {"pytest", "tox", "make", "ctest"}:
+        return "validate", lowered
+    if lowered in {"python", "python3"} and "pytest" in arguments:
+        return "validate", "pytest"
+    if lowered == "go" and arguments[:1] == ("test",):
+        return "validate", "go_test"
+    if lowered == "cargo" and arguments[:1] == ("test",):
+        return "validate", "cargo_test"
+    if lowered in {"rg", "grep", "find"}:
+        return "search", None
+    if lowered in {"cat", "head", "tail", "less"}:
+        return "read", None
+    if lowered in {"touch", "mkdir"}:
+        return "create", None
+    if lowered in {"rm", "rmdir"}:
+        return "delete", None
+    return "other", None
+
+
+@dataclass(frozen=True)
+class RetrievalActionState:
+    """Bounded action semantics; never stores a raw shell or program body."""
+
+    operation: str = "other"
+    executable: str = ""
+    targets: tuple[str, ...] = ()
+    validation_kind: str | None = None
+    semantic_tokens: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        operation = re.sub(r"[^a-z0-9_]+", "_", str(self.operation or "other").lower())[:40]
+        executable = str(self.executable or "").replace("\\", "/").rsplit("/", 1)[-1]
+        executable = re.sub(r"[^A-Za-z0-9_.+-]+", "", executable)[:80]
+        targets = tuple(
+            dict.fromkeys(
+                _normalize_path(target)[:300]
+                for target in self.targets
+                if target and "\n" not in target and "\r" not in target
+            )
+        )[:24]
+        semantic_tokens = tuple(
+            dict.fromkeys(
+                str(token)[:160]
+                for token in self.semantic_tokens
+                if _SAFE_ACTION_TOKEN.fullmatch(str(token))
+            )
+        )[:24]
+        validation_kind = (
+            re.sub(r"[^a-z0-9_.+-]+", "_", str(self.validation_kind).lower())[:80]
+            if self.validation_kind
+            else None
+        )
+        object.__setattr__(self, "operation", operation or "other")
+        object.__setattr__(self, "executable", executable)
+        object.__setattr__(self, "targets", targets)
+        object.__setattr__(self, "semantic_tokens", semantic_tokens)
+        object.__setattr__(self, "validation_kind", validation_kind)
+
+    @classmethod
+    def from_raw_command(cls, raw_command: str) -> RetrievalActionState:
+        tokens = _bounded_action_tokens(raw_command)
+        if not tokens:
+            return cls()
+        executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+        operation, validation_kind = _action_operation(executable, tokens)
+        operands = tuple(
+            token
+            for token in tokens[1:]
+            if not token.startswith("-") and token.lower() not in {"test", "-m"}
+        )
+        targets = tuple(
+            token
+            for token in operands
+            if "/" in token or "\\" in token or re.search(r"\.[A-Za-z0-9]{1,12}$", token)
+        )
+        semantic_tokens = tuple(token for token in operands if token not in targets)
+        return cls(
+            operation=operation,
+            executable=executable,
+            targets=targets,
+            validation_kind=validation_kind,
+            semantic_tokens=semantic_tokens,
+        )
+
+    def query_text(self) -> str:
+        fields = [f"operation={self.operation}"]
+        if self.executable:
+            fields.append(f"executable={self.executable}")
+        if self.targets:
+            fields.append(f"targets={' '.join(self.targets)}")
+        if self.validation_kind:
+            fields.append(f"validation={self.validation_kind}")
+        if self.semantic_tokens:
+            fields.append(f"tokens={' '.join(self.semantic_tokens)}")
+        return " ".join(fields)
+
+
 @dataclass(frozen=True)
 class RetrievalState:
     task_text: str
     intent: RetrievalIntent
-    proposed_action: str | None = None
+    proposed_action: InitVar[RetrievalActionState | str | None] = None
+    action: RetrievalActionState | None = None
     active_paths: tuple[str, ...] = ()
     active_symbols: tuple[str, ...] = ()
     changed_paths: tuple[str, ...] = ()
@@ -134,13 +329,25 @@ class RetrievalState:
     source_revision: str = ""
     previously_exposed_claims: tuple[str, ...] = ()
 
+    def __post_init__(self, proposed_action: RetrievalActionState | str | None) -> None:
+        if self.action is not None and proposed_action is not None:
+            raise ValueError("provide action or legacy proposed_action, not both")
+        action = self.action
+        if isinstance(proposed_action, RetrievalActionState):
+            action = proposed_action
+        elif proposed_action is not None:
+            action = RetrievalActionState.from_raw_command(str(proposed_action))
+        if action is not None and not isinstance(action, RetrievalActionState):
+            raise TypeError("action must be RetrievalActionState")
+        object.__setattr__(self, "action", action)
+
     def query_text(self) -> str:
         """Compile only current trajectory state into a replayable query."""
 
         sections = (
             self.task_text,
             self.intent.value,
-            self.proposed_action or "",
+            self.action.query_text() if self.action else "",
             " ".join(self.active_paths),
             " ".join(self.active_symbols),
             " ".join(self.changed_paths),
@@ -163,7 +370,7 @@ class RetrievalState:
         sections = (
             self.task_text,
             self.intent.value,
-            self.proposed_action or "",
+            self.action.query_text() if self.action else "",
             " ".join(self.active_symbols),
             " ".join(self.diagnostics),
             self.validation_state,
@@ -286,16 +493,29 @@ class RetrievalCandidate:
 
     @property
     def claim_hash(self) -> str:
-        """Channel-independent identity for exact delivery deduplication."""
+        """Semantic evidence identity, independent of global workspace revision."""
 
         normalized_text = " ".join(str(self.text or "").split())
+        normalized_provenance = tuple(
+            sorted(
+                {
+                    " ".join(str(item).split())
+                    for item in self.provenance
+                    if item
+                    and not str(item).startswith(
+                        ("delivery_support:", "support_channel:")
+                    )
+                }
+            )
+        )
         return _stable_hash(
             self.path.lower(),
             str(self.start_line or 0),
             str(self.end_line or 0),
             str(self.symbol or ""),
+            str(self.relation or "").lower(),
+            "\n".join(normalized_provenance),
             normalized_text,
-            self.source_revision,
         )
 
 
@@ -434,6 +654,11 @@ class ExactRetrievalChannel:
         self._path_document_frequency = Counter(
             token for _, path_tokens, _, _ in self._prepared for token in path_tokens
         )
+        self._symbol_document_frequency = Counter(
+            symbol
+            for document in self._documents
+            if (symbol := _canonical_symbol(document.symbol))
+        )
         self._distinctive_path_frequency = max(1, math.ceil(len(self._documents) * 0.20))
 
     def retrieve(
@@ -443,7 +668,8 @@ class ExactRetrievalChannel:
         limit: int,
     ) -> tuple[RetrievalCandidate, ...]:
         query_tokens = set(_tokens(state.query_text()))
-        query_text = state.query_text().lower()
+        explicit_identifiers = _explicit_identifiers(state)
+        explicit_paths = _explicit_paths(state)
         scored: list[tuple[float, RepositoryDocument, str | None, tuple[str, ...]]] = []
         for document, path_tokens, symbol_tokens, text in self._prepared:
             score = 0.0
@@ -460,11 +686,17 @@ class ExactRetrievalChannel:
             if symbol_overlap:
                 score += 6.0 * len(symbol_overlap)
                 reasons.append("exact_symbol_token")
-            normalized_path = document.path.lower()
-            if normalized_path in query_text:
+            normalized_path = _canonical_explicit_path(document.path)
+            if normalized_path in explicit_paths:
                 score += 10.0
                 reasons.append("exact_path")
-            if document.symbol and document.symbol.lower() in query_text:
+            canonical_symbol = _canonical_symbol(document.symbol)
+            if (
+                len(canonical_symbol) >= 4
+                and canonical_symbol not in _COMMON_SYMBOLS
+                and self._symbol_document_frequency[canonical_symbol] == 1
+                and canonical_symbol in explicit_identifiers
+            ):
                 score += 10.0
                 reasons.append("exact_symbol")
             exact_phrases = {
@@ -1104,6 +1336,21 @@ class HybridRetriever:
                 continue
             saw_supported = True
             candidate = ranked.representative
+            candidate = replace(
+                candidate,
+                provenance=tuple(
+                    dict.fromkeys(
+                        (
+                            *candidate.provenance,
+                            f"delivery_support:{support_kind}",
+                            *(
+                                f"support_channel:{channel.value}"
+                                for channel, _rank in ranked.channel_ranks
+                            ),
+                        )
+                    )
+                ),
+            )
             if support_kind == "validation_candidate":
                 candidate = replace(
                     candidate,
@@ -1196,6 +1443,7 @@ __all__ = [
     "RetrievalCandidate",
     "RetrievalChannel",
     "RetrievalChannelBackend",
+    "RetrievalActionState",
     "RetrievalIntent",
     "RetrievalState",
     "StructuralLink",

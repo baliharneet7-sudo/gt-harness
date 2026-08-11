@@ -13,9 +13,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from gt_engine.delivery_audit import audit_provider_deliveries  # noqa: E402
 
 KNOWN_DISPOSITIONS = {
     "provider_payload",
@@ -156,65 +163,39 @@ def _effect_report(receipt: dict[str, Any], task: str) -> tuple[list[dict[str, A
 
 
 def _delivery_report(receipt: dict[str, Any], task: str) -> tuple[list[dict[str, Any]], list[str]]:
-    failures: list[str] = []
+    all_rows, failures, _totals = audit_provider_deliveries(receipt, task=task)
     rows: list[dict[str, Any]] = []
-    contexts = {
-        row.get("call"): row
-        for row in receipt.get("model_call_contexts") or []
-        if isinstance(row, dict) and isinstance(row.get("call"), int)
-    }
-    all_deliveries = list(receipt.get("guidance_deliveries") or [])
-    all_deliveries.extend(
-        (receipt.get("repository_intelligence") or {}).get("frontier_deliveries") or []
-    )
-    for index, delivery in enumerate(all_deliveries, start=1):
-        feature = str(delivery.get("feature_id") or "repository_frontier")
-        first = delivery.get("first_eligible_call")
-        delivered = delivery.get("delivered_before_call")
-        request_hash = str(delivery.get("request_payload_sha256") or "")
-        provider_hash = str(delivery.get("provider_messages_sha256") or "")
-        # Guidance rows historically carry the request hash but not a second
-        # provider-view hash.  The exact provider hash is authoritative in the
-        # model-call context for the delivery window.
-        if not provider_hash and isinstance(delivered, int):
-            provider_hash = str(
-                (contexts.get(delivered) or {}).get("provider_messages_sha256") or ""
-            )
-        concrete = _has_anchor(delivery)
-        timing_valid = (
-            isinstance(first, int)
-            and isinstance(delivered, int)
-            and first == delivered
-            and delivery.get("delivered_before_model_query") is True
-            and delivery.get("one_step_late") is False
-            and delivery.get("not_predictive") is True
-        )
-        if not request_hash:
-            failures.append(f"{task}:delivery_missing_provider_request_hash:{index}")
-        if not provider_hash:
-            failures.append(f"{task}:delivery_missing_provider_messages_hash:{index}")
-        context = contexts.get(delivered) if isinstance(delivered, int) else None
-        if context and request_hash != str(context.get("request_payload_sha256") or ""):
-            failures.append(f"{task}:delivery_request_hash_context_mismatch:{index}")
+    for row in all_rows:
+        raw = row["raw"]
+        feature = str(row.get("feature_id") or "repository_frontier")
+        if not row["claim_count"] and _has_anchor(raw):
+            # Older frontier records used concrete facts without claim IDs.
+            # Preserve the historical concrete-anchor audit while the unified
+            # stream still reports the missing claim as a contract failure.
+            concrete = True
+        else:
+            concrete = bool(row["claim_count"])
         if not concrete:
-            failures.append(f"{task}:delivery_without_concrete_anchor:{index}:{feature}")
-        if not timing_valid:
-            failures.append(f"{task}:delivery_timing_invalid:{index}:{feature}")
-        semantic = str(delivery.get("semantic_utilization") or "")
+            failures.append(
+                f"{task}:delivery_without_concrete_anchor:{row['surface_index']}:{feature}"
+            )
         rows.append(
             {
+                "surface": row["surface"],
                 "feature_id": feature,
-                "evidence_action": delivery.get("evidence_action"),
-                "first_eligible_call": first,
-                "delivered_before_call": delivered,
+                "evidence_action": row["evidence_action"],
+                "first_eligible_call": row["first_eligible_call"],
+                "delivered_before_call": row["delivered_before_call"],
                 "deterministic_status": (
                     "VALID"
-                    if concrete and timing_valid and request_hash and provider_hash
+                    if concrete and row["deterministic_status"] == "VALID"
                     else "INVALID"
                 ),
                 "causal_status": "UNIDENTIFIABLE_NO_REPLAY_STATE",
-                "semantic_utilization": semantic or "unreported",
-                "anchor_followed": delivery.get("anchor_followed"),
+                "semantic_utilization": str(raw.get("semantic_utilization") or "unreported"),
+                "anchor_followed": raw.get("anchor_followed"),
+                "chars": row["chars"],
+                "claim_count": row["claim_count"],
             }
         )
     return rows, failures
@@ -226,6 +207,9 @@ def audit_task(trajectory_path: Path, receipt_path: Path, task: str) -> dict[str
     failures = _context_failures(receipt, task)
     effects, effect_failures = _effect_report(receipt, task)
     deliveries, delivery_failures = _delivery_report(receipt, task)
+    _all_delivery_rows, _all_delivery_failures, delivery_totals = audit_provider_deliveries(
+        receipt, task=task
+    )
     failures.extend(effect_failures)
     failures.extend(delivery_failures)
     action_count = _trajectory_action_count(trajectory)
@@ -244,6 +228,7 @@ def audit_task(trajectory_path: Path, receipt_path: Path, task: str) -> dict[str
         "effects": effects,
         "effect_dispositions": dict(sorted(dispositions.items())),
         "deliveries": deliveries,
+        "provider_delivery_totals": delivery_totals,
         "replay_state_available": replay_available,
         "failures": failures,
     }
@@ -259,12 +244,43 @@ def audit_run_root(root: Path) -> dict[str, Any]:
         tasks[task] = result
         failures.extend(result["failures"])
         replay_available = replay_available and result["replay_state_available"]
+    provider_delivery_totals = {
+        "delivery_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("delivery_count") or 0)
+            for result in tasks.values()
+        ),
+        "visible_chars": sum(
+            int(result.get("provider_delivery_totals", {}).get("visible_chars") or 0)
+            for result in tasks.values()
+        ),
+        "claim_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("claim_count") or 0)
+            for result in tasks.values()
+        ),
+        "timely_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("timely_count") or 0)
+            for result in tasks.values()
+        ),
+        "late_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("late_count") or 0)
+            for result in tasks.values()
+        ),
+        "predictive_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("predictive_count") or 0)
+            for result in tasks.values()
+        ),
+        "duplicate_count": sum(
+            int(result.get("provider_delivery_totals", {}).get("duplicate_count") or 0)
+            for result in tasks.values()
+        ),
+    }
     deterministic_ok = bool(tasks) and not failures
     return {
         "schema": "gt.central_trajectory_audit.v1",
         "run_root": str(root.resolve()),
         "task_count": len(tasks),
         "tasks": tasks,
+        "provider_delivery_totals": provider_delivery_totals,
         "failures": failures,
         "audit_status": (
             "DETERMINISTIC_AUDIT_CERTIFIED"

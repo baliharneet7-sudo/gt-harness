@@ -87,6 +87,7 @@ from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import (
     HybridRetriever,
+    RetrievalActionState,
     RetrievalIntent,
     RetrievalState,
     build_preemptive_frame,
@@ -349,6 +350,8 @@ def _retrieval_intent(
     if diagnostics or normalized_validation == "fail":
         return RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE
     if normalized_operation == ActionOperation.VALIDATE.value:
+        if normalized_validation == "pass":
+            return RetrievalIntent.OTHER
         return RetrievalIntent.VALIDATION_CONTEXT
     if changed_paths or normalized_operation in {
         ActionOperation.EDIT.value,
@@ -362,6 +365,61 @@ def _retrieval_intent(
     }:
         return RetrievalIntent.MISSING_CONTEXT
     return RetrievalIntent.IMPLEMENTATION_CONTEXT
+
+
+def _preemptive_retrieval_gate_reason(
+    *,
+    enabled: bool,
+    integration_active: bool,
+    policy_active: bool,
+    treatment: bool,
+    source_less_task_at_start: bool,
+    last_operation: str = "",
+    validation_state: str = "unknown",
+    diagnostics: tuple[str, ...] = (),
+) -> str | None:
+    """Return the deterministic reason live repository retrieval must abstain."""
+
+    if not enabled:
+        return "preemptive_retrieval_disabled"
+    if not integration_active:
+        return "integration_mode_not_active"
+    if not policy_active:
+        return "policy_inactive"
+    if not treatment:
+        return "not_treatment_runtime"
+    if source_less_task_at_start:
+        return "not_applicable_no_supported_source"
+    if (
+        str(last_operation or "").strip().lower() == ActionOperation.VALIDATE.value
+        and str(validation_state or "").strip().lower() == "pass"
+        and not diagnostics
+    ):
+        return "validation_pass_no_diagnostic"
+    return None
+
+
+def _retrieval_action_state(
+    proposed: ProposedAction,
+    *,
+    target_paths: tuple[str, ...],
+) -> RetrievalActionState:
+    """Project the shared shell parser result into bounded retrieval state."""
+
+    executable = next(
+        (
+            operation.executable
+            for operation in proposed.operations
+            if operation.executable
+        ),
+        "",
+    )
+    return RetrievalActionState(
+        operation=proposed.operation.value,
+        executable=executable,
+        targets=target_paths,
+        validation_kind=proposed.validation_kind,
+    )
 
 
 def _mini_config() -> dict[str, Any]:
@@ -771,7 +829,16 @@ class MiniSweCentralAgent(BaseAgent):
 
     async def _system_information(self, environment: BaseEnvironment) -> dict[str, str]:
         configured = str(self.cwd or "").strip()
-        command = "uname -s; uname -r; uname -v; uname -m; pwd -P"
+        # Kernel release/version identify the GitHub runner host rather than
+        # the task image, so they can perturb otherwise matched A/B prompts.
+        # Preserve Mini-SWE's four template fields with image-owned values.
+        command = (
+            "uname -s; "
+            "if test -r /etc/os-release; then "
+            ". /etc/os-release; printf '%s\\n%s\\n' \"${ID:-}\" \"${VERSION_ID:-}\"; "
+            "else printf '\\n\\n'; fi; "
+            "uname -m; pwd -P"
+        )
         if configured:
             configured_q = shlex.quote(configured)
             command += f"; if test -d {configured_q}; then cd -- {configured_q} && pwd -P; fi"
@@ -1722,7 +1789,7 @@ class MiniSweCentralAgent(BaseAgent):
         preemptive_repository: HybridRepository | None = None
         preemptive_repository_revision = ""
         preemptive_retriever: HybridRetriever | None = None
-        retrieval_last_command = ""
+        retrieval_last_action: RetrievalActionState | None = None
         retrieval_last_operation = ""
         retrieval_active_paths: tuple[str, ...] = ()
         retrieval_changed_paths: tuple[str, ...] = ()
@@ -1881,12 +1948,26 @@ class MiniSweCentralAgent(BaseAgent):
                     "channel_receipts": [],
                     "latency_ms": 0.0,
                 }
-                if (
-                    self.enable_preemptive_retrieval
-                    and self.integration_mode is GTIntegrationMode.ACTIVE
-                    and self.policy_active
-                    and self.runtime_mode == "treatment"
-                ):
+                preemptive_gate_reason = _preemptive_retrieval_gate_reason(
+                    enabled=self.enable_preemptive_retrieval,
+                    integration_active=(
+                        self.integration_mode is GTIntegrationMode.ACTIVE
+                    ),
+                    policy_active=self.policy_active,
+                    treatment=self.runtime_mode == "treatment",
+                    source_less_task_at_start=source_less_task_at_start,
+                    last_operation=retrieval_last_operation,
+                    validation_state=retrieval_validation_state,
+                    diagnostics=retrieval_diagnostics,
+                )
+                if preemptive_gate_reason is not None:
+                    preemptive_decision["reason_codes"] = [preemptive_gate_reason]
+                    if preemptive_gate_reason in {
+                        "not_applicable_no_supported_source",
+                        "validation_pass_no_diagnostic",
+                    }:
+                        preemptive_decision["status"] = "abstained"
+                if preemptive_gate_reason is None:
                     retrieval_started = time.perf_counter()
                     retrieval_cold_start = (
                         preemptive_repository is None
@@ -1946,7 +2027,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 state = RetrievalState(
                                     task_text=instruction,
                                     intent=intent,
-                                    proposed_action=retrieval_last_command or None,
+                                    action=retrieval_last_action,
                                     active_paths=retrieval_active_paths,
                                     changed_paths=retrieval_changed_paths,
                                     diagnostics=retrieval_diagnostics,
@@ -1955,6 +2036,21 @@ class MiniSweCentralAgent(BaseAgent):
                                     previously_exposed_claims=tuple(
                                         sorted(delivered_preemptive_claim_ids)
                                     ),
+                                )
+                                preemptive_decision["action_state"] = (
+                                    {
+                                        "operation": retrieval_last_action.operation,
+                                        "executable": retrieval_last_action.executable,
+                                        "targets": list(retrieval_last_action.targets),
+                                        "validation_kind": (
+                                            retrieval_last_action.validation_kind
+                                        ),
+                                        "semantic_tokens": list(
+                                            retrieval_last_action.semantic_tokens
+                                        ),
+                                    }
+                                    if retrieval_last_action is not None
+                                    else None
                                 )
                                 if preemptive_retriever is None:
                                     preemptive_retriever = HybridRetriever(
@@ -2017,9 +2113,26 @@ class MiniSweCentralAgent(BaseAgent):
                                                 "end_line": row.end_line,
                                                 "symbol": row.symbol,
                                                 "relation": row.relation,
-                                                "claim_hash": row.claim_hash,
-                                                "provenance": list(row.provenance),
-                                            }
+                                                 "claim_hash": row.claim_hash,
+                                                 "provenance": list(row.provenance),
+                                                 "support_kind": next(
+                                                     (
+                                                         item.split(":", 1)[1]
+                                                         for item in row.provenance
+                                                         if item.startswith(
+                                                             "delivery_support:"
+                                                         )
+                                                     ),
+                                                     "",
+                                                 ),
+                                                 "supporting_channels": [
+                                                     item.split(":", 1)[1]
+                                                     for item in row.provenance
+                                                     if item.startswith(
+                                                         "support_channel:"
+                                                     )
+                                                 ],
+                                             }
                                             for row in retrieval_result.selected_context
                                         ],
                                         "selected_token_count": (
@@ -2464,15 +2577,14 @@ class MiniSweCentralAgent(BaseAgent):
                         or planned_query_timeout > 0
                     )
                 )
-                control_provider_messages: list[dict[str, Any]] | None = None
+                (
+                    control_provider_messages,
+                    control_request_payload_sha256,
+                    control_provider_messages_sha256,
+                    control_provider_request_chars,
+                ) = _provider_request_receipt(model, control_query_messages)
                 intervention_capture: dict[str, Any] | None = None
                 if runtime_payload:
-                    (
-                        control_provider_messages,
-                        _control_request_payload_sha256,
-                        _control_provider_messages_sha256,
-                        _control_provider_request_chars,
-                    ) = _provider_request_receipt(model, control_query_messages)
                     intervention_capture = {
                         "payload": runtime_payload,
                         "message_index": runtime_message_index,
@@ -2556,6 +2668,9 @@ class MiniSweCentralAgent(BaseAgent):
                                 preemptive_frame.evidence_action > actions_count
                             ),
                             "chars": len(preemptive_payload),
+                            "selected_evidence": list(
+                                preemptive_decision.get("selected_evidence") or []
+                            ),
                         }
                     )
                     preemptive_retrieval_deliveries.append(delivery_receipt)
@@ -2725,6 +2840,7 @@ class MiniSweCentralAgent(BaseAgent):
                         **context_parts,
                         "stock_context_chars": context_chars - runtime_enrichment_chars,
                         "stock_provider_chars": stock_provider_request_chars,
+                        "control_provider_chars": control_provider_request_chars,
                         "feature_guidance_chars": len(guidance_payload),
                         "certified_graph_chars": len(frontier_payload),
                         "compaction_removed_chars": provider_view_metrics.elided_chars,
@@ -2739,6 +2855,12 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                         "final_provider_chars": provider_request_chars,
                         "stock_provider_messages_sha256": stock_provider_messages_sha256,
+                        "control_request_payload_sha256": (
+                            control_request_payload_sha256
+                        ),
+                        "control_provider_messages_sha256": (
+                            control_provider_messages_sha256
+                        ),
                         "provider_changed_message_indices": provider_changed_message_indices,
                         "provider_view_changed": bool(provider_changed_message_indices),
                         "provider_change_reasons": provider_change_reasons,
@@ -3528,7 +3650,10 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=source_revision,
                         workspace_revision=snapshot.revision,
                     )
-                    retrieval_last_command = command
+                    retrieval_last_action = _retrieval_action_state(
+                        proposed,
+                        target_paths=action_graph_paths,
+                    )
                     retrieval_last_operation = proposed.operation.value
                     retrieval_active_paths = action_graph_paths
                     retrieval_changed_paths = tuple(model_authored_source_paths)
@@ -5465,7 +5590,10 @@ class MiniSweCentralAgent(BaseAgent):
                                 delivered_preemptive_claim_ids
                             ),
                             "dense_backend": (
-                                self._preemptive_dense_backend.receipt()
+                                {
+                                    "available": True,
+                                    **self._preemptive_dense_backend.receipt(),
+                                }
                                 if self._preemptive_dense_backend is not None
                                 else None
                             ),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import gt_engine.hybrid_retrieval as hybrid_module
 from gt_engine.hybrid_retrieval import (
@@ -10,6 +11,7 @@ from gt_engine.hybrid_retrieval import (
     HybridRetriever,
     LexicalRetrievalChannel,
     RepositoryDocument,
+    RetrievalActionState,
     RetrievalCandidate,
     RetrievalChannel,
     RetrievalIntent,
@@ -98,6 +100,47 @@ def test_typed_state_builds_trajectory_conditioned_query_without_gold_fields():
     assert not hasattr(state, "gold_files")
 
 
+def test_legacy_raw_action_is_normalized_to_typed_state_without_heredoc_body():
+    state = _state(
+        proposed_action=(
+            "python - <<'PY'\n"
+            "SECRET_PROGRAM_BODY = 'must never enter retrieval'\n"
+            "print(SECRET_PROGRAM_BODY)\n"
+            "PY"
+        )
+    )
+
+    assert isinstance(state.action, RetrievalActionState)
+    assert state.action.executable == "python"
+    assert "SECRET_PROGRAM_BODY" not in state.query_text()
+    assert "must never enter retrieval" not in state.sparse_query_text()
+
+
+def test_legacy_inline_program_body_is_not_retrieval_query_text():
+    state = _state(proposed_action="python -c \"print('PRIVATE_INLINE_PROGRAM')\"")
+
+    assert isinstance(state.action, RetrievalActionState)
+    assert state.action.executable == "python"
+    assert "PRIVATE_INLINE_PROGRAM" not in state.query_text()
+
+
+def test_explicit_typed_action_contributes_only_bounded_semantic_fields():
+    state = _state(
+        action=RetrievalActionState(
+            operation="validate",
+            executable="pytest",
+            targets=("tests/test_allocator.py",),
+            validation_kind="pytest",
+        )
+    )
+
+    query = state.query_text()
+
+    assert "operation=validate" in query
+    assert "executable=pytest" in query
+    assert "targets=tests/test_allocator.py" in query
+
+
 def test_exact_lexical_and_bm25_channels_are_independent_rankers():
     documents = (
         RepositoryDocument(
@@ -156,6 +199,128 @@ def test_exact_channel_splits_snake_and_camel_case_symbols():
 
     assert ranked[0].path == "src/helpers.py"
     assert "exact_symbol_token" in ranked[0].provenance
+
+
+def test_short_or_common_symbol_is_rank_only_and_never_exact_certified():
+    for symbol in ("x", "run"):
+        documents = (
+            RepositoryDocument(
+                f"src/worker_{symbol}.py",
+                f"def {symbol}(): pass",
+                symbol=symbol,
+            ),
+        )
+        state = _state(task_text=f"repair {symbol}")
+        channel = ExactRetrievalChannel(documents)
+
+        ranked = channel.retrieve(state, limit=10)
+        result = HybridRetriever((), channels=(channel,)).retrieve(state)
+
+        assert "exact_symbol" not in ranked[0].provenance
+        assert result.selected_context == ()
+
+
+def test_exact_symbol_certification_requires_unique_explicit_identifier():
+    duplicate_documents = (
+        RepositoryDocument("src/one.py", "def calculateTotal(): pass", symbol="calculateTotal"),
+        RepositoryDocument("src/two.py", "def calculateTotal(): pass", symbol="calculateTotal"),
+    )
+    unique_documents = duplicate_documents[:1]
+    state = _state(task_text="repair calculateTotal")
+
+    duplicate = ExactRetrievalChannel(duplicate_documents).retrieve(state, limit=10)
+    unique = ExactRetrievalChannel(unique_documents).retrieve(state, limit=10)
+
+    assert all("exact_symbol" not in row.provenance for row in duplicate)
+    assert "exact_symbol" in unique[0].provenance
+
+    selected = HybridRetriever(unique_documents, dense_backend=None).retrieve(state)
+    assert "delivery_support:certified" in selected.selected_context[0].provenance
+    assert "support_channel:exact" in selected.selected_context[0].provenance
+
+
+def test_exact_path_certification_requires_a_complete_path_token():
+    documents = (RepositoryDocument("src/calculate.py", "def calculate(): pass"),)
+
+    explicit = ExactRetrievalChannel(documents).retrieve(
+        _state(task_text="inspect src/calculate.py"),
+        limit=10,
+    )
+    app_absolute = ExactRetrievalChannel(documents).retrieve(
+        _state(task_text="inspect /app/src/calculate.py"),
+        limit=10,
+    )
+    suffix_collision = ExactRetrievalChannel(documents).retrieve(
+        _state(task_text="inspect src/calculate.py.bak"),
+        limit=10,
+    )
+
+    assert "exact_path" in explicit[0].provenance
+    assert "exact_path" in app_absolute[0].provenance
+    assert "exact_path" not in suffix_collision[0].provenance
+
+
+def test_claim_identity_ignores_global_revision_but_tracks_semantic_evidence():
+    original = RetrievalCandidate(
+        path="src/calculate.py",
+        start_line=4,
+        end_line=8,
+        symbol="calculateTotal",
+        text="def calculateTotal(): return 1",
+        channel=RetrievalChannel.STRUCTURAL,
+        channel_rank=1,
+        relation="CALLS",
+        provenance=("graph_edge:7", "trust:CERTIFIED"),
+        source_revision="source-1",
+    )
+
+    assert replace(original, source_revision="source-unrelated").claim_hash == original.claim_hash
+    assert (
+        replace(original, text="def calculateTotal(): return 2").claim_hash
+        != original.claim_hash
+    )
+    assert replace(original, relation="IMPORTS").claim_hash != original.claim_hash
+    assert replace(original, provenance=("graph_edge:8",)).claim_hash != original.claim_hash
+    assert (
+        replace(
+            original,
+            provenance=(
+                *original.provenance,
+                "delivery_support:certified",
+                "support_channel:structural",
+            ),
+        ).claim_hash
+        == original.claim_hash
+    )
+
+
+def test_retrieved_unchanged_evidence_keeps_claim_across_unrelated_revisions():
+    document = RepositoryDocument(
+        "src/calculate.py",
+        "def calculateTotal(): return 1",
+        symbol="calculateTotal",
+        provenance=("graph_node:4",),
+    )
+    retriever = HybridRetriever((document,), dense_backend=None)
+
+    before = retriever.retrieve(
+        _state(task_text="inspect src/calculate.py", source_revision="source-1")
+    )
+    after = retriever.retrieve(
+        _state(task_text="inspect src/calculate.py", source_revision="source-2")
+    )
+    changed = HybridRetriever(
+        (
+            replace(
+                document,
+                text="def calculateTotal(): return 2",
+            ),
+        ),
+        dense_backend=None,
+    ).retrieve(_state(task_text="inspect src/calculate.py", source_revision="source-2"))
+
+    assert before.ranked_spans[0].claim_hash == after.ranked_spans[0].claim_hash
+    assert changed.ranked_spans[0].claim_hash != after.ranked_spans[0].claim_hash
 
 
 def test_dense_channel_finds_semantic_candidate_sparse_terms_do_not_name():

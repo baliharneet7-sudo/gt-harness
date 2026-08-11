@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from gt_engine.central_runtime import is_check_command, is_submit_command, normalize_command
+from gt_engine.delivery_audit import audit_provider_deliveries
 
 PRIMARY_RESOURCES = (
     "total_tokens",
@@ -97,6 +98,14 @@ DIAGNOSTIC_METRICS = (
     "timely_payload_deliveries",
     "late_payload_deliveries",
     "predictive_payload_deliveries",
+    "provider_delivery_count",
+    "provider_delivery_visible_chars",
+    "provider_delivery_claim_count",
+    "provider_delivery_timely_count",
+    "provider_delivery_late_count",
+    "provider_delivery_predictive_count",
+    "provider_delivery_duplicate_count",
+    "provider_delivery_failures",
     "predecided_actions_after_evidence",
     "context_compiler_calls",
     "context_fact_candidates",
@@ -314,7 +323,7 @@ def _payload_anchors(payload: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(anchors))
 
 
-def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> dict[str, int]:
+def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> dict[str, Any]:
     """Feature funnel grounded in the receipt, never inferred from prose.
 
     ``guidance_deliveries`` counts payloads that actually reached a model
@@ -327,6 +336,9 @@ def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> d
     consumed = len(effects)
     applied = sum(1 for effect in effects if effect.get("applied_after_action") is not None)
     deliveries = receipt.get("guidance_deliveries") or []
+    _provider_delivery_rows, provider_delivery_failures, provider_delivery_totals = (
+        audit_provider_deliveries(receipt)
+    )
     receipts_by_key = {
         (row.get("feature_id"), int(row.get("action") or 0)): row
         for row in (features.get("receipts") or [])
@@ -345,6 +357,14 @@ def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> d
         later = [item for item in actions if item["index"] > evidence_action]
         if any(any(anchor in item["command"] for anchor in anchors) for item in later):
             aligned += 1
+    surface_counts = {
+        surface: int(values.get("delivery_count") or 0)
+        for surface, values in provider_delivery_totals.get("surfaces", {}).items()
+    }
+    surface_chars = {
+        surface: int(values.get("visible_chars") or 0)
+        for surface, values in provider_delivery_totals.get("surfaces", {}).items()
+    }
     return {
         "feature_produced": produced,
         "feature_consumed": consumed,
@@ -352,6 +372,20 @@ def _feature_funnel(receipt: dict[str, Any], actions: list[dict[str, Any]]) -> d
         "guidance_deliveries": delivered,
         "guidance_behaviorally_aligned": aligned,
         "guidance_suppressed": int(features.get("guidance_suppressed") or 0),
+        "provider_delivery_count": int(provider_delivery_totals["delivery_count"]),
+        "provider_delivery_visible_chars": int(provider_delivery_totals["visible_chars"]),
+        "provider_delivery_claim_count": int(provider_delivery_totals["claim_count"]),
+        "provider_delivery_timely_count": int(provider_delivery_totals["timely_count"]),
+        "provider_delivery_late_count": int(provider_delivery_totals["late_count"]),
+        "provider_delivery_predictive_count": int(
+            provider_delivery_totals["predictive_count"]
+        ),
+        "provider_delivery_duplicate_count": int(
+            provider_delivery_totals["duplicate_count"]
+        ),
+        "provider_delivery_failures": len(provider_delivery_failures),
+        "provider_delivery_surface_counts": surface_counts,
+        "provider_delivery_surface_chars": surface_chars,
     }
 
 

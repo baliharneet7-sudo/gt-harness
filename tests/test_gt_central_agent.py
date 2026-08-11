@@ -24,6 +24,7 @@ from eval.gt_central_agent import (
     _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
+    _retrieval_intent,
     _stable_provider_prefix,
     _workspace_target_path,
 )
@@ -37,6 +38,8 @@ from gt_engine.decision_point_eval import (
     DecisionPointValidity,
     validate_decision_point_row,
 )
+from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.hybrid_retrieval import RetrievalIntent
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -158,6 +161,126 @@ class _Environment:
         if "-printf" in command:
             return ExecResult(stdout="", return_code=0)
         return ExecResult(stdout="", return_code=0)
+
+
+@pytest.mark.asyncio
+async def test_system_information_is_invariant_to_host_kernel_release(tmp_path):
+    class KernelEnvironment(_Environment):
+        def __init__(self, release: str, version: str):
+            super().__init__()
+            self.release = release
+            self.version = version
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if "/etc/os-release" in command:
+                return ExecResult(
+                    stdout="Linux\nUbuntu\n22.04\nx86_64\n/app\n",
+                    return_code=0,
+                )
+            if command.startswith("uname "):
+                return ExecResult(
+                    stdout=(
+                        f"Linux\n{self.release}\n{self.version}\n"
+                        "x86_64\n/app\n"
+                    ),
+                    return_code=0,
+                )
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    first = MiniSweCentralAgent(logs_dir=tmp_path / "first", model_name="test")
+    second = MiniSweCentralAgent(logs_dir=tmp_path / "second", model_name="test")
+
+    first_info = await first._system_information(
+        KernelEnvironment("6.17.0-1020-azure", "runner-a")
+    )
+    second_info = await second._system_information(
+        KernelEnvironment("6.17.0-1022-azure", "runner-b")
+    )
+
+    assert first_info == second_info
+    assert first_info == {
+        "system": "Linux",
+        "release": "Ubuntu",
+        "version": "22.04",
+        "machine": "x86_64",
+    }
+
+
+def test_passing_validation_does_not_request_repository_context():
+    assert (
+        _retrieval_intent(
+            operation=ActionOperation.VALIDATE.value,
+            validation_state="pass",
+            changed_paths=(),
+            diagnostics=(),
+        )
+        is RetrievalIntent.OTHER
+    )
+
+
+def test_source_less_task_blocks_preemptive_repository_retrieval():
+    from eval import gt_central_agent as central_agent
+
+    gate = getattr(central_agent, "_preemptive_retrieval_gate_reason", None)
+    assert callable(gate), "central agent must expose one applicability gate"
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=True,
+        )
+        == "not_applicable_no_supported_source"
+    )
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=False,
+        )
+        is None
+    )
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=False,
+            last_operation=ActionOperation.VALIDATE.value,
+            validation_state="pass",
+            diagnostics=(),
+        )
+        == "validation_pass_no_diagnostic"
+    )
+
+
+def test_live_retrieval_action_state_uses_typed_parser_not_raw_program_body():
+    from eval import gt_central_agent as central_agent
+
+    proposed = adapt_proposed_action(
+        {
+            "command": "python - <<'PY'\nSECRET_PROGRAM_BODY = 'never query this'\nPY",
+            "tool_call_id": "action-1",
+        },
+        source_revision="source-1",
+        workspace_revision="workspace-1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+    build_state = getattr(central_agent, "_retrieval_action_state", None)
+
+    assert callable(build_state), "central agent must use the typed action adapter"
+    action_state = build_state(proposed, target_paths=("src/worker.py",))
+    assert action_state.operation == proposed.operation.value
+    assert action_state.executable == "python"
+    assert action_state.targets == ("src/worker.py",)
+    assert "SECRET_PROGRAM_BODY" not in action_state.query_text()
 
 
 @pytest.mark.asyncio
@@ -559,9 +682,20 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     assert delivery["first_eligible_request"] is True
     assert delivery["one_step_late"] is False
     assert delivery["predictive"] is False
+    assert delivery["selected_evidence"]
+    assert all(row["support_kind"] for row in delivery["selected_evidence"])
     assert delivery["request_payload_sha256"] == receipt["model_call_contexts"][0][
         "request_payload_sha256"
     ]
+    call = receipt["model_call_contexts"][0]
+    assert call["control_provider_messages_sha256"]
+    assert call["control_request_payload_sha256"]
+    assert call["control_provider_messages_sha256"] != call["provider_messages_sha256"]
+    _delivery_rows, delivery_failures, delivery_totals = audit_provider_deliveries(
+        receipt, task="preemptive-integration"
+    )
+    assert delivery_failures == []
+    assert delivery_totals["delivery_count"] == 1
     assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 1
     assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] >= 1
     assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
@@ -714,6 +848,8 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
         enable_context_frontier=True,
     )
     agent._model_factory = lambda: model
@@ -728,6 +864,15 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     assert intelligence["failures"] == []
     assert intelligence["graph_gate"]["failures"] == []
     assert intelligence["frontier_deliveries"] == []
+    preemptive = receipt["preemptive_retrieval"]
+    assert preemptive["deliveries"] == []
+    assert preemptive["decisions"][0]["status"] == "abstained"
+    assert preemptive["decisions"][0]["reason_codes"] == [
+        "not_applicable_no_supported_source"
+    ]
+    call = receipt["model_call_contexts"][0]
+    assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
+    assert call["control_request_payload_sha256"] == call["request_payload_sha256"]
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
     assert receipt["metrics"]["context_frontier_zero_tasks"] == 0

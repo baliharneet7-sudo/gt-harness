@@ -43,6 +43,7 @@ RELEASE_TESTS = (
     "tests/test_gt_benchmark_language_contract.py",
     "tests/test_gt_central_agent.py::test_context_frontier_advances_repository_intelligence_without_feature_advisory",
     "tests/test_gt_central_agent.py::test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request",
+    "tests/test_gt_delivery_audit.py",
     "tests/test_preemptive_retrieval_frame.py",
     "tests/test_hybrid_retrieval.py",
     "tests/test_hybrid_repository.py",

@@ -93,6 +93,7 @@ jobs:
             tests/test_central_replay.py \
             tests/test_central_run_diff.py \
             tests/test_central_trajectory_audit.py \
+            tests/test_gt_delivery_audit.py \
             tests/test_provider_view.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
@@ -135,6 +136,7 @@ jobs:
             gt_engine/decision_point_eval.py \
             gt_engine/snowflake_onnx.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
+            gt_engine/delivery_audit.py \
             gt_engine/uplift_policy.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
@@ -162,6 +164,7 @@ jobs:
             tests/test_central_readiness.py \
             tests/test_central_replay.py tests/test_central_run_diff.py \
             tests/test_central_trajectory_audit.py \
+            tests/test_gt_delivery_audit.py \
             tests/test_replay_bundle.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \

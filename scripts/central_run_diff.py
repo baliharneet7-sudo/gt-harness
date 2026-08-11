@@ -10,8 +10,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from gt_engine.delivery_audit import (  # noqa: E402
+    audit_provider_deliveries,
+    collect_provider_deliveries,
+)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -103,18 +113,26 @@ def _request_identity(context: dict[str, Any]) -> tuple[str, str]:
     )
 
 
+def _control_request_identity(context: dict[str, Any]) -> tuple[str, str]:
+    """Return the provider view before GT text was attached."""
+
+    return (
+        str(
+            context.get("control_provider_messages_sha256")
+            or context.get("provider_messages_sha256")
+            or ""
+        ),
+        str(
+            context.get("control_request_payload_sha256")
+            or context.get("request_payload_sha256")
+            or ""
+        ),
+    )
+
+
 def _first_visible_call(receipt: dict[str, Any]) -> int | None:
     calls = []
-    for item in receipt.get("guidance_deliveries") or []:
-        if not isinstance(item, dict):
-            continue
-        call = item.get("delivered_before_call") or item.get("first_eligible_call")
-        if isinstance(call, int) and call > 0:
-            calls.append(call)
-    intelligence = receipt.get("repository_intelligence") or {}
-    for item in intelligence.get("frontier_deliveries") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in collect_provider_deliveries(receipt):
         call = item.get("delivered_before_call") or item.get("first_eligible_call")
         if isinstance(call, int) and call > 0:
             calls.append(call)
@@ -143,8 +161,20 @@ def _request_differences(
     ]
 
 
+def _control_request_differences(
+    baseline: dict[int, dict[str, Any]], treatment: dict[int, dict[str, Any]]
+) -> list[int]:
+    return [
+        call
+        for call in sorted(set(baseline) | set(treatment))
+        if _request_identity(baseline.get(call, {}))
+        != _control_request_identity(treatment.get(call, {}))
+    ]
+
+
 def _context_summary(receipt: dict[str, Any]) -> dict[str, Any]:
     metrics = receipt.get("metrics") or {}
+    _, delivery_failures, delivery_totals = audit_provider_deliveries(receipt)
     return {
         "compactions": int(metrics.get("context_compactions") or 0),
         "chars_elided": int(metrics.get("context_chars_elided") or 0),
@@ -157,6 +187,15 @@ def _context_summary(receipt: dict[str, Any]) -> dict[str, Any]:
         "effective_actions": int(metrics.get("effective_actions") or 0),
         "preflight_calls": int(metrics.get("preflight_calls") or 0),
         "preflight_dispositions": dict(metrics.get("preflight_applied_dispositions") or {}),
+        "provider_delivery_count": delivery_totals["delivery_count"],
+        "provider_visible_chars": delivery_totals["visible_chars"],
+        "provider_delivery_claims": delivery_totals["claim_count"],
+        "provider_delivery_timely": delivery_totals["timely_count"],
+        "provider_delivery_late": delivery_totals["late_count"],
+        "provider_delivery_predictive": delivery_totals["predictive_count"],
+        "provider_delivery_duplicates": delivery_totals["duplicate_count"],
+        "provider_delivery_failures": delivery_failures,
+        "provider_delivery_surfaces": delivery_totals["surfaces"],
     }
 
 
@@ -177,8 +216,14 @@ def _frames(receipt: dict[str, Any]) -> list[dict[str, Any]]:
     return frames
 
 
-def _accounting_complete(contexts: dict[int, dict[str, Any]]) -> bool:
-    return bool(contexts) and all(all(_request_identity(row)) for row in contexts.values())
+def _accounting_complete(receipt: dict[str, Any]) -> bool:
+    contexts = _contexts(receipt)
+    _, delivery_failures, _totals = audit_provider_deliveries(receipt)
+    return (
+        bool(contexts)
+        and all(all(_request_identity(row)) for row in contexts.values())
+        and not delivery_failures
+    )
 
 
 def _compare_task(
@@ -204,16 +249,29 @@ def _compare_task(
             first_call is not None and (earliest_visible is None or first_call < earliest_visible)
         ),
         "request_differences": _request_differences(left_contexts, right_contexts),
+        "control_request_differences": _control_request_differences(
+            left_contexts, right_contexts
+        ),
+        "control_request_accounting_complete": bool(right_contexts)
+        and all(
+            context.get("control_provider_messages_sha256")
+            and context.get("control_request_payload_sha256")
+            for context in right_contexts.values()
+        ),
         "guidance": {
             "left_first_visible_call": left_visible,
             "right_first_visible_call": right_visible,
             "left_frames": _frames(left_receipt),
             "right_frames": _frames(right_receipt),
         },
+        "provider_deliveries": {
+            "left": _context_summary(left_receipt).get("provider_delivery_surfaces", {}),
+            "right": _context_summary(right_receipt).get("provider_delivery_surfaces", {}),
+        },
         "left": _context_summary(left_receipt),
         "right": _context_summary(right_receipt),
-        "accounting_complete": _accounting_complete(left_contexts)
-        and _accounting_complete(right_contexts),
+        "accounting_complete": _accounting_complete(left_receipt)
+        and _accounting_complete(right_receipt),
     }
 
 

@@ -46,7 +46,7 @@ same implementation; benchmark-only rankers are forbidden. One typed
 `RetrievalState` is evaluated by five independent channels: exact path/symbol,
 lexical overlap, BM25, the explicitly provisioned local Snowflake Arctic ONNX
 embedder, and certified GraphDB structure. Equal-weight reciprocal-rank fusion
-uses `k=60`, fuses unique files, and then packs at most three complete evidence
+uses `k=60`, fuses unique files, and then packs at most eight complete evidence
 spans inside the configured token budget. Source bytes always come from the
 exact checkout. The structural corpus includes directed edges, resolved test
 assertions, verified closure, pair co-change, and commit-set co-change.
@@ -84,6 +84,59 @@ the top-20 ranked view and the actually selected/delivered view. Provider-free
 tests and runtime request proof establish implementation integrity only; no
 retrieval or solve-rate improvement may be claimed until the full 427-row ARB
 evaluation completes.
+
+## Final live-integration repair (2026-08-11)
+
+The accepted ARB retriever is not complete merely because its standalone
+ranking tests pass. The live Mini-SWE path must project the already-normalized
+`ProposedAction` into bounded `RetrievalActionState`; raw Bash, heredoc bodies,
+and interpreter `-c`/`-e` programs must never become retrieval query text.
+Exact delivery authority requires canonical full-path equality or a unique,
+explicit, non-common identifier of at least four characters. Weak token
+overlap remains rank-only. A claim identifies semantic evidence
+(path/span/symbol/relation/provenance/content), not the global source revision,
+so unrelated workspace edits cannot redeliver unchanged evidence.
+
+Preemptive retrieval must abstain for a task classified at transfer time as
+`not_applicable_no_supported_source` and after an attributable passing
+validation with no diagnostic. This is separate from incremental refresh on a
+source-backed task: changed source files still rebuild/refresh before the next
+provider request. Every selected preemptive row persists its support class and
+supporting channel set. A delivery without that semantic certificate is
+invalid, even if it was timely and its request hash exists.
+
+`gt_engine.delivery_audit.audit_provider_deliveries` is the only authoritative
+visible-delivery counter. It combines preemptive retrieval, feature guidance,
+repository frontier, progress, and explicitly visible completion surfaces. A
+valid delivery must have unique claims, first-eligible/non-predictive timing,
+an exact request and provider-view hash matching the call receipt, and a
+recorded provider-message index that is in range and listed among the messages
+changed by GT. Preemptive deliveries additionally require persisted semantic
+support. Never report only `guidance_deliveries` as total GT visibility.
+
+Archived outcome smoke `31535815764` is rejected deterministic-integrity
+evidence. Canonical reconstruction finds 60 visible deliveries and 44,372
+characters: 44 preemptive, 9 repository-frontier, and 7 feature-guidance
+deliveries. All were first-eligible and hash-accounted, but the 44 old
+preemptive receipts lack the new semantic-support certificate. The smoke also
+ran without the pinned dense backend in the matrix jobs and its first prompt
+contained runner-kernel identity. It cannot certify the repaired treatment.
+
+The paid matrix now provisions and executes the pinned Snowflake ONNX backend
+inside every applicable task job. Merge accepts dense treatment only when the
+pre-run embedding proof and the live central receipt both explicitly report
+success. The agent records a pre-GT control request hash on every call, while
+`central_run_diff.py` compares a baseline provider view to the treatment's
+pre-GT control view. Same-run control-versus-final differences are intervention
+accounting, not A/B prompt-parity failures.
+
+Local Windows release gates may fail if the checked-in `gt-index.exe` predates
+the current Go source (the known witness is missing `objective_c`). Do not
+weaken the graph gate or claim readiness from Python tests. The authoritative
+provider-free workflow builds `vendor/gt-index-src` on Linux, provisions the
+content-hashed ONNX asset, then must print every census line, `READY`, and
+`SMOKE_APPROVED`. No paid smoke is allowed before that exact pushed workflow
+passes.
 
 Keep these states distinct in every audit:
 

@@ -79,8 +79,11 @@ jobs:
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+      SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
       SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
       SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
+      GT_DENSE_INTRA_OP_THREADS: "4"
+      GT_DENSE_INTER_OP_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -248,6 +251,11 @@ jobs:
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+      SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
+      SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
+      SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
+      GT_DENSE_INTRA_OP_THREADS: "4"
+      GT_DENSE_INTER_OP_THREADS: "1"
       # Provider credentials remain on the Harbor host. The external agent
       # passes an empty env mapping to every model-selected task command.
     steps:
@@ -282,8 +290,75 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           chmod +x vendor/gt-index-linux-amd64
-          pip install -e . "mini-swe-agent==2.2.8" "harbor==0.20.0" \
+          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" \
             vendor/groundtruth_mcp-*.whl
+
+      - name: Provision pinned Snowflake ONNX runtime asset in task job
+        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
+        run: |
+          set -euo pipefail
+          model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
+          mkdir -p "$model_dir"
+          gh release download gt-retrieval-runtime-v1 \
+            --repo harneet2512/gt-harness \
+            --pattern model.onnx --pattern tokenizer.json --pattern manifest.json \
+            --dir "$model_dir"
+          echo "$SNOWFLAKE_MODEL_SHA256  $model_dir/model.onnx" | sha256sum -c -
+          echo "$SNOWFLAKE_TOKENIZER_SHA256  $model_dir/tokenizer.json" | sha256sum -c -
+          MODEL_DIR="$model_dir" python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path(os.environ["MODEL_DIR"])
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          expected = {
+              "model": "Snowflake/snowflake-arctic-embed-m",
+              "revision": os.environ["SNOWFLAKE_MODEL_REVISION"],
+              "model_sha256": os.environ["SNOWFLAKE_MODEL_SHA256"],
+              "tokenizer_sha256": os.environ["SNOWFLAKE_TOKENIZER_SHA256"],
+          }
+          for key, value in expected.items():
+              if str(manifest.get(key) or "") != value:
+                  raise SystemExit(f"manifest mismatch for {key}: {manifest.get(key)!r}")
+          if manifest.get("inference_api") is not False:
+              raise SystemExit("pinned asset manifest must prove inference_api=false")
+          PY
+
+      - name: Verify pinned dense backend before Mini-SWE
+        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
+        run: |
+          set -euo pipefail
+          MODEL_DIR="$RUNNER_TEMP/snowflake-arctic-embed-m" python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
+
+          root = Path(os.environ["MODEL_DIR"])
+          backend = SnowflakeOnnxDenseBackend.from_directory(root)
+          query = backend.embed_query("verify the repository implementation")
+          passage = backend.embed_documents(("def verify_repository(): pass",))[0]
+          if not query or not passage:
+              raise SystemExit("Snowflake backend returned an empty embedding")
+          receipt = backend.receipt()
+          if receipt.get("network_calls") or receipt.get("provider_calls"):
+              raise SystemExit("dense backend made a network/provider call")
+          proof = {
+              "schema": "gt.snowflake_dense_backend_proof.v1",
+              "available": True,
+              "identity": backend.identity,
+              "model_revision": os.environ["SNOWFLAKE_MODEL_REVISION"],
+              "model_sha256": os.environ["SNOWFLAKE_MODEL_SHA256"],
+              "tokenizer_sha256": os.environ["SNOWFLAKE_TOKENIZER_SHA256"],
+              "receipt": receipt,
+              "query_dimensions": len(query),
+              "passage_dimensions": len(passage),
+          }
+          Path("dense-backend-proof.json").write_text(
+              json.dumps(proof, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(proof, sort_keys=True))
+          PY
 
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
@@ -487,7 +562,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-${{ matrix.task }}
-          path: results/terminal-bench/
+          path: |
+            results/terminal-bench/
+            dense-backend-proof.json
           if-no-files-found: warn
 
   merge:
@@ -513,14 +590,18 @@ jobs:
       - name: Merge task results
         env:
           EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
+          GT_ARM: ${{ inputs.arm }}
         run: |
           python - <<'EOF'
           import json, os, sys
           from pathlib import Path
 
           from gt_engine.deep_metrics import extract_trajectory
+          from gt_engine.delivery_audit import audit_provider_deliveries
 
           expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
+          arm = os.environ.get("GT_ARM") or ""
+          dense_required = arm in {"certified_context", "certified_full"}
           trials, missing, per_task, receipt_metrics = [], [], [], []
           deep_tasks = {}
 
@@ -536,6 +617,29 @@ jobs:
                   receipt = json.loads(receipt_paths[0].read_text(encoding="utf-8"))
                   metrics = receipt.get("metrics") or {}
                   intelligence = receipt.get("repository_intelligence") or {}
+                  preemptive = receipt.get("preemptive_retrieval") or {}
+                  dense_receipt = preemptive.get("dense_backend") or {}
+                  contexts = receipt.get("model_call_contexts") or []
+                  first_context = contexts[0] if contexts else {}
+                  control_provider_hash = str(
+                      first_context.get("control_provider_messages_sha256")
+                      or first_context.get("stock_provider_messages_sha256")
+                      or ""
+                  )
+                  provider_hash = str(
+                      first_context.get("provider_messages_sha256") or ""
+                  )
+                  dense_proofs = list(task_dir.rglob("dense-backend-proof.json"))
+                  dense_proof = (
+                      json.loads(dense_proofs[0].read_text(encoding="utf-8"))
+                      if dense_proofs
+                      else {}
+                  )
+                  (
+                      _provider_delivery_rows,
+                      provider_delivery_failures,
+                      provider_delivery_totals,
+                  ) = audit_provider_deliveries(receipt, task=task_name)
                   receipt_metrics.append({
                       "task": task_name,
                       "feature_count": (receipt.get("features") or {}).get("feature_count"),
@@ -588,6 +692,45 @@ jobs:
                       "repository_index_refresh_ms": metrics.get("repository_index_refresh_ms"),
                       "context_frontier_deliveries": metrics.get("context_frontier_deliveries"),
                       "context_frontier_chars_added": metrics.get("context_frontier_chars_added"),
+                      "preemptive_retrieval_deliveries": metrics.get(
+                          "preemptive_retrieval_deliveries"
+                      ),
+                      "preemptive_retrieval_chars_added": metrics.get(
+                          "preemptive_retrieval_chars_added"
+                      ),
+                      "preemptive_dense_backend_available": bool(
+                          metrics.get("preemptive_dense_backend_available") == 1
+                          and dense_receipt.get("available") is True
+                          and dense_proof.get("available") is True
+                      ),
+                      "preemptive_dense_backend_error": (
+                          metrics.get("preemptive_dense_backend_error")
+                          or preemptive.get("dense_backend_error")
+                      ),
+                      "dense_backend_identity": (
+                          dense_receipt.get("model_name")
+                          or dense_proof.get("identity")
+                      ),
+                      "control_provider_messages_sha256": control_provider_hash,
+                      "provider_messages_sha256": provider_hash,
+                      "call1_gt_view_changed": bool(
+                          control_provider_hash
+                          and provider_hash
+                          and control_provider_hash != provider_hash
+                      ),
+                      "total_gt_context_chars_added": metrics.get(
+                          "total_gt_context_chars_added"
+                      ),
+                      "provider_delivery_count": provider_delivery_totals.get(
+                          "delivery_count"
+                      ),
+                      "provider_delivery_visible_chars": provider_delivery_totals.get(
+                          "visible_chars"
+                      ),
+                      "provider_delivery_surfaces": provider_delivery_totals.get(
+                          "surfaces"
+                      ),
+                      "provider_delivery_failures": provider_delivery_failures,
                   })
               results = list(task_dir.rglob("result.json"))
               if not results:
@@ -638,6 +781,24 @@ jobs:
                   or row["repository_intelligence_failures"]
               )
           ]
+          invalid_dense = [
+              row["task"]
+              for row in receipt_metrics
+              if dense_required
+              and row["repository_intelligence_required"]
+              and not row["repository_intelligence_denominator_excluded"]
+              and not row["preemptive_dense_backend_available"]
+          ]
+          invalid_provider_deliveries = [
+              row["task"]
+              for row in receipt_metrics
+              if row["provider_delivery_failures"]
+          ]
+          call1_gt_changed_tasks = [
+              row["task"]
+              for row in receipt_metrics
+              if row["call1_gt_view_changed"]
+          ]
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
           out.append("- arm: **${{ inputs.arm }}**")
@@ -663,6 +824,24 @@ jobs:
               out.append(
                   f"> **INVALID GT TREATMENT**: repository intelligence failed for "
                   f"{len(invalid_intelligence)} task(s): {', '.join(invalid_intelligence)}."
+              )
+          if invalid_dense:
+              out.append(
+                  f"> **INVALID DENSE TREATMENT**: pinned dense retrieval was unavailable "
+                  f"for {len(invalid_dense)} applicable task(s): {', '.join(invalid_dense)}."
+              )
+          if invalid_provider_deliveries:
+              out.append(
+                  f"> **INVALID PROVIDER DELIVERY**: deterministic delivery audit failed "
+                  f"for {len(invalid_provider_deliveries)} task(s): "
+                  f"{', '.join(invalid_provider_deliveries)}."
+              )
+          if call1_gt_changed_tasks:
+              out.append(
+                  f"> **GT CHANGED CALL 1**: final call-1 provider bytes differ from "
+                  f"the same run's recorded pre-GT control for {len(call1_gt_changed_tasks)} "
+                  f"task(s): {', '.join(call1_gt_changed_tasks)}. This is intervention "
+                  "accounting, not a baseline-parity failure."
               )
           out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
           for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
@@ -705,6 +884,10 @@ jobs:
               "n_errored": len(errored),
               "n_solved": n_solved,
               "invalid_repository_intelligence_tasks": invalid_intelligence,
+              "invalid_dense_backend_tasks": invalid_dense,
+              "invalid_provider_delivery_tasks": invalid_provider_deliveries,
+              "dense_backend_required": dense_required,
+              "call1_gt_changed_tasks": call1_gt_changed_tasks,
               "trial_results": trials,
               "receipt_metrics": receipt_metrics,
           }, indent=2), encoding="utf-8")
@@ -720,7 +903,7 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write(body)
           print(body[:4000])
-          if invalid_intelligence:
+          if invalid_intelligence or invalid_dense or invalid_provider_deliveries:
               sys.exit(2)
           EOF
 

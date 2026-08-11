@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from scripts.central_trajectory_audit import audit_run_root
+
+
+def test_direct_trajectory_audit_invocation_bootstraps_project_imports():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "central_trajectory_audit.py"), "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Fail-closed trajectory audit" in result.stdout
 
 
 def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
@@ -42,6 +58,8 @@ def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
                 "call": 1,
                 "request_payload_sha256": request_hash,
                 "provider_messages_sha256": request_hash,
+                "provider_message_count": 3,
+                "provider_changed_message_indices": [2],
                 "context_fact_candidates": 1,
                 "context_facts_represented": 1,
                 "context_facts_selected": 0,
@@ -75,6 +93,7 @@ def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
                 "not_predictive": True,
                 "request_payload_sha256": request_hash,
                 "provider_messages_sha256": request_hash,
+                "message_index": 2,
                 "facts": [{"path": "app.py", "line": 1, "symbol": "x"}],
                 "chars": 20,
             }

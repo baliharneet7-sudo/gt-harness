@@ -115,6 +115,24 @@ def test_run_diff_reports_identical_execution_without_spurious_differences(tmp_p
     assert task["accounting_complete"] is True
 
 
+def test_run_diff_compares_treatment_pre_gt_control_to_baseline_provider(tmp_path):
+    left, right = tmp_path / "left", tmp_path / "right"
+    _write_run(left, actions=["ls -la"], request_hashes=["base-provider"])
+    _write_run(right, actions=["ls -la"], request_hashes=["gt-provider"])
+    right_receipt_path = next(right.rglob("central_receipt.json"))
+    right_receipt = json.loads(right_receipt_path.read_text(encoding="utf-8"))
+    right_context = right_receipt["model_call_contexts"][0]
+    right_context["control_provider_messages_sha256"] = "base-provider"
+    right_context["control_request_payload_sha256"] = "payload-base-provider"
+    right_receipt_path.write_text(json.dumps(right_receipt), encoding="utf-8")
+
+    task = compare_run_roots(left, right)["tasks"]["demo"]
+
+    assert task["request_differences"] == [1]
+    assert task["control_request_differences"] == []
+    assert task["control_request_accounting_complete"] is True
+
+
 def test_run_diff_accepts_byte_identical_duplicate_task_extractions(tmp_path):
     left, right = tmp_path / "left", tmp_path / "right"
     for root in (left, right):
@@ -153,3 +171,17 @@ def test_central_replay_direct_script_invocation_bootstraps_project_imports():
 
     assert result.returncode == 0, result.stderr
     assert "Provider-free replay" in result.stdout
+
+
+def test_central_run_diff_direct_script_invocation_bootstraps_project_imports():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(root / "scripts" / "central_run_diff.py"), "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Compare two archived central-runtime runs" in result.stdout

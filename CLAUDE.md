@@ -938,3 +938,41 @@ real dense witness, readiness, all-17 census, exact pushed-tree check, and
 not rerun the existing online DeepSWE-off arm. After freeze, verify its
 metadata, run GT-on, then use Terminal-Bench 2.0
 with Mini-SWE. OpenHands/OpenAgents are outside this evaluation.
+
+## Final live-integration repair (2026-08-11)
+
+Live retrieval now consumes a bounded `RetrievalActionState` projected from
+Mini-SWE's shared `ProposedAction`. Raw commands, heredoc bodies, and
+interpreter program strings are not query state. Exact evidence authority is
+restricted to canonical full paths and unique explicit non-common identifiers;
+weak token matches remain ranking signals. Semantic claim identity excludes
+the global source revision, so an unrelated edit cannot make unchanged
+evidence appear new.
+
+The live gate abstains on transfer-time
+`not_applicable_no_supported_source` tasks and on attributable passing
+validation with no diagnostic. Source-backed tasks retain the incremental
+graph lifecycle. Every delivered preemptive row stores a support class and its
+supporting retrieval channels.
+
+Use `gt_engine.delivery_audit.audit_provider_deliveries` for all visibility
+counts. It combines every model-visible surface and validates unique claims,
+first-eligible/non-predictive timing, exact request/provider hashes, and the
+in-range provider-message index changed by GT. Preemptive evidence without a
+persisted semantic-support certificate fails closed.
+
+This invalidates the old summary of smoke `31535815764`. It emitted 60 visible
+deliveries and 44,372 GT characters (44 preemptive, 9 graph frontier, 7 feature
+guidance), not seven total. The 44 preemptive receipts predate the semantic
+certificate, the task jobs lacked the pinned dense backend, and runner-kernel
+identity perturbed the initial prompt. The archived run is diagnostic only.
+
+The repaired GitHub matrix installs retrieval dependencies and provisions the
+pinned Snowflake ONNX asset inside each task job, executes a real query and
+document embedding before Mini-SWE, and requires both that proof and a live
+backend receipt for each applicable source task. Every model call records the
+pre-GT control request/provider hashes. The authoritative provider-free gate
+must build the current Go indexer source on Linux and prove the real ONNX asset;
+the stale local Windows binary is known to lack `objective_c`. Do not weaken
+that gate, dispatch a paid smoke, or claim completion until the exact pushed
+workflow prints `READY` and `SMOKE_APPROVED`.

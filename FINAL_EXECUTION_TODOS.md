@@ -26,7 +26,7 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
 | GT-FINAL-009 | complete | Bounded paired decision-point utility evaluation and report complete | `DECISION_POINT_UTILITY_RESULTS.md`; captures `31530343093`, `31531620414`, `31532480146`; controls `31534502404`, `31534732127`, `31534734333` | outcome smoke gate |
-| GT-FINAL-010 | blocked | GT and harness frozen | outcome smoke `31535815764` vs `31535955624` regressed 7/10 vs 8/10; common-solved tokens +9.43% | adjudicate discordant trajectories before any freeze |
+| GT-FINAL-010 | in_progress | Repaired GT integration passes exact provider-free GitHub certification | typed action state, semantic claim dedup, canonical delivery audit, dense matrix gate implemented locally | push exact tree and run provider-free workflow |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
 | GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
@@ -62,17 +62,22 @@ controls `31534502404`, `31534732127`, and `31534734333` completed all 16 cases:
 12 different-action indeterminate cases. This is an action-level behavioral
 proxy only; it is not model acknowledgement or causal success evidence.
 
-The authorized matched outcome smoke is complete: treatment
+The authorized matched outcome smoke is complete but rejected as repaired-system evidence: treatment
 `certified_context` run `31535815764` versus central GT-off `31535955624`, both
 at commit `9ca48b9` and the frozen ten-task repair mix. Treatment resolved 7/10
 versus 8/10 baseline, gaining `regex-chess` but losing `qemu-alpine-ssh` and
 `sanitize-git-repo`. Total tokens fell 1.22%, but common-solved tokens rose
 9.43%, model calls/steps rose 5.62%, and effective task actions rose 14.59%.
-The deterministic treatment audit passed with zero timing/grounding failures;
-model causality remains unidentifiable. See
+Canonical reconstruction finds 60 deliveries/44,372 characters, not seven.
+Timing/hash checks pass, but 44 old preemptive receipts lack persisted semantic
+support; the matrix also lacked the live Snowflake backend and runner-kernel
+identity perturbed the initial prompt. Model causality remains unidentifiable. See
 `SMOKE_OUTCOME_CONTRACT_20260811.md` and `SMOKE_OUTCOME_RESULTS_20260811.md`.
-The 89-task run is still blocked; next action is trajectory adjudication, not
-another paid benchmark.
+The repaired runtime, workflow, and audit code pass local changed-component
+tests. The local formal gate remains blocked only because the checked-in
+Windows index binary lacks `objective_c`; GitHub builds the current Go source.
+The next action is exact-tree provider-free GitHub certification. Paid smoke
+and the 89-task run remain blocked.
 
 ## Work plan mapped to the GT objective
 
