@@ -23,7 +23,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from gt_engine.hybrid_repository import build_hybrid_repository
+from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import (
     DenseEmbeddingBackend,
     HybridRetrievalResult,
@@ -34,6 +34,7 @@ from gt_engine.hybrid_retrieval import (
     RetrievalState,
     build_preemptive_frame,
 )
+from gt_engine.indexer import IndexBuildReceipt
 from gt_engine.repository_intelligence import inspect_repository
 
 
@@ -367,6 +368,8 @@ def run_probe(
     repo_root: str | Path,
     state_dir: str | Path,
     dense_backend: DenseEmbeddingBackend | None = None,
+    index_receipt: IndexBuildReceipt | None = None,
+    prepared_repository: HybridRepository | None = None,
 ) -> RetrievalProbeResult:
     """Run the shared hybrid retrieval path for one checked-out snapshot."""
 
@@ -379,10 +382,11 @@ def run_probe(
         source_revision=probe.source_revision,
         active_paths=probe.active_paths,
         boundary="arb_retrieval",
+        index_receipt=index_receipt,
     )
     indexed_at = time.perf_counter()
     graph_db = evidence.index.graph_db if evidence.index is not None else None
-    repository = build_hybrid_repository(
+    repository = prepared_repository or build_hybrid_repository(
         repo_root,
         graph_db or (Path(state_dir) / "graph.unavailable"),
         source_revision=probe.source_revision,

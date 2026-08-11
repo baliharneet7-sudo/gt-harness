@@ -13,7 +13,9 @@ from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
+from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import DenseEmbeddingBackend
+from gt_engine.repository_intelligence import inspect_index
 from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from scripts.arb_adapter import RetrievalProbe, load_redacted_samples, run_probe
 
@@ -135,6 +137,26 @@ def run_groups(
         snapshot_output = output / f"{slug}--{base_commit}.jsonl"
         materialize_worktree(bare, worktree, base_commit)
         try:
+            # All rows in a snapshot group share the same checkout.  Build the
+            # expensive graph/database projection and source-span corpus once,
+            # then let each probe perform only its task-conditioned inspection
+            # and retrieval.  A mixed source revision is not cache-safe.
+            source_revisions = {row.source_revision for row in rows}
+            prepared_index = None
+            prepared_repository: HybridRepository | None = None
+            if len(source_revisions) == 1:
+                shared_revision = next(iter(source_revisions))
+                prepared_index = inspect_index(
+                    worktree,
+                    state_dir=snapshot_state,
+                    source_revision=shared_revision,
+                )
+                prepared_repository = build_hybrid_repository(
+                    worktree,
+                    prepared_index.graph_db
+                    or (snapshot_state / "graph.unavailable"),
+                    source_revision=shared_revision,
+                )
             snapshot_output.parent.mkdir(parents=True, exist_ok=True)
             with snapshot_output.open("w", encoding="utf-8", newline="\n") as handle:
                 for probe in rows:
@@ -143,6 +165,8 @@ def run_groups(
                         repo_root=worktree,
                         state_dir=snapshot_state,
                         dense_backend=dense_backend,
+                        index_receipt=prepared_index,
+                        prepared_repository=prepared_repository,
                     )
                     handle.write(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))
                     handle.write("\n")

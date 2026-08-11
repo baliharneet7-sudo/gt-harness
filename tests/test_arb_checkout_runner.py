@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from scripts.arb_adapter import RetrievalProbe, RetrievalProbeResult
@@ -94,6 +96,22 @@ def test_runner_emits_flushed_group_and_sample_progress(tmp_path, monkeypatch, c
 
     monkeypatch.setattr("scripts.arb_checkout_runner.materialize_worktree", materialize)
     monkeypatch.setattr("scripts.arb_checkout_runner._run_git", lambda *args, **kwargs: "")
+    index_calls: list[tuple[object, ...]] = []
+    repository_calls: list[tuple[object, ...]] = []
+
+    def fake_inspect_index(*args, **kwargs):
+        index_calls.append((args, kwargs))
+        return SimpleNamespace(graph_db=None)
+
+    def fake_build_repository(*args, **kwargs):
+        repository_calls.append((args, kwargs))
+        return object()
+
+    monkeypatch.setattr("scripts.arb_checkout_runner.inspect_index", fake_inspect_index)
+    monkeypatch.setattr(
+        "scripts.arb_checkout_runner.build_hybrid_repository",
+        fake_build_repository,
+    )
     monkeypatch.setattr(
         "scripts.arb_checkout_runner.run_probe",
         lambda probe, **kwargs: RetrievalProbeResult(
@@ -121,6 +139,8 @@ def test_runner_emits_flushed_group_and_sample_progress(tmp_path, monkeypatch, c
         state_dir=tmp_path / "state",
         output_dir=tmp_path / "out",
     ) == 2
+    assert len(index_calls) == 1
+    assert len(repository_calls) == 1
     output = capsys.readouterr().out
     assert "status=started" in output
     assert "sample=a" in output
