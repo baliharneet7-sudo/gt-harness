@@ -2,12 +2,12 @@
 
 ## Stop state
 
-`IMPLEMENTED_UNVERIFIED`
+`VERIFIED_COMPLETE`
 
-The source repair and local component verification are complete. Release
-verification is not complete until the exact pushed GitHub provider-free
-workflow builds the current Go indexer, loads the pinned Snowflake ONNX asset,
-and prints `READY` plus `SMOKE_APPROVED`. No paid smoke was launched.
+The source repair and release verification are complete at commit `338b391`.
+Exact GitHub provider-free workflow `31544885372` built the current Go indexer,
+loaded the pinned Snowflake ONNX asset, passed the runtime/readiness/static
+gates, and printed `READY` plus `SMOKE_APPROVED`. No paid smoke was launched.
 
 ## Reproduced defects
 
@@ -91,15 +91,13 @@ evidence.
   uses YAML-safe `"off"`. The audit now accepts either spelling while still
   requiring the exact five arms, default, and mode arguments; a focused RED/GREEN
   test covers the quoted form.
+- Exact rerun `31544885372` at `338b391` passed every step. Log audit found all
+  required all-17 census markers, `READY`, and `SMOKE_APPROVED`. The uploaded
+  `gt.central.provider-free.v1` receipt binds run ID `31544885372`, the intended
+  branch, and `provider_calls: 0`.
 
 ## Remaining TODOs
 
-1. Review the final diff and rerun all changed-component suites.
-2. Commit and push the exact source tree.
-3. Dispatch `central_provider_free.yml` at that exact SHA.
-4. Require a current-source graph proof, real ONNX witness, all census lines,
-   `READY`, and `SMOKE_APPROVED`.
-5. Audit the workflow receipt/artifacts.
-6. Only after a separate authorization, run a matched paid smoke and require
+1. Only after a separate authorization, run a matched paid smoke and require
    zero invalid delivery rows plus complete baseline/control request parity.
-7. Keep the 89-task run blocked until the matched smoke passes.
+2. Keep the 89-task run blocked until the matched smoke passes.

@@ -976,3 +976,9 @@ must build the current Go indexer source on Linux and prove the real ONNX asset;
 the stale local Windows binary is known to lack `objective_c`. Do not weaken
 that gate, dispatch a paid smoke, or claim completion until the exact pushed
 workflow prints `READY` and `SMOKE_APPROVED`.
+
+Exact provider-free workflow `31544885372` passed at `338b391`, including the
+current-source graph, pinned real ONNX backend, all language/runtime tests,
+`READY`, `SMOKE_APPROVED`, and static checks. The receipt records zero provider
+calls. The implementation repair is therefore verified; outcome benefit is
+not. A corrected paid smoke still requires separate authorization.

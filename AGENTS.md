@@ -138,6 +138,13 @@ content-hashed ONNX asset, then must print every census line, `READY`, and
 `SMOKE_APPROVED`. No paid smoke is allowed before that exact pushed workflow
 passes.
 
+Exact provider-free workflow `31544885372` passed this contract at commit
+`338b391`: current-source graph build, pinned real ONNX asset, language
+coverage, full central tests, `READY`, `SMOKE_APPROVED`, and static checks. Its
+uploaded receipt records `provider_calls: 0`. This verifies the implementation
+and integration repair; it does not prove solve uplift or authorize a paid
+smoke. The next paid matched smoke still requires separate authorization.
+
 Keep these states distinct in every audit:
 
 1. **Receipt:** a FACT or CAP payload was produced at the correct action and

@@ -26,7 +26,8 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-007 | complete | Complete 427-row ARB run is pinned, gold-isolated, evaluated, and retained | run `31517629497`; `RETRIEVAL_BENCH_RESULTS.md`; `D:\gt_runs\arb-31517629497` | connect the frozen profile to live Mini-SWE |
 | GT-FINAL-008 | complete | One generalized hybrid retrieval repair completed and frozen | commits `55553a3` through `433c330`; ARB final metrics | no further retrieval tuning |
 | GT-FINAL-009 | complete | Bounded paired decision-point utility evaluation and report complete | `DECISION_POINT_UTILITY_RESULTS.md`; captures `31530343093`, `31531620414`, `31532480146`; controls `31534502404`, `31534732127`, `31534734333` | outcome smoke gate |
-| GT-FINAL-010 | in_progress | Repaired GT integration passes exact provider-free GitHub certification | typed action state, semantic claim dedup, canonical delivery audit, dense matrix gate implemented locally | push exact tree and run provider-free workflow |
+| GT-FINAL-010 | complete | Repaired GT integration passes exact provider-free GitHub certification | commit `338b391`; provider-free run `31544885372` | request authorization for corrected matched smoke |
+| GT-FINAL-010A | pending | Corrected ten-task matched smoke preserves runtime integrity and reports outcome/resource deltas | new GT-on artifacts plus existing matched control where scientifically usable | paid run requires separate authorization |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
 | GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
@@ -34,33 +35,13 @@ the relevant gate and explicit authorization are recorded.
 
 ## Current stop state
 
-`GT-FINAL-009` is active. ARB is complete: workflow `31517629497` evaluated
-all 427 rows at frozen commit `433c330`, and `RETRIEVAL_BENCH_RESULTS.md` is the
-authoritative report. The live Mini-SWE defect was configuration drift: the
-accepted retriever was disabled, lacked the 32-span dense cap, used three
-selected files instead of the frozen eight-file packing policy, and had no
-pinned ONNX asset. The shared profile, durable GitHub release asset, live
-workflow configuration, real Snowflake integration witness, typed contribution
-compiler, and active component registry passed exact GitHub provider-free run
-`31527155811` at `90896d4`, including `READY` and `SMOKE_APPROVED`. The next gate
-is paired decision-point utility. Archived run `31421610097` contains 1,051
-complete treatment calls but zero exact control requests, so none is a valid
-pair for the frozen mechanism. The bounded captures at `31530343093`,
-`31531620414`, and `31532480146` contain 16 valid first-intervention pairs and
-24 legitimate no-intervention abstentions, with zero corrupt bundles. The last
-slice's merge failed closed for `crack-7z-hash` because its repository graph
-was invalid; that task is excluded from any utility claim. The control replay
-workflow is committed at `2cd0dfd` and was registered through the normal merge
-path. No end-to-end outcome claim is made and the 89-task run remains blocked.
-
-The workflow-registration PR was merged as PR #14, and the provider-environment
-fixes were applied on `main` and the evaluation branch. The first two control
-attempts failed before provider dispatch because the raw secret was reintroduced
-after sanitation; those runs are infrastructure failures, not cases. Corrected
-controls `31534502404`, `31534732127`, and `31534734333` completed all 16 cases:
-2 treatment-anchor proxies, 1 control-anchor proxy, 1 equivalent action, and
-12 different-action indeterminate cases. This is an action-level behavioral
-proxy only; it is not model acknowledgement or causal success evidence.
+`GT-FINAL-010` is complete. ARB remains the retrieval-only authority and the
+paired decision-point work remains a behavioral proxy, not model
+acknowledgement. The repaired live integration is commit `338b391`. Exact
+provider-free workflow `31544885372` built the current Go indexer, provisioned
+and exercised the pinned Snowflake ONNX asset, proved the language contract,
+passed the complete central runtime suite, printed `READY` and
+`SMOKE_APPROVED`, passed static checks, and recorded `provider_calls: 0`.
 
 The authorized matched outcome smoke is complete but rejected as repaired-system evidence: treatment
 `certified_context` run `31535815764` versus central GT-off `31535955624`, both
@@ -73,11 +54,12 @@ Timing/hash checks pass, but 44 old preemptive receipts lack persisted semantic
 support; the matrix also lacked the live Snowflake backend and runner-kernel
 identity perturbed the initial prompt. Model causality remains unidentifiable. See
 `SMOKE_OUTCOME_CONTRACT_20260811.md` and `SMOKE_OUTCOME_RESULTS_20260811.md`.
-The repaired runtime, workflow, and audit code pass local changed-component
-tests. The local formal gate remains blocked only because the checked-in
-Windows index binary lacks `objective_c`; GitHub builds the current Go source.
-The next action is exact-tree provider-free GitHub certification. Paid smoke
-and the 89-task run remain blocked.
+The implementation/integration repair is verified. The next step is a new
+authorized ten-task matched GT-on smoke using the repaired matrix. It must have
+zero canonical delivery failures, explicit live dense receipts on every
+applicable source task, source-less abstention, and complete baseline/control
+request accounting before outcome/resource deltas are interpreted. The paid
+smoke and the 89-task run remain blocked pending separate authorization.
 
 ## Work plan mapped to the GT objective
 
