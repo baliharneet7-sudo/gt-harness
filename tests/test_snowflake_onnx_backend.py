@@ -58,6 +58,8 @@ def test_snowflake_backend_receipt_binds_model_identity_without_api():
     assert receipt["model_sha256"] == "model-sha"
     assert receipt["network_calls"] == 0
     assert receipt["provider_calls"] == 0
+    assert receipt["intra_op_num_threads"] == 1
+    assert receipt["inter_op_num_threads"] == 1
     assert backend.identity == (
         "snowflake_onnx:Snowflake/snowflake-arctic-embed-m@sha256:model-sha"
     )

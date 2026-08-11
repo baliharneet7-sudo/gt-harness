@@ -10,6 +10,7 @@ pooling, and the resulting vectors are L2 normalized.
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 from collections.abc import Sequence
 from pathlib import Path
@@ -62,10 +63,20 @@ class _SnowflakeOnnxModel:
                 "Snowflake ONNX retrieval requires numpy, onnxruntime, and tokenizers"
             ) from exc
 
+        def _thread_count(name: str) -> int:
+            raw = os.environ.get(name, "1").strip()
+            try:
+                value = int(raw)
+            except ValueError:
+                return 1
+            return max(1, min(value, 64))
+
         options = ort.SessionOptions()
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        options.intra_op_num_threads = 1
-        options.inter_op_num_threads = 1
+        self.intra_op_num_threads = _thread_count("GT_DENSE_INTRA_OP_THREADS")
+        self.inter_op_num_threads = _thread_count("GT_DENSE_INTER_OP_THREADS")
+        options.intra_op_num_threads = self.intra_op_num_threads
+        options.inter_op_num_threads = self.inter_op_num_threads
         options.add_session_config_entry("session.use_deterministic_compute", "1")
         self._session = ort.InferenceSession(
             str(model_path),
@@ -218,6 +229,12 @@ class SnowflakeOnnxDenseBackend:
             "query_cache_misses": self._query_cache_misses,
             "network_calls": 0,
             "provider_calls": 0,
+            "intra_op_num_threads": int(
+                getattr(self._model, "intra_op_num_threads", 1)
+            ),
+            "inter_op_num_threads": int(
+                getattr(self._model, "inter_op_num_threads", 1)
+            ),
         }
 
 
