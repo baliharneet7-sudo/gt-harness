@@ -88,6 +88,8 @@ class RetrievalProbeResult:
     source_revision: str
     index_latency_ms: float
     query_latency_ms: float
+    index_cache_hit: bool = False
+    repository_cache_hit: bool = False
     query_hash: str = ""
     selected_token_count: int = 0
     payload_chars: int = 0
@@ -444,12 +446,18 @@ def run_probe(
         graph_revision=str(evidence.graph_revision),
         source_revision=probe.source_revision,
         index_latency_ms=round(
-            float(evidence.index.elapsed_ms)
-            if evidence.index is not None
-            else (indexed_at - started) * 1000.0,
+            0.0
+            if index_receipt is not None
+            else (
+                float(evidence.index.elapsed_ms)
+                if evidence.index is not None
+                else (indexed_at - started) * 1000.0
+            ),
             6,
         ),
         query_latency_ms=round((time.perf_counter() - indexed_at) * 1000.0, 6),
+        index_cache_hit=index_receipt is not None,
+        repository_cache_hit=prepared_repository is not None,
         query_hash=retrieval.query_hash,
         selected_token_count=retrieval.selected_token_count,
         payload_chars=(

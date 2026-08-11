@@ -82,6 +82,10 @@ def aggregate(
         "mean_query_latency_ms": round(
             sum(float(row.get("query_latency_ms") or 0.0) for row in rows) / len(rows), 6
         ) if rows else 0.0,
+        "index_cache_hits": sum(bool(row.get("index_cache_hit")) for row in rows),
+        "repository_cache_hits": sum(
+            bool(row.get("repository_cache_hit")) for row in rows
+        ),
         "rows_detail": rows,
     }
 

@@ -43,7 +43,10 @@ Index construction latency and post-index retrieval latency are separate.
 Predictions are deterministic JSONL and include graph status, graph/source
 revision, exact checkout spans/text, per-channel ranks and receipts, dense
 backend identity/digest, abstention reason, selected token/payload size, and
-index/query timing.
+index/query timing. Snapshot reuse is explicit in each row through
+`index_cache_hit` and `repository_cache_hit`; cached rows report zero per-row
+index-build latency so aggregate latency does not charge the same preparation
+work repeatedly.
 
 The checkout runner also emits flushed `[arb-progress]` lines while a shard is
 running: shard/group assignment, repository and commit, sample ID, completed
