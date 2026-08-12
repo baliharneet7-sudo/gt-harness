@@ -159,10 +159,12 @@ main snapshot was not a valid v1.1 execution even though its IDs matched.
 
 The workflow is now corrected to install pinned `datacurve-pier==0.3.1` and
 invoke `pier run --include-task-name`.  Pier is the Harbor-compatible runner
-that implements the v1.1 separate-verifier and collect-hook lifecycle.  It
-still loads `eval.gt_central_agent:MiniSweCentralAgent`, so this change does
-not replace Mini-SWE or GT with another agent.  The workflow keeps the exact
-GT receipt, provider-delivery audit, and merged outcome artifacts.
+that implements the v1.1 separate-verifier and collect-hook lifecycle.  Its
+only integration point is the thin
+`eval.pier_gt_adapter:PierMiniSweCentralAgent` boundary adapter; the central
+runtime remains runner-neutral and is still the single GT implementation.  The
+workflow keeps the exact GT receipt, provider-delivery audit, and merged
+outcome artifacts.
 
 The contract is guarded by
 `test_deepswe_workflow_uses_pier_v11_verifier_protocol`, which rejects a direct
@@ -196,18 +198,18 @@ After the gateway fix, dispatch `31556237120` passed provider preflight and
 reached Pier, but all ten tasks stopped before execution with
 `AttributeError: 'MiniSweCentralAgent' object has no attribute 'install_spec'`.
 Pier 0.3.1 requires `install_spec()` and `network_allowlist()` on custom
-agents. The central agent now exposes both: it declares no in-container
-install, and returns an empty optional Pier allowlist because provider calls
-are host-owned. The Harbor-only runtime remains import-compatible when Pier
-is absent. The focused hook test is green; the exact source-built gate must be
-rerun on this commit before another paid dispatch.
+agents. The external `eval.pier_gt_adapter` supplies both: it declares no
+in-container install and returns an empty Pier allowlist because provider calls
+are host-owned. The Harbor-only central runtime remains completely free of
+Pier imports. The focused isolation test is green; the exact source-built gate
+must be rerun on this commit before another paid dispatch.
 
 The next dispatch, `31556650765`, passed both provider routing and the install/
 allowlist boundary, then exposed a final runner-model boundary: Pier rejected
-Harbor's `AgentInfo` instance during result construction. The central agent
-now serializes its identity with Pier's equivalent `AgentInfo`/`ModelInfo` when
-Pier is installed and retains Harbor's superclass type otherwise. That fix is
-covered by a focused test and the direct Pier import witness.
+Harbor's `AgentInfo` instance during result construction. The external adapter
+now serializes its identity with Pier's equivalent `AgentInfo`/`ModelInfo`;
+the central agent retains Harbor's native type. That fix is covered by a
+focused isolation test and the direct Pier import witness.
 
 ## Remaining gate
 

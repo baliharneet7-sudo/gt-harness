@@ -271,7 +271,7 @@ jobs:
           set -uo pipefail
           mkdir -p results/deepswe
           pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
-            --agent-import-path eval.gt_central_agent:MiniSweCentralAgent \
+            --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
             -m "$MODEL" -o results/deepswe \
             --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
             --agent-timeout-multiplier 1.0 -n 1 -y \

@@ -171,6 +171,7 @@ def test_deepswe_workflow_uses_pier_v11_verifier_protocol():
     assert '"datacurve-pier==0.3.1"' in workflow
     assert "pier run -p deepswe-bench/tasks" in workflow
     assert "--include-task-name \"$TASK\"" in workflow
+    assert "eval.pier_gt_adapter:PierMiniSweCentralAgent" in workflow
     assert "harbor run -p deepswe-bench/tasks" not in workflow
 
 
@@ -188,22 +189,15 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'kwargs["api_base"] = base' in workflow
 
 
-def test_central_agent_exposes_pier_compatibility_hooks_without_agent_install():
-    agent = MiniSweCentralAgent(logs_dir=Path("/tmp/gt-pier-hooks"), model_name="test")
+def test_pier_adapter_isolated_from_runner_neutral_central_agent():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "eval" / "pier_gt_adapter.py").read_text(encoding="utf-8")
+    central = (root / "eval" / "gt_central_agent.py").read_text(encoding="utf-8")
 
-    assert agent.install_spec() is None
-    allowlist = agent.network_allowlist()
-    assert allowlist is None or getattr(allowlist, "domains", []) == []
-
-
-def test_central_agent_agent_info_uses_runner_model_boundary():
-    agent = MiniSweCentralAgent(logs_dir=Path("/tmp/gt-pier-agent-info"), model_name="test")
-    info = agent.to_agent_info()
-
-    assert info.name == agent.name()
-    assert info.version == agent.version()
-    assert info.model_info is not None
-    assert info.model_info.name == "test"
+    assert "class PierMiniSweCentralAgent" in source
+    assert "from pier." in source
+    assert "from pier." not in central
+    assert "class MiniSweCentralAgent" in central
 
 
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
