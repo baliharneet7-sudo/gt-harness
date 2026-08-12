@@ -42,7 +42,8 @@ updates reuse the central immutable `ValidationClassification`, including the
 canonical declared-check ID, so shell wrappers do not strand a satisfied task
 check and raw return codes are never reinterpreted as validation authority.
 
-Provider-free workflow `31646939206` passed the implementation at `003a5b7` with
+Provider-free workflow `31647174958` passed runtime commit
+`e0c63ae15be6eeff9eae67ffe873f3b44e2da31f` with
 the source-built current indexer, pinned Snowflake ONNX backend, central tests,
 `READY`, `SMOKE_APPROVED`, and a receipt recording zero provider calls. This is
 runtime-integrity evidence, not a solve-rate or efficiency result.

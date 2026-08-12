@@ -252,8 +252,8 @@ gains. A provider-free pass alone is not success.
 
 ## 24. Exact next engineering step
 
-The complete source-built Linux provider-free workflow passed at implementation commit
-`003a5b7` (run `31646939206`). It built the current indexer, provisioned the pinned
+The complete source-built Linux provider-free workflow passed at runtime commit
+`e0c63ae15be6eeff9eae67ffe873f3b44e2da31f` (run `31647174958`). It built the current indexer, provisioned the pinned
 Snowflake ONNX backend, ran the persistent-state kernel/integration/release tests,
 printed `READY` and `SMOKE_APPROVED`, and uploaded a receipt with `provider_calls: 0`.
 The exact next engineering step is a separately authorized frozen matched diagnostic;
