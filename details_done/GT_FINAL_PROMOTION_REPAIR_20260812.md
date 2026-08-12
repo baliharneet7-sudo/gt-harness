@@ -2,11 +2,11 @@
 
 ## Status
 
-Implementation is complete locally and the focused Python integration suite is
-green. No paid smoke was launched. The exact local provider-free census remains
-blocked by the known stale Windows `gt-index.exe`, which lacks `objective_c`.
-The Linux provider-free workflow must rebuild the native indexer before smoke
-approval.
+Implementation is complete and the focused Python integration suite is green.
+No paid smoke was launched. The local Windows census remains blocked by the
+known stale `gt-index.exe`, which lacks `objective_c`; the authoritative Linux
+provider-free workflow rebuilt the current indexer and passed on runtime commit
+`80a8376` in run `31616184187`.
 
 ## Reproduced failure evidence
 
@@ -140,6 +140,23 @@ RuntimeError: registered parser languages missing from binary: objective_c
 
 No readiness claim is made from Python tests alone.
 
+## Provider-free Linux certification
+
+Workflow `31616184187` passed on exact runtime commit `80a8376`. It proved the
+current-source native graph build, the pinned Snowflake ONNX asset, repository
+substrate, all advertised language fixtures, central runtime tests, structural
+readiness, exact pre-smoke approval, and static checks. Its uploaded receipt is
+`gt.central.provider-free.v1` and records `provider_calls: 0`.
+
+The log contains every required literal, including all 17 producer/consumer
+proof lines, grounded payloads, first-eligible visibility, context accounting,
+`NO_ACTIONS_BLOCKED`, `READY`, and `SMOKE_APPROVED`. The earlier dispatch
+`31615759833` failed at checkout because a seven-character SHA was interpreted
+as a branch/tag. Run `31615908442` used the full SHA and passed all substantive
+checks but intentionally failed exact-commit parity because checkout was in a
+detached HEAD. Neither failed dispatch called a provider. The accepted run used
+the pushed branch, whose HEAD was exactly `80a8376`.
+
 ## Archived-run release-gate replay
 
 The new gate was applied to all ten raw treatment receipts from workflow
@@ -161,19 +178,16 @@ not retroactively repair or validate the archived outcome run.
 
 ## Remaining execution order
 
-1. Push an immutable commit and run the exact Linux provider-free workflow,
-   which builds the current Go indexer and provisions the pinned Snowflake ONNX
-   asset. It must print every census line, `READY`, and `SMOKE_APPROVED`.
-2. Do not run a paid task if the new release gate fails any receipt.
-3. With explicit authorization, run a 10-task GT-on diagnostic in SHADOW and
+1. Do not run a paid task if the new release gate fails any receipt.
+2. With explicit authorization, run a 10-task GT-on diagnostic in SHADOW and
    compare it to the existing frozen local baseline.
-4. Require zero new uncensored solve loss, zero invalid payloads, zero late or
+3. Require zero new uncensored solve loss, zero invalid payloads, zero late or
    predictive deliveries, zero duplicate claims, zero post-budget retrieval,
    valid opportunity accounting, and no aggregate regression across calls,
    effective actions, tokens, or wall time.
-5. If that passes, run a 20-task mixed promotion cohort selected from previously
+4. If that passes, run a 20-task mixed promotion cohort selected from previously
    solved and failed baseline cases without repository-specific heuristics.
-6. Freeze the commit before any full 113-task DeepSWE or 89-task
+5. Freeze the commit before any full 113-task DeepSWE or 89-task
    Terminal-Bench evaluation.
 
 The repair proves implementation integrity locally. It does not yet prove more

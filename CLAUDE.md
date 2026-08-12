@@ -1038,3 +1038,9 @@ content claims, and non-material/non-endpoint-aligned decision evidence.
 Preflight remains SHADOW until a separately authorized outcome smoke. Local
 Windows native-index results are not authoritative while the checked-in binary
 lacks Objective-C; the pushed Linux build remains the substrate authority.
+
+Provider-free workflow `31616184187` passed the final-promotion contract on
+runtime commit `80a8376`, including current native build, pinned Snowflake ONNX,
+all substrate/runtime/readiness gates, `READY`, and `SMOKE_APPROVED`. The
+uploaded receipt records `provider_calls: 0`. It does not prove outcome uplift;
+the matched paid smoke remains separately authorized.

@@ -1350,3 +1350,10 @@ workflow remains `SHADOW` for pre-action return until a separately authorized
 matched smoke passes. The local Windows `gt-index.exe` remains non-authoritative
 when it lacks `objective_c`; only the Linux build gate may certify the native
 substrate.
+
+Provider-free workflow `31616184187` passed this final-promotion contract on
+runtime commit `80a8376`: current native indexer, pinned Snowflake ONNX,
+repository and language substrates, central tests, readiness, every required
+all-17/timing/context line, `READY`, and `SMOKE_APPROVED`. Its uploaded receipt
+records `provider_calls: 0`. This proves implementation integrity, not solve
+uplift or non-regression; a paid matched smoke still requires authorization.

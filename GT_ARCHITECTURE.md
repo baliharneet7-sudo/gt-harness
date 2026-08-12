@@ -151,3 +151,9 @@ validation timeouts. The release gate rejects disabled controls, work after a
 closed budget, missing opportunity accounting, duplicate content claims, and
 non-material or non-endpoint-aligned decision evidence. Preflight remains
 `SHADOW`; no action-changing claim is made before a separately approved smoke.
+
+Provider-free workflow `31616184187` passed the complete implementation gate on
+runtime commit `80a8376`, with current native graph build, pinned Snowflake ONNX,
+all-17/timing/context proof, `READY`, `SMOKE_APPROVED`, and zero provider calls.
+This is architecture/integration evidence only; outcome and efficiency remain
+live matched-smoke gates.
