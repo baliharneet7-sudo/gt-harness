@@ -214,8 +214,10 @@ def audit() -> dict[str, bool]:
                 and item.count("--ak persistent_state_context_tokens=512") == 2
                 for item in workflows
             )
-            and deepswe_workflow.count("--ak enable_persistent_execution_state=true") == 1
-            and deepswe_workflow.count("--ak persistent_state_bootstrap_timeout_sec=45") == 1
+            and deepswe_workflow.count("--ak enable_persistent_execution_state=true") >= 2
+            and deepswe_workflow.count("--ak persistent_state_bootstrap_timeout_sec=45") >= 2
+            and "comparison_profile:" in deepswe_workflow
+            and "diagnostic_only:" in deepswe_workflow
         ),
         "persistent_state_is_graph_first_and_repeated": (
             0
