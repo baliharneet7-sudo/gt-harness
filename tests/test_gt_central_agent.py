@@ -330,6 +330,11 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "needs: [plan, baseline, run]" in workflow
     assert "# DeepSWE central evaluation" in workflow
     assert "ten-task smoke" not in workflow
+    assert "diagnostic_only:" in workflow
+    assert "comparison_profile:" in workflow
+    assert "persistent_state_only" in workflow
+    assert "PROFILE_ARGS" in workflow
+    assert "persistent_state_bootstrap_calls" in workflow
 
 
 def test_provider_free_workflow_covers_final_hardening_and_exact_commit():

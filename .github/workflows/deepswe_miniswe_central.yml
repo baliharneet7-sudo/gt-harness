@@ -62,6 +62,17 @@ on:
         required: true
         options: [preservation, promotion]
         default: preservation
+      diagnostic_only:
+        description: "Run a treatment-only diagnostic; compare offline to a prior run and skip the frozen GT-off release gate"
+        type: boolean
+        required: false
+        default: false
+      comparison_profile:
+        description: "Controller profile for a fair comparison with the prior central run"
+        type: choice
+        required: true
+        options: [persistent_state_only, certified_full]
+        default: persistent_state_only
 
 permissions:
   contents: read
@@ -180,6 +191,7 @@ jobs:
           print(summary)
 
   baseline:
+    if: ${{ !inputs.diagnostic_only }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -264,6 +276,7 @@ jobs:
 
   run:
     needs: [plan, baseline]
+    if: ${{ always() && (inputs.diagnostic_only || needs.baseline.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
@@ -280,6 +293,7 @@ jobs:
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
       PROVIDER: ${{ inputs.provider }}
+      PROFILE: ${{ inputs.comparison_profile }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -440,35 +454,62 @@ jobs:
           set -uo pipefail
           mkdir -p results/deepswe
           run_task() {
+            PROFILE_ARGS=()
+            if [ "$PROFILE" = "persistent_state_only" ]; then
+              # Match the preceding central comparison exactly, adding only
+              # the graph-first persistent execution state mechanism.
+              PROFILE_ARGS=(
+                --ak integration_mode=active --ak policy_mode=certified_active
+                --ak preflight_mode=shadow
+                --ak enable_all_features=true --ak enable_submit_readiness=true
+                --ak enable_repository_intelligence=true --ak require_graph_ready=true
+                --ak repository_initial_index_timeout_sec=60
+                --ak repository_refresh_timeout_sec=60
+                --ak enable_lint=true --ak enable_feature_guidance=true
+                --ak enable_context_frontier=true --ak enable_preemptive_retrieval=true
+                --ak enable_persistent_execution_state=true
+                --ak persistent_state_bootstrap_timeout_sec=45
+                --ak persistent_state_bootstrap_input_tokens=2000
+                --ak persistent_state_bootstrap_output_tokens=512
+                --ak persistent_state_context_tokens=512
+                --ak preemptive_retrieval_model_dir="$MODEL_DIR"
+                --ak enable_context_compaction=false
+                --ak enable_completion_controller=false
+                --ak enable_progress_control=false
+                --ak enable_adaptive_validation_timeout=false
+              )
+            elif [ "$PROFILE" = "certified_full" ]; then
+              PROFILE_ARGS=(
+                --ak integration_mode=active --ak policy_mode=certified_active
+                --ak preflight_mode=assistive_safe
+                --ak enable_all_features=true --ak enable_submit_readiness=true
+                --ak enable_repository_intelligence=true --ak require_graph_ready=true
+                --ak repository_initial_index_timeout_sec=60
+                --ak repository_refresh_timeout_sec=60
+                --ak enable_lint=true --ak enable_feature_guidance=true
+                --ak enable_context_frontier=true --ak enable_preemptive_retrieval=true
+                --ak enable_persistent_execution_state=true
+                --ak persistent_state_bootstrap_timeout_sec=45
+                --ak persistent_state_bootstrap_input_tokens=2000
+                --ak persistent_state_bootstrap_output_tokens=512
+                --ak persistent_state_context_tokens=512
+                --ak preemptive_retrieval_model_dir="$MODEL_DIR"
+                --ak enable_context_compaction=true
+                --ak enable_completion_controller=true
+                --ak enable_progress_control=true
+                --ak enable_adaptive_validation_timeout=true
+              )
+            else
+              echo "::error::unknown comparison profile: $PROFILE"
+              return 2
+            fi
             timeout --signal=TERM --kill-after=30s 6000s pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
               --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
               -m "$MODEL" -o results/deepswe \
               --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
               --agent-timeout-multiplier 1.0 -n 1 -y \
-              --ak integration_mode=active \
-              --ak policy_mode=certified_active \
-              --ak preflight_mode=assistive_safe \
-              --ak enable_all_features=true \
-              --ak enable_submit_readiness=true \
-              --ak enable_repository_intelligence=true \
-              --ak require_graph_ready=true \
-              --ak repository_initial_index_timeout_sec=60 \
-              --ak repository_refresh_timeout_sec=60 \
-              --ak enable_lint=true \
-              --ak enable_feature_guidance=true \
-              --ak enable_context_frontier=true \
-              --ak enable_preemptive_retrieval=true \
+              "${PROFILE_ARGS[@]}" \
               --ak enable_decision_sufficiency=true \
-              --ak enable_persistent_execution_state=true \
-              --ak persistent_state_bootstrap_timeout_sec=45 \
-              --ak persistent_state_bootstrap_input_tokens=2000 \
-              --ak persistent_state_bootstrap_output_tokens=512 \
-              --ak persistent_state_context_tokens=512 \
-              --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
-              --ak enable_context_compaction=true \
-              --ak enable_completion_controller=true \
-              --ak enable_progress_control=true \
-              --ak enable_adaptive_validation_timeout=true \
               --ak enable_replay_capture=false \
               --ak enable_task_start_advisory=false \
               --ak step_limit="$STEP_LIMIT" \
@@ -528,11 +569,13 @@ jobs:
           path: tasks
           merge-multiple: false
       - name: Download approved frozen baseline
+        if: ${{ !inputs.diagnostic_only }}
         uses: actions/download-artifact@v4
         with:
           name: deepswe-baseline-approved-${{ github.run_id }}
           path: baseline-approved
       - name: Stage approved baseline
+        if: ${{ !inputs.diagnostic_only }}
         run: cp baseline-approved/DEEPSWE_BASELINE_RESULTS.json DEEPSWE_BASELINE_RESULTS.json
       - name: Merge receipts, outcomes, and delivery metrics
         env:
@@ -543,6 +586,8 @@ jobs:
           MODEL: ${{ inputs.model }}
           PROVIDER: ${{ inputs.provider }}
           STEP_LIMIT: ${{ inputs.step_limit }}
+          PROFILE: ${{ inputs.comparison_profile }}
+          DIAGNOSTIC_ONLY: ${{ inputs.diagnostic_only && '1' || '0' }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -626,6 +671,20 @@ jobs:
                            "total_tokens": metrics.get("total_tokens"),
                            "provider_cost_usd": metrics.get("provider_cost_usd"),
                            "total_gt_context_chars": metrics.get("total_gt_context_chars_added"),
+                           "persistent_state_enabled": metrics.get("persistent_state_enabled"),
+                           "persistent_state_initialized": metrics.get("persistent_state_initialized"),
+                           "persistent_state_initial_retrieval_calls": metrics.get("persistent_state_initial_retrieval_calls"),
+                           "persistent_state_initial_retrieval_latency_ms": metrics.get("persistent_state_initial_retrieval_latency_ms"),
+                           "persistent_state_bootstrap_calls": metrics.get("persistent_state_bootstrap_calls"),
+                           "persistent_state_bootstrap_input_tokens": metrics.get("persistent_state_bootstrap_input_tokens"),
+                           "persistent_state_bootstrap_output_tokens": metrics.get("persistent_state_bootstrap_output_tokens"),
+                           "persistent_state_bootstrap_latency_ms": metrics.get("persistent_state_bootstrap_latency_ms"),
+                           "persistent_state_context_compilations": metrics.get("persistent_state_context_compilations"),
+                           "persistent_state_preflight_projections": metrics.get("persistent_state_preflight_projections"),
+                           "persistent_state_postflight_commits": metrics.get("persistent_state_postflight_commits"),
+                           "persistent_state_graph_rebases": metrics.get("persistent_state_graph_rebases"),
+                           "persistent_state_material_transitions": metrics.get("persistent_state_material_transitions"),
+                           "persistent_state_deliveries": metrics.get("persistent_state_deliveries"),
                            "wall_time_sec": metrics.get("wall_time_sec")})
           provider_identity = (
               "openrouter:deepseek:only:no-fallback"
@@ -643,13 +702,15 @@ jobs:
                               "temperature": 1.0,
                               "step_limit": int(os.environ.get("STEP_LIMIT") or 0),
                               "execution_budget_sec": 5400,
-                              "runner": "datacurve-pier==0.3.1"},
+                              "runner": "datacurve-pier==0.3.1",
+                              "comparison_profile": os.environ.get("PROFILE") or "",
+                              "diagnostic_only": os.environ.get("DIAGNOSTIC_ONLY") == "1"},
                  "tasks": expected, "rows": rows, "missing": missing,
                  "solved": sum(r["solved"] for r in rows), "planned": len(expected)}
           Path("DEEPSWE_EVALUATION_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-          md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens |", "|---|---:|---:|---|---:|---:|---:|---:|---:|"]
+          md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- profile: **{out['manifest']['comparison_profile']}**", f"- diagnostic-only: **{out['manifest']['diagnostic_only']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens | bootstrap calls | state frames |", "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
           for r in rows:
-              md.append(f"| {r['task']} | {int(r['solved'])} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} |")
+              md.append(f"| {r['task']} | {int(r['solved'])} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} | {r['persistent_state_bootstrap_calls']} | {r['persistent_state_context_compilations']} |")
           Path("DEEPSWE_EVALUATION_RESULTS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
           print("\n".join(md))
           if missing:
@@ -664,6 +725,7 @@ jobs:
               raise SystemExit("exact provider route gate failed")
           PY
       - name: Enforce outcome-first DeepSWE release gate
+        if: ${{ !inputs.diagnostic_only }}
         run: |
           set -euo pipefail
           python scripts/deepswe_release_gate.py \
