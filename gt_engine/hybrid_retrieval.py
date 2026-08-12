@@ -408,7 +408,21 @@ class RetrievalState:
         state; exact path matching remains independently available.
         """
 
-        return self.query_plan().primary_text
+        current_sections = (
+            self.intent.value,
+            self.action.query_text() if self.action else "",
+            " ".join(self.active_symbols),
+            " ".join(self.diagnostics),
+            self.validation_state,
+        )
+        current = "\n".join(
+            section.strip() for section in current_sections if section.strip()
+        )
+        if self.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE and self.diagnostics:
+            return current
+        return "\n".join(
+            section.strip() for section in (self.task_text, current) if section.strip()
+        )
 
     @property
     def query_hash(self) -> str:
@@ -1310,6 +1324,17 @@ def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
     return 0 if _is_test_path(ranked.path) else 1
 
 
+def _trajectory_novelty_priority(ranked: RankedFile, state: RetrievalState) -> int:
+    """Prefer unseen paths only when fused relevance is otherwise tied."""
+
+    already_active = {
+        _normalize_path(path).lower()
+        for path in (*state.active_paths, *state.changed_paths)
+        if _normalize_path(path)
+    }
+    return 1 if ranked.path.lower() in already_active else 0
+
+
 _DIRECT_DECISION_RELATIONS = frozenset(
     {
         "calls",
@@ -1481,6 +1506,7 @@ class HybridRetriever:
                         key=lambda row: (
                             _intent_priority(row, state),
                             -row.fused_score,
+                            _trajectory_novelty_priority(row, state),
                             row.path.lower(),
                             row.path,
                         ),
@@ -1555,6 +1581,7 @@ class HybridRetriever:
                 key=lambda row: (
                     _intent_priority(row, state),
                     -row.fused_score,
+                    _trajectory_novelty_priority(row, state),
                     row.path.lower(),
                     row.path,
                 ),

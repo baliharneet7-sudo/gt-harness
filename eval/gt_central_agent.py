@@ -4132,6 +4132,7 @@ class MiniSweCentralAgent(BaseAgent):
                             revision=source_revision,
                             source_revision=source_revision,
                             refused=True,
+                            held=True,
                             sensor_healthy=snapshot.healthy,
                             check_count=len(readiness_evidence),
                             passing_checks=sum(
@@ -4303,6 +4304,7 @@ class MiniSweCentralAgent(BaseAgent):
                             revision=source_revision,
                             source_revision=source_revision,
                             refused=hold_submit,
+                            held=hold_submit,
                             sensor_healthy=snapshot.healthy,
                             **readiness_kwargs,
                         )

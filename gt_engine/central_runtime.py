@@ -3848,6 +3848,7 @@ class CentralFeatureRuntime:
         action_id: int,
         revision: str,
         refused: bool,
+        held: bool = False,
         sensor_healthy: bool,
         check_count: int = 0,
         passing_checks: int = 0,
@@ -3855,6 +3856,8 @@ class CentralFeatureRuntime:
         blockers: tuple[str, ...] = (),
         source_revision: str | None = None,
     ) -> None:
+        if held and not refused:
+            raise ValueError("a submit action cannot be held without a refusal")
         source_rev = source_revision if source_revision is not None else revision
         if self._current_source_revision and source_rev != self._current_source_revision:
             self._decisions.invalidate_other_revisions(source_rev)
@@ -3866,8 +3869,9 @@ class CentralFeatureRuntime:
             kind="submission_readiness_evaluated",
             detail=f"healthy={sensor_healthy}; checks={check_count}",
         )
-        if refused:
+        if held:
             self._action_metrics["submit_holds"] += 1
+        if refused:
             self._action_metrics["submit_risks"] += 1
             self.record_producer_event(
                 feature_id="submit_refusal",

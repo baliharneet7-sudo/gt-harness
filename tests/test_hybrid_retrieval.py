@@ -985,6 +985,23 @@ def test_retrieval_query_terms_preserve_literal_workflow_vocabulary():
     assert "validation_context" not in terms
 
 
+def test_sparse_query_terms_do_not_leak_active_path_scaffolding():
+    state = RetrievalState(
+        task_text="find allocator regression tests",
+        intent=RetrievalIntent.VALIDATION_CONTEXT,
+        active_paths=("src/allocator.py",),
+        changed_paths=("tests/test_allocator.py",),
+        source_revision="source-1",
+    )
+
+    terms = retrieval_query_terms(state)
+
+    assert "allocator" in terms
+    assert "regression" in terms
+    assert "src" not in terms
+    assert "py" not in terms
+
+
 def test_stale_revision_candidates_are_rejected_before_fusion():
     class StaleChannel:
         channel = RetrievalChannel.EXACT
