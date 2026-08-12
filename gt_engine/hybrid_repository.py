@@ -82,6 +82,12 @@ class HybridRepository:
 
 _DEFAULT_BUILD_LIMITS = RepositoryBuildLimits()
 
+# A source span may be bounded for the retrieval corpus without invalidating
+# the graph substrate. The bounded text remains certified by its path, graph
+# node, and source revision; only its body is partial. All other build reasons
+# remain fail-closed because they can remove or falsify repository evidence.
+_NON_FATAL_BUILD_REASONS = frozenset({"chunk_character_limit"})
+
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
     try:
@@ -340,6 +346,9 @@ def build_hybrid_repository(
                 break
             if truncated:
                 reasons.append("chunk_character_limit")
+            provenance = [f"graph_node:{int(raw_id)}", "checkout_source"]
+            if truncated:
+                provenance.append("bounded_source_span")
             documents.append(
                 RepositoryDocument(
                     path=path,
@@ -347,7 +356,7 @@ def build_hybrid_repository(
                     start_line=start,
                     end_line=bounded_end,
                     symbol=name,
-                    provenance=(f"graph_node:{int(raw_id)}", "checkout_source"),
+                    provenance=tuple(provenance),
                 )
             )
             total_chars += len(text)
@@ -532,7 +541,7 @@ def build_hybrid_repository(
         documents=tuple(documents),
         structural_links=tuple(links),
         source_revision=source_revision,
-        complete=not reason_codes,
+        complete=not any(reason not in _NON_FATAL_BUILD_REASONS for reason in reason_codes),
         reason_codes=reason_codes,
         source_file_count=sum(1 for lines in source_cache.values() if lines is not None),
         document_chars=total_chars,

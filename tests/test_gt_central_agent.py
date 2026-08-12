@@ -131,6 +131,33 @@ def test_merge_gate_does_not_promote_recovered_transient_repository_failures():
     assert "repository_intelligence_transient_failures" not in merge_block
 
 
+def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "--ak repository_initial_index_timeout_sec=60" in workflow
+
+
+def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
+    defaulted = MiniSweCentralAgent(
+        logs_dir=tmp_path / "defaulted",
+        model_name="test",
+        repository_initial_index_timeout_sec=0.5,
+    )
+    configured = MiniSweCentralAgent(
+        logs_dir=tmp_path / "configured",
+        model_name="test",
+        repository_initial_index_timeout_sec=42.5,
+    )
+
+    assert defaulted.repository_initial_index_timeout_sec == 1.0
+    assert configured.repository_initial_index_timeout_sec == 42.5
+
+
 def test_recovered_refresh_failure_is_not_current_failure():
     current, transient = _partition_recovered_repository_failures(
         [

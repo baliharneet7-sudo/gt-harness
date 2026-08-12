@@ -130,6 +130,40 @@ def test_builder_is_bounded_deterministically_and_reports_incomplete(tmp_path):
     assert "document_limit" in repository.reason_codes
 
 
+def test_bounded_source_span_remains_retrievable_and_is_not_corpus_failure(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "large.py").write_text(
+        "def important_function():\n    return 'a very long implementation body'\n",
+        encoding="utf-8",
+    )
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO nodes VALUES (1, 'important_function', 'src/large.py', 1, 2,"
+            "'def important_function()')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = build_hybrid_repository(
+        tmp_path,
+        graph,
+        source_revision="source-1",
+        limits=RepositoryBuildLimits(max_chunk_chars=12),
+    )
+
+    assert repository.complete is True
+    assert "chunk_character_limit" in repository.reason_codes
+    assert repository.documents[0].text
+    assert "bounded_source_span" in repository.documents[0].provenance
+
+
 def test_builder_fails_open_on_missing_or_invalid_graph(tmp_path):
     missing = build_hybrid_repository(
         tmp_path,

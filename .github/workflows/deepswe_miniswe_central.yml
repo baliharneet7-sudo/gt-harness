@@ -265,6 +265,7 @@ jobs:
             --ak enable_submit_readiness=true \
             --ak enable_repository_intelligence=true \
             --ak require_graph_ready=true \
+            --ak repository_initial_index_timeout_sec=60 \
             --ak enable_lint=true \
             --ak enable_feature_guidance=true \
             --ak enable_context_frontier=true \

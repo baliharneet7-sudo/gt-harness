@@ -527,6 +527,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_all_features: bool = True,
         enable_repository_intelligence: bool = True,
         require_graph_ready: bool = False,
+        repository_initial_index_timeout_sec: float = 60.0,
         enable_task_start_advisory: bool = False,
         enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
@@ -643,6 +644,9 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_all_features = enable_all_features
         self.enable_repository_intelligence = enable_repository_intelligence
         self.require_graph_ready = bool(require_graph_ready)
+        self.repository_initial_index_timeout_sec = max(
+            1.0, float(repository_initial_index_timeout_sec)
+        )
         self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_feature_guidance = bool(enable_feature_guidance)
         self.enable_context_frontier = bool(enable_context_frontier)
@@ -1242,7 +1246,7 @@ class MiniSweCentralAgent(BaseAgent):
             index_started = time.perf_counter()
             evidence = await asyncio.wait_for(
                 asyncio.to_thread(session.refresh, source_revision=source_revision),
-                timeout=15,
+                timeout=self.repository_initial_index_timeout_sec,
             )
             self._repository_work_receipts.append(
                 {
@@ -5471,6 +5475,9 @@ class MiniSweCentralAgent(BaseAgent):
                             "replay_capture": self.enable_replay_capture,
                             "lint": self.enable_lint,
                             "repository_intelligence": self.enable_repository_intelligence,
+                            "repository_initial_index_timeout_sec": (
+                                self.repository_initial_index_timeout_sec
+                            ),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
                             "preemptive_retrieval_token_budget": (
                                 self.preemptive_retrieval_token_budget

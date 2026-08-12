@@ -60,7 +60,7 @@ from gt_engine.uplift_policy import (
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
     "-printf '%y\\t%s\\t%T@\\t%C@\\t%P\\t%l\\n' 2>/dev/null "
-    "| LC_ALL=C sort | head -n 50001"
+    "| LC_ALL=C sort | LC_ALL=C awk 'NR <= 50001'"
 )
 _EXTERNAL_ROOTS = ("/etc/nginx/", "/var/log/nginx/")
 _PRIVATE_TERMS = re.compile(r"groundtruth|gt_[a-z0-9_]*", re.IGNORECASE)

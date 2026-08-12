@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import gt_engine.central_runtime as central_runtime
 from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
@@ -85,6 +86,31 @@ def test_manifest_and_diff_are_non_git_and_cross_language():
     assert transition.created == ("job.cob",)
     assert transition.deleted == ("main.c",)
     assert transition.changed_paths == ("job.cob", "main.c", "src/a.js")
+
+
+@pytest.mark.asyncio
+async def test_large_manifest_bound_does_not_turn_sort_limit_into_sigpipe_failure():
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            # ``head`` exits early and makes find return 141 under pipefail.
+            # The production command must consume the sorted stream fully.
+            if command.startswith("sha256sum"):
+                return Result("a" * 64 + "  src/app.py\n")
+            if "head -n" in command:
+                return Result("", 141)
+            assert "awk" in command
+            return Result("f\t3\t2.0\t2.0\tsrc/app.py\t\n")
+
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app")
+
+    assert snapshot.healthy is True
+    assert snapshot.entries["src/app.py"].size == 3
+    assert "head -n" not in central_runtime._MANIFEST_COMMAND
 
 
 def test_ctime_detects_same_size_rewrite_even_when_mtime_is_preserved():
