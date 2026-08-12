@@ -10,7 +10,7 @@ decision needs determine whether a claim belongs in a provider request.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -247,6 +247,22 @@ class SemanticDecisionEngine:
         for need_id, need in tuple(self._needs.items()):
             if need.open and need.kind is kind:
                 self.resolve_need(need_id, resolution=resolution)
+                # A deliberately disabled delivery window must close both
+                # halves of the semantic lifecycle.  Leaving its claim active
+                # would make the receipt look like an unresolved decision even
+                # though the host explicitly suppressed the surface.
+                for claim_id, claim in tuple(self._claims.items()):
+                    if (
+                        claim.active
+                        and claim.source_revision == need.source_revision
+                        and claim.evidence_action == need.created_after_action
+                        and claim.kind in need.required_claim_kinds
+                    ):
+                        self._claims[claim_id] = replace(
+                            claim,
+                            active=False,
+                            invalidated_reason=str(resolution or "need_resolved"),
+                        )
                 resolved.append(need_id)
         return tuple(resolved)
 

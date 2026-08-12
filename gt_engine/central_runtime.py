@@ -4163,7 +4163,16 @@ class CentralFeatureRuntime:
             elif any(claims[claim_id]["active"] for claim_id in linked_claim_ids):
                 outcome = "pending_decision_claim"
             elif linked_claim_ids:
-                outcome = "expired_unconsumed_claim"
+                suppressed = any(
+                    claims[claim_id].get("invalidated_reason")
+                    == "task_start_advisory_disabled"
+                    for claim_id in linked_claim_ids
+                )
+                outcome = (
+                    "controller_state_suppressed"
+                    if suppressed
+                    else "expired_unconsumed_claim"
+                )
             elif trace.get("disposition") == "engine_internal_state":
                 # A producer event proves that the effect performed
                 # deterministic engine work even when no provider payload was

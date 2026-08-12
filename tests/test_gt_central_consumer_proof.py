@@ -213,6 +213,23 @@ def test_localization_and_gt_loc_reslot_store_anchors_internal_only():
     )
 
 
+def test_disabled_task_start_reslot_closes_its_semantic_claim():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    _register_graph_contract(runtime)
+
+    summary = runtime.summary()
+    counts = summary["effect_accountability_counts"]
+    assert counts.get("pending_decision_claim", 0) == 0
+    assert counts.get("controller_state_suppressed", 0) == 1
+    claim_rows = summary["semantic_decisions"]["claims"]
+    assert any(
+        row["invalidated_reason"] == "task_start_advisory_disabled"
+        and row["active"] is False
+        for row in claim_rows
+    )
+
+
 def test_def_partition_separates_definition_from_reference_anchors():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
