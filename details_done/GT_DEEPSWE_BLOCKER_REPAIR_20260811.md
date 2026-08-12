@@ -184,6 +184,24 @@ The downloaded log and receipt are retained at
 `artifacts/deepswe_provider_free_31555714691/` and
 `artifacts/deepswe_provider_free_31555714691/run.log`.
 
+## First Pier smoke retry and compatibility repair
+
+The first v1.1/Pier dispatch was `31555872660`. It is invalid as benchmark
+evidence: all ten tasks stopped before environment creation because the
+provider preflight still used a bare model without the gateway route. The
+failure was `litellm.BadRequestError: LLM Provider NOT provided`, not a task
+failure.
+
+After the gateway fix, dispatch `31556237120` passed provider preflight and
+reached Pier, but all ten tasks stopped before execution with
+`AttributeError: 'MiniSweCentralAgent' object has no attribute 'install_spec'`.
+Pier 0.3.1 requires `install_spec()` and `network_allowlist()` on custom
+agents. The central agent now exposes both: it declares no in-container
+install, and returns an empty optional Pier allowlist because provider calls
+are host-owned. The Harbor-only runtime remains import-compatible when Pier
+is absent. The focused hook test is green; the exact source-built gate must be
+rerun on this commit before another paid dispatch.
+
 ## Remaining gate
 
 The new runner contract and the exact source-built provider-free gate are now
