@@ -146,6 +146,7 @@ jobs:
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       MODEL: ${{ inputs.model }}
       TASK: ${{ matrix.task }}
@@ -254,7 +255,15 @@ jobs:
           MODEL="$MODEL" python - <<'PY'
           import os, litellm
           m = os.environ["MODEL"]
-          r = litellm.completion(model=m, messages=[{"role":"user", "content":"Reply: ok"}], temperature=1.0, max_tokens=8, num_retries=0)
+          base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
+          kwargs = {"temperature": 1.0, "max_tokens": 8, "num_retries": 0}
+          if base:
+              # Mirror MiniSweCentralAgent._build_model: the gateway receives
+              # the bare DeepSeek model id through an OpenAI provider route.
+              if "/" not in m:
+                  m = f"openai/{m}"
+              kwargs["api_base"] = base
+          r = litellm.completion(model=m, messages=[{"role":"user", "content":"Reply: ok"}], **kwargs)
           print("provider preflight ok", r.model)
           PY
       - name: Run current central Mini-SWE on DeepSWE task

@@ -174,6 +174,20 @@ def test_deepswe_workflow_uses_pier_v11_verifier_protocol():
     assert "harbor run -p deepswe-bench/tasks" not in workflow
 
 
+def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}" in workflow
+    assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
+    assert 'm = f"openai/{m}"' in workflow
+    assert 'kwargs["api_base"] = base' in workflow
+
+
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
     defaulted = MiniSweCentralAgent(
         logs_dir=tmp_path / "defaulted",
