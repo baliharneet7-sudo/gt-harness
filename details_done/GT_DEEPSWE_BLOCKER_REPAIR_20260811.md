@@ -106,8 +106,16 @@ The v1.1 artifact reports 113 tasks, 91 repositories, five languages, and a
 generation timestamp of 2026-08-07. The ten-task local smoke maps to ten
 catalog tasks across Go (2), Python (2), TypeScript (2), Rust (2), and
 JavaScript (2). Its treatment reward was 0/10; this is diagnostic evidence and
-is not a leaderboard comparison. The public leaderboard artifact contains
-aggregated model/configuration rows, not a GT-on row for this smoke.
+is not a leaderboard comparison. The public v1.1 artifact's DeepSeek V4 Flash
+reference row is `mini-swe-agent`, max effort, 241/452 passed attempts,
+pass@1 `0.5331858407`, pass@4 `0.8053097345`, across 113 tasks and four runs.
+That is an external aggregate reference, not a GT-on row for this smoke.
+
+The repository-wide workflow audit found no `v1.1` DeepSWE task reference.
+The only active DeepSWE workflow is pinned to `v1.0.0` in both checkout steps
+and verifies commit `c33fa70e68d11d85f9e58abcd5d78643705e916e`. Unrelated
+Terminal-Bench release comments mentioning `v1.1.0` are not DeepSWE task
+inputs and were not changed.
 
 ## Remaining gate
 
