@@ -329,7 +329,15 @@ jobs:
               if not receipts or not results:
                   missing.append(task); continue
               receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
-              result = json.loads(results[0].read_text(encoding="utf-8"))
+              parsed_results = [json.loads(p.read_text(encoding="utf-8")) for p in results]
+              # Harbor writes an aggregate result.json beside the trial
+              # directory.  Outcome fields live in the nested trial result;
+              # selecting the aggregate yields a None verifier_result.
+              result = next(
+                  (item for item in parsed_results if isinstance(item, dict) and
+                   ("verifier_result" in item or "exception_info" in item)),
+                  parsed_results[-1],
+              )
               metrics = receipt.get("metrics") or {}
               intel = receipt.get("repository_intelligence") or {}
               _, failures, totals = audit_provider_deliveries(receipt, task=task)
