@@ -2370,7 +2370,12 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 compiled_contributions = compile_contributions(
                     tuple(contribution_candidates),
-                    current_source_revision=source_revision,
+                    # Raw workspace/source revision and graph source revision
+                    # are separate certified domains.  Retrieval frames are
+                    # bound to the latter; feature/controller evidence is
+                    # commonly bound to the former.  Validate against both,
+                    # while still rejecting every unrelated/stale revision.
+                    current_source_revision=(source_revision, graph_source_revision),
                     current_call=calls,
                     budget_chars=contribution_budget,
                 )

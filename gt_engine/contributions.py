@@ -147,12 +147,18 @@ class CompiledContributions:
 def compile_contributions(
     contributions: tuple[GTContribution, ...],
     *,
-    current_source_revision: str,
+    current_source_revision: str | tuple[str, ...],
     current_call: int,
     budget_chars: int,
 ) -> CompiledContributions:
     """Select complete contributions deterministically; ambiguity omits text."""
 
+    if isinstance(current_source_revision, str):
+        valid_revisions = {current_source_revision}
+    else:
+        valid_revisions = {
+            str(revision) for revision in current_source_revision if str(revision)
+        }
     decisions: dict[str, ContributionAccounting] = {}
     selected: list[GTContribution] = []
     selected_claims: set[str] = set()
@@ -168,9 +174,7 @@ def compile_contributions(
     for _, contribution in ordered:
         disposition = ContributionDisposition.SELECTED
         reasons: tuple[str, ...] = ()
-        if contribution.source_revision and (
-            contribution.source_revision != current_source_revision
-        ):
+        if contribution.source_revision and contribution.source_revision not in valid_revisions:
             disposition = ContributionDisposition.STALE_SOURCE_REVISION
             reasons = ("source_revision_mismatch",)
         elif contribution.eligible_call < current_call:

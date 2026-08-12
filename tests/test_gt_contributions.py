@@ -46,6 +46,33 @@ def test_contribution_compiler_accounts_every_candidate_once():
     )
 
 
+def test_contribution_compiler_accepts_current_raw_and_graph_revisions():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    result = compile_contributions(
+        (
+            _contribution(source_revision="raw-rev"),
+            _contribution(
+                surface="graph_frontier",
+                payload="src/b.py:20 — caller B",
+                claim_ids=("claim-b",),
+                fact_ids=("fact-b",),
+                source_revision="graph-rev",
+                priority=20,
+            ),
+        ),
+        current_source_revision=("raw-rev", "graph-rev"),
+        current_call=2,
+        budget_chars=1_000,
+    )
+
+    assert result.payload
+    assert all(
+        row.disposition is ContributionDisposition.SELECTED
+        for row in result.accounting
+    )
+
+
 def test_contribution_compiler_deduplicates_claims_across_surfaces():
     from gt_engine.contributions import ContributionDisposition, compile_contributions
 
