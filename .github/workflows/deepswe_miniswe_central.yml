@@ -361,12 +361,14 @@ jobs:
               _, failures, totals = audit_provider_deliveries(receipt, task=task)
               rewards = (result.get("verifier_result") or {}).get("rewards") or {}
               solved = bool(rewards) and all(isinstance(v, (int, float)) and v >= 1 for v in rewards.values())
+              preemptive = receipt.get("preemptive_retrieval") or {}
+              dense_backend = preemptive.get("dense_backend") or {}
               rows.append({"task": task, "solved": solved, "rewards": rewards,
                            "exception": result.get("exception_info"),
                            "graph_status": intel.get("status"),
                            "graph_applicability": intel.get("applicability"),
                            "graph_failures": intel.get("failures") or [],
-                           "dense_available": bool((receipt.get("preemptive_retrieval") or {}).get("dense_backend", {}).get("available")),
+                           "dense_available": bool(dense_backend.get("available")),
                            "provider_delivery_count": totals.get("delivery_count"),
                            "provider_delivery_chars": totals.get("visible_chars"),
                            "delivery_failures": failures,
