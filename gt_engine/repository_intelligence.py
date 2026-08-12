@@ -8,9 +8,12 @@ location when the graph cannot prove one.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
 import time
+import tomllib
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -185,7 +188,10 @@ class RepositorySession:
         self.refresh_log: list[dict[str, Any]] = []
         self._pending_index_paths: set[str] = set()
         self._requires_full_rebuild = False
-        self._query_cache: dict[tuple[str, tuple[str, ...]], RepositoryEvidence] = {}
+        self._query_cache: dict[
+            tuple[str, tuple[str, ...], tuple[str, ...], str, str],
+            RepositoryEvidence,
+        ] = {}
         self._owned_directories: tuple[TemporaryDirectory[str], ...] = ()
 
     @classmethod
@@ -377,6 +383,8 @@ class RepositorySession:
         source_revision: str,
         active_paths: tuple[str, ...],
         boundary: str,
+        active_symbols: tuple[str, ...] = (),
+        diagnostic_fingerprint: str = "",
         limit: int = 8,
     ) -> RepositoryEvidence:
         """Re-rank the current graph for typed action paths without reindexing."""
@@ -388,6 +396,15 @@ class RepositorySession:
                 if str(path or "").strip()
             )
         )
+        normalized_symbols = tuple(
+            dict.fromkeys(
+                str(symbol or "").strip()
+                for symbol in active_symbols
+                if str(symbol or "").strip()
+            )
+        )
+        normalized_boundary = str(boundary or "unknown")
+        normalized_diagnostic = str(diagnostic_fingerprint or "").strip()
         index = self.evidence.index
         if (
             not normalized
@@ -397,7 +414,13 @@ class RepositorySession:
             or not self.evidence.substrate_ready
         ):
             return self.evidence
-        cache_key = (source_revision, normalized)
+        cache_key = (
+            source_revision,
+            normalized,
+            normalized_symbols,
+            normalized_boundary,
+            normalized_diagnostic,
+        )
         cached = self._query_cache.get(cache_key)
         if cached is not None:
             self.evidence = cached
@@ -408,8 +431,10 @@ class RepositorySession:
                     "available": cached.available,
                     "status": cached.status,
                     "mode": "action_query_cache_hit",
-                    "boundary": str(boundary or "unknown"),
+                    "boundary": normalized_boundary,
                     "active_paths": list(normalized),
+                    "active_symbols": list(normalized_symbols),
+                    "diagnostic_fingerprint": normalized_diagnostic,
                     "elapsed_ms": 0.0,
                 }
             )
@@ -423,7 +448,7 @@ class RepositorySession:
             index_receipt=index,
             source_revision=source_revision,
             active_paths=normalized,
-            boundary=boundary,
+            boundary=normalized_boundary,
         )
         evidence = replace(
             evidence,
@@ -444,8 +469,10 @@ class RepositorySession:
                 "available": evidence.available,
                 "status": evidence.status,
                 "mode": "action_query",
-                "boundary": str(boundary or "unknown"),
+                "boundary": normalized_boundary,
                 "active_paths": list(normalized),
+                "active_symbols": list(normalized_symbols),
+                "diagnostic_fingerprint": normalized_diagnostic,
                 "elapsed_ms": round((time.monotonic() - started) * 1000.0, 6),
             }
         )
@@ -461,20 +488,139 @@ class RepositorySession:
         }
 
 
-def discover_project_checks(root: str | Path) -> tuple[str, ...]:
-    """Return only conventional, repository-backed verification commands."""
-    base = Path(root)
+_PROJECT_MANIFESTS = frozenset(
+    {
+        "pyproject.toml",
+        "pytest.ini",
+        "setup.cfg",
+        "tox.ini",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "Makefile",
+        "makefile",
+    }
+)
+
+
+def _project_roots(base: Path, active_paths: tuple[str, ...]) -> tuple[Path, ...]:
+    if not active_paths:
+        return (base,)
+    roots: list[Path] = []
+    for raw_path in active_paths:
+        candidate = (base / str(raw_path).replace("\\", "/")).resolve()
+        try:
+            candidate.relative_to(base.resolve())
+        except ValueError:
+            continue
+        directory = candidate if candidate.is_dir() else candidate.parent
+        while True:
+            if any((directory / name).is_file() for name in _PROJECT_MANIFESTS):
+                roots.append(directory)
+                break
+            if directory == base or directory.parent == directory:
+                roots.append(base)
+                break
+            directory = directory.parent
+    return tuple(dict.fromkeys(roots or (base,)))
+
+
+def _pyproject_uses_pytest(project: Path) -> bool:
+    path = project / "pyproject.toml"
+    if not path.is_file():
+        return False
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return False
+    tool = data.get("tool") if isinstance(data, dict) else None
+    if isinstance(tool, dict) and isinstance(tool.get("pytest"), dict):
+        return True
+    project_data = data.get("project") if isinstance(data, dict) else None
+    dependency_values: list[str] = []
+    if isinstance(project_data, dict):
+        dependencies = project_data.get("dependencies")
+        if isinstance(dependencies, list):
+            dependency_values.extend(str(item) for item in dependencies)
+        optional = project_data.get("optional-dependencies")
+        if isinstance(optional, dict):
+            for values in optional.values():
+                if isinstance(values, list):
+                    dependency_values.extend(str(item) for item in values)
+    return any(re.match(r"^pytest(?:\W|$)", item.strip(), re.I) for item in dependency_values)
+
+
+def _has_pytest_evidence(project: Path) -> bool:
+    if (project / "pytest.ini").is_file() or _pyproject_uses_pytest(project):
+        return True
+    for config_name in ("setup.cfg", "tox.ini"):
+        path = project / config_name
+        try:
+            if path.is_file() and re.search(
+                r"\[(?:tool:)?pytest", path.read_text(encoding="utf-8"), re.I
+            ):
+                return True
+        except (OSError, UnicodeError):
+            pass
+    tests = project / "tests"
+    return tests.is_dir() and any(
+        child.is_file() and (child.name.startswith("test_") or child.name.endswith("_test.py"))
+        for child in tests.rglob("*.py")
+    )
+
+
+def _package_has_test(project: Path) -> bool:
+    path = project / "package.json"
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    command = str(scripts.get("test") or "").strip() if isinstance(scripts, dict) else ""
+    return bool(command and "no test specified" not in command.lower())
+
+
+def _make_has_test(project: Path) -> bool:
+    path = project / "Makefile"
+    if not path.is_file():
+        path = project / "makefile"
+    try:
+        return bool(
+            path.is_file()
+            and re.search(
+                r"(?m)^test\s*:(?![=])", path.read_text(encoding="utf-8")
+            )
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def discover_project_checks(
+    root: str | Path,
+    active_paths: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return mechanically evidenced checks at the nearest project boundary."""
+
+    base = Path(root).resolve()
     checks: list[str] = []
-    if (base / "pyproject.toml").is_file() or (base / "pytest.ini").is_file():
-        checks.append("pytest -q")
-    if (base / "package.json").is_file():
-        checks.append("npm test")
-    if (base / "Cargo.toml").is_file():
-        checks.append("cargo test")
-    if (base / "go.mod").is_file():
-        checks.append("go test ./...")
-    if (base / "Makefile").is_file() or (base / "makefile").is_file():
-        checks.append("make test")
+    for project in _project_roots(base, active_paths):
+        try:
+            relative = project.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        prefix = "" if relative == "." else f"cd {relative} && "
+        if _has_pytest_evidence(project):
+            checks.append(prefix + "pytest -q")
+        if _package_has_test(project):
+            checks.append(prefix + "npm test")
+        if (project / "Cargo.toml").is_file():
+            checks.append(prefix + "cargo test")
+        if (project / "go.mod").is_file():
+            checks.append(prefix + "go test ./...")
+        if _make_has_test(project):
+            checks.append(prefix + "make test")
     return tuple(dict.fromkeys(checks))
 
 
@@ -634,7 +780,7 @@ def inspect_repository(
     heuristic relations remain absent.
     """
     base = Path(root)
-    checks = discover_project_checks(base)
+    checks = discover_project_checks(base, active_paths=active_paths)
     try:
         index_receipt = index_receipt or inspect_index(
             base, state_dir=state_dir, source_revision=source_revision

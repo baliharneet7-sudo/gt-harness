@@ -91,7 +91,54 @@ def test_project_checks_are_repository_backed_not_guessed(tmp_path: Path):
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
     (tmp_path / "go.mod").write_text("module example.test/demo\n")
 
-    assert discover_project_checks(tmp_path) == ("pytest -q", "go test ./...")
+    assert discover_project_checks(tmp_path) == ("go test ./...",)
+
+
+def test_project_checks_require_mechanical_manifest_evidence(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='demo'\ndependencies=['pytest>=8']\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "Makefile").write_text(
+        "build:\n\tpython -m build\ntest:\n\tpytest -q\n",
+        encoding="utf-8",
+    )
+
+    assert discover_project_checks(tmp_path) == (
+        "pytest -q",
+        "npm test",
+        "make test",
+    )
+
+
+def test_project_checks_reject_placeholder_scripts_and_missing_make_target(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "echo Error: no test specified && exit 1"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "Makefile").write_text("build:\n\techo ok\n", encoding="utf-8")
+
+    assert discover_project_checks(tmp_path) == ()
+
+
+def test_project_checks_scope_to_nearest_changed_project(tmp_path: Path):
+    package = tmp_path / "packages" / "api"
+    source = package / "src"
+    source.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+    (source / "handler.ts").write_text("export const handler = () => 1\n")
+
+    assert discover_project_checks(
+        tmp_path,
+        active_paths=("packages/api/src/handler.ts",),
+    ) == ("cd packages/api && npm test",)
 
 
 def test_shipped_index_fixture_covers_every_registered_parser_language():
@@ -123,7 +170,9 @@ def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Pat
     assert evidence.definitions
     assert evidence.references == ()
     assert evidence.callers == ()
-    assert evidence.project_checks == ("pytest -q",)
+    # A generic Python package is not proof that pytest is installed or that
+    # the repository declares a project-wide pytest contract.
+    assert evidence.project_checks == ()
     assert evidence.index is not None
     assert evidence.index.schema_valid is True
     assert evidence.index.node_count > 0
@@ -420,3 +469,36 @@ def test_typed_action_path_requeries_current_graph_without_rebuilding(tmp_path: 
     )
     assert cached == action_evidence
     assert session.refresh_log[-1]["mode"] == "action_query_cache_hit"
+
+
+def test_repository_query_cache_is_scoped_to_boundary_and_diagnostic_state(tmp_path: Path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "greeter.py").write_text(
+        "def greet(name: str) -> str:\n    return f'hello {name}'\n",
+        encoding="utf-8",
+    )
+    session = RepositorySession(
+        root=tmp_path,
+        state_dir=tmp_path / ".state",
+        instruction="Repair the implementation.",
+    )
+    session.refresh(source_revision="s1")
+
+    session.query(
+        source_revision="s1",
+        active_paths=("src/greeter.py",),
+        boundary="post_read",
+    )
+    session.query(
+        source_revision="s1",
+        active_paths=("src/greeter.py",),
+        active_symbols=("greet",),
+        diagnostic_fingerprint="failure-1",
+        boundary="post_validate",
+    )
+
+    assert session.refresh_log[-1]["mode"] == "action_query"
+    assert session.refresh_log[-1]["boundary"] == "post_validate"
+    assert session.refresh_log[-1]["active_symbols"] == ["greet"]
+    assert session.refresh_log[-1]["diagnostic_fingerprint"] == "failure-1"

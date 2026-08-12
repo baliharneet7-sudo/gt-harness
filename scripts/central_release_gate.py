@@ -316,6 +316,34 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     )
 
 
+def _project_validation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    runtime = receipt.get("project_validation") or {}
+    probes = runtime.get("probes") or []
+    failures: list[str] = []
+    seen_revisions: set[str] = set()
+    for index, probe in enumerate(probes, start=1):
+        revision = str(probe.get("source_revision") or "")
+        if not revision:
+            failures.append(f"{label}:project_probe_revision_missing:{index}")
+        elif revision in seen_revisions:
+            failures.append(f"{label}:project_probe_repeated_revision:{revision}")
+        seen_revisions.add(revision)
+        status = str(probe.get("status") or "")
+        if status not in {"pass", "fail", "failed_open"}:
+            failures.append(f"{label}:project_probe_status_invalid:{index}")
+        if status == "fail" and not str(probe.get("diagnostic") or "").strip():
+            failures.append(f"{label}:project_probe_failure_without_diagnostic:{index}")
+    metrics = receipt.get("metrics") or {}
+    if "project_validation_probe_attempts" in metrics and int(
+        metrics.get("project_validation_probe_attempts") or 0
+    ) != len(probes):
+        failures.append(f"{label}:project_probe_count_mismatch")
+    return ReleaseGateCheck(
+        "project_validation",
+        not failures,
+        tuple(failures),
+        {"task": label, "probes": len(probes)},
+    )
 def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     runtime = receipt.get("preemptive_retrieval") or {}
     if runtime.get("enabled") is False:
@@ -401,6 +429,7 @@ def audit_treatment_runtime(
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _outcome_preservation(receipt, label),
+        _project_validation(receipt, label),
         _retrieval_efficiency(receipt, label),
     )
 

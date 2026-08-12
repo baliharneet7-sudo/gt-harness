@@ -29,6 +29,32 @@ def task_information_gain(*, new_read_anchor: bool, diagnostic_gain: bool) -> bo
     return bool(new_read_anchor or diagnostic_gain)
 
 
+def semantic_progress_fingerprint(
+    *,
+    source_revision: str,
+    changed_paths: tuple[str, ...],
+    validation_state: str,
+    diagnostic_fingerprint: str,
+    project_checks: tuple[str, ...],
+    validation_debt: bool,
+) -> str:
+    """Hash decision state, never command novelty or raw model output."""
+
+    material = json.dumps(
+        [
+            str(source_revision),
+            tuple(sorted({str(path).replace("\\", "/") for path in changed_paths if path})),
+            str(validation_state or "unknown").lower(),
+            str(diagnostic_fingerprint or ""),
+            tuple(sorted({" ".join(str(check).split()) for check in project_checks if check})),
+            bool(validation_debt),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8", "replace")).hexdigest()
+
+
 def classify_action_result(
     *,
     operation: str,
@@ -417,11 +443,13 @@ class ProgressLedger:
         *,
         iteration: int,
         limit: int,
+        iteration_risk_ratio: float = 0.8,
         unresolved: bool = False,
         remaining_seconds: float | None = None,
         time_risk_threshold_seconds: float | None = None,
     ) -> ProgressTransition | None:
-        iteration_risk = limit > 0 and iteration >= max(1, int(limit * 0.8))
+        risk_ratio = min(1.0, max(0.01, float(iteration_risk_ratio)))
+        iteration_risk = limit > 0 and iteration >= max(1, int(limit * risk_ratio))
         time_risk = bool(
             remaining_seconds is not None
             and time_risk_threshold_seconds is not None

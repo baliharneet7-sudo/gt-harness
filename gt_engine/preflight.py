@@ -42,6 +42,14 @@ class MutationCertainty(StrEnum):
     PROVEN_MUTATING = "proven_mutating"
 
 
+class WorkspaceImpact(StrEnum):
+    """Whether dispatch can affect the task workspace tree."""
+
+    PROVEN_NO_WORKSPACE_CHANGE = "proven_no_workspace_change"
+    MAY_CHANGE_WORKSPACE = "may_change_workspace"
+    PROVEN_WORKSPACE_CHANGE = "proven_workspace_change"
+
+
 class ActionDisposition(StrEnum):
     PASS = "pass"
     AUGMENT = "augment"
@@ -198,6 +206,47 @@ class ProposedAction:
         return row
 
 
+def classify_workspace_impact(
+    proposed: ProposedAction,
+    *,
+    cwd: str,
+) -> WorkspaceImpact:
+    """Classify sensor necessity without trusting an opaque program body."""
+
+    if proposed.mutation_certainty is MutationCertainty.PROVEN_READ_ONLY:
+        return WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE
+    if proposed.has_unknown_segments or proposed.has_opaque_segments:
+        return WorkspaceImpact.MAY_CHANGE_WORKSPACE
+    mutating = tuple(operation for operation in proposed.operations if operation.mutates_workspace)
+    if not mutating:
+        return WorkspaceImpact.MAY_CHANGE_WORKSPACE
+    targets = tuple(
+        target.path.replace("\\", "/")
+        for operation in mutating
+        for target in operation.targets
+        if target.path
+    )
+    if not targets:
+        return WorkspaceImpact.MAY_CHANGE_WORKSPACE
+    normalized_cwd = posixpath.normpath(str(cwd or "/").replace("\\", "/"))
+
+    def inside_workspace(path: str) -> bool:
+        if not path.startswith("/"):
+            return True
+        normalized = posixpath.normpath(path)
+        return normalized == normalized_cwd or normalized.startswith(
+            normalized_cwd.rstrip("/") + "/"
+        )
+
+    if all(path.startswith("/") and not inside_workspace(path) for path in targets):
+        return WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE
+    if proposed.mutation_certainty is MutationCertainty.PROVEN_MUTATING and any(
+        inside_workspace(path) for path in targets
+    ):
+        return WorkspaceImpact.PROVEN_WORKSPACE_CHANGE
+    return WorkspaceImpact.MAY_CHANGE_WORKSPACE
+
+
 @dataclass(frozen=True, slots=True)
 class PreflightDecision:
     disposition: ActionDisposition
@@ -292,6 +341,9 @@ _MUTATING_GIT_SUBCOMMANDS = frozenset(
         "switch",
         "update-ref",
     }
+)
+_READ_ONLY_GIT_SUBCOMMANDS = frozenset(
+    {"blame", "diff", "grep", "log", "ls-files", "rev-parse", "show", "status"}
 )
 
 
@@ -958,6 +1010,12 @@ def _classify_operations(
         ):
             operation, confidence = ActionOperation.VALIDATE, 1.0
         elif head in _READ_EXECUTABLES:
+            operation, confidence = ActionOperation.READ, 0.98
+        elif (
+            head == "git"
+            and len(semantic_words) > 1
+            and semantic_words[1] in _READ_ONLY_GIT_SUBCOMMANDS
+        ):
             operation, confidence = ActionOperation.READ, 0.98
         elif head == "sed" and "-n" in semantic_words and "-i" not in semantic_words:
             operation, confidence = ActionOperation.READ, 0.95

@@ -132,6 +132,23 @@ def test_release_gate_fails_closed_when_outcome_preservation_is_disabled():
     assert "treatment-1:completion_controller_disabled" in report.failures
 
 
+def test_release_gate_rejects_repeated_or_diagnostic_free_project_probe():
+    receipt = _treatment()
+    receipt["project_validation"] = {
+        "probes": [
+            {"source_revision": "s1", "status": "fail", "diagnostic": ""},
+            {"source_revision": "s1", "status": "pass", "diagnostic": ""},
+        ]
+    }
+    receipt["metrics"]["project_validation_probe_attempts"] = 2
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:project_probe_failure_without_diagnostic:1" in report.failures
+    assert "treatment-1:project_probe_repeated_revision:s1" in report.failures
+
+
 def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
     receipt = _treatment()
     receipt["repository_intelligence"] = {

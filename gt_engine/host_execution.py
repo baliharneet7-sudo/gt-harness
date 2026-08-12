@@ -15,6 +15,7 @@ class HostExecCategory(StrEnum):
     WORKSPACE_CAPTURE = "workspace_capture"
     SYNTAX_PROBE = "syntax_probe"
     COMPLETION_PROBE = "completion_probe"
+    PROJECT_VALIDATION_PROBE = "project_validation_probe"
     AUTO_SUBMIT = "auto_submit"
     SYSTEM_INFORMATION = "system_information"
     REPOSITORY_TRANSFER = "repository_transfer"
@@ -29,6 +30,17 @@ _SENSOR_CATEGORIES = frozenset(
         HostExecCategory.WORKSPACE_HASH,
         HostExecCategory.WORKSPACE_CAPTURE,
     }
+)
+_CONTROLLER_INTERVENTION_CATEGORIES = frozenset(
+    {
+        HostExecCategory.SYNTAX_PROBE,
+        HostExecCategory.COMPLETION_PROBE,
+        HostExecCategory.PROJECT_VALIDATION_PROBE,
+        HostExecCategory.AUTO_SUBMIT,
+    }
+)
+_SUBSTRATE_CATEGORIES = frozenset(
+    {*_SENSOR_CATEGORIES, HostExecCategory.REPOSITORY_TRANSFER}
 )
 
 
@@ -164,8 +176,18 @@ class HostExecutionRecorder:
         return {
             "actual_environment_execs": len(executed),
             "model_actions": category_counts[HostExecCategory.MODEL_ACTION.value],
+            "decision_actions": category_counts[HostExecCategory.MODEL_ACTION.value],
             "controller_environment_execs": sum(
                 row.category is not HostExecCategory.MODEL_ACTION for row in executed
+            ),
+            "harness_overhead_execs": sum(
+                row.category is not HostExecCategory.MODEL_ACTION for row in executed
+            ),
+            "controller_intervention_execs": sum(
+                row.category in _CONTROLLER_INTERVENTION_CATEGORIES for row in executed
+            ),
+            "substrate_environment_execs": sum(
+                row.category in _SUBSTRATE_CATEGORIES for row in executed
             ),
             "controller_cached_reads": len(cached),
             "effective_task_actions": sum(

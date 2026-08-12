@@ -18,9 +18,56 @@ from gt_engine.preflight import (
     PreflightDecision,
     PreflightMode,
     SegmentRole,
+    WorkspaceImpact,
     adapt_proposed_action,
+    classify_workspace_impact,
     normalize_executable_invocation,
 )
+
+
+def test_workspace_impact_skips_vcs_inspection_and_proven_external_writes():
+    git_status = adapt_proposed_action(
+        {"command": "cd /app && git status --short"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+    external_write = adapt_proposed_action(
+        {"command": "mkdir -p /tmp/gt-check"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=2,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert classify_workspace_impact(git_status, cwd="/app") is (
+        WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE
+    )
+    assert classify_workspace_impact(external_write, cwd="/app") is (
+        WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE
+    )
+
+
+def test_workspace_impact_keeps_builds_unknown_programs_and_repo_edits_conservative():
+    for command in (
+        "pytest -q",
+        "python -c 'open(\"src/x.py\", \"w\").write(\"x\")'",
+        "mkdir -p src/generated",
+    ):
+        proposal = adapt_proposed_action(
+            {"command": command},
+            source_revision="s1",
+            workspace_revision="w1",
+            model_call=1,
+            batch_index=0,
+            batch_size=1,
+        )
+        assert classify_workspace_impact(proposal, cwd="/app") is not (
+            WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE
+        )
 
 
 def test_proposal_adapter_unwraps_environment_and_timeout_before_classification():

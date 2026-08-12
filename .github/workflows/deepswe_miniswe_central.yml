@@ -21,7 +21,7 @@ on:
         description: "Maximum concurrent DeepSWE tasks"
         type: string
         required: true
-        default: "10"
+        default: "20"
       task_ids:
         description: "Optional comma-separated DeepSWE v1.1 catalog task IDs; empty selects two per language"
         type: string
@@ -43,14 +43,30 @@ on:
         required: true
         default: "baseline-swe-live-lite-v4flash0731"
       provider:
-        description: "Provider route: configured gateway (default) or OpenRouter"
+        description: "Frozen provider route for this final comparison"
+        type: choice
+        required: true
+        options: [openrouter]
+        default: "openrouter"
+      baseline_run_id:
+        description: "GitHub run ID containing the frozen contemporaneous GT-off result"
         type: string
         required: true
-        default: "configured"
+      baseline_artifact_name:
+        description: "Exact merged GT-off artifact name from baseline_run_id"
+        type: string
+        required: true
+      release_phase:
+        description: "Outcome gate: preserve first, then require a net positive flip"
+        type: choice
+        required: true
+        options: [preservation, promotion]
+        default: preservation
 
 permissions:
   contents: read
   packages: read
+  actions: read
 
 env:
   PYTHONUTF8: "1"
@@ -70,6 +86,7 @@ env:
   SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
   GT_DENSE_INTRA_OP_THREADS: "4"
   GT_DENSE_INTER_OP_THREADS: "1"
+  GT_OPENROUTER_PROVIDER_ONLY: deepseek
 
 jobs:
   plan:
@@ -78,6 +95,7 @@ jobs:
     outputs:
       tasks: ${{ steps.select.outputs.tasks }}
       bench_sha: ${{ steps.bench.outputs.sha }}
+      gt_sha: ${{ steps.gt.outputs.sha }}
     env:
       TASK_IDS: ${{ inputs.task_ids }}
       TASK_COUNT: ${{ inputs.task_count }}
@@ -85,6 +103,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+      - name: Resolve exact GT revision
+        id: gt
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Checkout pinned DeepSWE task set
         uses: actions/checkout@v4
         with:
@@ -153,15 +174,98 @@ jobs:
                   raise SystemExit(f"balanced selection produced {len(selected)} tasks")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("tasks=" + json.dumps(selected, separators=(",", ":")) + "\n")
-          summary = "## DeepSWE smoke task set\n\n" + "\n".join(f"- `{x}`" for x in selected)
+          summary = "## DeepSWE evaluation task set\n\n" + "\n".join(f"- `{x}`" for x in selected)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write(summary + "\n")
           print(summary)
 
-  run:
+  baseline:
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download frozen GT-off comparison before any paid task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN_ID: ${{ inputs.baseline_run_id }}
+          BASELINE_ARTIFACT_NAME: ${{ inputs.baseline_artifact_name }}
+        run: |
+          set -euo pipefail
+          test -n "$BASELINE_RUN_ID" && test -n "$BASELINE_ARTIFACT_NAME"
+          mkdir -p baseline-evidence
+          gh run download "$BASELINE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$BASELINE_ARTIFACT_NAME" \
+            --dir baseline-evidence
+          mapfile -t candidates < <(find baseline-evidence -name DEEPSWE_EVALUATION_RESULTS.json -type f)
+          test "${#candidates[@]}" -eq 1 || {
+            echo "::error::expected one frozen baseline evaluation, found ${#candidates[@]}"; exit 1;
+          }
+          cp "${candidates[0]}" DEEPSWE_BASELINE_RESULTS.json
+      - name: Prove comparison manifest and task parity
+        env:
+          EXPECTED: ${{ needs.plan.outputs.tasks }}
+          BENCH_SHA: ${{ needs.plan.outputs.bench_sha }}
+          MODEL: ${{ inputs.model }}
+          STEP_LIMIT: ${{ inputs.step_limit }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          payload = json.loads(Path("DEEPSWE_BASELINE_RESULTS.json").read_text(encoding="utf-8"))
+          if payload.get("schema") != "gt.deepswe.central.evaluation.v1.1":
+              raise SystemExit("baseline schema is not the frozen evaluation contract")
+          expected = json.loads(os.environ["EXPECTED"])
+          rows = payload.get("rows") or []
+          if [row.get("task") for row in rows] != expected:
+              raise SystemExit("baseline task order/set does not match treatment plan")
+          manifest = payload.get("manifest") or {}
+          expected_model = os.environ["MODEL"]
+          if expected_model == "deepseek-v4-flash":
+              expected_model = "deepseek/deepseek-v4-flash"
+          required = {
+              "benchmark_sha": os.environ["BENCH_SHA"],
+              "model": expected_model,
+              "provider": "openrouter:deepseek:only:no-fallback",
+              "temperature": 1.0,
+              "step_limit": int(os.environ["STEP_LIMIT"]),
+              "execution_budget_sec": 5400,
+              "runner": "datacurve-pier==0.3.1",
+          }
+          mismatches = {
+              key: {"expected": value, "observed": manifest.get(key)}
+              for key, value in required.items()
+              if manifest.get(key) != value
+          }
+          if mismatches:
+              raise SystemExit("baseline manifest mismatch: " + json.dumps(mismatches, sort_keys=True))
+          required_metrics = {"total_tokens", "provider_calls", "decision_actions", "provider_cost_usd"}
+          for row in rows:
+              missing = sorted(required_metrics - set(row))
+              if missing:
+                  raise SystemExit(f"baseline row {row.get('task')} missing metrics: {missing}")
+          print("BASELINE_APPROVED")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deepswe-baseline-approved-${{ github.run_id }}
+          path: DEEPSWE_BASELINE_RESULTS.json
+          if-no-files-found: error
+
+  run:
+    needs: [plan, baseline]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       max-parallel: ${{ fromJSON(inputs.parallel) }}
@@ -176,11 +280,12 @@ jobs:
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
       PROVIDER: ${{ inputs.provider }}
-      GT_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+      - name: Bind receipts to the exact checked-out GT revision
+        run: echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Checkout pinned DeepSWE task set
         uses: actions/checkout@v4
         with:
@@ -286,15 +391,26 @@ jobs:
             echo "::error::no provider credential configured"; exit 1;
           }
           MODEL="$MODEL" python - <<'PY'
-          import os, litellm
+          import json, os, litellm
+          from pathlib import Path
           m = os.environ["MODEL"]
           base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
           kwargs = {"temperature": 1.0, "max_tokens": 8, "num_retries": 0}
           if os.environ.get("PROVIDER") == "openrouter":
+              if m == "deepseek-v4-flash":
+                  m = "deepseek/deepseek-v4-flash"
               if not m.startswith("openai/"):
                   m = f"openai/{m}"
               kwargs["api_key"] = os.environ["OPENROUTER_API_KEY"]
               kwargs["api_base"] = base or "https://openrouter.ai/api/v1"
+              kwargs["extra_body"] = {
+                  "provider": {
+                      "only": ["deepseek"],
+                      "order": ["deepseek"],
+                      "allow_fallbacks": False,
+                      "require_parameters": True,
+                  }
+              }
           elif base:
               # Mirror MiniSweCentralAgent._build_model: the gateway receives
               # the bare DeepSeek model id through an OpenAI provider route.
@@ -302,41 +418,73 @@ jobs:
                   m = f"openai/{m}"
               kwargs["api_base"] = base
           r = litellm.completion(model=m, messages=[{"role":"user", "content":"Reply: ok"}], **kwargs)
+          response = r.model_dump()
+          proof = {
+              "schema": "gt.provider_route_proof.v1",
+              "requested_model": m,
+              "response_model": str(response.get("model") or ""),
+              "requested_provider": (
+                  "deepseek" if os.environ.get("PROVIDER") == "openrouter" else "configured"
+              ),
+              "response_provider": str(response.get("provider") or ""),
+              "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
+              "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
+          }
+          Path("provider-route-proof.json").write_text(
+              json.dumps(proof, indent=2) + "\n", encoding="utf-8"
+          )
           print("provider preflight ok", r.model)
           PY
       - name: Run current central Mini-SWE on DeepSWE task
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
-          pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
-            --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
-            -m "$MODEL" -o results/deepswe \
-            --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
-            --agent-timeout-multiplier 1.0 -n 1 -y \
-            --ak integration_mode=active \
-            --ak policy_mode=certified_active \
-            --ak preflight_mode=shadow \
-            --ak enable_all_features=true \
-            --ak enable_submit_readiness=true \
-            --ak enable_repository_intelligence=true \
-            --ak require_graph_ready=true \
-            --ak repository_initial_index_timeout_sec=60 \
-            --ak repository_refresh_timeout_sec=60 \
-            --ak enable_lint=true \
-            --ak enable_feature_guidance=true \
-            --ak enable_context_frontier=true \
-            --ak enable_preemptive_retrieval=true \
-            --ak enable_decision_sufficiency=true \
-            --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
-            --ak enable_context_compaction=true \
-            --ak enable_completion_controller=true \
-            --ak enable_progress_control=true \
-            --ak enable_adaptive_validation_timeout=true \
-            --ak enable_replay_capture=false \
-            --ak enable_task_start_advisory=false \
-            --ak step_limit="$STEP_LIMIT" \
-            --ak execution_budget_sec=5400 \
-            2>&1 | tee deepswe-task.log
+          run_task() {
+            timeout --signal=TERM --kill-after=30s 6000s pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
+              --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
+              -m "$MODEL" -o results/deepswe \
+              --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
+              --agent-timeout-multiplier 1.0 -n 1 -y \
+              --ak integration_mode=active \
+              --ak policy_mode=certified_active \
+              --ak preflight_mode=assistive_safe \
+              --ak enable_all_features=true \
+              --ak enable_submit_readiness=true \
+              --ak enable_repository_intelligence=true \
+              --ak require_graph_ready=true \
+              --ak repository_initial_index_timeout_sec=60 \
+              --ak repository_refresh_timeout_sec=60 \
+              --ak enable_lint=true \
+              --ak enable_feature_guidance=true \
+              --ak enable_context_frontier=true \
+              --ak enable_preemptive_retrieval=true \
+              --ak enable_decision_sufficiency=true \
+              --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
+              --ak enable_context_compaction=true \
+              --ak enable_completion_controller=true \
+              --ak enable_progress_control=true \
+              --ak enable_adaptive_validation_timeout=true \
+              --ak enable_replay_capture=false \
+              --ak enable_task_start_advisory=false \
+              --ak step_limit="$STEP_LIMIT" \
+              --ak execution_budget_sec=5400
+          }
+          set +e
+          run_task 2>&1 | tee deepswe-task.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ] \
+            && ! find results/deepswe -name central_receipt.json -print -quit | grep -q . \
+            && ! find results/deepswe -name provider_query_started.json -print -quit | grep -q .; then
+            echo "infra-only retry: no GT provider query started"
+            mkdir -p results/deepswe-infra-attempt-1
+            find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} +
+            set +e
+            run_task 2>&1 | tee -a deepswe-task.log
+            status=${PIPESTATUS[0]}
+            set -e
+          fi
+          exit "$status"
       - name: Upload task evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -344,13 +492,15 @@ jobs:
           name: deepswe-central-${{ github.run_id }}-${{ matrix.task }}
           path: |
             results/deepswe/
+            results/deepswe-infra-attempt-1/
             dense-backend-proof.json
+            provider-route-proof.json
             deepswe-budget-${{ matrix.task }}.json
             deepswe-task.log
           if-no-files-found: warn
 
   merge:
-    needs: [plan, run]
+    needs: [plan, baseline, run]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -372,10 +522,22 @@ jobs:
           pattern: deepswe-central-${{ github.run_id }}-*
           path: tasks
           merge-multiple: false
+      - name: Download approved frozen baseline
+        uses: actions/download-artifact@v4
+        with:
+          name: deepswe-baseline-approved-${{ github.run_id }}
+          path: baseline-approved
+      - name: Stage approved baseline
+        run: cp baseline-approved/DEEPSWE_BASELINE_RESULTS.json DEEPSWE_BASELINE_RESULTS.json
       - name: Merge receipts, outcomes, and delivery metrics
         env:
           EXPECTED: ${{ needs.plan.outputs.tasks }}
           RUN_ID: ${{ github.run_id }}
+          BENCH_SHA: ${{ needs.plan.outputs.bench_sha }}
+          GT_SHA: ${{ needs.plan.outputs.gt_sha }}
+          MODEL: ${{ inputs.model }}
+          PROVIDER: ${{ inputs.provider }}
+          STEP_LIMIT: ${{ inputs.step_limit }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -391,7 +553,8 @@ jobs:
               root = Path("tasks") / f"deepswe-central-{os.environ['RUN_ID']}-{task}"
               receipts = list(root.rglob("central_receipt.json"))
               results = list(root.rglob("result.json"))
-              if not receipts or not results:
+              provider_proofs = list(root.rglob("provider-route-proof.json"))
+              if not receipts or not results or len(provider_proofs) != 1:
                   missing.append(task); continue
               receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
               parsed_results = [json.loads(p.read_text(encoding="utf-8")) for p in results]
@@ -414,15 +577,36 @@ jobs:
                   for failure in check.failures
               ]
               rewards = (result.get("verifier_result") or {}).get("rewards") or {}
-              solved = bool(rewards) and all(isinstance(v, (int, float)) and v >= 1 for v in rewards.values())
+              exception = result.get("exception_info")
+              solved = rewards.get("reward") == 1 and not exception
               preemptive = receipt.get("preemptive_retrieval") or {}
               dense_backend = preemptive.get("dense_backend") or {}
+              provider_proof = json.loads(
+                  provider_proofs[0].read_text(encoding="utf-8")
+              )
+              provider_route_valid = bool(
+                  provider_proof.get("requested_model")
+                  == "openai/deepseek/deepseek-v4-flash"
+                  and provider_proof.get("requested_provider") == "deepseek"
+                  and provider_proof.get("allow_fallbacks") is False
+                  and provider_proof.get("require_parameters") is True
+                  and (receipt.get("provider_route") or {}).get("model")
+                  == "openai/deepseek/deepseek-v4-flash"
+                  and (receipt.get("provider_route") or {}).get("api_base")
+                  == "https://openrouter.ai/api/v1"
+                  and ((receipt.get("provider_route") or {}).get("provider_policy") or {}).get("only")
+                  == ["deepseek"]
+                  and (receipt.get("provider_route") or {}).get("credential_in_receipt")
+                  is False
+              )
               rows.append({"task": task, "solved": solved, "rewards": rewards,
-                           "exception": result.get("exception_info"),
+                           "exception": exception,
                            "graph_status": intel.get("status"),
                            "graph_applicability": intel.get("applicability"),
                            "graph_failures": intel.get("failures") or [],
                            "dense_available": bool(dense_backend.get("available")),
+                           "provider_route_valid": provider_route_valid,
+                           "provider_route_proof": provider_proof,
                            "provider_delivery_count": totals.get("delivery_count"),
                            "provider_delivery_chars": totals.get("visible_chars"),
                            "delivery_failures": failures,
@@ -431,18 +615,37 @@ jobs:
                            "treatment_release_failures": treatment_failures,
                            "provider_calls": metrics.get("api_calls"),
                            "assistant_steps": metrics.get("assistant_steps"),
+                           "decision_actions": metrics.get("decision_actions"),
                            "effective_actions": metrics.get("effective_task_actions"),
                            "actions": metrics.get("actions"),
                            "total_tokens": metrics.get("total_tokens"),
+                           "provider_cost_usd": metrics.get("provider_cost_usd"),
                            "total_gt_context_chars": metrics.get("total_gt_context_chars_added"),
                            "wall_time_sec": metrics.get("wall_time_sec")})
-          out = {"schema": "gt.deepswe.central.smoke.v1.1", "tasks": expected, "rows": rows, "missing": missing,
+          provider_identity = (
+              "openrouter:deepseek:only:no-fallback"
+              if os.environ.get("PROVIDER") == "openrouter"
+              else "configured"
+          )
+          model_identity = os.environ.get("MODEL") or ""
+          if provider_identity.startswith("openrouter") and model_identity == "deepseek-v4-flash":
+              model_identity = "deepseek/deepseek-v4-flash"
+          out = {"schema": "gt.deepswe.central.evaluation.v1.1",
+                 "manifest": {"benchmark_sha": os.environ.get("BENCH_SHA"),
+                              "gt_commit": os.environ.get("GT_SHA"),
+                              "model": model_identity,
+                              "provider": provider_identity,
+                              "temperature": 1.0,
+                              "step_limit": int(os.environ.get("STEP_LIMIT") or 0),
+                              "execution_budget_sec": 5400,
+                              "runner": "datacurve-pier==0.3.1"},
+                 "tasks": expected, "rows": rows, "missing": missing,
                  "solved": sum(r["solved"] for r in rows), "planned": len(expected)}
-          Path("DEEPSWE_SMOKE_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-          md = ["# DeepSWE central ten-task smoke", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens |", "|---|---:|---:|---|---:|---:|---:|---:|---:|"]
+          Path("DEEPSWE_EVALUATION_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+          md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens |", "|---|---:|---:|---|---:|---:|---:|---:|---:|"]
           for r in rows:
               md.append(f"| {r['task']} | {int(r['solved'])} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} |")
-          Path("DEEPSWE_SMOKE_RESULTS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+          Path("DEEPSWE_EVALUATION_RESULTS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
           print("\n".join(md))
           if missing:
               raise SystemExit("missing task artifacts: " + ", ".join(missing))
@@ -452,13 +655,25 @@ jobs:
               raise SystemExit("GT runtime integrity gate failed")
           if any(r["treatment_release_failures"] for r in rows):
               raise SystemExit("GT treatment release gate failed")
+          if any(not r["provider_route_valid"] for r in rows):
+              raise SystemExit("exact provider route gate failed")
           PY
-      - name: Publish merged smoke result
+      - name: Enforce outcome-first DeepSWE release gate
+        run: |
+          set -euo pipefail
+          python scripts/deepswe_release_gate.py \
+            --baseline DEEPSWE_BASELINE_RESULTS.json \
+            --treatment DEEPSWE_EVALUATION_RESULTS.json \
+            --phase "${{ inputs.release_phase }}" \
+            --output DEEPSWE_RELEASE_GATE.json
+      - name: Publish merged evaluation result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deepswe-central-${{ github.run_id }}-merged
           path: |
-            DEEPSWE_SMOKE_RESULTS.json
-            DEEPSWE_SMOKE_RESULTS.md
+            DEEPSWE_EVALUATION_RESULTS.json
+            DEEPSWE_EVALUATION_RESULTS.md
+            DEEPSWE_BASELINE_RESULTS.json
+            DEEPSWE_RELEASE_GATE.json
           if-no-files-found: warn

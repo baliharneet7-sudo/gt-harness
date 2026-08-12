@@ -171,8 +171,9 @@ def _explicit_paths(state: RetrievalState) -> frozenset[str]:
         for match in _PATH_LITERAL_RE.finditer(material.replace("\\", "/"))
     }
     paths.update(_canonical_explicit_path(path) for path in action_targets)
-    paths.update(_canonical_explicit_path(path) for path in state.active_paths)
-    paths.update(_canonical_explicit_path(path) for path in state.changed_paths)
+    # Active/changed paths are structural seeds, not proof that an arbitrary
+    # span from the same file is missing from provider history.  Making them
+    # exact authority caused the retriever to echo the file just read/edited.
     return frozenset(path for path in paths if path)
 
 
@@ -316,6 +317,20 @@ class RetrievalActionState:
 
 
 @dataclass(frozen=True)
+class RetrievalQueryPlan:
+    """Deterministic split between the current decision and task fallback."""
+
+    primary_text: str
+    fallback_text: str = ""
+
+    @property
+    def full_text(self) -> str:
+        return "\n".join(
+            part for part in (self.primary_text.strip(), self.fallback_text.strip()) if part
+        )
+
+
+@dataclass(frozen=True)
 class RetrievalState:
     task_text: str
     intent: RetrievalIntent
@@ -341,20 +356,46 @@ class RetrievalState:
             raise TypeError("action must be RetrievalActionState")
         object.__setattr__(self, "action", action)
 
-    def query_text(self) -> str:
-        """Compile only current trajectory state into a replayable query."""
+    def query_plan(self) -> RetrievalQueryPlan:
+        """Prefer observed failure state while retaining task text as fallback.
 
-        sections = (
-            self.task_text,
+        A concrete current diagnostic is a stronger retrieval key than the
+        original long-form task.  Mixing both at equal weight caused dense and
+        sparse channels to return task-adjacent but failure-irrelevant files.
+        Other lifecycle states retain the historical task-conditioned query.
+        """
+
+        current_sections = (
             self.intent.value,
             self.action.query_text() if self.action else "",
-            " ".join(self.active_paths),
             " ".join(self.active_symbols),
-            " ".join(self.changed_paths),
             " ".join(self.diagnostics),
             self.validation_state,
         )
-        return "\n".join(section.strip() for section in sections if section.strip())
+        current = "\n".join(
+            section.strip() for section in current_sections if section.strip()
+        )
+        if self.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE and self.diagnostics:
+            return RetrievalQueryPlan(primary_text=current, fallback_text=self.task_text)
+        sections = (
+            self.task_text,
+            current,
+            " ".join(self.active_paths),
+            " ".join(self.changed_paths),
+        )
+        return RetrievalQueryPlan(
+            primary_text="\n".join(
+                section.strip() for section in sections if section.strip()
+            )
+        )
+
+    def query_text(self) -> str:
+        """Compile full replay identity, including deterministic fallback."""
+
+        return self.query_plan().full_text
+
+    def dense_query_text(self) -> str:
+        return self.query_plan().primary_text
 
     def sparse_query_text(self) -> str:
         """Return sparse terms without creating false same-directory support.
@@ -367,15 +408,7 @@ class RetrievalState:
         state; exact path matching remains independently available.
         """
 
-        sections = (
-            self.task_text,
-            self.intent.value,
-            self.action.query_text() if self.action else "",
-            " ".join(self.active_symbols),
-            " ".join(self.diagnostics),
-            self.validation_state,
-        )
-        return "\n".join(section.strip() for section in sections if section.strip())
+        return self.query_plan().primary_text
 
     @property
     def query_hash(self) -> str:
@@ -904,7 +937,7 @@ class DenseRetrievalChannel:
                 f"_docs/{len(self._candidate_paths)}_paths"
             )
         )
-        query = tuple(float(item) for item in self._backend.embed_query(state.query_text()))
+        query = tuple(float(item) for item in self._backend.embed_query(state.dense_query_text()))
         document_texts = tuple(
             "\n".join(
                 part
@@ -1277,6 +1310,74 @@ def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
     return 0 if _is_test_path(ranked.path) else 1
 
 
+_DIRECT_DECISION_RELATIONS = frozenset(
+    {
+        "calls",
+        "inverse:calls",
+        "asserted_by",
+        "inverse:asserted_by",
+        "tested_by",
+        "inverse:tested_by",
+    }
+)
+_CHANGE_IMPACT_RELATIONS = frozenset(
+    {"calls_transitive", "inverse:calls_transitive", *_DIRECT_DECISION_RELATIONS}
+)
+
+
+def _decision_relevance(
+    candidate: RetrievalCandidate,
+    *,
+    support_kind: str,
+    state: RetrievalState,
+) -> str | None:
+    """Separate evidence truth from usefulness to the current decision."""
+
+    provenance = set(candidate.provenance)
+    active_paths = {
+        _normalize_path(path).lower() for path in state.active_paths if _normalize_path(path)
+    }
+    if support_kind == "validation_candidate":
+        return "validation_test_candidate" if _is_test_path(candidate.path) else None
+    if "exact_path" in provenance and candidate.path.lower() not in active_paths:
+        return "exact_path"
+    if "exact_symbol" in provenance:
+        return "exact_symbol"
+    relation = str(candidate.relation or "").strip().lower()
+    if not relation or "cochange" in relation:
+        return None
+    if state.intent is RetrievalIntent.VALIDATION_CONTEXT:
+        return (
+            "validation_direct_relation"
+            if relation
+            in {
+                "asserted_by",
+                "inverse:asserted_by",
+                "tested_by",
+                "inverse:tested_by",
+            }
+            else None
+        )
+    if state.intent is RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE:
+        return (
+            "diagnostic_direct_relation"
+            if relation in _DIRECT_DECISION_RELATIONS
+            else None
+        )
+    if state.intent is RetrievalIntent.CHANGE_IMPACT:
+        return "change_impact_relation" if relation in _CHANGE_IMPACT_RELATIONS else None
+    if state.intent in {
+        RetrievalIntent.IMPLEMENTATION_CONTEXT,
+        RetrievalIntent.MISSING_CONTEXT,
+    }:
+        return (
+            "implementation_direct_relation"
+            if relation in _DIRECT_DECISION_RELATIONS
+            else None
+        )
+    return None
+
+
 class HybridRetriever:
     """Run independent channels, fuse files, then pack bounded new evidence."""
 
@@ -1459,14 +1560,7 @@ class HybridRetriever:
                 ),
             )
         )
-        known_paths = {
-            _normalize_path(path).lower()
-            for path in (*state.active_paths, *state.changed_paths)
-            if _normalize_path(path)
-        }
-        ranked_files = tuple(row for row in fused if row.path.lower() not in known_paths)[
-            : max(0, top_k)
-        ]
+        ranked_files = fused[: max(0, top_k)]
         ranked_spans = tuple(row.representative for row in ranked_files)
         exposed = set(state.previously_exposed_claims)
         selected: list[RetrievalCandidate] = []
@@ -1474,6 +1568,7 @@ class HybridRetriever:
         selected_tokens = 0
         selected_characters = 0
         saw_supported = False
+        saw_decision_irrelevant = False
         skipped_budget = False
         skipped_character_budget = False
         skipped_duplicate = False
@@ -1485,6 +1580,14 @@ class HybridRetriever:
                 continue
             support_kind, candidate = supported
             saw_supported = True
+            decision_relevance = _decision_relevance(
+                candidate,
+                support_kind=support_kind,
+                state=state,
+            )
+            if decision_relevance is None:
+                saw_decision_irrelevant = True
+                continue
             candidate = replace(
                 candidate,
                 provenance=tuple(
@@ -1492,6 +1595,7 @@ class HybridRetriever:
                         (
                             *candidate.provenance,
                             f"delivery_support:{support_kind}",
+                            f"decision_relevance:{decision_relevance}",
                             *(
                                 f"support_channel:{channel.value}"
                                 for channel, _rank in ranked.channel_ranks
@@ -1537,6 +1641,8 @@ class HybridRetriever:
             reasons.append("stale_candidates_rejected")
         if ranked_files and not saw_supported:
             reasons.append("insufficient_independent_support")
+        if saw_decision_irrelevant and not selected:
+            reasons.append("no_decision_relevant_evidence")
         if skipped_duplicate:
             reasons.append("already_visible_or_delivered")
         if skipped_budget:
@@ -1605,6 +1711,7 @@ __all__ = [
     "RetrievalChannelBackend",
     "RetrievalActionState",
     "RetrievalIntent",
+    "RetrievalQueryPlan",
     "RetrievalState",
     "StructuralLink",
     "StructuralRetrievalChannel",

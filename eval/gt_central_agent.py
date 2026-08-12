@@ -52,6 +52,7 @@ from gt_engine.central_runtime import (
     InterventionDecision,
     ValidationAuthority,
     ValidationClassification,
+    ValidationStatus,
     WorkspaceSensor,
     classify_change,
     classify_validation_command,
@@ -61,6 +62,7 @@ from gt_engine.central_runtime import (
     is_check_command,
     is_submit_command,
     lint_commands,
+    normalize_command,
     source_revision_receipt,
     task_deliverable_paths,
 )
@@ -89,6 +91,7 @@ from gt_engine.decision_sufficiency import (
     compile_decision_sufficiency,
 )
 from gt_engine.deep_metrics import normalized_token_cost
+from gt_engine.diagnostics import extract_diagnostic_anchors
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import (
@@ -109,12 +112,13 @@ from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
     EvidenceGrade,
-    MutationCertainty,
     PreflightDecision,
     PreflightMode,
     ProposedAction,
     SegmentRole,
+    WorkspaceImpact,
     adapt_proposed_action,
+    classify_workspace_impact,
     pass_decision,
 )
 from gt_engine.progress import (
@@ -123,6 +127,7 @@ from gt_engine.progress import (
     ProgressObservation,
     StallAggregateFact,
     classify_action_result,
+    semantic_progress_fingerprint,
     task_information_gain,
 )
 from gt_engine.provider_evidence import (
@@ -255,6 +260,14 @@ def _resolved_repository_evidence(
     return session.evidence if session is not None else observed
 
 
+def _model_kwargs(model: Any) -> dict[str, Any]:
+    direct = getattr(model, "model_kwargs", None)
+    if isinstance(direct, dict):
+        return dict(direct)
+    configured = getattr(getattr(model, "config", None), "model_kwargs", None)
+    return dict(configured) if isinstance(configured, dict) else {}
+
+
 def _provider_request_receipt(
     model: Any, messages: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str, str, int]:
@@ -286,7 +299,7 @@ def _provider_request_receipt(
             getattr(getattr(model, "config", None), "model_name", "")
             or getattr(model, "model_name", "")
         ),
-        "model_kwargs": getattr(model, "model_kwargs", {}) or {},
+        "model_kwargs": _model_kwargs(model),
         "tools": provider_tools,
         "messages": prepared,
     }
@@ -297,6 +310,25 @@ def _provider_request_receipt(
         hashlib.sha256(messages_bytes).hexdigest(),
         len(messages_bytes.decode("utf-8")),
     )
+
+
+def _provider_route_configuration(model: Any) -> dict[str, Any]:
+    """Return the non-secret provider route that participates in every call."""
+
+    model_name = str(
+        getattr(getattr(model, "config", None), "model_name", "")
+        or getattr(model, "model_name", "")
+    )
+    kwargs = _model_kwargs(model)
+    provider_policy = dict((kwargs.get("extra_body") or {}).get("provider") or {})
+    return {
+        "model": model_name,
+        "api_base": str(kwargs.get("api_base") or ""),
+        "provider_policy": provider_policy,
+        "credential_in_receipt": any(
+            key in kwargs for key in ("api_key", "authorization", "headers")
+        ),
+    }
 
 
 def _stable_provider_prefix(
@@ -503,6 +535,31 @@ def _preemptive_opportunity_budget_limit(
     return total - reserve
 
 
+def _preemptive_lifecycle_budget(
+    opportunity_kind: str,
+    *,
+    task_budget_chars: int,
+) -> tuple[int, int]:
+    """Return cumulative character cap and per-frame evidence count."""
+
+    total = max(0, int(task_budget_chars))
+    profiles = {
+        "task_start": (800, 1),
+        "post_read_search": (2_400, 1),
+        "post_mutation": (3_600, 2),
+        "post_diagnostic": (5_200, 2),
+        "post_validation": (5_200, 2),
+    }
+    cap, count = profiles.get(str(opportunity_kind or ""), (0, 0))
+    return min(total, cap), count if total else 0
+
+
+def _preemptive_lifecycle_group(opportunity_kind: str) -> str:
+    if opportunity_kind in {"post_diagnostic", "post_validation"}:
+        return "post_failure_validation"
+    return opportunity_kind
+
+
 def _preemptive_retrieval_gate_reason(
     *,
     enabled: bool,
@@ -542,19 +599,43 @@ def _retrieval_action_state(
 ) -> RetrievalActionState:
     """Project the shared shell parser result into bounded retrieval state."""
 
-    executable = next(
+    selected_operation = next(
         (
-            operation.executable
+            operation
             for operation in proposed.operations
             if operation.executable
+            and operation.segment_role is SegmentRole.ACTION
+            and operation.operation is proposed.operation
         ),
-        "",
+        None,
+    )
+    if selected_operation is None:
+        selected_operation = next(
+            (
+                operation
+                for operation in proposed.operations
+                if operation.executable and operation.segment_role is SegmentRole.ACTION
+            ),
+            None,
+        )
+    if selected_operation is None:
+        selected_operation = next(
+            (operation for operation in proposed.operations if operation.executable),
+            None,
+        )
+    executable = (
+        selected_operation.executable
+        if selected_operation is not None
+        else ""
     )
     return RetrievalActionState(
         operation=proposed.operation.value,
         executable=executable,
         targets=target_paths,
-        validation_kind=proposed.validation_kind,
+        validation_kind=(
+            proposed.validation_kind
+            or (executable if proposed.operation is ActionOperation.VALIDATE else None)
+        ),
     )
 
 
@@ -995,7 +1076,7 @@ class MiniSweCentralAgent(BaseAgent):
         self.replay_capture_max_bundle_bytes = max(10_000, int(replay_capture_max_bundle_bytes))
         self._ledger = EvidenceLedger(max_holds=max_submit_holds)
         self._checkpoints = ShadowCheckpointLedger()
-        self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
+        self._progress = ProgressLedger(stall_threshold=12, cycle_threshold=24)
         self._sensor = WorkspaceSensor()
         self._features = CentralFeatureRuntime(
             enabled=enable_all_features,
@@ -1032,7 +1113,25 @@ class MiniSweCentralAgent(BaseAgent):
         kwargs: dict[str, Any] = {"temperature": self.temperature, "num_retries": 0}
         api_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
         if api_base:
-            if "/" not in model:
+            openrouter = "openrouter.ai" in api_base.lower()
+            if openrouter:
+                if model == "deepseek-v4-flash":
+                    model = "deepseek/deepseek-v4-flash"
+                if not model.startswith("openai/"):
+                    model = f"openai/{model}"
+                provider = (
+                    os.environ.get("GT_OPENROUTER_PROVIDER_ONLY") or ""
+                ).strip()
+                if provider:
+                    kwargs["extra_body"] = {
+                        "provider": {
+                            "only": [provider],
+                            "order": [provider],
+                            "allow_fallbacks": False,
+                            "require_parameters": True,
+                        }
+                    }
+            elif "/" not in model:
                 model = f"openai/{model}"
             kwargs["api_base"] = api_base
         return LitellmModel(
@@ -1869,7 +1968,13 @@ class MiniSweCentralAgent(BaseAgent):
         auto_submit_attempts = 0
         auto_submit_count = 0
         controller_opportunities: list[dict[str, Any]] = []
-        self._progress = ProgressLedger(stall_threshold=3, cycle_threshold=6)
+        project_validation_probes: list[dict[str, Any]] = []
+        project_validation_probe_revisions: set[str] = set()
+        project_validation_probe_diagnostics: dict[str, str] = {}
+        # Do not interrupt ordinary exploration after three actions.  A stall
+        # is semantic (no source/validation/diagnostic progress), and only a
+        # sustained 12-action witness is strong enough for model-visible state.
+        self._progress = ProgressLedger(stall_threshold=12, cycle_threshold=24)
         progress_transitions: list[dict[str, Any]] = []
         pending_progress_fact: StallAggregateFact | None = None
         delivered_progress_fact_ids: set[str] = set()
@@ -1883,6 +1988,7 @@ class MiniSweCentralAgent(BaseAgent):
         semantic_progress_kinds: dict[str, int] = {}
         activity_events = 0
         task_progress_changes = 0
+        source_validation_debt = False
         if graph_receipt.complete:
             repository_evidence, repository_session = await self._start_repository_session(
                 environment,
@@ -1911,6 +2017,9 @@ class MiniSweCentralAgent(BaseAgent):
             available=repository_evidence.available,
             substrate_ready=repository_evidence.substrate_ready,
             retrieval_disposition=repository_evidence.retrieval_disposition,
+        )
+        explicit_checks = self._features.register_project_checks(
+            (*explicit_checks, *repository_evidence.project_checks)
         )
         if repository_evidence.available:
             self._features.register_structural_evidence(
@@ -1956,6 +2065,7 @@ class MiniSweCentralAgent(BaseAgent):
         calls = 0
         provider_requests_prepared = 0
         model_query_invocations = 0
+        provider_query_marker_error = ""
         provider_responses_received = 0
         actions_count = 0
         input_tokens = output_tokens = cache_tokens = 0
@@ -2001,6 +2111,7 @@ class MiniSweCentralAgent(BaseAgent):
         decision_sufficiency_receipts: list[dict[str, Any]] = []
         delivered_preemptive_claim_ids: set[str] = set()
         preemptive_retrieval_chars_delivered = 0
+        preemptive_retrieval_chars_by_lifecycle: dict[str, int] = {}
         preemptive_retrieval_cache: dict[str, Any] = {}
         preemptive_retrieval_cache_limit = 128
         preemptive_repository: HybridRepository | None = None
@@ -2009,6 +2120,7 @@ class MiniSweCentralAgent(BaseAgent):
         retrieval_last_action: RetrievalActionState | None = None
         retrieval_last_operation = ""
         retrieval_active_paths: tuple[str, ...] = ()
+        retrieval_active_symbols: tuple[str, ...] = ()
         retrieval_changed_paths: tuple[str, ...] = ()
         retrieval_diagnostics: tuple[str, ...] = ()
         retrieval_validation_state = "unknown"
@@ -2048,6 +2160,7 @@ class MiniSweCentralAgent(BaseAgent):
                     self._progress.budget_risk(
                         iteration=max(calls, actions_count),
                         limit=self.step_limit,
+                        iteration_risk_ratio=0.6,
                         unresolved=not bool(
                             completion_certificates
                             and completion_certificates[-1].auto_submit_eligible
@@ -2123,11 +2236,69 @@ class MiniSweCentralAgent(BaseAgent):
                     stock_provider_messages_sha256,
                     stock_provider_request_chars,
                 ) = _provider_request_receipt(model, messages)
+                compaction_epoch_started = False
                 if self.enable_context_compaction:
-                    query_messages, provider_view_metrics = provider_view_session.project(
-                        messages,
-                        active_state=active_state,
+                    raw_context_chars = sum(
+                        _message_context_chars(message) for message in messages
                     )
+                    if (
+                        not provider_view_session.checkpoint_messages
+                        and raw_context_chars >= self.context_trigger_chars
+                    ):
+                        _candidate_view, candidate_metrics = build_provider_view(
+                            messages,
+                            active_state=active_state,
+                            trigger_chars=self.context_trigger_chars,
+                            target_chars=self.context_target_chars,
+                            keep_recent_turns=2,
+                            transform=True,
+                        )
+                        savings = max(0, candidate_metrics.elided_chars)
+                        savings_ratio = savings / max(1, raw_context_chars)
+                        if (
+                            savings >= self.context_min_compaction_savings_chars
+                            and savings_ratio
+                            >= self.context_min_compaction_savings_ratio
+                            and candidate_metrics.unique_assistant_reasoning_chars_removed == 0
+                        ):
+                            query_messages, provider_view_metrics = (
+                                provider_view_session.compact(
+                                    messages,
+                                    active_state=active_state,
+                                    target_chars=self.context_target_chars,
+                                    keep_recent_turns=2,
+                                    trigger_tokens=0,
+                                    trigger_kind="character_pressure",
+                                    trigger_chars=raw_context_chars,
+                                )
+                            )
+                            context_compactions += 1
+                            context_chars_elided += provider_view_metrics.elided_chars
+                            compaction_epoch_started = True
+                        else:
+                            query_messages, provider_view_metrics = (
+                                provider_view_session.project(
+                                    messages,
+                                    active_state=active_state,
+                                )
+                            )
+                            context_compaction_deferrals.append(
+                                {
+                                    "call": calls,
+                                    "trigger_kind": "character_pressure",
+                                    "raw_chars": raw_context_chars,
+                                    "projected_savings_chars": savings,
+                                    "projected_savings_ratio": savings_ratio,
+                                    "reason": "minimum_safe_savings_not_met",
+                                }
+                            )
+                    else:
+                        query_messages, provider_view_metrics = (
+                            provider_view_session.project(
+                                messages,
+                                active_state=active_state,
+                            )
+                        )
                 else:
                     query_messages, provider_view_metrics = build_provider_view(
                         messages,
@@ -2141,11 +2312,6 @@ class MiniSweCentralAgent(BaseAgent):
                 # attached. Replay capture is opt-in, but when enabled this is
                 # the only defensible paired decision-point control.
                 control_query_messages = [dict(item) for item in query_messages]
-                compaction_epoch_started = False
-                # Character-count compaction used to change otherwise safe
-                # provider requests long before the model's measured context
-                # reserve was at risk.  Only the exact provider-budget gate
-                # below may start an epoch now.
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
@@ -2164,6 +2330,21 @@ class MiniSweCentralAgent(BaseAgent):
                         self.preemptive_retrieval_priority_reserve_chars
                     ),
                 )
+                lifecycle_budget_limit, lifecycle_selection_limit = (
+                    _preemptive_lifecycle_budget(
+                        retrieval_opportunity_kind,
+                        task_budget_chars=self.preemptive_retrieval_task_budget_chars,
+                    )
+                )
+                lifecycle_group = _preemptive_lifecycle_group(
+                    retrieval_opportunity_kind
+                )
+                lifecycle_chars_delivered = preemptive_retrieval_chars_by_lifecycle.get(
+                    lifecycle_group, 0
+                )
+                lifecycle_remaining_chars = max(
+                    0, lifecycle_budget_limit - lifecycle_chars_delivered
+                )
                 preemptive_decision: dict[str, Any] = {
                     "call": calls,
                     "evidence_action": retrieval_evidence_action,
@@ -2179,6 +2360,9 @@ class MiniSweCentralAgent(BaseAgent):
                     "latency_ms": 0.0,
                     "opportunity_kind": retrieval_opportunity_kind,
                     "opportunity_budget_limit_chars": opportunity_budget_limit,
+                    "lifecycle_budget_limit_chars": lifecycle_budget_limit,
+                    "lifecycle_budget_remaining_chars": lifecycle_remaining_chars,
+                    "lifecycle_selection_limit": lifecycle_selection_limit,
                     "cache_hit": False,
                 }
                 preemptive_gate_reason = _preemptive_retrieval_gate_reason(
@@ -2193,6 +2377,21 @@ class MiniSweCentralAgent(BaseAgent):
                     validation_state=retrieval_validation_state,
                     diagnostics=retrieval_diagnostics,
                 )
+                if (
+                    preemptive_gate_reason is None
+                    and self.preemptive_retrieval_task_budget_chars < 1
+                ):
+                    preemptive_gate_reason = "task_character_budget_closed_precheck"
+                if (
+                    preemptive_gate_reason is None
+                    and lifecycle_selection_limit < 1
+                ):
+                    preemptive_gate_reason = "lifecycle_not_material"
+                if (
+                    preemptive_gate_reason is None
+                    and lifecycle_remaining_chars < 1
+                ):
+                    preemptive_gate_reason = "lifecycle_budget_closed_precheck"
                 if (
                     preemptive_gate_reason is None
                     and preemptive_retrieval_chars_delivered
@@ -2211,6 +2410,8 @@ class MiniSweCentralAgent(BaseAgent):
                         "validation_pass_no_diagnostic",
                         "task_character_budget_closed_precheck",
                         "opportunity_budget_reserved_precheck",
+                        "lifecycle_not_material",
+                        "lifecycle_budget_closed_precheck",
                     }:
                         preemptive_decision["status"] = "abstained"
                 if preemptive_gate_reason is None:
@@ -2275,6 +2476,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     intent=intent,
                                     action=retrieval_last_action,
                                     active_paths=retrieval_active_paths,
+                                    active_symbols=retrieval_active_symbols,
                                     changed_paths=retrieval_changed_paths,
                                     diagnostics=retrieval_diagnostics,
                                     validation_state=retrieval_validation_state,
@@ -2309,10 +2511,13 @@ class MiniSweCentralAgent(BaseAgent):
                                             self.preemptive_retrieval_dense_candidate_limit
                                         ),
                                     )
-                                remaining_chars = max(
-                                    0,
-                                    opportunity_budget_limit
-                                    - preemptive_retrieval_chars_delivered,
+                                remaining_chars = min(
+                                    lifecycle_remaining_chars,
+                                    max(
+                                        0,
+                                        opportunity_budget_limit
+                                        - preemptive_retrieval_chars_delivered,
+                                    ),
                                 )
                                 retrieval_cache_key = hashlib.sha256(
                                     _canonical_json(
@@ -2326,7 +2531,10 @@ class MiniSweCentralAgent(BaseAgent):
                                             ),
                                             "top_k": self.preemptive_retrieval_top_k,
                                             "selection_limit": (
-                                                self.preemptive_retrieval_selection_limit
+                                                min(
+                                                    self.preemptive_retrieval_selection_limit,
+                                                    lifecycle_selection_limit,
+                                                )
                                             ),
                                             "token_budget": (
                                                 self.preemptive_retrieval_token_budget
@@ -2368,8 +2576,9 @@ class MiniSweCentralAgent(BaseAgent):
                                                 self.preemptive_retrieval_channel_limit
                                             ),
                                             top_k=self.preemptive_retrieval_top_k,
-                                            selection_limit=(
-                                                self.preemptive_retrieval_selection_limit
+                                            selection_limit=min(
+                                                self.preemptive_retrieval_selection_limit,
+                                                lifecycle_selection_limit,
                                             ),
                                             token_budget=(
                                                 self.preemptive_retrieval_token_budget
@@ -2476,10 +2685,13 @@ class MiniSweCentralAgent(BaseAgent):
                                         else f"post_{retrieval_last_operation or 'action'}"
                                     ),
                                 )
-                                remaining_chars = max(
-                                    0,
-                                    opportunity_budget_limit
-                                    - preemptive_retrieval_chars_delivered,
+                                remaining_chars = min(
+                                    lifecycle_remaining_chars,
+                                    max(
+                                        0,
+                                        opportunity_budget_limit
+                                        - preemptive_retrieval_chars_delivered,
+                                    ),
                                 )
                                 if (
                                     frame is not None
@@ -2678,10 +2890,13 @@ class MiniSweCentralAgent(BaseAgent):
                     priority=40,
                 )
                 contribution_budget = (
-                    max(
-                        0,
-                        opportunity_budget_limit
-                        - preemptive_retrieval_chars_delivered,
+                    min(
+                        lifecycle_remaining_chars,
+                        max(
+                            0,
+                            opportunity_budget_limit
+                            - preemptive_retrieval_chars_delivered,
+                        ),
                     )
                     + len(frontier_payload)
                     + len(guidance_payload)
@@ -2765,8 +2980,14 @@ class MiniSweCentralAgent(BaseAgent):
                         current_source_revision=graph_source_revision,
                         current_call=calls,
                         budget_chars=(
-                            opportunity_budget_limit
-                            - preemptive_retrieval_chars_delivered
+                            min(
+                                lifecycle_remaining_chars,
+                                max(
+                                    0,
+                                    opportunity_budget_limit
+                                    - preemptive_retrieval_chars_delivered,
+                                ),
+                            )
                             + len(legacy_runtime_payload)
                         ),
                         now_ms=time.monotonic() * 1_000.0,
@@ -2951,7 +3172,7 @@ class MiniSweCentralAgent(BaseAgent):
                     request_payload_sha256=request_payload_sha256,
                     provider_messages_sha256=provider_messages_sha256,
                     model_name=str(self.model_name or ""),
-                    model_kwargs=getattr(model, "model_kwargs", {}) or {},
+                    model_kwargs=_model_kwargs(model),
                     temperature=self.temperature,
                     active_state=active_state,
                     source_revision=source_revision,
@@ -2976,6 +3197,10 @@ class MiniSweCentralAgent(BaseAgent):
                 ):
                     delivered_preemptive_claim_ids.update(preemptive_frame.claim_ids)
                     preemptive_retrieval_chars_delivered += len(preemptive_payload)
+                    preemptive_retrieval_chars_by_lifecycle[lifecycle_group] = (
+                        preemptive_retrieval_chars_by_lifecycle.get(lifecycle_group, 0)
+                        + len(preemptive_payload)
+                    )
                     delivery_receipt = dict(
                         preemptive_compilation.receipt
                         if preemptive_compilation
@@ -3420,6 +3645,26 @@ class MiniSweCentralAgent(BaseAgent):
                         deadline_reserve_exits += 1
                         break
                     model_query_invocations += 1
+                    try:
+                        (self.logs_dir / "provider_query_started.json").write_text(
+                            json.dumps(
+                                {
+                                    "schema": "gt.provider_query_started.v1",
+                                    "calls_started": model_query_invocations,
+                                    "last_call": calls,
+                                    "request_payload_sha256": request_payload_sha256,
+                                    "model": str(self.model_name or ""),
+                                    "gt_commit": (
+                                        os.environ.get("GT_COMMIT") or ""
+                                    ).strip(),
+                                },
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                    except OSError as exc:
+                        provider_query_marker_error = type(exc).__name__
                     model_call_contexts[-1]["dispatch_status"] = "invoked"
                     replay_bundle.record_invocation(call=calls)
                     provider_evidence.mark_dispatched(
@@ -3692,6 +3937,7 @@ class MiniSweCentralAgent(BaseAgent):
                                                 target_paths=target_paths,
                                             ),
                                             diagnostics=retrieval_diagnostics,
+                                            active_symbols=retrieval_active_symbols,
                                             validation_state=retrieval_validation_state,
                                             source_revision=graph_source_revision,
                                         )
@@ -3873,6 +4119,33 @@ class MiniSweCentralAgent(BaseAgent):
                                 applied_reasons
                             )
                             decision_sufficiency_receipts.append(sufficiency_row)
+                    if (
+                        applied_disposition == ActionDisposition.RETURN_TO_MODEL
+                        and proposed.operation is ActionOperation.SUBMIT
+                        and "proven_submit_blocker" in applied_reasons
+                    ):
+                        readiness_evidence = self._ledger.readiness_evidence(
+                            source_revision
+                        )
+                        self._features.record_submit(
+                            action_id=actions_count,
+                            revision=source_revision,
+                            source_revision=source_revision,
+                            refused=True,
+                            sensor_healthy=snapshot.healthy,
+                            check_count=len(readiness_evidence),
+                            passing_checks=sum(
+                                item.returncode == 0 for item in readiness_evidence
+                            ),
+                            failing_checks=sum(
+                                item.returncode != 0 for item in readiness_evidence
+                            ),
+                            blockers=tuple(
+                                item.command
+                                for item in readiness_evidence
+                                if item.returncode != 0
+                            ),
+                        )
                     if applied_disposition == ActionDisposition.RETURN_TO_MODEL:
                         pending_reconsideration_cycle = proposed.cycle_id
                         outputs.append(
@@ -3916,6 +4189,98 @@ class MiniSweCentralAgent(BaseAgent):
                         break
                     submit = is_submit_command(command)
                     if submit and self.enable_submit_readiness:
+                        current_readiness = self._ledger.readiness_evidence(
+                            source_revision
+                        )
+                        if (
+                            self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                            and source_validation_debt
+                            and repository_evidence.project_checks
+                            and not current_readiness
+                            and source_revision not in project_validation_probe_revisions
+                        ):
+                            project_validation_probe_revisions.add(source_revision)
+                            project_check = repository_evidence.project_checks[0]
+                            probe_timeout = self.max_validation_timeout_sec
+                            if deadline is not None:
+                                probe_timeout = min(
+                                    probe_timeout,
+                                    max(
+                                        0.05,
+                                        (deadline - time.monotonic())
+                                        * self.validation_timeout_budget_ratio,
+                                    ),
+                                )
+                            try:
+                                probe_result = await self._host_executions.exec(
+                                    environment,
+                                    project_check,
+                                    category=HostExecCategory.PROJECT_VALIDATION_PROBE,
+                                    action_id=actions_count,
+                                    source_revision=source_revision,
+                                    cwd=self.cwd,
+                                    env={},
+                                    timeout_sec=probe_timeout,
+                                )
+                            except Exception as exc:  # fail open at submit
+                                project_validation_probes.append(
+                                    {
+                                        "action_id": actions_count,
+                                        "command": project_check,
+                                        "source_revision": source_revision,
+                                        "status": "failed_open",
+                                        "error_type": type(exc).__name__,
+                                    }
+                                )
+                            else:
+                                raw_probe_diagnostic = " ".join(
+                                    (
+                                        (probe_result.stderr or "")
+                                        + " "
+                                        + (probe_result.stdout or "")
+                                    ).split()
+                                )[:800]
+                                project_validation_probe_diagnostics[
+                                    normalize_command(project_check)
+                                ] = raw_probe_diagnostic
+                                probe_classification = classify_validation_command(
+                                    project_check,
+                                    explicit_checks,
+                                ).with_result(
+                                    result_code=probe_result.return_code,
+                                    output=(
+                                        (probe_result.stderr or "")
+                                        + "\n"
+                                        + (probe_result.stdout or "")
+                                    ),
+                                    source_revision=source_revision,
+                                    workspace_revision=snapshot.revision,
+                                )
+                                self._ledger.record_check(
+                                    project_check,
+                                    returncode=probe_result.return_code,
+                                    revision=source_revision,
+                                    grounded=probe_classification.grounded,
+                                    classification=probe_classification,
+                                )
+                                if (
+                                    probe_classification.status is ValidationStatus.PASS
+                                    and probe_classification.status_attributed
+                                ):
+                                    source_validation_debt = False
+                                project_validation_probes.append(
+                                    {
+                                        "action_id": actions_count,
+                                        "command": project_check,
+                                        "source_revision": source_revision,
+                                        "status": probe_classification.status.value,
+                                        "returncode": probe_result.return_code,
+                                        "project_scoped": (
+                                            probe_classification.project_scoped
+                                        ),
+                                        "diagnostic": raw_probe_diagnostic,
+                                    }
+                                )
                         decision = self._ledger.submit_decision(
                             source_revision, sensor_healthy=snapshot.healthy
                         )
@@ -3929,11 +4294,15 @@ class MiniSweCentralAgent(BaseAgent):
                                 item.returncode != 0 for item in readiness_evidence
                             ),
                         }
+                        hold_submit = bool(
+                            decision.decision == InterventionDecision.HOLD_ONCE
+                            and self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                        )
                         self._features.record_submit(
                             action_id=actions_count,
                             revision=source_revision,
                             source_revision=source_revision,
-                            refused=False,
+                            refused=hold_submit,
                             sensor_healthy=snapshot.healthy,
                             **readiness_kwargs,
                         )
@@ -3949,6 +4318,71 @@ class MiniSweCentralAgent(BaseAgent):
                                 "revision": source_revision,
                             }
                         )
+                        if hold_submit:
+                            blocker_text = ", ".join(decision.blockers[:2])
+                            blocker_diagnostic = next(
+                                (
+                                    project_validation_probe_diagnostics.get(
+                                        normalize_command(blocker), ""
+                                    )
+                                    for blocker in decision.blockers
+                                    if project_validation_probe_diagnostics.get(
+                                        normalize_command(blocker), ""
+                                    )
+                                ),
+                                "",
+                            )
+                            preflight_text = (
+                                "Pre-execution check: current validation is failing; "
+                                f"blocker={blocker_text}."
+                                + (
+                                    f" diagnostic={blocker_diagnostic}"
+                                    if blocker_diagnostic
+                                    else ""
+                                )
+                            )
+                            pending_reconsideration_cycle = proposed.cycle_id
+                            pending_preflight_evidence = {
+                                "fact_id": "submit-"
+                                + hashlib.sha256(
+                                    f"{source_revision}\0{blocker_text}".encode()
+                                ).hexdigest()[:20],
+                                "evidence_action": actions_count,
+                                "eligible_call": calls + 1,
+                                "text": preflight_text,
+                            }
+                            outputs.append(
+                                {
+                                    "output": preflight_text,
+                                    "returncode": 2,
+                                    "exception_info": "",
+                                }
+                            )
+                            cancelled = len(actions) - index - 1
+                            for cancelled_proposal in proposed_actions[index + 1 :]:
+                                self._features.record_cancelled_proposal(
+                                    cancelled_proposal,
+                                    mode=self.preflight_mode,
+                                    reason="submit_readiness_return_to_model",
+                                )
+                            outputs.extend(
+                                {
+                                    "output": (
+                                        "Cancelled: submit readiness requires fresh reasoning."
+                                    ),
+                                    "returncode": 2,
+                                    "exception_info": "",
+                                }
+                                for _ in range(cancelled)
+                            )
+                            self._features.record_skipped_action(action_id=actions_count)
+                            if cancelled:
+                                self._features.record_batch_interrupt(
+                                    action_id=actions_count,
+                                    cancelled=cancelled,
+                                    reason="submit_readiness_return_to_model",
+                                )
+                            break
 
                     try:
                         remaining_for_action = (
@@ -3999,10 +4433,16 @@ class MiniSweCentralAgent(BaseAgent):
                         output["output"] += "\n\nPre-execution check: " + " ".join(
                             preflight.evidence
                         )
-                    if proposed.mutation_certainty is MutationCertainty.PROVEN_READ_ONLY:
+                    workspace_impact = classify_workspace_impact(
+                        proposed,
+                        cwd=self.cwd,
+                    )
+                    if workspace_impact is WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE:
                         self._host_executions.record_cache_hit(
                             category=HostExecCategory.WORKSPACE_MANIFEST,
-                            command="[workspace scan skipped: proven read-only action]",
+                            command=(
+                                "[workspace scan skipped: mechanically proven no workspace change]"
+                            ),
                             action_id=actions_count,
                             source_revision=source_revision,
                         )
@@ -4030,6 +4470,48 @@ class MiniSweCentralAgent(BaseAgent):
                     source_revision = source_receipt.revision
                     graph_receipt = graph_revision_receipt(after, task_deliverables)
                     graph_source_revision = graph_receipt.revision
+                    classification = classification.with_result(
+                        result_code=result.return_code,
+                        output=output["output"],
+                        source_revision=source_revision,
+                        workspace_revision=snapshot.revision,
+                    )
+                    diagnostic_text = str(output["output"] or "").strip()
+                    if len(diagnostic_text) > 4_000:
+                        diagnostic_text = (
+                            diagnostic_text[:2_000]
+                            + "\n...[bounded diagnostic]...\n"
+                            + diagnostic_text[-2_000:]
+                        )
+                    retrieval_diagnostics = (
+                        (diagnostic_text,)
+                        if diagnostic_text
+                        and (
+                            result.return_code != 0
+                            or classification.status.value == "fail"
+                        )
+                        else ()
+                    )
+                    diagnostic_repository_paths = tuple(
+                        path
+                        for path, entry in snapshot.entries.items()
+                        if entry.kind == "f"
+                        and classify_change(
+                            path,
+                            kind="f",
+                            task_deliverables=task_deliverables,
+                            content=entry.content,
+                        ).graph_indexable
+                    )
+                    diagnostic_anchors = (
+                        extract_diagnostic_anchors(
+                            diagnostic_text,
+                            repository_paths=diagnostic_repository_paths,
+                            cwd=self.cwd,
+                        )
+                        if retrieval_diagnostics
+                        else ()
+                    )
                     classified_transition = tuple(
                         classify_change(
                             path,
@@ -4128,7 +4610,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 status=RepositoryIntelligenceStatus.MIRROR_INCOMPLETE.value,
                             )
                             repository_evidence = repository_session.evidence
-                    action_graph_paths = tuple(
+                    action_target_paths = tuple(
                         dict.fromkeys(
                             normalized
                             for target in proposed.targets
@@ -4145,6 +4627,21 @@ class MiniSweCentralAgent(BaseAgent):
                             ).graph_indexable
                         )
                     )
+                    action_graph_paths = tuple(
+                        dict.fromkeys(
+                            (
+                                *action_target_paths,
+                                *(anchor.path for anchor in diagnostic_anchors),
+                            )
+                        )
+                    )
+                    action_graph_symbols = tuple(
+                        dict.fromkeys(
+                            anchor.symbol
+                            for anchor in diagnostic_anchors
+                            if anchor.symbol
+                        )
+                    )
                     if (
                         repository_session is not None
                         and repository_session.evidence.substrate_ready
@@ -4155,12 +4652,17 @@ class MiniSweCentralAgent(BaseAgent):
                             ActionOperation.SEARCH,
                             ActionOperation.EDIT,
                             ActionOperation.CREATE,
+                            ActionOperation.VALIDATE,
                         }
                     ):
                         repository_evidence = await asyncio.to_thread(
                             repository_session.query,
                             source_revision=graph_source_revision,
                             active_paths=action_graph_paths,
+                            active_symbols=action_graph_symbols,
+                            diagnostic_fingerprint=(
+                                classification.diagnostic_fingerprint
+                            ),
                             boundary=f"post_{proposed.operation.value}",
                         )
                         if repository_evidence.available:
@@ -4174,35 +4676,14 @@ class MiniSweCentralAgent(BaseAgent):
                                 callers=repository_evidence.callers,
                                 graph_revision=repository_evidence.graph_revision,
                             )
-                    classification = classification.with_result(
-                        result_code=result.return_code,
-                        output=output["output"],
-                        source_revision=source_revision,
-                        workspace_revision=snapshot.revision,
-                    )
                     retrieval_last_action = _retrieval_action_state(
                         proposed,
-                        target_paths=action_graph_paths,
+                        target_paths=action_target_paths,
                     )
                     retrieval_last_operation = proposed.operation.value
                     retrieval_active_paths = action_graph_paths
+                    retrieval_active_symbols = action_graph_symbols
                     retrieval_changed_paths = tuple(model_authored_source_paths)
-                    diagnostic_text = str(output["output"] or "").strip()
-                    if len(diagnostic_text) > 4_000:
-                        diagnostic_text = (
-                            diagnostic_text[:2_000]
-                            + "\n...[bounded diagnostic]...\n"
-                            + diagnostic_text[-2_000:]
-                        )
-                    retrieval_diagnostics = (
-                        (diagnostic_text,)
-                        if diagnostic_text
-                        and (
-                            result.return_code != 0
-                            or classification.status.value == "fail"
-                        )
-                        else ()
-                    )
                     retrieval_validation_state = classification.status.value
                     retrieval_evidence_action = actions_count
                     retrieval_eligible_call = calls + 1
@@ -4389,9 +4870,26 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     if task_progress_gain:
                         task_progress_changes += 1
+                    if source_paths:
+                        source_validation_debt = True
+                    if validation_gain and (
+                        classification.authority is ValidationAuthority.DECLARED
+                        or classification.project_scoped
+                    ):
+                        source_validation_debt = False
                     if self.enable_progress_control:
+                        progress_signature = semantic_progress_fingerprint(
+                            source_revision=source_revision,
+                            changed_paths=source_paths,
+                            validation_state=classification.status.value,
+                            diagnostic_fingerprint=(
+                                classification.diagnostic_fingerprint or ""
+                            ),
+                            project_checks=repository_evidence.project_checks,
+                            validation_debt=source_validation_debt,
+                        )
                         progress_transition = self._progress.observe(
-                            progress_observation.attempt_id,
+                            progress_signature,
                             information_gain=observation_gain,
                             changed=bool(source_paths),
                             semantic_gain=task_progress_gain,
@@ -4413,6 +4911,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     "signature": progress_transition.signature,
                                     "semantic_kind": semantic_kind,
                                     "attempt_id": progress_observation.attempt_id,
+                                    "semantic_fingerprint": progress_signature,
                                     "observation_id": progress_observation.observation_id,
                                     "result_kind": result_kind.value,
                                     "observation_gain": observation_gain,
@@ -5058,6 +5557,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "provider_requests_prepared": provider_requests_prepared,
                 "model_query_invocations": model_query_invocations,
                 "provider_responses_received": provider_responses_received,
+                "provider_query_marker_error": provider_query_marker_error,
                 "provider_requests_not_sent": max(
                     0, provider_requests_prepared - model_query_invocations
                 ),
@@ -5249,6 +5749,11 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "completion_probe_execs": self._completion_probe_execs,
                 "completion_cache_hits": self._completion_cache_hits,
+                "project_validation_probe_attempts": len(project_validation_probes),
+                "project_validation_probe_execs": sum(
+                    row.get("status") != "failed_open"
+                    for row in project_validation_probes
+                ),
                 "completion_certificates_complete": sum(
                     item.status is CompletionStatus.COMPLETE for item in completion_certificates
                 ),
@@ -5256,6 +5761,14 @@ class MiniSweCentralAgent(BaseAgent):
                 "auto_submits": auto_submit_count,
                 "effective_actions": host_execution["effective_task_actions"],
                 "effective_actions_schema": "actual-task-environment-execs-v2",
+                "decision_actions": host_execution["decision_actions"],
+                "harness_overhead_execs": host_execution["harness_overhead_execs"],
+                "controller_intervention_execs": (
+                    host_execution["controller_intervention_execs"]
+                ),
+                "substrate_environment_execs": (
+                    host_execution["substrate_environment_execs"]
+                ),
                 "effective_task_actions": host_execution["effective_task_actions"],
                 "actual_environment_execs": host_execution["actual_environment_execs"],
                 "controller_environment_execs": host_execution["controller_environment_execs"],
@@ -6043,6 +6556,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "integration_mode": self.integration_mode.value,
                         "policy_mode": self.policy_mode.value,
                         "preflight_mode": self.preflight_mode.value,
+                        "provider_route": _provider_route_configuration(model),
                         "component_configuration": {
                             "feature_guidance": self.enable_feature_guidance,
                             "context_frontier": self.enable_context_frontier,
@@ -6127,6 +6641,12 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "auto_submit_attempts": auto_submit_attempts,
                             "auto_submit_count": auto_submit_count,
+                        },
+                        "project_validation": {
+                            "discovered_checks": list(
+                                repository_evidence.project_checks
+                            ),
+                            "probes": project_validation_probes,
                         },
                         "progress": {
                             "state": self._progress.state,

@@ -1590,6 +1590,66 @@ def test_ledger_records_declared_validation_bound_to_source_revision():
     assert ledger.submit_decision(source_r).decision == InterventionDecision.HOLD_ONCE
 
 
+def test_attributable_standard_runner_failure_is_a_submit_blocker():
+    ledger = EvidenceLedger(max_holds=1)
+    classification = classify_validation_command("pytest -q").with_result(
+        result_code=1,
+        output="tests/test_api.py:12: AssertionError",
+        source_revision="source-v1",
+        workspace_revision="workspace-v1",
+    )
+
+    ledger.record_check(
+        "pytest -q",
+        returncode=1,
+        revision="source-v1",
+        grounded=classification.grounded,
+        classification=classification,
+    )
+
+    assert classification.authority is ValidationAuthority.STANDARD_RUNNER
+    assert classification.grounded is False
+    assert ledger.readiness_evidence("source-v1")[0].returncode == 1
+    assert ledger.submit_decision("source-v1").decision == InterventionDecision.HOLD_ONCE
+
+
+def test_only_full_project_standard_pass_becomes_readiness_evidence():
+    full = classify_validation_command("pytest -q").with_result(
+        result_code=0,
+        output="12 passed",
+        source_revision="source-v1",
+        workspace_revision="workspace-v1",
+    )
+    targeted = classify_validation_command("pytest -q tests/test_api.py").with_result(
+        result_code=0,
+        output="1 passed",
+        source_revision="source-v1",
+        workspace_revision="workspace-v1",
+    )
+    full_ledger = EvidenceLedger()
+    targeted_ledger = EvidenceLedger()
+
+    full_ledger.record_check(
+        full.command,
+        returncode=0,
+        revision="source-v1",
+        grounded=False,
+        classification=full,
+    )
+    targeted_ledger.record_check(
+        targeted.command,
+        returncode=0,
+        revision="source-v1",
+        grounded=False,
+        classification=targeted,
+    )
+
+    assert full.project_scoped is True
+    assert targeted.project_scoped is False
+    assert len(full_ledger.readiness_evidence("source-v1")) == 1
+    assert targeted_ledger.readiness_evidence("source-v1") == ()
+
+
 def test_fresh_passing_declared_check_yields_positive_certificate_counts():
     ledger = EvidenceLedger(max_holds=1)
     source_r = "source-v1"
@@ -1637,6 +1697,22 @@ def test_runtime_validation_log_records_declared_checks():
     assert log[0]["command_class"] == "declared_validation"
     assert log[0]["declared_check_id"] == "pytest -q"
     assert log[0]["result_code"] == 0
+
+
+def test_repository_project_checks_extend_contract_without_creating_payload():
+    runtime = CentralFeatureRuntime(enabled=True, model_visible=True)
+    runtime.begin_task(
+        "Implement the change.",
+        revision="w0",
+        source_revision="s0",
+        explicit_checks=("python -m unittest",),
+    )
+    receipts_before = len(runtime.receipts)
+
+    checks = runtime.register_project_checks(("go test ./...", "python -m unittest"))
+
+    assert checks == ("python -m unittest", "go test ./...")
+    assert len(runtime.receipts) == receipts_before
 
 
 def test_effect_timing_consumes_evidence_before_the_next_action():

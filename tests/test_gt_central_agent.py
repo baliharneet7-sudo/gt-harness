@@ -24,6 +24,8 @@ from eval.gt_central_agent import (
     _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
+    _preemptive_lifecycle_budget,
+    _provider_route_configuration,
     _provider_visible_claim_ids,
     _resolved_repository_evidence,
     _retrieval_intent,
@@ -58,6 +60,21 @@ from gt_engine.replay_bundle import load_replay_bundle
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
+
+
+def test_preemptive_lifecycle_budget_preserves_late_failure_capacity():
+    assert _preemptive_lifecycle_budget("task_start", task_budget_chars=12_000) == (800, 1)
+    assert _preemptive_lifecycle_budget(
+        "post_read_search", task_budget_chars=12_000
+    ) == (2_400, 1)
+    assert _preemptive_lifecycle_budget("post_mutation", task_budget_chars=12_000) == (
+        3_600,
+        2,
+    )
+    assert _preemptive_lifecycle_budget(
+        "post_diagnostic", task_budget_chars=12_000
+    ) == (5_200, 2)
+    assert _preemptive_lifecycle_budget("post_other", task_budget_chars=12_000) == (0, 0)
 
 
 def test_recovered_frontier_failure_is_receipted_but_not_current_failure():
@@ -242,6 +259,88 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
     assert 'm = f"openai/{m}"' in workflow
     assert 'kwargs["api_base"] = base' in workflow
+
+
+def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
+
+    model = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="deepseek-v4-flash",
+    )._build_model()
+
+    assert model.config.model_name == "openai/deepseek/deepseek-v4-flash"
+    assert model.config.model_kwargs["api_base"] == "https://openrouter.ai/api/v1"
+    assert "api_key" not in model.config.model_kwargs
+    assert model.config.model_kwargs["extra_body"] == {
+        "provider": {
+            "only": ["deepseek"],
+            "order": ["deepseek"],
+            "allow_fallbacks": False,
+            "require_parameters": True,
+        }
+    }
+    route = _provider_route_configuration(model)
+    assert route["credential_in_receipt"] is False
+    assert route["provider_policy"]["only"] == ["deepseek"]
+
+
+def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'default: "20"' in workflow
+    assert "GT_OPENROUTER_PROVIDER_ONLY: deepseek" in workflow
+    assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
+    assert "GT_COMMIT: ${{ github.sha }}" not in workflow
+    assert 'm = "deepseek/deepseek-v4-flash"' in workflow
+    assert '"only": ["deepseek"]' in workflow
+    assert '"allow_fallbacks": False' in workflow
+    assert "provider-route-proof.json" in workflow
+    assert "exact provider route gate failed" in workflow
+    assert "--ak preflight_mode=assistive_safe" in workflow
+    assert "timeout --signal=TERM --kill-after=30s 6000s pier run" in workflow
+    assert "provider_query_started.json" in workflow
+    assert "central_receipt.json -print -quit" in workflow
+    assert "infra-only retry: no GT provider query started" in workflow
+    assert 'rewards.get("reward") == 1' in workflow
+    assert 'and not exception' in workflow
+    assert "all(isinstance(v" not in workflow
+    assert "gt.deepswe.central.evaluation.v1.1" in workflow
+    assert "DEEPSWE_EVALUATION_RESULTS.json" in workflow
+    assert '"decision_actions": metrics.get("decision_actions")' in workflow
+    assert "baseline_run_id:" in workflow
+    assert "baseline_artifact_name:" in workflow
+    assert "scripts/deepswe_release_gate.py" in workflow
+    assert "--phase \"${{ inputs.release_phase }}\"" in workflow
+    assert "Download frozen GT-off comparison before any paid task" in workflow
+    assert "BASELINE_APPROVED" in workflow
+    assert "needs: [plan, baseline]" in workflow
+    assert "needs: [plan, baseline, run]" in workflow
+    assert "# DeepSWE central evaluation" in workflow
+    assert "ten-task smoke" not in workflow
+
+
+def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "central_provider_free.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "tests/test_diagnostics.py" in workflow
+    assert "tests/test_deepswe_release_gate.py" in workflow
+    assert "gt_engine/diagnostics.py" in workflow
+    assert "scripts/deepswe_release_gate.py" in workflow
+    assert '["git", "rev-parse", "HEAD"]' in workflow
+    assert '"provider_calls": 0' in workflow
 
 
 def test_pier_adapter_isolated_from_runner_neutral_central_agent():
@@ -436,6 +535,32 @@ def test_live_retrieval_action_state_uses_typed_parser_not_raw_program_body():
     assert action_state.executable == "python"
     assert action_state.targets == ("src/worker.py",)
     assert "SECRET_PROGRAM_BODY" not in action_state.query_text()
+
+
+def test_live_retrieval_action_state_uses_validator_segment_after_shell_context():
+    from eval import gt_central_agent as central_agent
+
+    proposed = adapt_proposed_action(
+        {
+            "command": "cd /app && go test ./...",
+            "tool_call_id": "action-validate",
+        },
+        source_revision="source-1",
+        workspace_revision="workspace-1",
+        model_call=2,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    action_state = central_agent._retrieval_action_state(
+        proposed,
+        target_paths=("pkg/worker.go",),
+    )
+
+    assert proposed.operation is ActionOperation.VALIDATE
+    assert action_state.operation == "validate"
+    assert action_state.executable == "go"
+    assert action_state.validation_kind == "go"
 
 
 @pytest.mark.asyncio
@@ -1606,7 +1731,7 @@ async def test_context_transform_preserves_oversized_read_before_budget_pressure
 
 
 @pytest.mark.asyncio
-async def test_context_soft_character_limit_never_starts_compaction_epoch(tmp_path):
+async def test_context_soft_character_limit_starts_one_safe_compaction_epoch(tmp_path):
     class LargeReadEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -1641,11 +1766,13 @@ async def test_context_soft_character_limit_never_starts_compaction_epoch(tmp_pa
     await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert receipt["metrics"]["context_compactions"] == 0
-    assert receipt["metrics"]["context_compaction_epochs"] == []
+    assert receipt["metrics"]["context_compactions"] == 1
+    assert len(receipt["metrics"]["context_compaction_epochs"]) == 1
+    assert receipt["metrics"]["context_compaction_epochs"][0]["trigger_kind"] == (
+        "character_pressure"
+    )
     assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
-    assert receipt["metrics"]["context_bounded_observations"] == 0
-    assert receipt["metrics"]["context_bounded_observation_applications"] == 0
+    assert receipt["metrics"]["context_chars_elided"] > 0
 
 
 @pytest.mark.asyncio
@@ -1682,7 +1809,7 @@ async def test_soft_compaction_defers_when_cache_break_savings_are_too_small(tmp
 
     metrics = json.loads((tmp_path / "central_receipt.json").read_text())["metrics"]
     assert metrics["context_compactions"] == 0
-    assert metrics["context_compaction_deferral_count"] == 0
+    assert metrics["context_compaction_deferral_count"] >= 1
 
 
 @pytest.mark.asyncio
@@ -1763,6 +1890,27 @@ async def test_receipt_hashes_the_provider_prepared_messages_not_private_extra(t
     )
     assert row["provider_message_count"] == len(prepared)
     assert logical
+
+
+@pytest.mark.asyncio
+async def test_provider_query_marker_proves_whether_a_paid_call_started(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("GT_COMMIT", "a" * 40)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-be-persisted")
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run("Finish.", _Environment(), AgentContext())
+
+    raw = (tmp_path / "provider_query_started.json").read_text(encoding="utf-8")
+    marker = json.loads(raw)
+    assert marker["schema"] == "gt.provider_query_started.v1"
+    assert marker["calls_started"] == 1
+    assert marker["gt_commit"] == "a" * 40
+    assert len(marker["request_payload_sha256"]) == 64
+    assert "must-not-be-persisted" not in raw
 
 
 @pytest.mark.asyncio
@@ -2906,6 +3054,107 @@ async def test_grounded_failure_warns_before_submit_without_holding_it(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_assistive_safe_returns_fresh_standard_failure_before_submit(tmp_path):
+    class CheckEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "pytest -q":
+                return ExecResult(stdout="1 failed\n", return_code=1)
+            if "COMPLETE_TASK" in command:
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
+            raise AssertionError(command)
+
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    environment = CheckEnvironment()
+    model = _ScriptedModel(["pytest -q", submit, submit])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="assistive_safe",
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Run the project tests before finishing.", environment, AgentContext())
+
+    executed_submits = [command for command, _ in environment.commands if command == submit]
+    assert executed_submits == [submit]
+    assert len(model.observed_history) == 3
+    assert any("pytest -q" in item and "failing" in item for item in model.observed_history[2])
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["submit_holds"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assistive_safe_runs_one_discovered_project_check_at_submit(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+
+    class ProjectEnvironment(_ObservedMutationEnvironment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if command == "pytest -q":
+                self.commands.append((command, env))
+                return ExecResult(
+                    stdout="tests/test_app.py::test_behavior FAILED\n",
+                    return_code=1,
+                )
+            if command == submit:
+                self.commands.append((command, env))
+                return ExecResult(stdout=submit + "\n", return_code=0)
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    class ProjectAgent(MiniSweCentralAgent):
+        async def _start_repository_session(
+            self,
+            environment,
+            instruction,
+            *,
+            snapshot,
+            source_revision,
+            task_deliverables=frozenset(),
+        ):
+            return (
+                RepositoryEvidence(
+                    available=True,
+                    status="available",
+                    project_checks=("pytest -q",),
+                ),
+                None,
+            )
+
+    environment = ProjectEnvironment(
+        "touch app.py",
+        "f\t6\t2.0\t2.0\tapp.py\t\n",
+    )
+    model = _ScriptedModel(["touch app.py", submit, submit])
+    agent = ProjectAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="assistive_safe",
+        enable_lint=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Change the implementation and finish.", environment, AgentContext())
+
+    commands = [command for command, _ in environment.commands]
+    assert commands.count("pytest -q") == 1
+    assert commands.count(submit) == 1
+    assert any(
+        "tests/test_app.py::test_behavior FAILED" in item
+        for item in model.observed_history[2]
+    )
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["project_validation_probe_execs"] == 1
+    assert receipt["project_validation"]["probes"][0]["status"] == "fail"
+    assert receipt["metrics"]["controller_intervention_execs"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_format_error_is_returned_to_model_instead_of_aborting(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
@@ -3011,9 +3260,7 @@ async def test_provider_budget_failure_stops_before_model_query_and_is_receipted
 async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice(tmp_path):
     model = _ScriptedModel(
         [
-            "printf same",
-            "printf same",
-            "printf same",
+            *("printf same" for _ in range(12)),
             "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
         ]
     )
@@ -3034,7 +3281,7 @@ async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice
     assert deliveries[0]["one_step_late"] is False
     assert deliveries[0]["not_predictive"] is True
     assert receipt["metrics"]["progress_frame_deliveries"] == 1
-    visible = "\n".join(model.observed_history[3])
+    visible = "\n".join(model.observed_history[12])
     assert "Execution state STALLED" in visible
     stall_line = next(line for line in visible.splitlines() if "Execution state STALLED" in line)
     assert "should" not in stall_line.lower()

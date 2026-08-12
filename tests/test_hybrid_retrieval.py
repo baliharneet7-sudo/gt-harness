@@ -100,6 +100,30 @@ def test_typed_state_builds_trajectory_conditioned_query_without_gold_fields():
     assert not hasattr(state, "gold_files")
 
 
+def test_diagnostic_query_plan_prioritizes_current_failure_over_full_task_prose():
+    state = _state(
+        task_text="rewrite the entire service and update unrelated documentation",
+        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
+        action=RetrievalActionState(
+            operation="validate",
+            executable="pytest",
+            targets=("tests/test_pool.py",),
+        ),
+        active_symbols=("Arena.release",),
+        diagnostics=("tests/test_pool.py:44 leaked block in Arena.release",),
+        validation_state="fail",
+    )
+
+    plan = state.query_plan()
+
+    assert "tests/test_pool.py:44" in plan.primary_text
+    assert "Arena.release" in plan.primary_text
+    assert "rewrite the entire service" not in plan.primary_text
+    assert "rewrite the entire service" in plan.fallback_text
+    assert state.sparse_query_text() == plan.primary_text
+    assert state.dense_query_text() == plan.primary_text
+
+
 def test_legacy_raw_action_is_normalized_to_typed_state_without_heredoc_body():
     state = _state(
         proposed_action=(
@@ -663,7 +687,7 @@ def test_rrf_is_equal_weight_k60_and_aggregates_unique_files_deterministically()
     )
 
 
-def test_hybrid_selection_excludes_active_paths_and_prior_claims():
+def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
     documents = (
         RepositoryDocument("src/allocator.py", "cleanup allocator current implementation"),
         RepositoryDocument(
@@ -692,8 +716,7 @@ def test_hybrid_selection_excludes_active_paths_and_prior_claims():
         token_budget=200,
     )
 
-    assert "src/allocator.py" not in {row.path for row in first.ranked_files}
-    assert "src/allocator.py" not in {row.path for row in first.selected_context}
+    assert "src/allocator.py" in {row.path for row in first.ranked_files}
     assert exposed not in {row.claim_hash for row in second.selected_context}
     dense_receipt = next(
         row for row in first.channel_receipts if row.channel is RetrievalChannel.DENSE
@@ -846,6 +869,75 @@ def test_validation_dense_rerank_can_deliver_honest_test_candidate_context():
     assert "validation_candidate" in result.selected_context[0].provenance
     assert frame is not None
     assert "GT candidate repository context" in frame.rendered_text
+
+
+def test_diagnostic_delivery_rejects_certified_but_unrelated_structural_relation():
+    documents = (
+        RepositoryDocument("Makefile", "test:\n\tpytest -q", symbol="test"),
+    )
+    state = _state(
+        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
+        active_paths=("tests/test_worker.py",),
+        diagnostics=("tests/test_worker.py:1 failed",),
+    )
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                "tests/test_worker.py",
+                "Makefile",
+                "IMPORTS",
+                confidence=1.0,
+                certified=True,
+                source_symbol="test_worker",
+                source_start_line=1,
+                target_symbol="test",
+                target_start_line=1,
+            ),
+        ),
+        dense_backend=None,
+    ).retrieve(state, selection_limit=1)
+
+    assert result.selected_context == ()
+    assert "no_decision_relevant_evidence" in result.reason_codes
+
+
+def test_diagnostic_delivery_accepts_direct_certified_test_to_code_relation():
+    documents = (
+        RepositoryDocument("src/worker.py", "def work(): return 1", symbol="work"),
+        RepositoryDocument(
+            "tests/test_worker.py",
+            "def test_worker(): assert work() == 2",
+            symbol="test_worker",
+        ),
+    )
+    state = _state(
+        intent=RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE,
+        active_paths=("tests/test_worker.py",),
+        diagnostics=("tests/test_worker.py:1 AssertionError",),
+    )
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                "src/worker.py",
+                "tests/test_worker.py",
+                "ASSERTED_BY",
+                confidence=1.0,
+                certified=True,
+                source_symbol="work",
+                source_start_line=1,
+                target_symbol="test_worker",
+                target_start_line=1,
+            ),
+        ),
+        dense_backend=None,
+    ).retrieve(state, selection_limit=1)
+
+    assert [row.path for row in result.selected_context] == ["src/worker.py"]
+    assert "decision_relevance:diagnostic_direct_relation" in (
+        result.selected_context[0].provenance
+    )
 
 
 def test_validation_intent_prioritizes_mechanically_recognized_test_paths():

@@ -1044,3 +1044,90 @@ runtime commit `80a8376`, including current native build, pinned Snowflake ONNX,
 all substrate/runtime/readiness gates, `READY`, and `SMOKE_APPROVED`. The
 uploaded receipt records `provider_calls: 0`. It does not prove outcome uplift;
 the matched paid smoke remains separately authorized.
+
+
+## Final no-regression hardening contract (2026-08-12)
+
+This section supersedes earlier DeepSWE statements that the final workflow must
+remain in preflight `SHADOW`. The final workflow is now
+`ACTIVE + ASSISTIVE_SAFE`, but no paid task is eligible until the exact pushed
+provider-free workflow rebuilds the current Go indexer and passes the complete
+census, readiness, and pre-smoke gates. This is an implementation state, not an
+outcome claim.
+
+The final hardening is top-down:
+
+1. The live retrieval action is projected from the action-bearing shell segment,
+   not a leading `cd` or other shell context segment. Raw heredoc and
+   interpreter program bodies remain excluded.
+2. Validation failure output is bounded and parsed into exact traceback,
+   JavaScript/TypeScript stack, or compiler path/line anchors only when the
+   referenced path exists in the current repository manifest. Diagnostic
+   symbols and paths enter the immediate postflight retrieval query before the
+   next provider call.
+3. Repository-query cache identity includes source revision, paths, symbols,
+   retrieval boundary, and diagnostic fingerprint. A prior read query cannot
+   satisfy a later failure query.
+4. Retrieval grounding and decision relevance are separate. Same-file unseen
+   spans may rank, but an active path alone cannot authorize delivery.
+   Model-visible evidence requires an exact symbol, a direct mechanically
+   relevant caller/test relation, a change-impact relation for a mutation, or a
+   validation-linked test. Dense/sparse/co-change support never becomes
+   delivery authority by itself.
+5. Retrieval budgets are lifecycle-specific. Task start, read/search, mutation,
+   and diagnostic/validation opportunities have separate bounded allowances;
+   diagnostic and validation share their late-recovery reserve. Closed budgets
+   run zero retrieval channels.
+6. Project checks are discovered only from real repository contracts: declared
+   pytest configuration/dependency/test trees, non-placeholder npm test
+   scripts, exact Make test targets, Cargo, or Go modules. Checks are scoped to
+   the nearest project root. A generic `pyproject.toml` is not a pytest
+   contract.
+7. Standard-runner failures are grounded submit blockers. A standard-runner
+   pass clears whole-project validation debt only when its scope is
+   mechanically project-wide. In assistive mode, if authored source is still
+   unvalidated at submit, the controller may run exactly one discovered
+   project check for that source revision. A failure returns the real bounded
+   diagnostic; success clears debt; timeout/exception fails open; the probe is
+   never repeated at the same revision.
+8. Progress is semantic, not command novelty. Source revision, validation
+   state, diagnostic identity, obligations, and validation debt form the
+   progress fingerprint. Model-visible stall requires 12 no-progress actions
+   (24 for a cycle), while unresolved budget risk begins at 60% of the action
+   limit. Novel scratch commands do not erase validation debt or budget risk.
+9. Context compaction remains deterministic and loss-bounded. It starts only
+   after the configured character threshold and minimum savings, removes no
+   unique assistant reasoning, keeps the latest two turns, and preserves the
+   full audit history outside the provider view.
+10. Workspace impact is independently classified. Proven external-only writes
+    skip repository sensing; unknown or workspace-affecting commands continue
+    to scan fail closed. Metrics separately report model decision actions,
+    harness/substrate executions, and controller interventions.
+
+The final DeepSWE workflow pins the official OpenRouter model identifier
+`deepseek/deepseek-v4-flash` and a DeepSeek-only provider route with fallbacks
+disabled and required parameters enforced. Mini-SWE's exact model kwargs now
+participate in request hashing; secrets never enter receipts. The workflow
+records the checked-out GT SHA, not the dispatcher SHA, uses exact
+`reward == 1` with no outer exception, runs at parallelism 20, and permits
+one infrastructure retry only when neither a provider-query marker nor a
+central receipt exists. OpenRouter routing semantics are documented at
+https://openrouter.ai/docs/guides/routing/provider-selection.
+
+`scripts/deepswe_release_gate.py` is the outcome authority.
+The baseline artifact and manifest are validated in a prerequisite GitHub job;
+the paid treatment matrix cannot start if that control is absent or confounded.
+Preservation requires the identical task/model/provider/runner/budget manifest, zero
+baseline-solved losses, zero censored treatment tasks, and non-positive
+common-solved deltas for tokens, provider calls, model decision actions, and
+provider cost. Promotion additionally requires at least one positive flip and
+strictly more treatment solves. This gate does not make regressions impossible;
+it prevents a regressing run from being promoted or mislabeled.
+
+Current proof boundary: focused Python suites and static checks pass. The full
+local graph-dependent census is blocked by the known stale Windows
+`gt-index.exe` lacking Objective-C. Only the source-built Linux provider-free
+workflow can clear that gate. No new paid run, solve uplift, efficiency uplift,
+or non-regression claim exists yet. The existing online DeepSWE-off result is
+usable only if its frozen artifact satisfies the exact comparison manifest;
+otherwise it is descriptive, not the release control.

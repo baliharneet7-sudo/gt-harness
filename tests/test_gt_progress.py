@@ -1,11 +1,46 @@
 import gt_engine.progress as progress
-from gt_engine.progress import ProgressLedger, StallAggregateFact, task_information_gain
+from gt_engine.progress import (
+    ProgressLedger,
+    StallAggregateFact,
+    semantic_progress_fingerprint,
+    task_information_gain,
+)
 
 
 def test_information_gain_requires_task_linked_evidence_not_output_novelty():
     assert task_information_gain(new_read_anchor=False, diagnostic_gain=False) is False
     assert task_information_gain(new_read_anchor=True, diagnostic_gain=False) is True
     assert task_information_gain(new_read_anchor=False, diagnostic_gain=True) is True
+
+
+def test_semantic_progress_fingerprint_ignores_novel_commands_but_tracks_task_state():
+    first = semantic_progress_fingerprint(
+        source_revision="s1",
+        changed_paths=(),
+        validation_state="unknown",
+        diagnostic_fingerprint="",
+        project_checks=("pytest -q",),
+        validation_debt=True,
+    )
+    repeated = semantic_progress_fingerprint(
+        source_revision="s1",
+        changed_paths=(),
+        validation_state="unknown",
+        diagnostic_fingerprint="",
+        project_checks=("pytest -q",),
+        validation_debt=True,
+    )
+    validated = semantic_progress_fingerprint(
+        source_revision="s1",
+        changed_paths=(),
+        validation_state="pass",
+        diagnostic_fingerprint="",
+        project_checks=("pytest -q",),
+        validation_debt=False,
+    )
+
+    assert first == repeated
+    assert validated != first
 
 
 def test_stall_aggregate_is_bounded_declarative_and_source_bound():
@@ -76,6 +111,22 @@ def test_unresolved_contract_triggers_budget_risk_without_exact_loop():
         iteration=80, limit=100, unresolved=True
     )
     assert transition is not None
+
+
+def test_budget_risk_ratio_can_warn_at_sixty_percent_without_changing_default():
+    default = ProgressLedger(stall_threshold=3)
+    configured = ProgressLedger(stall_threshold=3)
+
+    assert default.budget_risk(iteration=60, limit=100, unresolved=True) is None
+    transition = configured.budget_risk(
+        iteration=60,
+        limit=100,
+        iteration_risk_ratio=0.6,
+        unresolved=True,
+    )
+
+    assert transition is not None
+    assert transition.current == "BUDGET_RISK"
     assert transition.current == "BUDGET_RISK"
     assert transition.reason == "unresolved_contract_near_iteration_limit"
 

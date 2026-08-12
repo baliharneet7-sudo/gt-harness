@@ -754,6 +754,7 @@ class ValidationClassification:
     authority: ValidationAuthority = ValidationAuthority.NONE
     executable: str | None = None
     requested_timeout_sec: float | None = None
+    project_scoped: bool = False
 
     def with_result(
         self,
@@ -872,6 +873,31 @@ def _recognized_validation(words: tuple[str, ...]) -> bool:
     return _validation_authority(words) is not ValidationAuthority.NONE
 
 
+def _standard_runner_project_scoped(invocation: Any) -> bool:
+    """Whether a standard runner invocation covers its default project scope."""
+
+    if invocation is None or invocation.executable is None:
+        return False
+    executable = invocation.executable.lower()
+    args = tuple(invocation.arguments)
+    if executable in {"pytest", "py.test"}:
+        return not any(
+            not arg.startswith("-") or "::" in arg
+            for arg in args
+        )
+    if executable in {"python", "python3", "python3.12", "python3.11"}:
+        if len(args) >= 2 and args[:2] in {("-m", "pytest"), ("-m", "unittest")}:
+            return not any(not arg.startswith("-") or "::" in arg for arg in args[2:])
+        return False
+    if executable == "go":
+        return len(args) >= 2 and args[0] == "test" and args[1:] == ("./...",)
+    if executable in {"cargo", "npm", "pnpm", "yarn", "mvn", "gradle"}:
+        return bool(args and args[0] == "test" and len(args) == 1)
+    if executable in {"ctest", "unittest"}:
+        return not any(not arg.startswith("-") for arg in args)
+    return False
+
+
 def classify_validation_command(
     command: str, explicit_checks: Iterable[str] = ()
 ) -> ValidationClassification:
@@ -983,6 +1009,10 @@ def classify_validation_command(
         executable=invocation.executable if invocation is not None else None,
         requested_timeout_sec=(
             invocation.requested_timeout_sec if invocation is not None else None
+        ),
+        project_scoped=(
+            authority is ValidationAuthority.STANDARD_RUNNER
+            and _standard_runner_project_scoped(invocation)
         ),
     )
 
@@ -1113,11 +1143,27 @@ class EvidenceLedger:
                     classification.result_code if classification.result_code not in {None, 0} else 1
                 )
             )
+        effective_grounded = bool(grounded)
+        if (
+            classification is not None
+            and classification.authority is ValidationAuthority.STANDARD_RUNNER
+            and classification.status_attributed
+        ):
+            # A real current failure is always a safe blocker.  A pass becomes
+            # readiness evidence only when the runner covered its default
+            # project scope rather than a targeted subset.
+            effective_grounded = bool(
+                classification.status is ValidationStatus.FAIL
+                or (
+                    classification.status is ValidationStatus.PASS
+                    and classification.project_scoped
+                )
+            )
         evidence = CheckEvidence(
             command=key,
             returncode=effective_returncode,
             revision=revision,
-            grounded=grounded,
+            grounded=effective_grounded,
             command_class=(classification.command_class if classification else "unknown"),
             failure_kind=(
                 classification.failure_kind
@@ -2612,12 +2658,12 @@ class CentralFeatureRuntime:
             elif not snapshot.healthy:
                 decision = pass_decision(proposed, "workspace_sensor_degraded")
             elif proposed.operation == ActionOperation.SUBMIT and ledger is not None:
-                blockers = tuple(
-                    item.command
-                    for item in ledger.readiness_evidence(source_revision)
-                    if item.returncode != 0
+                submit_decision = ledger.submit_decision(
+                    source_revision,
+                    sensor_healthy=snapshot.healthy,
                 )
-                if blockers:
+                blockers = submit_decision.blockers
+                if submit_decision.decision is InterventionDecision.HOLD_ONCE:
                     for feature_id in (
                         "obligations",
                         "submit_refusal",
@@ -2882,6 +2928,7 @@ class CentralFeatureRuntime:
                 kind="contract_captured",
                 detail="task requirements and declared checks entered the engine contract",
             )
+
             self._emit(
                 "obligations",
                 boundary="task_start",
@@ -2900,6 +2947,25 @@ class CentralFeatureRuntime:
                     )["message"],
                 },
             )
+
+    def register_project_checks(self, checks: Iterable[str]) -> tuple[str, ...]:
+        """Merge mechanically discovered project checks into the task contract.
+
+        Discovery happens after the initial repository transfer, so these
+        checks cannot always be supplied to :meth:`begin_task`.  They become
+        declared validation obligations, but do not themselves create model
+        text or claim that a check has run.
+        """
+
+        normalized = tuple(
+            dict.fromkeys(
+                normalize_command(item)
+                for item in (*self._explicit_checks, *tuple(checks))
+                if normalize_command(item)
+            )
+        )
+        self._explicit_checks = normalized
+        return normalized
 
     def _is_model_actionable(self, feature_id: str, decision: str, payload: dict[str, Any]) -> bool:
         """Expose only novel engine control evidence, never passive receipts."""
@@ -3801,6 +3867,7 @@ class CentralFeatureRuntime:
             detail=f"healthy={sensor_healthy}; checks={check_count}",
         )
         if refused:
+            self._action_metrics["submit_holds"] += 1
             self._action_metrics["submit_risks"] += 1
             self.record_producer_event(
                 feature_id="submit_refusal",

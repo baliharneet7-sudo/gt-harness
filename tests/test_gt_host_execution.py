@@ -93,3 +93,6 @@ async def test_effective_task_actions_include_sensor_overhead_but_not_system_inf
     assert summary["actual_environment_execs"] == 2
     assert summary["sensor_environment_execs"] == 1
     assert summary["effective_task_actions"] == 1
+    assert summary["decision_actions"] == 0
+    assert summary["harness_overhead_execs"] == 2
+    assert summary["substrate_environment_execs"] == 1
