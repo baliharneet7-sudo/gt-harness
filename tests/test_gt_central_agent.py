@@ -8,7 +8,9 @@ import json
 import os
 import tarfile
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from harbor.agents.base import BaseAgent
@@ -43,11 +45,14 @@ from gt_engine.decision_point_eval import (
     validate_decision_point_row,
 )
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.hybrid_repository import HybridRepository
 from gt_engine.hybrid_retrieval import (
+    RepositoryDocument,
     RetrievalCandidate,
     RetrievalChannel,
     RetrievalIntent,
 )
+from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -476,6 +481,31 @@ def test_passing_validation_does_not_request_repository_context():
     )
 
 
+def test_persistent_state_is_one_switch_and_off_audit_cannot_enable_it(tmp_path):
+    active = MiniSweCentralAgent(
+        logs_dir=tmp_path / "active",
+        model_name="test",
+        integration_mode="active",
+        enable_persistent_execution_state=True,
+    )
+    off = MiniSweCentralAgent(
+        logs_dir=tmp_path / "off",
+        model_name="test",
+        integration_mode="off",
+        enable_persistent_execution_state=True,
+    )
+    audit = MiniSweCentralAgent(
+        logs_dir=tmp_path / "audit",
+        model_name="test",
+        integration_mode="audit",
+        enable_persistent_execution_state=True,
+    )
+
+    assert active.enable_persistent_execution_state is True
+    assert off.enable_persistent_execution_state is False
+    assert audit.enable_persistent_execution_state is False
+
+
 def test_source_less_task_blocks_preemptive_repository_retrieval():
     from eval import gt_central_agent as central_agent
 
@@ -749,6 +779,201 @@ class _BatchModel(_ScriptedModel):
             }
             for action, output in zip(actions, outputs, strict=True)
         ]
+
+
+@pytest.mark.asyncio
+async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary(
+    tmp_path, monkeypatch
+):
+    class BootstrapModel(_ScriptedModel):
+        def __init__(self):
+            super().__init__([])
+            self.query_count = 0
+            self.bootstrap_kwargs = None
+
+        def query(self, messages, **kwargs):
+            self.query_count += 1
+            self.observed = [str(item.get("content") or "") for item in messages]
+            self.observed_history.append(self.observed)
+            if self.query_count == 1:
+                self.bootstrap_kwargs = dict(kwargs)
+                catalog_blob = self.observed[-1].split("CERTIFIED CATALOG\n", 1)[1].split(
+                    "\n\nSelect only", 1
+                )[0]
+                catalog = json.loads(catalog_blob)
+                focus = next(item["id"] for item in catalog if item["kind"] == "focus")
+                validation = next(
+                    item["id"] for item in catalog if item["kind"] == "validation"
+                )
+                command = json.dumps(
+                    {
+                        "primary_focus_id": focus,
+                        "ordered_item_ids": [focus, validation],
+                        "risk_item_ids": [],
+                        "validation_item_ids": [validation],
+                    }
+                )
+                content = "bootstrap-selection"
+            elif self.query_count == 2:
+                command = "sed -n '1,40p' src/service.py"
+                content = "inspect"
+            else:
+                command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+                content = "submit"
+            return {
+                "role": "assistant",
+                "content": content,
+                "extra": {
+                    "actions": [{"command": command, "tool_call_id": f"call-{self.query_count}"}],
+                    "response": {
+                        "usage": {
+                            "prompt_tokens": 10,
+                            "completion_tokens": 2,
+                            "total_tokens": 12,
+                        }
+                    },
+                    "cost": 0.0,
+                },
+            }
+
+    model = BootstrapModel()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_persistent_execution_state=True,
+        enable_context_frontier=False,
+        enable_preemptive_retrieval=True,
+        enable_feature_guidance=False,
+        enable_completion_controller=False,
+    )
+    agent._model_factory = lambda: model
+
+    async def fake_repository_session(*args, **kwargs):
+        graph_source_revision = kwargs["source_revision"]
+        evidence = RepositoryEvidence(
+            available=True,
+            graph_revision="graph-1",
+            anchors=(
+                {
+                    "path": "src/service.py",
+                    "line": 1,
+                    "symbol": "save_user",
+                    "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
+                },
+            ),
+            definitions=(
+                {"path": "src/service.py", "line": 1, "symbol": "save_user"},
+            ),
+            project_checks=("pytest tests/test_service.py -q",),
+            status="source_backed",
+            source_revision=graph_source_revision,
+            index_current=True,
+            intelligence_valid=True,
+            substrate_ready=True,
+            index=IndexBuildReceipt(
+                status=IndexBuildStatus.AVAILABLE,
+                graph_db=str(tmp_path / "graph.db"),
+                schema_valid=True,
+                node_count=2,
+                edge_count=0,
+                source_files=1,
+                indexable_files=1,
+                graph_revision="graph-1",
+                source_revision=graph_source_revision,
+            ),
+        )
+        session = SimpleNamespace(
+            root=tmp_path,
+            indexed_source_revision=graph_source_revision,
+            source_revision=graph_source_revision,
+            evidence=evidence,
+            refresh_log=[],
+            summary=lambda: {"status": "source_backed"},
+            close=lambda: None,
+        )
+        return evidence, session
+
+    repository = HybridRepository(
+        documents=(
+            RepositoryDocument(
+                path="src/service.py",
+                start_line=1,
+                end_line=2,
+                symbol="save_user",
+                text="def save_user():\n    pass",
+                provenance=("graph_node",),
+            ),
+        ),
+        structural_links=(),
+        source_revision="graph-source",
+        complete=True,
+        reason_codes=(),
+        source_file_count=1,
+        document_chars=25,
+    )
+    monkeypatch.setattr(
+        "eval.gt_central_agent.build_hybrid_repository",
+        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+    )
+    agent._start_repository_session = fake_repository_session
+    environment = _Environment()
+
+    context = AgentContext()
+    await agent.run(
+        "Fix src/service.py and run pytest tests/test_service.py -q.",
+        environment,
+        context,
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    persistent = receipt["persistent_execution_state"]
+    assert model.query_count == 3
+    assert model.bootstrap_kwargs == {"temperature": 0.0, "max_tokens": 512}
+    assert receipt["bootstrap_calls"] == 1
+    assert receipt["executor_calls"] == 2
+    assert receipt["calls"] == 3
+    assert receipt["metrics"]["api_calls"] == 3
+    assert receipt["metrics"]["executor_api_calls"] == 2
+    assert receipt["metrics"]["bootstrap_api_calls"] == 1
+    assert receipt["metrics"]["provider_request_hash_coverage"] == 1.0
+    assert receipt["metrics"]["bootstrap_provider_request_chars"] > 0
+    assert context.metadata["api_calls"] == 3
+    assert context.metadata["executor_api_calls"] == 2
+    assert context.metadata["bootstrap_api_calls"] == 1
+    assert persistent["initial_retrieval"]["calls"] == 1
+    assert persistent["initial_retrieval"]["provider_calls"] == 0
+    assert persistent["initial_retrieval"]["action_executions"] == 0
+    assert persistent["initial_retrieval"]["ranked_files"][0]["path"] == (
+        "src/service.py"
+    )
+    assert {
+        row["channel"] for row in persistent["initial_retrieval"]["channel_receipts"]
+    } == {"exact", "lexical", "bm25", "dense", "structural"}
+    assert receipt["metrics"]["persistent_state_initial_retrieval_calls"] == 1
+    assert persistent["initial_retrieval"]["runtime_cache_seeded"] is True
+    task_start_retrieval = receipt["preemptive_retrieval"]["decisions"][0]
+    assert task_start_retrieval["opportunity_kind"] == "task_start"
+    assert task_start_retrieval["cache_hit"] is True
+    assert all(
+        float(row["latency_ms"]) == 0.0
+        for row in task_start_retrieval["channel_receipts"]
+    )
+    assert persistent["bootstrap"]["action_executions"] == 0
+    assert persistent["bootstrap"]["status"] == "selected"
+    assert persistent["metrics"]["context_compilations"] == 2
+    assert persistent["metrics"]["preflight_projections"] == 2
+    assert persistent["metrics"]["postflight_commits"] == 2
+    assert len(persistent["deliveries"]) == 2
+    assert persistent["valid"] is True
+    assert not any("bootstrap-selection" in item for item in model.observed_history[1])
+    executed = [command for command, _ in environment.commands]
+    assert not any("primary_focus_id" in command for command in executed)
+    assert executed.count("sed -n '1,40p' src/service.py") == 1
+    rows, failures, totals = audit_provider_deliveries(receipt, task="persistent")
+    assert failures == []
+    assert totals["surfaces"]["persistent_execution_state"]["delivery_count"] == 2
+    assert all(row["deterministic_status"] == "VALID" for row in rows)
 
 
 class _ObservedMutationEnvironment(_Environment):

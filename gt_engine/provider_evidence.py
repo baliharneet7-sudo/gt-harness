@@ -15,6 +15,7 @@ class ProviderEvidenceSurface(StrEnum):
     STATE_FRAME = "state_frame"
     PROGRESS_FRAME = "progress_frame"
     PREFLIGHT_RETURN = "preflight_return"
+    PERSISTENT_EXECUTION_STATE = "persistent_execution_state"
 
 
 class ProviderEvidenceDisposition(StrEnum):

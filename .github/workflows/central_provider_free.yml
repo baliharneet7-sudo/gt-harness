@@ -104,6 +104,7 @@ jobs:
             tests/test_hybrid_retrieval.py \
             tests/test_diagnostics.py \
             tests/test_decision_sufficiency.py \
+            tests/test_persistent_execution_state.py \
             tests/test_central_release_gate.py \
             tests/test_deepswe_release_gate.py \
             tests/test_hybrid_repository.py \
@@ -133,6 +134,7 @@ jobs:
             gt_engine/indexer.py gt_engine/hybrid_retrieval.py \
             gt_engine/diagnostics.py \
             gt_engine/decision_sufficiency.py \
+            gt_engine/persistent_execution_state.py \
             gt_engine/hybrid_repository.py gt_engine/preemptive_retrieval.py \
             gt_engine/component_registry.py gt_engine/contributions.py \
             gt_engine/retrieval_profile.py \
@@ -178,6 +180,7 @@ jobs:
             tests/test_hybrid_retrieval.py \
             tests/test_diagnostics.py \
             tests/test_decision_sufficiency.py \
+            tests/test_persistent_execution_state.py \
             tests/test_central_release_gate.py \
             tests/test_deepswe_release_gate.py \
             tests/test_hybrid_repository.py \

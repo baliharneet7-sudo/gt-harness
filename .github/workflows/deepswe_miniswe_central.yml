@@ -459,6 +459,11 @@ jobs:
               --ak enable_context_frontier=true \
               --ak enable_preemptive_retrieval=true \
               --ak enable_decision_sufficiency=true \
+              --ak enable_persistent_execution_state=true \
+              --ak persistent_state_bootstrap_timeout_sec=45 \
+              --ak persistent_state_bootstrap_input_tokens=2000 \
+              --ak persistent_state_bootstrap_output_tokens=512 \
+              --ak persistent_state_context_tokens=512 \
               --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
               --ak enable_context_compaction=true \
               --ak enable_completion_controller=true \

@@ -18,6 +18,8 @@ def _treatment() -> dict:
             "completion_controller": True,
             "progress_control": True,
             "adaptive_validation_timeout": True,
+            "preemptive_retrieval": True,
+            "persistent_execution_state": True,
         },
         "repository_intelligence": {
             "status": "passed",
@@ -54,6 +56,94 @@ def _treatment() -> dict:
             "preflight_calls": 0,
             "preflight_duplicate_evidence": 0,
             "provider_view_changed_calls": 0,
+            "persistent_state_initial_retrieval_calls": 1,
+            "persistent_state_bootstrap_calls": 1,
+            "bootstrap_api_calls": 1,
+        },
+        "calls": 2,
+        "executor_calls": 1,
+        "bootstrap_calls": 1,
+        "actions": 0,
+        "host_execution": {"decision_actions": 0},
+        "persistent_execution_state": {
+            "initialization": {
+                "status": "initialized",
+                "catalog": {
+                    "graph_source_revision": "source-1",
+                    "items": [
+                        {
+                            "item_id": "pes-1",
+                            "retrieval_rank": 1,
+                            "provenance": ["hybrid_ranked_candidate"],
+                        }
+                    ],
+                },
+            },
+            "initial_retrieval": {
+                "status": "selected",
+                "calls": 1,
+                "provider_calls": 0,
+                "action_executions": 0,
+                "source_revision": "source-1",
+                "query_hash": "retrieval-query-1",
+                "runtime_cache_seeded": True,
+                "runtime_cache_key": "retrieval-cache-1",
+                "ranked_files": [{"path": "src/service.py"}],
+                "selected_evidence": [{"path": "src/service.py"}],
+                "channel_receipts": [
+                    {
+                        "channel": channel,
+                        "candidate_count": 1,
+                        "failed": False,
+                        "available": True,
+                    }
+                    for channel in ("exact", "lexical", "bm25", "dense", "structural")
+                ],
+            },
+            "bootstrap": {
+                "status": "selected",
+                "logical_calls": 1,
+                "provider_calls": 1,
+                "action_executions": 0,
+                "response_received": True,
+                "request_payload_sha256": "bootstrap-request",
+                "provider_messages_sha256": "bootstrap-provider",
+                "visible_catalog_count": 2,
+                "visible_catalog_ids_sha256": "catalog-hash",
+            },
+            "state": {
+                "version": 2,
+                "graph_current": True,
+                "bootstrap_status": "selected",
+                "field_authority": {
+                    "primary_focus_id": "generative_bootstrap",
+                    "phase": "deterministic_mutable",
+                    "current_focus_path": "executor_observed",
+                },
+            },
+            "metrics": {
+                "context_compilations": 1,
+                "preflight_projections": 0,
+                "postflight_commits": 0,
+            },
+            "deliveries": [
+                {
+                    "delivery_id": "state-1",
+                    "claim_ids": ["state-claim-1"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "request-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 30,
+                }
+            ],
+            "failures": [],
+            "valid": True,
         },
         "features": {"effect_trace": [], "preflight_receipts": []},
         "contribution_compiler": {"calls": []},
@@ -62,8 +152,10 @@ def _treatment() -> dict:
                 "call": 1,
                 "request_payload_sha256": "request-1",
                 "provider_messages_sha256": "provider-1",
-                "stock_provider_messages_sha256": "provider-1",
-                "provider_view_changed": False,
+                "stock_provider_messages_sha256": "stock-1",
+                "provider_view_changed": True,
+                "provider_message_count": 2,
+                "provider_changed_message_indices": [1],
                 "context_fact_candidates": 0,
                 "context_facts_accounted": 0,
             }
@@ -74,6 +166,20 @@ def _treatment() -> dict:
 def _off() -> dict:
     receipt = _treatment()
     receipt["integration_mode"] = "off"
+    receipt["component_configuration"]["persistent_execution_state"] = False
+    receipt["persistent_execution_state"] = {
+        "initialization": {"status": "disabled"},
+        "initial_retrieval": {"calls": 0},
+        "bootstrap": {"provider_calls": 0},
+        "state": None,
+        "metrics": {},
+        "deliveries": [],
+        "failures": [],
+        "valid": True,
+    }
+    receipt["calls"] = 1
+    receipt["executor_calls"] = 1
+    receipt["bootstrap_calls"] = 0
     receipt["preemptive_retrieval"] = {"dense_backend": None, "deliveries": []}
     receipt["repository_intelligence"] = {
         "status": "not_applicable",
@@ -82,6 +188,12 @@ def _off() -> dict:
         "failures": [],
     }
     receipt["metrics"]["repository_intelligence_valid"] = 0
+    receipt["metrics"]["persistent_state_bootstrap_calls"] = 0
+    receipt["metrics"]["persistent_state_initial_retrieval_calls"] = 0
+    receipt["metrics"]["bootstrap_api_calls"] = 0
+    receipt["model_call_contexts"][0]["stock_provider_messages_sha256"] = "provider-1"
+    receipt["model_call_contexts"][0]["provider_view_changed"] = False
+    receipt["model_call_contexts"][0]["provider_changed_message_indices"] = []
     return receipt
 
 
@@ -159,10 +271,69 @@ def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
     }
     receipt["metrics"]["repository_intelligence_valid"] = 0
     receipt["preemptive_retrieval"]["dense_backend"] = None
+    receipt["persistent_execution_state"] = {
+        "initialization": {"status": "not_applicable"},
+        "initial_retrieval": {"calls": 0},
+        "bootstrap": {"provider_calls": 0},
+        "state": None,
+        "metrics": {},
+        "deliveries": [],
+        "failures": [],
+        "valid": True,
+    }
+    receipt["calls"] = 1
+    receipt["bootstrap_calls"] = 0
+    receipt["metrics"]["persistent_state_bootstrap_calls"] = 0
+    receipt["metrics"]["persistent_state_initial_retrieval_calls"] = 0
+    receipt["metrics"]["bootstrap_api_calls"] = 0
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
     assert report.passed is True
+
+
+def test_release_gate_rejects_bootstrap_only_or_silently_missing_living_state():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["metrics"]["context_compilations"] = 0
+    receipt["persistent_execution_state"]["deliveries"] = []
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_context_compilation_count" in report.failures
+    assert "treatment-1:persistent_delivery_not_every_executor_call" in report.failures
+
+
+def test_release_gate_rejects_missing_or_unwired_initial_hybrid_retrieval():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["initial_retrieval"] = {
+        "status": "disabled",
+        "calls": 0,
+    }
+    receipt["metrics"]["persistent_state_initial_retrieval_calls"] = 0
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_initial_retrieval_call_count" in report.failures
+    assert "treatment-1:persistent_initial_retrieval_incomplete" in report.failures
+    assert "treatment-1:persistent_initial_retrieval_channels" in report.failures
+    assert "treatment-1:persistent_initial_retrieval_metric_mismatch" in report.failures
+
+
+def test_release_gate_rejects_fallback_bootstrap_and_hidden_extra_calls():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["bootstrap"]["status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["state"]["bootstrap_status"] = (
+        "invalid_fallback"
+    )
+    receipt["calls"] = 3
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_bootstrap_not_selected" in report.failures
+    assert "treatment-1:persistent_provider_call_accounting_mismatch" in report.failures
 
 
 def test_release_gate_fails_closed_on_selected_pending_retrieval():

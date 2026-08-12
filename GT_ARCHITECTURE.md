@@ -1,6 +1,46 @@
 # GroundTruth central engine architecture
 
-Authoritative date: 2026-08-11
+Authoritative date: 2026-08-12
+
+## Graph-first persistent execution state (2026-08-12)
+
+The active central runtime optionally creates one task-scoped typed execution
+state after the repository GraphDB is complete and before the first executor
+request. See `GT_PERSISTENT_EXECUTION_STATE_RESEARCH.md` for the architectural
+decision and `GT_PERSISTENT_EXECUTION_STATE_IMPLEMENTATION_PLAN.md` for the
+living implementation record.
+
+The lifecycle is:
+
+    complete repository graph
+    -> one shared five-channel task-start retrieval (local; zero provider calls)
+    -> one catalog-ID bootstrap call (never executed as an action)
+    -> bounded state frame in provider request N
+    -> typed preflight read
+    -> host execution
+    -> deterministic postflight transition
+    -> graph refresh/rebase when source changed
+    -> bounded current state frame in provider request N+1
+
+The bootstrap is the only new model call. All subsequent state maintenance is
+deterministic. Graph-derived dependency items are advisory unless a separate
+mechanical fact makes them required; exact task checks and deliverables are the
+only task-owned blocking obligations. The state cannot rewrite, suppress, or
+execute commands. All call/token/context overhead is included in totals.
+
+Task-start retrieval is not a benchmark-only or second retrieval path. It calls
+the same `HybridRetriever` and frozen live profile used at the provider boundary.
+Its exact result both populates the bootstrap catalog and seeds the first live
+retrieval cache, preventing duplicate Snowflake embedding/ranking work. Hybrid
+rank is task relevance, not certification: its catalog rows remain explicitly
+non-certified, while paths/spans still come from the current checkout. A valid
+bootstrap may select no focus; invalid output cannot promote a ranked candidate.
+
+The state consumes production relation names through a bounded alias map and
+only certified mechanical relations can create advisory obligations. Validation
+updates reuse the central immutable `ValidationClassification`, including the
+canonical declared-check ID, so shell wrappers do not strand a satisfied task
+check and raw return codes are never reinterpreted as validation authority.
 
 GroundTruth is an in-process deterministic evidence and control layer owned by
 `eval.gt_central_agent.MiniSweCentralAgent`. It is not an MCP sidecar and the

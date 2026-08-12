@@ -196,6 +196,54 @@ def test_duplicate_preemptive_delivery_is_reported():
     assert totals["duplicate_count"] == 1
 
 
+def test_persistent_state_refresh_is_repeated_context_not_duplicate_evidence():
+    receipt = {
+        "model_call_contexts": [
+            _context(1, request="req-1", provider="provider-1"),
+            _context(2, request="req-2", provider="provider-2"),
+        ],
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-1",
+                    "claim_ids": ["phase-current"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 30,
+                },
+                {
+                    "delivery_id": "state-2",
+                    "claim_ids": ["phase-current"],
+                    "evidence_action": 1,
+                    "first_eligible_call": 2,
+                    "delivered_before_call": 2,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-2",
+                    "provider_messages_sha256": "provider-2",
+                    "message_index": 1,
+                    "chars": 30,
+                },
+            ]
+        },
+    }
+
+    rows, failures, totals = audit_provider_deliveries(receipt)
+
+    assert failures == []
+    assert totals["delivery_count"] == 2
+    assert totals["duplicate_count"] == 0
+    assert rows[1]["persistent_state_refresh"] is True
+
+
 def test_trajectory_audit_exposes_all_provider_surface_totals(tmp_path):
     task_dir = tmp_path / "run-task-demo"
     task_dir.mkdir()

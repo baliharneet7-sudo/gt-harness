@@ -15,6 +15,7 @@ from typing import Any
 
 SURFACE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("preemptive_retrieval", ("preemptive_retrieval", "deliveries")),
+    ("persistent_execution_state", ("persistent_execution_state", "deliveries")),
     ("guidance", ("guidance_deliveries",)),
     ("repository_frontier", ("repository_intelligence", "frontier_deliveries")),
     ("progress", ("progress", "fact_deliveries")),
@@ -183,15 +184,19 @@ def audit_provider_deliveries(
         identity = row["identity"]
         duplicate_identity = identity in identities
         claim_overlap = seen_claims.intersection(row["claim_ids"])
+        permitted_state_refresh = bool(
+            row["surface"] == "persistent_execution_state" and claim_overlap
+        )
         if duplicate_identity:
             failures.append(f"{task}:duplicate_provider_delivery:{identity}")
-        if claim_overlap:
+        if claim_overlap and not permitted_state_refresh:
             failures.append(
                 f"{task}:duplicate_provider_claim:{','.join(sorted(claim_overlap))}"
             )
         identities.add(identity)
         seen_claims.update(row["claim_ids"])
-        duplicate = duplicate_identity or bool(claim_overlap)
+        duplicate = duplicate_identity or bool(claim_overlap and not permitted_state_refresh)
+        row["persistent_state_refresh"] = permitted_state_refresh
         delivered = row["delivered_before_call"]
         eligible = row["first_eligible_call"]
         context = contexts.get(delivered) if isinstance(delivered, int) else None

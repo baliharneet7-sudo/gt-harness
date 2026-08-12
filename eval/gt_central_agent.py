@@ -95,11 +95,23 @@ from gt_engine.diagnostics import extract_diagnostic_anchors
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
 from gt_engine.hybrid_retrieval import (
+    HybridRetrievalResult,
     HybridRetriever,
     RetrievalActionState,
     RetrievalIntent,
     RetrievalState,
     build_preemptive_frame,
+)
+from gt_engine.persistent_execution_state import (
+    BootstrapCatalog,
+    BootstrapSelection,
+    BootstrapStatus,
+    ContextFrameKind,
+    PersistentExecutionStateEngine,
+    bootstrap_visible_item_ids,
+    build_bootstrap_catalog,
+    build_bootstrap_messages,
+    parse_bootstrap_selection,
 )
 from gt_engine.preemptive_retrieval import (
     PreemptiveFrame,
@@ -516,6 +528,72 @@ def _preemptive_opportunity_accounting(
     }
 
 
+def _initial_persistent_retrieval_receipt(
+    result: HybridRetrievalResult,
+    *,
+    source_revision: str,
+) -> dict[str, Any]:
+    """Persist the exact shared-retriever output used to form the bootstrap catalog."""
+
+    return {
+        "schema": "gt.persistent_initial_retrieval.v1",
+        "status": "abstained" if result.abstained else "selected",
+        "calls": 1,
+        "source_revision": source_revision,
+        "query_hash": result.query_hash,
+        "reason_codes": list(result.reason_codes),
+        "latency_ms": result.latency_ms,
+        "ranked_files": [
+            {
+                "path": row.path,
+                "fused_score": row.fused_score,
+                "channel_ranks": [
+                    {"channel": channel.value, "rank": rank}
+                    for channel, rank in row.channel_ranks
+                ],
+                "representative": {
+                    "start_line": row.representative.start_line,
+                    "end_line": row.representative.end_line,
+                    "symbol": row.representative.symbol,
+                    "source_revision": row.representative.source_revision,
+                    "claim_hash": row.representative.claim_hash,
+                },
+                "provenance": list(row.provenance),
+            }
+            for row in result.ranked_files
+        ],
+        "selected_evidence": [
+            {
+                "path": row.path,
+                "start_line": row.start_line,
+                "end_line": row.end_line,
+                "symbol": row.symbol,
+                "relation": row.relation,
+                "source_revision": row.source_revision,
+                "claim_hash": row.claim_hash,
+                "provenance": list(row.provenance),
+            }
+            for row in result.selected_context
+        ],
+        "selected_token_count": result.selected_token_count,
+        "selected_character_count": result.selected_character_count,
+        "channel_receipts": [
+            {
+                "channel": row.channel.value,
+                "candidate_count": row.candidate_count,
+                "failed": row.failed,
+                "reason": row.reason,
+                "latency_ms": row.latency_ms,
+                "available": row.available,
+                "backend_identity": row.backend_identity,
+            }
+            for row in result.channel_receipts
+        ],
+        "provider_calls": 0,
+        "action_executions": 0,
+    }
+
+
 def _preemptive_opportunity_budget_limit(
     opportunity_kind: str,
     *,
@@ -812,6 +890,11 @@ class MiniSweCentralAgent(BaseAgent):
         preemptive_retrieval_dense_candidate_limit: int | None = None,
         preemptive_retrieval_model_dir: str | None = None,
         enable_decision_sufficiency: bool = False,
+        enable_persistent_execution_state: bool = False,
+        persistent_state_bootstrap_timeout_sec: float = 45.0,
+        persistent_state_bootstrap_input_tokens: int = 2_000,
+        persistent_state_bootstrap_output_tokens: int = 512,
+        persistent_state_context_tokens: int = 512,
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
         completion_check_timeout_sec: float = 10.0,
@@ -891,6 +974,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_context_frontier = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_progress_control = False
@@ -900,6 +984,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -909,6 +994,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -1010,6 +1096,19 @@ class MiniSweCentralAgent(BaseAgent):
             preemptive_retrieval_model_dir or ""
         ).strip()
         self.enable_decision_sufficiency = bool(enable_decision_sufficiency)
+        self.enable_persistent_execution_state = bool(enable_persistent_execution_state)
+        self.persistent_state_bootstrap_timeout_sec = max(
+            1.0, float(persistent_state_bootstrap_timeout_sec)
+        )
+        self.persistent_state_bootstrap_input_tokens = max(
+            1_024, int(persistent_state_bootstrap_input_tokens)
+        )
+        self.persistent_state_bootstrap_output_tokens = max(
+            64, int(persistent_state_bootstrap_output_tokens)
+        )
+        self.persistent_state_context_tokens = max(
+            32, min(512, int(persistent_state_context_tokens))
+        )
         self._preemptive_dense_backend: SnowflakeOnnxDenseBackend | None = None
         self._preemptive_dense_backend_error = ""
         self.enable_context_compaction = enable_context_compaction
@@ -1139,6 +1238,122 @@ class MiniSweCentralAgent(BaseAgent):
             model_kwargs=kwargs,
             cost_tracking="ignore_errors",
         )
+
+    async def _run_persistent_state_bootstrap(
+        self,
+        model: Any,
+        *,
+        instruction: str,
+        catalog: BootstrapCatalog,
+        timeout_sec: float,
+    ) -> tuple[BootstrapSelection, dict[str, Any]]:
+        """Make the single bounded bootstrap call; its Bash envelope is data only."""
+
+        bootstrap_messages = build_bootstrap_messages(
+            task=instruction,
+            catalog=catalog,
+            max_input_tokens=self.persistent_state_bootstrap_input_tokens,
+        )
+        visible_item_ids = bootstrap_visible_item_ids(bootstrap_messages)
+        (
+            provider_messages,
+            request_payload_sha256,
+            provider_messages_sha256,
+            provider_request_chars,
+        ) = _provider_request_receipt(model, bootstrap_messages)
+        receipt: dict[str, Any] = {
+            "schema": "gt.persistent_bootstrap.v1",
+            "status": BootstrapStatus.ERROR_FALLBACK.value,
+            "logical_calls": 1,
+            "provider_calls": 0,
+            "action_executions": 0,
+            "source_revision": catalog.source_revision,
+            "graph_source_revision": catalog.graph_source_revision,
+            "graph_revision": catalog.graph_revision,
+            "catalog_count": len(catalog.items),
+            "visible_catalog_count": len(visible_item_ids),
+            "visible_catalog_ids_sha256": hashlib.sha256(
+                _canonical_json(sorted(visible_item_ids))
+            ).hexdigest(),
+            "catalog_complete": catalog.complete,
+            "request_payload_sha256": request_payload_sha256,
+            "provider_messages_sha256": provider_messages_sha256,
+            "provider_message_count": len(provider_messages),
+            "provider_request_chars": provider_request_chars,
+            "temperature": 0.0,
+            "max_output_tokens": self.persistent_state_bootstrap_output_tokens,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cost": 0.0,
+            "latency_ms": 0.0,
+            "reason_codes": [],
+            "response_received": False,
+        }
+        started = time.perf_counter()
+        try:
+            receipt["provider_calls"] = 1
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.query,
+                    bootstrap_messages,
+                    temperature=0.0,
+                    max_tokens=self.persistent_state_bootstrap_output_tokens,
+                ),
+                timeout=max(0.001, float(timeout_sec)),
+            )
+            receipt["response_received"] = True
+            extra = response.get("extra") or {}
+            actions = tuple(extra.get("actions") or ())
+            usage = (extra.get("response") or {}).get("usage") or {}
+            receipt.update(
+                {
+                    "input_tokens": int(usage.get("prompt_tokens") or 0),
+                    "output_tokens": int(usage.get("completion_tokens") or 0),
+                    "cached_tokens": int(
+                        usage.get("prompt_cache_hit_tokens")
+                        or (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                        or 0
+                    ),
+                    "cost": float(extra.get("cost") or 0.0),
+                    "response_action_count": len(actions),
+                }
+            )
+            if len(actions) != 1:
+                selection = BootstrapSelection(
+                    valid=False, reason_codes=("bootstrap_action_count",)
+                )
+            else:
+                selection = parse_bootstrap_selection(
+                    str(actions[0].get("command") or ""),
+                    catalog,
+                    visible_item_ids=visible_item_ids,
+                )
+            receipt["selection"] = selection.as_dict()
+            receipt["status"] = (
+                BootstrapStatus.SELECTED.value
+                if selection.valid
+                else BootstrapStatus.INVALID_FALLBACK.value
+            )
+            receipt["reason_codes"] = list(selection.reason_codes)
+            return selection, receipt
+        except TimeoutError:
+            selection = BootstrapSelection(
+                valid=False, reason_codes=("bootstrap_timeout",)
+            )
+            receipt["selection"] = selection.as_dict()
+            receipt["reason_codes"] = ["bootstrap_timeout"]
+            return selection, receipt
+        except Exception as exc:  # noqa: BLE001 - bootstrap degrades deterministically
+            selection = BootstrapSelection(
+                valid=False,
+                reason_codes=(f"bootstrap_error:{type(exc).__name__}",),
+            )
+            receipt["selection"] = selection.as_dict()
+            receipt["reason_codes"] = list(selection.reason_codes)
+            return selection, receipt
+        finally:
+            receipt["latency_ms"] = round((time.perf_counter() - started) * 1_000.0, 6)
 
     async def _system_information(self, environment: BaseEnvironment) -> dict[str, str]:
         configured = str(self.cwd or "").strip()
@@ -2126,6 +2341,309 @@ class MiniSweCentralAgent(BaseAgent):
         retrieval_validation_state = "unknown"
         retrieval_evidence_action = 0
         retrieval_eligible_call = 1
+        persistent_state_engine: PersistentExecutionStateEngine | None = None
+        persistent_state_deliveries: list[dict[str, Any]] = []
+        persistent_state_preflights: list[dict[str, Any]] = []
+        persistent_state_initial_retrieval: dict[str, Any] = {
+            "schema": "gt.persistent_initial_retrieval.v1",
+            "status": "disabled",
+            "calls": 0,
+            "provider_calls": 0,
+            "action_executions": 0,
+            "reason_codes": ["persistent_execution_state_disabled"],
+        }
+        persistent_state_bootstrap: dict[str, Any] = {
+            "schema": "gt.persistent_bootstrap.v1",
+            "status": "disabled",
+            "logical_calls": 0,
+            "provider_calls": 0,
+            "action_executions": 0,
+            "reason_codes": ["persistent_execution_state_disabled"],
+        }
+        persistent_state_initialization: dict[str, Any] = {
+            "enabled": self.enable_persistent_execution_state,
+            "status": "disabled",
+            "reason_codes": ["persistent_execution_state_disabled"],
+        }
+        if self.enable_persistent_execution_state:
+            if source_less_task_at_start:
+                persistent_state_initialization = {
+                    "enabled": True,
+                    "status": BootstrapStatus.NOT_APPLICABLE.value,
+                    "reason_codes": ["not_applicable_no_supported_source"],
+                }
+                persistent_state_bootstrap = {
+                    **persistent_state_bootstrap,
+                    "status": BootstrapStatus.NOT_APPLICABLE.value,
+                    "reason_codes": ["not_applicable_no_supported_source"],
+                }
+                persistent_state_initial_retrieval = {
+                    **persistent_state_initial_retrieval,
+                    "status": BootstrapStatus.NOT_APPLICABLE.value,
+                    "reason_codes": ["not_applicable_no_supported_source"],
+                }
+            elif (
+                repository_session is None
+                or repository_evidence.index is None
+                or not repository_evidence.index.graph_db
+                or not repository_evidence.substrate_ready
+                or repository_session.indexed_source_revision != graph_source_revision
+            ):
+                persistent_state_initialization = {
+                    "enabled": True,
+                    "status": "graph_unavailable",
+                    "reason_codes": ["repository_substrate_unavailable"],
+                }
+                persistent_state_bootstrap = {
+                    **persistent_state_bootstrap,
+                    "status": "graph_unavailable",
+                    "reason_codes": ["repository_substrate_unavailable"],
+                }
+                persistent_state_initial_retrieval = {
+                    **persistent_state_initial_retrieval,
+                    "status": "graph_unavailable",
+                    "reason_codes": ["repository_substrate_unavailable"],
+                }
+            else:
+                try:
+                    preemptive_repository = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            build_hybrid_repository,
+                            repository_session.root,
+                            repository_evidence.index.graph_db,
+                            source_revision=graph_source_revision,
+                        ),
+                        timeout=self.preemptive_retrieval_cold_start_timeout_sec,
+                    )
+                    preemptive_repository_revision = graph_source_revision
+                    if not preemptive_repository.complete:
+                        persistent_state_initialization = {
+                            "enabled": True,
+                            "status": "graph_corpus_incomplete",
+                            "reason_codes": list(
+                                preemptive_repository.reason_codes
+                                or ("repository_corpus_incomplete",)
+                            ),
+                        }
+                    else:
+                        initial_retrieval_result: HybridRetrievalResult | None = None
+                        initial_retrieval_state = RetrievalState(
+                            task_text=instruction,
+                            intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+                            source_revision=graph_source_revision,
+                        )
+                        initial_lifecycle_budget, initial_selection_limit = (
+                            _preemptive_lifecycle_budget(
+                                "task_start",
+                                task_budget_chars=(
+                                    self.preemptive_retrieval_task_budget_chars
+                                ),
+                            )
+                        )
+                        initial_opportunity_budget = (
+                            _preemptive_opportunity_budget_limit(
+                                "task_start",
+                                task_budget_chars=(
+                                    self.preemptive_retrieval_task_budget_chars
+                                ),
+                                priority_reserve_chars=(
+                                    self.preemptive_retrieval_priority_reserve_chars
+                                ),
+                            )
+                        )
+                        initial_character_budget = min(
+                            initial_lifecycle_budget,
+                            initial_opportunity_budget,
+                        )
+                        try:
+                            preemptive_retriever = HybridRetriever(
+                                preemptive_repository.documents,
+                                structural_links=preemptive_repository.structural_links,
+                                dense_backend=self._snowflake_dense_backend(),
+                                dense_candidate_limit=(
+                                    self.preemptive_retrieval_dense_candidate_limit
+                                ),
+                            )
+                            remaining_for_initial_retrieval = (
+                                self.preemptive_retrieval_cold_start_timeout_sec
+                                if deadline is None
+                                else max(
+                                    0.001,
+                                    min(
+                                        self.preemptive_retrieval_cold_start_timeout_sec,
+                                        deadline
+                                        - time.monotonic()
+                                        - self.deadline_reserve_sec,
+                                    ),
+                                )
+                            )
+                            initial_retrieval_result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    preemptive_retriever.retrieve,
+                                    initial_retrieval_state,
+                                    channel_limit=self.preemptive_retrieval_channel_limit,
+                                    top_k=self.preemptive_retrieval_top_k,
+                                    selection_limit=min(
+                                        self.preemptive_retrieval_selection_limit,
+                                        initial_selection_limit,
+                                    ),
+                                    token_budget=self.preemptive_retrieval_token_budget,
+                                    character_budget=initial_character_budget,
+                                ),
+                                timeout=remaining_for_initial_retrieval,
+                            )
+                            persistent_state_initial_retrieval = (
+                                _initial_persistent_retrieval_receipt(
+                                    initial_retrieval_result,
+                                    source_revision=graph_source_revision,
+                                )
+                            )
+                            initial_retrieval_cache_key = hashlib.sha256(
+                                _canonical_json(
+                                    {
+                                        "query_hash": initial_retrieval_state.query_hash,
+                                        "visible_claims": [],
+                                        "channel_limit": (
+                                            self.preemptive_retrieval_channel_limit
+                                        ),
+                                        "top_k": self.preemptive_retrieval_top_k,
+                                        "selection_limit": min(
+                                            self.preemptive_retrieval_selection_limit,
+                                            initial_selection_limit,
+                                        ),
+                                        "token_budget": (
+                                            self.preemptive_retrieval_token_budget
+                                        ),
+                                        "remaining_chars": initial_character_budget,
+                                    }
+                                )
+                            ).hexdigest()
+                            preemptive_retrieval_cache[initial_retrieval_cache_key] = (
+                                initial_retrieval_result
+                            )
+                            persistent_state_initial_retrieval.update(
+                                {
+                                    "runtime_cache_seeded": True,
+                                    "runtime_cache_key": initial_retrieval_cache_key,
+                                    "task_start_character_budget": (
+                                        initial_character_budget
+                                    ),
+                                    "task_start_selection_limit": min(
+                                        self.preemptive_retrieval_selection_limit,
+                                        initial_selection_limit,
+                                    ),
+                                }
+                            )
+                        except TimeoutError:
+                            preemptive_retriever = None
+                            persistent_state_initial_retrieval = {
+                                **persistent_state_initial_retrieval,
+                                "status": "timeout",
+                                "calls": 1,
+                                "source_revision": graph_source_revision,
+                                "query_hash": initial_retrieval_state.query_hash,
+                                "reason_codes": ["initial_retrieval_timeout"],
+                            }
+                        except Exception as exc:  # noqa: BLE001 - state may fall back, gate fails
+                            preemptive_retriever = None
+                            persistent_state_initial_retrieval = {
+                                **persistent_state_initial_retrieval,
+                                "status": "error",
+                                "calls": 1,
+                                "source_revision": graph_source_revision,
+                                "query_hash": initial_retrieval_state.query_hash,
+                                "reason_codes": [
+                                    f"initial_retrieval_error:{type(exc).__name__}"
+                                ],
+                            }
+                        catalog = build_bootstrap_catalog(
+                            instruction=instruction,
+                            evidence=repository_evidence,
+                            documents=preemptive_repository.documents,
+                            structural_links=preemptive_repository.structural_links,
+                            explicit_checks=tuple(explicit_checks),
+                            task_deliverables=tuple(sorted(task_deliverables)),
+                            source_revision=source_revision,
+                            graph_source_revision=graph_source_revision,
+                            graph_revision=repository_evidence.graph_revision,
+                            repository_complete=True,
+                            initial_retrieval=initial_retrieval_result,
+                        )
+                        persistent_state_initialization = {
+                            "enabled": True,
+                            "status": "initialized" if catalog.complete else "catalog_incomplete",
+                            "reason_codes": list(catalog.reason_codes),
+                            "catalog": catalog.as_dict(),
+                            "initial_retrieval_status": (
+                                persistent_state_initial_retrieval.get("status")
+                            ),
+                        }
+                        if catalog.complete:
+                            persistent_state_engine = (
+                                PersistentExecutionStateEngine.initialize_from_graph(
+                                    task=instruction,
+                                    catalog=catalog,
+                                    structural_links=preemptive_repository.structural_links,
+                                    present_paths=tuple(
+                                        document.path
+                                        for document in preemptive_repository.documents
+                                    ),
+                                    workspace_root=self.cwd or "/app",
+                                )
+                            )
+                            remaining_for_bootstrap = (
+                                self.persistent_state_bootstrap_timeout_sec
+                                if deadline is None
+                                else max(
+                                    0.001,
+                                    min(
+                                        self.persistent_state_bootstrap_timeout_sec,
+                                        deadline
+                                        - time.monotonic()
+                                        - self.deadline_reserve_sec,
+                                    ),
+                                )
+                            )
+                            selection, persistent_state_bootstrap = (
+                                await self._run_persistent_state_bootstrap(
+                                    model,
+                                    instruction=instruction,
+                                    catalog=catalog,
+                                    timeout_sec=remaining_for_bootstrap,
+                                )
+                            )
+                            persistent_state_engine.apply_bootstrap(
+                                selection,
+                                current_source_revision=source_revision,
+                                error=(
+                                    persistent_state_bootstrap.get("status")
+                                    == BootstrapStatus.ERROR_FALLBACK.value
+                                ),
+                            )
+                            input_tokens += int(
+                                persistent_state_bootstrap.get("input_tokens") or 0
+                            )
+                            output_tokens += int(
+                                persistent_state_bootstrap.get("output_tokens") or 0
+                            )
+                            cache_tokens += int(
+                                persistent_state_bootstrap.get("cached_tokens") or 0
+                            )
+                            cost += float(persistent_state_bootstrap.get("cost") or 0.0)
+                except TimeoutError:
+                    persistent_state_initialization = {
+                        "enabled": True,
+                        "status": "graph_corpus_timeout",
+                        "reason_codes": ["repository_corpus_timeout"],
+                    }
+                except Exception as exc:  # noqa: BLE001 - run preserves Mini-SWE
+                    persistent_state_initialization = {
+                        "enabled": True,
+                        "status": "initialization_error",
+                        "reason_codes": [
+                            f"persistent_state_initialization_error:{type(exc).__name__}"
+                        ],
+                    }
 
         if (
             repository_evidence.available
@@ -2315,6 +2833,21 @@ class MiniSweCentralAgent(BaseAgent):
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
+                persistent_state_frame = (
+                    persistent_state_engine.compile_context(
+                        current_source_revision=source_revision,
+                        provider_call=calls,
+                        max_tokens=self.persistent_state_context_tokens,
+                    )
+                    if persistent_state_engine is not None
+                    else None
+                )
+                persistent_state_payload = (
+                    persistent_state_frame.rendered_text
+                    if persistent_state_frame is not None
+                    and persistent_state_frame.kind is not ContextFrameKind.NONE
+                    else ""
+                )
                 preemptive_frame: PreemptiveFrame | None = None
                 preemptive_compilation: PreemptiveFrameCompilation | None = None
                 retrieval_opportunity_kind = _retrieval_opportunity_kind(
@@ -2816,6 +3349,20 @@ class MiniSweCentralAgent(BaseAgent):
                     _candidates.append(contribution)
                     _by_surface[surface] = contribution.contribution_id
 
+                if persistent_state_frame is not None:
+                    register_contribution(
+                        surface="persistent_execution_state",
+                        payload=persistent_state_payload,
+                        claim_ids=persistent_state_frame.claim_ids,
+                        fact_ids=(
+                            f"{persistent_state_engine.snapshot.state_id}:"
+                            f"v{persistent_state_frame.state_version}",
+                        ),
+                        evidence_action=actions_count,
+                        eligible_call=calls,
+                        revision=persistent_state_frame.source_revision,
+                        priority=5,
+                    )
                 if preemptive_frame is not None:
                     register_contribution(
                         surface="preemptive_retrieval",
@@ -2901,6 +3448,7 @@ class MiniSweCentralAgent(BaseAgent):
                     + len(frontier_payload)
                     + len(guidance_payload)
                     + len(progress_payload)
+                    + len(persistent_state_payload)
                     + 6
                 )
                 compiled_contributions = compile_contributions(
@@ -2930,6 +3478,10 @@ class MiniSweCentralAgent(BaseAgent):
                     "preemptive_retrieval"
                 ):
                     preemptive_frame = None
+                if persistent_state_payload and not contribution_selected(
+                    "persistent_execution_state"
+                ):
+                    persistent_state_payload = ""
                 if frontier_payload and not contribution_selected("graph_frontier"):
                     frontier_payload = ""
                 if guidance_payload and not contribution_selected("feature_fact"):
@@ -2952,7 +3504,12 @@ class MiniSweCentralAgent(BaseAgent):
                 contribution_compilations.append(contribution_receipt)
                 legacy_runtime_parts = [
                     item
-                    for item in (frontier_payload, guidance_payload, progress_payload)
+                    for item in (
+                        persistent_state_payload,
+                        frontier_payload,
+                        guidance_payload,
+                        progress_payload,
+                    )
                     if item
                 ]
                 legacy_runtime_payload = "\n\n".join(legacy_runtime_parts)
@@ -3192,6 +3749,43 @@ class MiniSweCentralAgent(BaseAgent):
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
+                    and persistent_state_payload
+                    and persistent_state_frame is not None
+                ):
+                    persistent_state_deliveries.append(
+                        {
+                            "delivery_id": "persistent-state-"
+                            + hashlib.sha256(
+                                _canonical_json(
+                                    {
+                                        "payload": persistent_state_payload,
+                                        "call": calls,
+                                        "source_revision": source_revision,
+                                    }
+                                )
+                            ).hexdigest()[:20],
+                            "call": calls,
+                            "state_id": persistent_state_engine.snapshot.state_id,
+                            "state_version": persistent_state_frame.state_version,
+                            "frame_kind": persistent_state_frame.kind.value,
+                            "claim_ids": list(persistent_state_frame.claim_ids),
+                            "source_revision": persistent_state_frame.source_revision,
+                            "evidence_action": actions_count,
+                            "first_eligible_call": calls,
+                            "delivered_before_call": calls,
+                            "delivered_before_model_query": True,
+                            "not_predictive": True,
+                            "one_step_late": False,
+                            "request_payload_sha256": request_payload_sha256,
+                            "provider_messages_sha256": provider_messages_sha256,
+                            "message_index": runtime_message_index,
+                            "chars": len(persistent_state_payload),
+                            "tokens": persistent_state_frame.token_count,
+                        }
+                    )
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
                     and preemptive_payload
                     and preemptive_frame is not None
                 ):
@@ -3351,6 +3945,7 @@ class MiniSweCentralAgent(BaseAgent):
                     "assistant_chars": 0,
                     "tool_observation_chars": 0,
                     "preemptive_retrieval_chars": len(preemptive_payload),
+                    "persistent_execution_state_chars": len(persistent_state_payload),
                     "runtime_advisory_chars": len(guidance_payload),
                     "context_frontier_chars": len(frontier_payload),
                     "progress_frame_chars": len(progress_payload),
@@ -3358,6 +3953,7 @@ class MiniSweCentralAgent(BaseAgent):
                         0,
                         runtime_enrichment_chars
                         - len(preemptive_payload)
+                        - len(persistent_state_payload)
                         - len(guidance_payload)
                         - len(frontier_payload)
                         - len(progress_payload),
@@ -3384,6 +3980,7 @@ class MiniSweCentralAgent(BaseAgent):
                     for reason, applies in (
                         ("provider_budget_compaction", provider_view_metrics.compacted),
                         ("preemptive_retrieval", bool(preemptive_payload)),
+                        ("persistent_execution_state", bool(persistent_state_payload)),
                         ("certified_evidence", bool(legacy_runtime_payload)),
                     )
                     if applies
@@ -3435,6 +4032,14 @@ class MiniSweCentralAgent(BaseAgent):
                         "runtime_message_index": runtime_message_index,
                         "preemptive_retrieval": dict(preemptive_decision),
                         "preemptive_retrieval_delivered": bool(preemptive_payload),
+                        "persistent_execution_state": (
+                            persistent_state_frame.as_dict()
+                            if persistent_state_frame is not None
+                            else None
+                        ),
+                        "persistent_execution_state_delivered": bool(
+                            persistent_state_payload
+                        ),
                         "context_frontier": frontier_decision.as_dict(),
                         "context_frontier_delivered": bool(frontier_payload),
                         "provider_view_compacted": provider_view_metrics.compacted,
@@ -3507,6 +4112,32 @@ class MiniSweCentralAgent(BaseAgent):
                             for item in preemptive_decision.get("reason_codes") or ()
                         ),
                         source_revision=graph_source_revision,
+                    )
+                if persistent_state_frame is not None:
+                    provider_evidence.prepare(
+                        surface=ProviderEvidenceSurface.PERSISTENT_EXECUTION_STATE,
+                        fact_ids=(
+                            f"{persistent_state_engine.snapshot.state_id}:"
+                            f"v{persistent_state_frame.state_version}",
+                        ),
+                        claim_ids=persistent_state_frame.claim_ids,
+                        evidence_action=actions_count,
+                        eligible_call=calls,
+                        prepared_call=calls,
+                        message_indices=(
+                            (runtime_message_index,)
+                            if persistent_state_payload
+                            and runtime_message_index is not None
+                            else ()
+                        ),
+                        chars=len(persistent_state_payload),
+                        disposition=(
+                            None
+                            if persistent_state_payload
+                            else ProviderEvidenceDisposition.CONTROLLER_ONLY
+                        ),
+                        reason_codes=persistent_state_frame.reason_codes,
+                        source_revision=source_revision,
                     )
                 if frontier_decision.candidate_count or frontier_decision.facts:
                     provider_evidence.prepare(
@@ -3846,6 +4477,22 @@ class MiniSweCentralAgent(BaseAgent):
                 ):
                     actions_count += 1
                     command = proposed.raw_command
+                    persistent_projection = (
+                        persistent_state_engine.project_preflight(
+                            proposed,
+                            current_source_revision=source_revision,
+                        )
+                        if persistent_state_engine is not None
+                        else None
+                    )
+                    if persistent_projection is not None:
+                        persistent_state_preflights.append(
+                            {
+                                **persistent_projection.as_dict(),
+                                "selecting_request_hash": request_payload_sha256,
+                                "before_environment_exec": True,
+                            }
+                        )
                     preflight = pass_decision(proposed, "preflight_disabled")
                     applied_disposition = ActionDisposition.PASS
                     applied_reasons: tuple[str, ...] = ("preflight_disabled",)
@@ -4689,6 +5336,87 @@ class MiniSweCentralAgent(BaseAgent):
                     retrieval_validation_state = classification.status.value
                     retrieval_evidence_action = actions_count
                     retrieval_eligible_call = calls + 1
+                    if persistent_state_engine is not None:
+                        persistent_state_engine.commit_postflight(
+                            proposed,
+                            returncode=result.return_code,
+                            output=output["output"],
+                            changed_paths=tuple(
+                                item.path
+                                for item in classified_transition
+                                if item.origin
+                                in {
+                                    ChangeOrigin.MODEL_AUTHORED,
+                                    ChangeOrigin.TASK_DELIVERABLE,
+                                }
+                                and item.path in after.entries
+                                and item.path
+                                in (*transition.created, *transition.modified)
+                            ),
+                            graph_changed_paths=tuple(model_authored_source_paths),
+                            current_source_revision=source_revision,
+                            current_graph_source_revision=graph_source_revision,
+                            current_graph_revision=repository_evidence.graph_revision,
+                            validation_status=classification.status.value,
+                            validation_check_id=classification.declared_check_id,
+                        )
+                        if model_authored_source_paths:
+                            persistent_rebase_repository: HybridRepository | None = None
+                            if (
+                                repository_session is not None
+                                and repository_evidence.index is not None
+                                and repository_evidence.index.graph_db
+                                and repository_evidence.substrate_ready
+                                and repository_session.indexed_source_revision
+                                == graph_source_revision
+                            ):
+                                try:
+                                    persistent_rebase_repository = await asyncio.wait_for(
+                                        asyncio.to_thread(
+                                            build_hybrid_repository,
+                                            repository_session.root,
+                                            repository_evidence.index.graph_db,
+                                            source_revision=graph_source_revision,
+                                        ),
+                                        timeout=self.preemptive_retrieval_cold_start_timeout_sec,
+                                    )
+                                except Exception:  # noqa: BLE001 - fail closed to no state frame
+                                    persistent_rebase_repository = None
+                            if (
+                                persistent_rebase_repository is not None
+                                and persistent_rebase_repository.complete
+                            ):
+                                preemptive_repository = persistent_rebase_repository
+                                preemptive_repository_revision = graph_source_revision
+                                preemptive_retriever = None
+                                persistent_state_engine.rebase_graph(
+                                    evidence=repository_evidence,
+                                    structural_links=(
+                                        persistent_rebase_repository.structural_links
+                                    ),
+                                    current_source_revision=source_revision,
+                                    current_graph_source_revision=graph_source_revision,
+                                    current_graph_revision=(
+                                        repository_evidence.graph_revision
+                                    ),
+                                    graph_complete=True,
+                                    changed_paths=tuple(model_authored_source_paths),
+                                    present_paths=tuple(
+                                        document.path
+                                        for document in persistent_rebase_repository.documents
+                                    ),
+                                )
+                            else:
+                                persistent_state_engine.rebase_graph(
+                                    evidence=repository_evidence,
+                                    structural_links=(),
+                                    current_source_revision=source_revision,
+                                    current_graph_source_revision=graph_source_revision,
+                                    current_graph_revision=(
+                                        repository_evidence.graph_revision
+                                    ),
+                                    graph_complete=False,
+                                )
                     # Workspace activity remains useful for stale-batch safety,
                     # but it is not proof of task progress.  A fixture reset,
                     # scratch-file rewrite, or novel command must not clear
@@ -5345,6 +6073,10 @@ class MiniSweCentralAgent(BaseAgent):
                 "context_compiler_effect_accountability_counts"
             ]
             total_tokens = input_tokens + output_tokens
+            bootstrap_provider_calls = int(
+                persistent_state_bootstrap.get("provider_calls") or 0
+            )
+            total_provider_calls = model_query_invocations + bootstrap_provider_calls
             uncached_input_tokens = max(0, input_tokens - cache_tokens)
             normalized_cost = normalized_token_cost(
                 uncached_input_tokens, cache_tokens, output_tokens
@@ -5356,6 +6088,13 @@ class MiniSweCentralAgent(BaseAgent):
                 for row in guidance_deliveries
             )
             host_execution = self._host_executions.summary()
+            persistent_state_completion = (
+                persistent_state_engine.evaluate_completion(
+                    current_source_revision=source_revision
+                )
+                if persistent_state_engine is not None
+                else None
+            )
             repository_required = bool(
                 self.enable_repository_intelligence
                 and self.integration_mode is GTIntegrationMode.ACTIVE
@@ -5383,6 +6122,79 @@ class MiniSweCentralAgent(BaseAgent):
             )
             intelligence_failures: list[str] = []
             transient_intelligence_failures: list[str] = []
+            persistent_state_failures: list[str] = []
+            if self.enable_persistent_execution_state and not source_less_task:
+                initial_retrieval_channels = {
+                    str(row.get("channel") or ""): row
+                    for row in persistent_state_initial_retrieval.get(
+                        "channel_receipts", ()
+                    )
+                    if isinstance(row, dict)
+                }
+                if int(persistent_state_initial_retrieval.get("calls") or 0) != 1:
+                    persistent_state_failures.append(
+                        "persistent_initial_retrieval_call_count"
+                    )
+                if str(persistent_state_initial_retrieval.get("status") or "") not in {
+                    "selected",
+                    "abstained",
+                }:
+                    persistent_state_failures.append(
+                        "persistent_initial_retrieval_incomplete"
+                    )
+                if (
+                    str(persistent_state_initial_retrieval.get("source_revision") or "")
+                    != str(
+                        (persistent_state_initialization.get("catalog") or {}).get(
+                            "graph_source_revision"
+                        )
+                        or ""
+                    )
+                    or not str(persistent_state_initial_retrieval.get("query_hash") or "")
+                ):
+                    persistent_state_failures.append(
+                        "persistent_initial_retrieval_revision_or_query"
+                    )
+                if set(initial_retrieval_channels) != {
+                    "exact",
+                    "lexical",
+                    "bm25",
+                    "dense",
+                    "structural",
+                } or any(
+                    bool(row.get("failed"))
+                    for row in initial_retrieval_channels.values()
+                ):
+                    persistent_state_failures.append(
+                        "persistent_initial_retrieval_channels"
+                    )
+                if persistent_state_engine is None:
+                    persistent_state_failures.append("persistent_state_not_initialized")
+                else:
+                    persistent_metrics = persistent_state_engine.metrics
+                    if persistent_state_bootstrap.get("status") != BootstrapStatus.SELECTED.value:
+                        persistent_state_failures.append("persistent_bootstrap_not_selected")
+                    if int(persistent_state_bootstrap.get("provider_calls") or 0) != 1:
+                        persistent_state_failures.append("persistent_bootstrap_call_count")
+                    if int(persistent_state_bootstrap.get("action_executions") or 0) != 0:
+                        persistent_state_failures.append("persistent_bootstrap_action_executed")
+                    if int(persistent_metrics["context_compilations"]) != len(
+                        model_call_contexts
+                    ):
+                        persistent_state_failures.append(
+                            "persistent_context_compilation_count"
+                        )
+                    if int(persistent_metrics["preflight_projections"]) != actions_count:
+                        persistent_state_failures.append(
+                            "persistent_preflight_projection_count"
+                        )
+                    if int(persistent_metrics["postflight_commits"]) != int(
+                        host_execution["decision_actions"]
+                    ):
+                        persistent_state_failures.append("persistent_postflight_commit_count")
+                    if not persistent_state_engine.snapshot.graph_current:
+                        persistent_state_failures.append("persistent_graph_not_current")
+                intelligence_failures.extend(persistent_state_failures)
             if (
                 repository_required
                 and not source_less_task
@@ -5489,6 +6301,7 @@ class MiniSweCentralAgent(BaseAgent):
                 else "no_provider_call"
             )
             intelligence_failures = list(dict.fromkeys(intelligence_failures))
+            persistent_state_failures = list(dict.fromkeys(persistent_state_failures))
             transient_intelligence_failures = list(dict.fromkeys(transient_intelligence_failures))
             intelligence_status = (
                 "disabled"
@@ -5555,8 +6368,20 @@ class MiniSweCentralAgent(BaseAgent):
                 "provider_cost_usd": cost,
                 "normalized_cost_usd": normalized_cost,
                 "normalized_pricing": "deepseek-v4-flash-frozen-2026",
-                "api_calls": model_query_invocations,
-                "provider_requests_prepared": provider_requests_prepared,
+                "api_calls": total_provider_calls,
+                "executor_api_calls": model_query_invocations,
+                "bootstrap_api_calls": bootstrap_provider_calls,
+                "bootstrap_provider_responses_received": int(
+                    bool(persistent_state_bootstrap.get("response_received"))
+                ),
+                "total_provider_responses_received": (
+                    provider_responses_received
+                    + int(bool(persistent_state_bootstrap.get("response_received")))
+                ),
+                "provider_requests_prepared": (
+                    provider_requests_prepared + bootstrap_provider_calls
+                ),
+                "executor_provider_requests_prepared": provider_requests_prepared,
                 "model_query_invocations": model_query_invocations,
                 "provider_responses_received": provider_responses_received,
                 "provider_query_marker_error": provider_query_marker_error,
@@ -5574,8 +6399,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "assistant_steps": assistant_steps,
                 "trajectory_messages": len(messages),
                 "tokens_per_call": (
-                    round(total_tokens / model_query_invocations, 6)
-                    if model_query_invocations
+                    round(total_tokens / total_provider_calls, 6)
+                    if total_provider_calls
                     else 0.0
                 ),
                 "tokens_per_assistant_step": (
@@ -5593,22 +6418,47 @@ class MiniSweCentralAgent(BaseAgent):
                 "provider_request_chars_sent": sum(
                     int(row.get("provider_request_chars") or 0)
                     for row in dispatched_model_call_contexts
+                )
+                + int(persistent_state_bootstrap.get("provider_request_chars") or 0),
+                "bootstrap_provider_request_chars": int(
+                    persistent_state_bootstrap.get("provider_request_chars") or 0
                 ),
                 "provider_requests_hashed": sum(
                     bool(row.get("provider_messages_sha256"))
                     and bool(row.get("request_payload_sha256"))
                     for row in dispatched_model_call_contexts
+                )
+                + int(
+                    bool(persistent_state_bootstrap.get("request_payload_sha256"))
+                    and bool(persistent_state_bootstrap.get("provider_messages_sha256"))
+                    and bootstrap_provider_calls > 0
                 ),
                 "provider_request_hash_coverage": (
                     round(
-                        sum(
-                            bool(row.get("provider_messages_sha256"))
-                            for row in dispatched_model_call_contexts
+                        (
+                            sum(
+                                bool(row.get("provider_messages_sha256"))
+                                and bool(row.get("request_payload_sha256"))
+                                for row in dispatched_model_call_contexts
+                            )
+                            + int(
+                                bool(
+                                    persistent_state_bootstrap.get(
+                                        "provider_messages_sha256"
+                                    )
+                                )
+                                and bool(
+                                    persistent_state_bootstrap.get(
+                                        "request_payload_sha256"
+                                    )
+                                )
+                                and bootstrap_provider_calls > 0
+                            )
                         )
-                        / len(dispatched_model_call_contexts),
+                        / (len(dispatched_model_call_contexts) + bootstrap_provider_calls),
                         6,
                     )
-                    if dispatched_model_call_contexts
+                    if dispatched_model_call_contexts or bootstrap_provider_calls
                     else 1.0
                 ),
                 "provider_request_budget_failures": sum(
@@ -5783,6 +6633,66 @@ class MiniSweCentralAgent(BaseAgent):
                 "progress_frame_deliveries": len(progress_fact_deliveries),
                 "progress_frame_chars_sent": sum(
                     int(row.get("chars") or 0) for row in progress_fact_deliveries
+                ),
+                "persistent_state_enabled": int(self.enable_persistent_execution_state),
+                "persistent_state_initialized": int(persistent_state_engine is not None),
+                "persistent_state_initial_retrieval_calls": int(
+                    persistent_state_initial_retrieval.get("calls") or 0
+                ),
+                "persistent_state_initial_retrieval_latency_ms": float(
+                    persistent_state_initial_retrieval.get("latency_ms") or 0.0
+                ),
+                "persistent_state_initial_ranked_files": len(
+                    persistent_state_initial_retrieval.get("ranked_files") or ()
+                ),
+                "persistent_state_initial_selected_evidence": len(
+                    persistent_state_initial_retrieval.get("selected_evidence") or ()
+                ),
+                "persistent_state_bootstrap_calls": bootstrap_provider_calls,
+                "persistent_state_bootstrap_input_tokens": int(
+                    persistent_state_bootstrap.get("input_tokens") or 0
+                ),
+                "persistent_state_bootstrap_output_tokens": int(
+                    persistent_state_bootstrap.get("output_tokens") or 0
+                ),
+                "persistent_state_bootstrap_cached_tokens": int(
+                    persistent_state_bootstrap.get("cached_tokens") or 0
+                ),
+                "persistent_state_bootstrap_cost_usd": float(
+                    persistent_state_bootstrap.get("cost") or 0.0
+                ),
+                "persistent_state_bootstrap_latency_ms": float(
+                    persistent_state_bootstrap.get("latency_ms") or 0.0
+                ),
+                "persistent_state_context_compilations": (
+                    int(persistent_state_engine.metrics["context_compilations"])
+                    if persistent_state_engine is not None
+                    else 0
+                ),
+                "persistent_state_preflight_projections": len(
+                    persistent_state_preflights
+                ),
+                "persistent_state_postflight_commits": (
+                    int(persistent_state_engine.metrics["postflight_commits"])
+                    if persistent_state_engine is not None
+                    else 0
+                ),
+                "persistent_state_graph_rebases": (
+                    int(persistent_state_engine.metrics["graph_rebases"])
+                    if persistent_state_engine is not None
+                    else 0
+                ),
+                "persistent_state_material_transitions": (
+                    int(persistent_state_engine.metrics["material_transitions"])
+                    if persistent_state_engine is not None
+                    else 0
+                ),
+                "persistent_state_deliveries": len(persistent_state_deliveries),
+                "persistent_state_context_tokens": sum(
+                    int(row.get("tokens") or 0) for row in persistent_state_deliveries
+                ),
+                "persistent_state_context_chars": sum(
+                    int(row.get("chars") or 0) for row in persistent_state_deliveries
                 ),
                 "progress_frame_late_deliveries": sum(
                     bool(row.get("one_step_late")) for row in progress_fact_deliveries
@@ -6430,6 +7340,10 @@ class MiniSweCentralAgent(BaseAgent):
                     int(row.get("preemptive_retrieval_chars") or 0)
                     for row in dispatched_model_call_contexts
                 ),
+                "persistent_execution_state_context_chars_added": sum(
+                    int(row.get("persistent_execution_state_chars") or 0)
+                    for row in dispatched_model_call_contexts
+                ),
                 "context_state_frame_chars_added": sum(
                     int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
                     for row in dispatched_model_call_contexts
@@ -6441,6 +7355,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "total_gt_context_chars_added": sum(
                     int(row.get("runtime_advisory_chars") or 0)
                     + int(row.get("preemptive_retrieval_chars") or 0)
+                    + int(row.get("persistent_execution_state_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
                     + int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
@@ -6449,6 +7364,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "newly_inserted_context_chars": sum(
                     int(row.get("runtime_advisory_chars") or 0)
                     + int(row.get("preemptive_retrieval_chars") or 0)
+                    + int(row.get("persistent_execution_state_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
                     + int((row.get("context_compiler") or {}).get("active_state_chars") or 0)
@@ -6537,7 +7453,9 @@ class MiniSweCentralAgent(BaseAgent):
                 "info": {
                     "model_stats": {
                         "instance_cost": cost,
-                        "api_calls": model_query_invocations,
+                        "api_calls": total_provider_calls,
+                        "executor_api_calls": model_query_invocations,
+                        "bootstrap_api_calls": bootstrap_provider_calls,
                     },
                     "agent": self.name(),
                     "version": self.version(),
@@ -6579,6 +7497,21 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
                             "decision_sufficiency": self.enable_decision_sufficiency,
+                            "persistent_execution_state": (
+                                self.enable_persistent_execution_state
+                            ),
+                            "persistent_state_bootstrap_timeout_sec": (
+                                self.persistent_state_bootstrap_timeout_sec
+                            ),
+                            "persistent_state_bootstrap_input_tokens": (
+                                self.persistent_state_bootstrap_input_tokens
+                            ),
+                            "persistent_state_bootstrap_output_tokens": (
+                                self.persistent_state_bootstrap_output_tokens
+                            ),
+                            "persistent_state_context_tokens": (
+                                self.persistent_state_context_tokens
+                            ),
                             "preemptive_retrieval_token_budget": (
                                 self.preemptive_retrieval_token_budget
                             ),
@@ -6602,8 +7535,12 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "graph_required": self.require_graph_ready,
                         },
-                        "calls": model_query_invocations,
-                        "provider_requests_prepared": provider_requests_prepared,
+                        "calls": total_provider_calls,
+                        "executor_calls": model_query_invocations,
+                        "bootstrap_calls": bootstrap_provider_calls,
+                        "provider_requests_prepared": (
+                            provider_requests_prepared + bootstrap_provider_calls
+                        ),
                         "actions": actions_count,
                         "elapsed_seconds": elapsed_seconds,
                         "workspace_sensor_healthy": snapshot.healthy,
@@ -6633,6 +7570,31 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                         "repository_work_receipts": list(self._repository_work_receipts),
                         "checkpoint_ledger": self._checkpoints.summary(),
+                        "persistent_execution_state": {
+                            "initialization": persistent_state_initialization,
+                            "initial_retrieval": persistent_state_initial_retrieval,
+                            "bootstrap": persistent_state_bootstrap,
+                            "state": (
+                                persistent_state_engine.snapshot.as_dict()
+                                if persistent_state_engine is not None
+                                else None
+                            ),
+                            "metrics": (
+                                persistent_state_engine.metrics
+                                if persistent_state_engine is not None
+                                else {}
+                            ),
+                            "receipts": (
+                                list(persistent_state_engine.receipts)
+                                if persistent_state_engine is not None
+                                else []
+                            ),
+                            "preflights": persistent_state_preflights,
+                            "deliveries": persistent_state_deliveries,
+                            "failures": persistent_state_failures,
+                            "valid": not persistent_state_failures,
+                            "completion": persistent_state_completion,
+                        },
                         "completion": {
                             "plan": completion_plan.as_dict(),
                             "certificates": [item.as_dict() for item in completion_certificates],
@@ -6759,7 +7721,7 @@ class MiniSweCentralAgent(BaseAgent):
                 output_tokens=output_tokens,
                 cache_tokens=cache_tokens,
                 cost=cost,
-                calls=model_query_invocations,
+                calls=total_provider_calls,
             )
             context.n_input_tokens = input_tokens
             context.n_output_tokens = output_tokens
@@ -6769,7 +7731,9 @@ class MiniSweCentralAgent(BaseAgent):
                 "runtime_mode": self.runtime_mode,
                 "integration_mode": self.integration_mode.value,
                 "policy_mode": self.policy_mode.value,
-                "api_calls": model_query_invocations,
+                "api_calls": total_provider_calls,
+                "executor_api_calls": model_query_invocations,
+                "bootstrap_api_calls": bootstrap_provider_calls,
                 "actions": actions_count,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,

@@ -89,6 +89,9 @@ def audit() -> dict[str, bool]:
     provider_free_workflow = (ROOT / ".github/workflows/central_provider_free.yml").read_text(
         encoding="utf-8"
     )
+    deepswe_workflow = (
+        ROOT / ".github/workflows/deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
     deep_metrics_source = (ROOT / "gt_engine/deep_metrics.py").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as directory:
         agent = MiniSweCentralAgent(logs_dir=Path(directory), model_name="audit-model")
@@ -191,6 +194,49 @@ def audit() -> dict[str, bool]:
             and "gt_engine/hybrid_retrieval.py" in provider_free_workflow
             and "gt_engine/hybrid_repository.py" in provider_free_workflow
             and "gt_engine/snowflake_onnx.py" in provider_free_workflow
+        ),
+        "provider_free_gate_covers_persistent_execution_state": (
+            "tests/test_persistent_execution_state.py" in provider_free_workflow
+            and "gt_engine/persistent_execution_state.py" in provider_free_workflow
+            and "test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary"
+            in (ROOT / "tests/test_gt_central_agent.py").read_text(encoding="utf-8")
+            and "_persistent_execution_state" in (
+                ROOT / "scripts/central_release_gate.py"
+            ).read_text(encoding="utf-8")
+        ),
+        "paid_persistent_state_contract_is_explicit": (
+            all(
+                item.count("--ak enable_persistent_execution_state=true") == 2
+                and item.count("--ak enable_persistent_execution_state=false") == 3
+                and item.count("--ak persistent_state_bootstrap_timeout_sec=45") == 2
+                and item.count("--ak persistent_state_bootstrap_input_tokens=2000") == 2
+                and item.count("--ak persistent_state_bootstrap_output_tokens=512") == 2
+                and item.count("--ak persistent_state_context_tokens=512") == 2
+                for item in workflows
+            )
+            and deepswe_workflow.count("--ak enable_persistent_execution_state=true") == 1
+            and deepswe_workflow.count("--ak persistent_state_bootstrap_timeout_sec=45") == 1
+        ),
+        "persistent_state_is_graph_first_and_repeated": (
+            0
+            <= run_source.find("build_hybrid_repository,")
+            < run_source.find("initial_retrieval_state = RetrievalState(")
+            < run_source.find("preemptive_retriever = HybridRetriever(")
+            < run_source.find("preemptive_retriever.retrieve,")
+            < run_source.find("build_bootstrap_catalog(")
+            < run_source.find("await self._run_persistent_state_bootstrap(")
+            < run_source.find("persistent_state_engine.compile_context(")
+            < run_source.find("model.query, query_messages")
+            and run_source.find("persistent_state_engine.project_preflight(")
+            < run_source.find("self._host_executions.exec(")
+            and run_source.find("persistent_state_engine.commit_postflight(")
+            > run_source.find("self._host_executions.exec(")
+            and "persistent_state_engine.rebase_graph(" in run_source
+            and "initial_retrieval=initial_retrieval_result" in run_source
+            and "preemptive_retrieval_cache[initial_retrieval_cache_key]" in run_source
+            and "persistent_initial_retrieval_not_in_catalog" in (
+                ROOT / "scripts/central_release_gate.py"
+            ).read_text(encoding="utf-8")
         ),
         "paid_live_retrieval_matches_arb_profile": all(
             item.count("--ak enable_preemptive_retrieval=true") == 2

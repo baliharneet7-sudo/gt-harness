@@ -363,6 +363,7 @@ jobs:
               FEATURE_ARGS+=(
                 --ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
                 --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
+                --ak enable_persistent_execution_state=false
                 --ak enable_all_features=false --ak enable_submit_readiness=false
                 --ak enable_lint=false --ak enable_feature_guidance=false
                 --ak enable_context_frontier=false --ak enable_context_compaction=false
@@ -373,6 +374,7 @@ jobs:
               FEATURE_ARGS+=(
                 --ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
                 --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
+                --ak enable_persistent_execution_state=false
                 --ak enable_all_features=true --ak enable_submit_readiness=true
                 --ak enable_repository_intelligence=true
                 --ak enable_lint=false --ak enable_feature_guidance=false
@@ -389,6 +391,11 @@ jobs:
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
                 --ak enable_preemptive_retrieval=true
                 --ak enable_decision_sufficiency=true
+                --ak enable_persistent_execution_state=true
+                --ak persistent_state_bootstrap_timeout_sec=45
+                --ak persistent_state_bootstrap_input_tokens=2000
+                --ak persistent_state_bootstrap_output_tokens=512
+                --ak persistent_state_context_tokens=512
                 --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=false --ak enable_completion_controller=false
                 --ak enable_progress_control=false --ak enable_adaptive_validation_timeout=false
@@ -402,6 +409,7 @@ jobs:
                 --ak preflight_mode=shadow --ak enable_lint=true
                 --ak enable_feature_guidance=false --ak enable_context_frontier=false
                 --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
+                --ak enable_persistent_execution_state=false
                 --ak enable_context_compaction=false --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
                 --ak require_graph_ready=false
@@ -415,6 +423,11 @@ jobs:
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
                 --ak enable_preemptive_retrieval=true
                 --ak enable_decision_sufficiency=true
+                --ak enable_persistent_execution_state=true
+                --ak persistent_state_bootstrap_timeout_sec=45
+                --ak persistent_state_bootstrap_input_tokens=2000
+                --ak persistent_state_bootstrap_output_tokens=512
+                --ak persistent_state_context_tokens=512
                 --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=true --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true

@@ -278,6 +278,156 @@ def _decision_sufficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     )
 
 
+def _persistent_execution_state(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Fail closed if the graph-first living state is absent or only bootstrapped."""
+
+    intelligence = receipt.get("repository_intelligence") or {}
+    source_less = bool(
+        intelligence.get("denominator_excluded") is True
+        and str(intelligence.get("applicability") or "")
+        == "not_applicable_no_supported_source"
+    )
+    configuration = receipt.get("component_configuration") or {}
+    runtime = receipt.get("persistent_execution_state") or {}
+    initialization = runtime.get("initialization") or {}
+    initial_retrieval = runtime.get("initial_retrieval") or {}
+    bootstrap = runtime.get("bootstrap") or {}
+    state = runtime.get("state") or {}
+    runtime_metrics = runtime.get("metrics") or {}
+    metrics = receipt.get("metrics") or {}
+    deliveries = runtime.get("deliveries") or []
+    failures: list[str] = []
+
+    if configuration.get("persistent_execution_state") is not True:
+        failures.append(f"{label}:persistent_state_disabled")
+    if source_less:
+        if str(initialization.get("status") or "") != "not_applicable":
+            failures.append(f"{label}:persistent_state_bad_not_applicable_status")
+        if int(bootstrap.get("provider_calls") or 0) != 0:
+            failures.append(f"{label}:persistent_state_source_less_bootstrap_call")
+        if int(initial_retrieval.get("calls") or 0) != 0:
+            failures.append(f"{label}:persistent_state_source_less_retrieval_call")
+        if state or deliveries:
+            failures.append(f"{label}:persistent_state_source_less_artifact")
+        return ReleaseGateCheck(
+            "persistent_execution_state",
+            not failures,
+            tuple(failures),
+            {"task": label, "applicability": "not_applicable_no_supported_source"},
+        )
+
+    if str(initialization.get("status") or "") != "initialized":
+        failures.append(f"{label}:persistent_state_not_initialized")
+    initial_catalog = initialization.get("catalog") or {}
+    initial_channels = {
+        str(row.get("channel") or ""): row
+        for row in initial_retrieval.get("channel_receipts") or ()
+        if isinstance(row, dict)
+    }
+    if int(initial_retrieval.get("calls") or 0) != 1:
+        failures.append(f"{label}:persistent_initial_retrieval_call_count")
+    if str(initial_retrieval.get("status") or "") not in {"selected", "abstained"}:
+        failures.append(f"{label}:persistent_initial_retrieval_incomplete")
+    if (
+        not str(initial_retrieval.get("query_hash") or "")
+        or str(initial_retrieval.get("source_revision") or "")
+        != str(initial_catalog.get("graph_source_revision") or "")
+    ):
+        failures.append(f"{label}:persistent_initial_retrieval_revision_or_query")
+    if set(initial_channels) != {"exact", "lexical", "bm25", "dense", "structural"}:
+        failures.append(f"{label}:persistent_initial_retrieval_channels")
+    elif any(bool(row.get("failed")) for row in initial_channels.values()):
+        failures.append(f"{label}:persistent_initial_retrieval_channel_failed")
+    if configuration.get("preemptive_retrieval") is True and (
+        initial_retrieval.get("runtime_cache_seeded") is not True
+        or not str(initial_retrieval.get("runtime_cache_key") or "")
+    ):
+        failures.append(f"{label}:persistent_initial_retrieval_cache_not_seeded")
+    ranked = initial_retrieval.get("ranked_files") or []
+    catalog_items = initial_catalog.get("items") or []
+    if ranked and not any(
+        int(item.get("retrieval_rank") or 0) > 0
+        and "hybrid_ranked_candidate" in set(item.get("provenance") or ())
+        for item in catalog_items
+        if isinstance(item, dict)
+    ):
+        failures.append(f"{label}:persistent_initial_retrieval_not_in_catalog")
+    if str(bootstrap.get("status") or "") != "selected":
+        failures.append(f"{label}:persistent_bootstrap_not_selected")
+    if int(bootstrap.get("logical_calls") or 0) != 1 or int(
+        bootstrap.get("provider_calls") or 0
+    ) != 1:
+        failures.append(f"{label}:persistent_bootstrap_not_exactly_one_call")
+    if int(bootstrap.get("action_executions") or 0) != 0:
+        failures.append(f"{label}:persistent_bootstrap_action_executed")
+    if bootstrap.get("response_received") is not True:
+        failures.append(f"{label}:persistent_bootstrap_response_missing")
+    if not str(bootstrap.get("request_payload_sha256") or "") or not str(
+        bootstrap.get("provider_messages_sha256") or ""
+    ):
+        failures.append(f"{label}:persistent_bootstrap_hash_missing")
+    if int(bootstrap.get("visible_catalog_count") or 0) <= 0 or not str(
+        bootstrap.get("visible_catalog_ids_sha256") or ""
+    ):
+        failures.append(f"{label}:persistent_bootstrap_visible_catalog_missing")
+    if runtime.get("valid") is not True or runtime.get("failures"):
+        failures.append(f"{label}:persistent_state_runtime_invalid")
+    if not state or state.get("graph_current") is not True:
+        failures.append(f"{label}:persistent_state_graph_not_current")
+    if str(state.get("bootstrap_status") or "") != "selected":
+        failures.append(f"{label}:persistent_state_selection_not_applied")
+    authorities = state.get("field_authority") or {}
+    if (
+        authorities.get("primary_focus_id") != "generative_bootstrap"
+        or authorities.get("phase") != "deterministic_mutable"
+        or authorities.get("current_focus_path") != "executor_observed"
+    ):
+        failures.append(f"{label}:persistent_state_authority_boundary_missing")
+
+    executor_calls = int(receipt.get("executor_calls") or 0)
+    actions = int(receipt.get("actions") or 0)
+    host_executed = int(
+        (receipt.get("host_execution") or {}).get("decision_actions") or 0
+    )
+    if executor_calls <= 0:
+        failures.append(f"{label}:persistent_state_no_executor_call")
+    if int(runtime_metrics.get("context_compilations") or 0) != len(
+        receipt.get("model_call_contexts") or []
+    ):
+        failures.append(f"{label}:persistent_context_compilation_count")
+    if int(runtime_metrics.get("preflight_projections") or 0) != actions:
+        failures.append(f"{label}:persistent_preflight_projection_count")
+    if int(runtime_metrics.get("postflight_commits") or 0) != host_executed:
+        failures.append(f"{label}:persistent_postflight_commit_count")
+    if len(deliveries) != executor_calls:
+        failures.append(f"{label}:persistent_delivery_not_every_executor_call")
+    if int(metrics.get("persistent_state_bootstrap_calls") or 0) != 1:
+        failures.append(f"{label}:persistent_bootstrap_metric_mismatch")
+    if int(metrics.get("persistent_state_initial_retrieval_calls") or 0) != 1:
+        failures.append(f"{label}:persistent_initial_retrieval_metric_mismatch")
+    if int(metrics.get("bootstrap_api_calls") or 0) != 1:
+        failures.append(f"{label}:persistent_bootstrap_api_metric_mismatch")
+    if int(receipt.get("bootstrap_calls") or 0) != 1:
+        failures.append(f"{label}:persistent_bootstrap_total_mismatch")
+    if int(receipt.get("calls") or 0) != executor_calls + 1:
+        failures.append(f"{label}:persistent_provider_call_accounting_mismatch")
+
+    return ReleaseGateCheck(
+        "persistent_execution_state",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "bootstrap_calls": int(bootstrap.get("provider_calls") or 0),
+            "executor_calls": executor_calls,
+            "deliveries": len(deliveries),
+            "state_version": int(state.get("version") or 0),
+        },
+    )
+
+
 def _delivery(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     runtime_failures, runtime_summary = audit_runtime_receipt(receipt, task=label)
     _rows, delivery_failures, delivery_summary = audit_provider_deliveries(
@@ -428,6 +578,7 @@ def audit_treatment_runtime(
         _delivery(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
+        _persistent_execution_state(receipt, label),
         _outcome_preservation(receipt, label),
         _project_validation(receipt, label),
         _retrieval_efficiency(receipt, label),

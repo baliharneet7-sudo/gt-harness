@@ -1,5 +1,64 @@
 # nano-harness
 
+## Graph-first persistent execution state (2026-08-12)
+
+`gt_engine.persistent_execution_state.PersistentExecutionStateEngine` is the
+task-scoped living repository-semantic state used by the central Mini-SWE host.
+It is enabled only by `enable_persistent_execution_state=true`; OFF, AUDIT, and
+certified-shadow isolation forcibly disable it.
+
+Creation is graph-first. A graph-applicable task must finish repository transfer,
+GraphDB build, schema/coverage validation, and source/graph-revision binding
+before the state is created. The accepted five-channel `HybridRetriever` first
+constructs the task-start candidate surface from that exact checkout and graph;
+the identical result seeds the first live retrieval cache so dense/lexical/graph
+work is not repeated. Only then may the host make exactly one bounded
+bootstrap model call. That call can select and order immutable certified catalog
+IDs and explicitly non-certified hybrid-ranked candidates; it cannot introduce a
+path, symbol, command, obligation, or repository
+fact. Its Bash envelope is data transport only: it is never executed, never
+added to executor history, and is always counted separately and in total API
+calls, tokens, cost, and latency. Invalid/timeout bootstrap output degrades to a
+deterministic fallback so Mini-SWE can continue, but invalidates the intended
+treatment release gate.
+
+After bootstrap there are no planning or advisor calls. The same state engine is
+used repeatedly: `compile_context()` before every executor provider request,
+`project_preflight()` for every typed proposal before environment execution,
+`commit_postflight()` after every executed model action, and
+`rebase_graph()` after every source-changing graph refresh. A source edit marks
+the graph state unavailable; no frame may be served until the refreshed graph is
+complete and revision-current. Old catalog line/symbol labels are not presented
+as current after graph revision changes. Newly certified current edges create
+deterministic advisory obligations.
+
+Production GraphDB relations are normalized at the state boundary (`CALLS`,
+`ASSERTED_BY`, and `CALLS_TRANSITIVE` included); uncertified/co-change-only edges
+cannot create obligations. Validation state consumes the one shared immutable
+classifier, including its canonical declared-check ID. The state never reparses
+raw Bash to infer a pass/fail result, and a read cannot satisfy a task-owned
+deliverable creation obligation.
+
+The full state remains host-private. Each normal executor request receives one
+complete bounded current slice through the existing contribution compiler and
+natural tool-observation surface: initial/critical at most 512 packing tokens,
+delta at most 256, stable core at most 96. This is not another agent tool/action,
+is not durable duplicated history, and cannot rewrite, suppress, or execute a
+command. Exact task checks and deliverables may be blocking. A certified graph
+relationship alone is only advisory: it proves a dependency exists, not that a
+particular repair must touch it.
+
+Every receipt exposes the field-level determinism boundary, the one bootstrap,
+all state transitions, graph rebases, preflight reads, postflight commits,
+context frames, exact request/provider hashes, changed message index, timing,
+and total/executor/bootstrap resource accounting.
+`scripts/central_release_gate.py` rejects bootstrap-only behavior, missing
+per-call delivery, hidden extra calls, fallback selection, stale final graph
+state, or a disabled applicable treatment. Provider-free proof establishes only
+integration integrity. No solve-rate or efficiency benefit may be claimed until
+a frozen matched evaluation counts the bootstrap overhead.
+
+
 Minimal coding agent harness. Score >30% on Terminal-bench and SWE-bench Verified with the smallest, most readable harness possible. Karpathy nano-aesthetic applied to agent harnesses.
 
 ## Current Status
