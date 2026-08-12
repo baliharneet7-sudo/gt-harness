@@ -21,7 +21,21 @@ import json
 
 import pytest
 
-from eval.gt_central_agent import MiniSweCentralAgent
+from eval.gt_central_agent import MiniSweCentralAgent, _preemptive_frame_identity
+
+
+def test_preemptive_frame_identity_changes_when_claim_set_changes():
+    """Repeated query state must not create duplicate receipt identities."""
+
+    first = _preemptive_frame_identity("query-r1", ("claim-a",), 43, "src-r1")
+    second = _preemptive_frame_identity(
+        "query-r1", ("claim-b",), 44, "src-r1"
+    )
+    assert first != second
+    # The same concrete delivery remains replay-stable.
+    assert first == _preemptive_frame_identity(
+        "query-r1", ("claim-a",), 43, "src-r1"
+    )
 
 
 def _api():

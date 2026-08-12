@@ -336,6 +336,33 @@ def _changed_provider_message_indices(
     return changed
 
 
+def _preemptive_frame_identity(
+    query_hash: str,
+    claim_hashes: tuple[str, ...],
+    eligible_call: int,
+    source_revision: str,
+) -> str:
+    """Return a stable ID for one concrete preemptive evidence delivery.
+
+    A retrieval query can recur while the selected claims change after a
+    workspace/graph transition.  The receipt identity therefore includes the
+    claim set and delivery window, not only the query hash.
+    """
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "query_hash": query_hash,
+                "claim_hashes": list(claim_hashes),
+                "eligible_call": eligible_call,
+                "source_revision": source_revision,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:20]
+
+
 def _inject_runtime_evidence(
     messages: list[dict[str, Any]], evidence: str
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -2255,10 +2282,21 @@ class MiniSweCentralAgent(BaseAgent):
                                     frame is not None
                                     and len(frame.rendered_text) <= remaining_chars
                                 ):
+                                    # ``query_hash`` identifies the retrieval
+                                    # state, not this particular delivery. A
+                                    # repeated state can legitimately produce
+                                    # a different claim set after the graph or
+                                    # workspace changes. Include the selected
+                                    # claims and eligible call so each provider
+                                    # frame has a stable, unique receipt ID.
+                                    frame_identity = _preemptive_frame_identity(
+                                        frame.query_hash,
+                                        tuple(frame.claim_hashes),
+                                        retrieval_eligible_call,
+                                        frame.source_revision,
+                                    )
                                     preemptive_frame = PreemptiveFrame(
-                                        frame_id=(
-                                            "preemptive-" + frame.query_hash[:20]
-                                        ),
+                                        frame_id="preemptive-" + frame_identity,
                                         text=frame.rendered_text,
                                         source_revision=frame.source_revision,
                                         eligible_call=retrieval_eligible_call,
