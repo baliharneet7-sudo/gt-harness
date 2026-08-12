@@ -1222,14 +1222,21 @@ class MiniSweCentralAgent(BaseAgent):
                     os.environ.get("GT_OPENROUTER_PROVIDER_ONLY") or ""
                 ).strip()
                 if provider:
-                    kwargs["extra_body"] = {
-                        "provider": {
-                            "only": [provider],
-                            "order": [provider],
-                            "allow_fallbacks": False,
-                            "require_parameters": True,
-                        }
+                    provider_policy = {
+                        "only": [provider],
+                        "order": [provider],
+                        "allow_fallbacks": False,
+                        "require_parameters": True,
                     }
+                    # Keep the account data-policy choice explicit.  This
+                    # is opt-in and receipt-visible; GT never silently
+                    # relaxes a user's privacy guardrail.
+                    data_collection = (
+                        os.environ.get("GT_OPENROUTER_DATA_COLLECTION") or ""
+                    ).strip().lower()
+                    if data_collection in {"allow", "deny"}:
+                        provider_policy["data_collection"] = data_collection
+                    kwargs["extra_body"] = {"provider": provider_policy}
             elif "/" not in model:
                 model = f"openai/{model}"
             kwargs["api_base"] = api_base

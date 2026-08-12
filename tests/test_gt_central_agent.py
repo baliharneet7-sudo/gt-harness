@@ -270,6 +270,7 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
+    monkeypatch.setenv("GT_OPENROUTER_DATA_COLLECTION", "allow")
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -285,11 +286,29 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
             "order": ["deepseek"],
             "allow_fallbacks": False,
             "require_parameters": True,
+            "data_collection": "allow",
         }
     }
     route = _provider_route_configuration(model)
     assert route["credential_in_receipt"] is False
     assert route["provider_policy"]["only"] == ["deepseek"]
+    assert route["provider_policy"]["data_collection"] == "allow"
+
+
+def test_openrouter_model_builder_does_not_override_unset_data_policy(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
+    monkeypatch.delenv("GT_OPENROUTER_DATA_COLLECTION", raising=False)
+
+    model = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="deepseek-v4-flash",
+    )._build_model()
+
+    assert "data_collection" not in model.config.model_kwargs["extra_body"]["provider"]
 
 
 def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
@@ -302,11 +321,13 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
 
     assert 'default: "20"' in workflow
     assert "GT_OPENROUTER_PROVIDER_ONLY: deepseek" in workflow
+    assert "GT_OPENROUTER_DATA_COLLECTION: allow" in workflow
     assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
     assert "GT_COMMIT: ${{ github.sha }}" not in workflow
     assert 'm = "deepseek/deepseek-v4-flash"' in workflow
     assert '"only": ["deepseek"]' in workflow
     assert '"allow_fallbacks": False' in workflow
+    assert '"data_collection": "allow"' in workflow
     assert "provider-route-proof.json" in workflow
     assert "exact provider route gate failed" in workflow
     assert "--ak preflight_mode=assistive_safe" in workflow

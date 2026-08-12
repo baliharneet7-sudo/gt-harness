@@ -98,6 +98,7 @@ env:
   GT_DENSE_INTRA_OP_THREADS: "4"
   GT_DENSE_INTER_OP_THREADS: "1"
   GT_OPENROUTER_PROVIDER_ONLY: deepseek
+  GT_OPENROUTER_DATA_COLLECTION: allow
 
 jobs:
   plan:
@@ -423,6 +424,7 @@ jobs:
                       "order": ["deepseek"],
                       "allow_fallbacks": False,
                       "require_parameters": True,
+                      "data_collection": "allow",
                   }
               }
           elif base:
@@ -443,6 +445,7 @@ jobs:
               "response_provider": str(response.get("provider") or ""),
               "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
               "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
+              "data_collection": "allow" if os.environ.get("PROVIDER") == "openrouter" else None,
           }
           Path("provider-route-proof.json").write_text(
               json.dumps(proof, indent=2) + "\n", encoding="utf-8"
