@@ -175,7 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" pytest \
+          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" pytest pytest-asyncio \
             vendor/groundtruth_mcp-*.whl
       - name: Provision and verify pinned Snowflake ONNX backend
         run: |
