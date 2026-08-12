@@ -131,8 +131,48 @@ checkout steps, verifies the commit, and requires exactly 113 task manifests.
 Unrelated Terminal-Bench release comments mentioning `v1.1.0` are not
 DeepSWE task inputs and were not changed.
 
+## v1.0.0 versus the published v1.1 protocol
+
+The task-ID equality is real but is not the release identity.  The upstream
+repository exposes tag `v1.0.0` at
+`79a508a908998690c6ceb773ae2dbcc23f55e434e` (peeled commit
+`c33fa70e68d11d85f9e58abcd5d78643705e916e`) and no `v1.1` tag.  Its current
+`main` commit `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9` has the same 113 task
+IDs as the public v1.1 catalog, but the task execution contract is materially
+different:
+
+| Boundary | v1.0.0 | current main / published v1.1 |
+|---|---|---|
+| task schema | `1.1` | `1.3` |
+| grading topology | agent and verifier shared task environment | separate no-network verifier environment |
+| agent completion | changes left in the agent workspace | agent commits work; verifier consumes a collected patch |
+| artifact contract | no declared patch artifact | `model.patch` from a `[[verifier.collect]]` hook |
+| verifier | task `test.sh`/`test.patch` flow | `grader.py prepare/grade`, CTRF report, `reward.json`, `run.log`, reports |
+| isolation | `allow_internet=false` task setting | explicit agent/verifier network and environment modes plus resource limits |
+| image | base `...:<ext_id>` image | `...:<ext_id>-v1.1` image |
+| task instruction | no mandatory branch/commit instruction | requires a new branch from main and a commit |
+
+These differences are visible in the version-controlled task TOMLs,
+environment Dockerfiles, instructions, and test harnesses; they are not an
+inference from the leaderboard.  Therefore a direct `harbor run` against the
+main snapshot was not a valid v1.1 execution even though its IDs matched.
+
+The workflow is now corrected to install pinned `datacurve-pier==0.3.1` and
+invoke `pier run --include-task-name`.  Pier is the Harbor-compatible runner
+that implements the v1.1 separate-verifier and collect-hook lifecycle.  It
+still loads `eval.gt_central_agent:MiniSweCentralAgent`, so this change does
+not replace Mini-SWE or GT with another agent.  The workflow keeps the exact
+GT receipt, provider-delivery audit, and merged outcome artifacts.
+
+The contract is guarded by
+`test_deepswe_workflow_uses_pier_v11_verifier_protocol`, which rejects a direct
+Harbor invocation and requires the pinned Pier version and task selector.
+
 ## Remaining gate
 
-No new paid smoke was launched by this repair. The source-built provider-free
-gate is now green; the remaining step is an explicitly authorized repaired
-ten-task DeepSWE smoke, followed by the existing receipt/outcome audit.
+The new runner contract has passed the focused workflow tests.  The source-
+built provider-free gate remains green for the pinned task snapshot; it must be
+rerun on the final workflow commit before any paid smoke, because the runner
+changed from direct Harbor to Pier.  Only after that exact gate passes should
+the authorized repaired ten-task DeepSWE smoke be dispatched, followed by the
+existing receipt/outcome audit.

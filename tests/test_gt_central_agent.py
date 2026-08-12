@@ -157,6 +157,23 @@ def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
     assert "mimo-v2.5-pro" not in workflow
 
 
+def test_deepswe_workflow_uses_pier_v11_verifier_protocol():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    # Matching task IDs is not sufficient for DeepSWE v1.1.  Its separate
+    # verifier/collect-patch lifecycle is implemented by the pinned Pier
+    # runner, not by a direct Harbor invocation.
+    assert '"datacurve-pier==0.3.1"' in workflow
+    assert "pier run -p deepswe-bench/tasks" in workflow
+    assert "--include-task-name \"$TASK\"" in workflow
+    assert "harbor run -p deepswe-bench/tasks" not in workflow
+
+
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
     defaulted = MiniSweCentralAgent(
         logs_dir=tmp_path / "defaulted",

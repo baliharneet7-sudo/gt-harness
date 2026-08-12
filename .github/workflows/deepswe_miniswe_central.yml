@@ -2,10 +2,11 @@
 # host-owned central runtime.  The upstream repository has no v1.1 tag; this
 # workflow pins the immutable main snapshot whose 113 task IDs match the
 # published v1.1 catalog.
-# This workflow intentionally does not reuse the retired Pier/artifact_deepswe agent.
-# It clones the pinned DeepSWE task set, runs Harbor 0.20 with
-# eval.gt_central_agent:MiniSweCentralAgent, and preserves the central receipt and
-# provider-delivery audit for every task.
+# The v1.1 task contract is executed by the pinned Pier runner.  Pier is the
+# Harbor-compatible orchestrator that creates the separate verifier environment,
+# runs verifier.collect hooks (including the commit-to-patch collector), and
+# grades the pristine verifier checkout.  Mini-SWE still runs through the
+# host-owned eval.gt_central_agent:MiniSweCentralAgent import.
 name: DeepSWE Mini-SWE central ten-task smoke
 
 on:
@@ -181,8 +182,9 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" pytest pytest-asyncio \
+          python -m pip install -e '.[retrieval]' "mini-swe-agent==2.2.8" "harbor==0.20.0" "datacurve-pier==0.3.1" pytest pytest-asyncio \
             vendor/groundtruth_mcp-*.whl
+          test "$(python -c 'import importlib.metadata as m; print(m.version("datacurve-pier"))')" = "0.3.1"
       - name: Provision and verify pinned Snowflake ONNX backend
         run: |
           set -euo pipefail
@@ -259,7 +261,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
-          harbor run -p deepswe-bench/tasks -i "$TASK" \
+          pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
             --agent-import-path eval.gt_central_agent:MiniSweCentralAgent \
             -m "$MODEL" -o results/deepswe \
             --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
