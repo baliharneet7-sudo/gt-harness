@@ -38,17 +38,26 @@ The Pier/Harbor boundary worked: no provider preflight failure, missing Pier
 hook, result-type mismatch, or central-agent import failure occurred. The
 remaining blockers are outcome/resource issues: two tasks hit the configured
 provider context budget, and one environment was unavailable because of a
-registry rate limit. The workflow also needs a contemporaneous GT-off arm
-before any causal claim.
+registry rate limit. The retrieval audit also found a P1 delivery defect: the
+hybrid retriever selected evidence (`preemptive_retrieval_selected_evidence`
+was nonzero), but the contribution compiler marked the frames
+`stale_source_revision`, so zero preemptive claims reached the provider
+request. The one ordinary feature guidance delivery is not a substitute for
+the selected retrieval frame. The workflow therefore does not yet prove the
+intended hybrid-retrieval delivery contract.
 
 ## Next order
 
-1. Use the repaired merge code to produce the report on the next authorized
+1. Reproduce and repair the source-revision mismatch at the provider-free
+   delivery seam. The fix must preserve fail-closed stale evidence rejection,
+   and must prove selected frames appear in the first eligible request.
+2. Use the repaired merge code to produce the report on the next authorized
    run; do not rerun this paid task set merely for the reporting defect.
-2. Decide whether the DeepSWE smoke budget should enable the existing bounded
+3. Decide whether the DeepSWE smoke budget should enable the existing bounded
    compaction path; this must be a controlled policy change, not a silent
    retuning of GT after seeing outcomes.
-3. Run a matched GT-off ten-task arm with the same v1.1 Pier contract, model,
+4. Run a matched GT-off ten-task arm with the same v1.1 Pier contract, model,
    limits, and task list, then compare reward, uncensored resolution, tokens,
    calls, actions, and context failures.
-4. Keep the 113-task benchmark blocked until the matched outcome gate passes.
+5. Keep the 113-task benchmark blocked until the delivery proof and matched
+   outcome gate pass.
