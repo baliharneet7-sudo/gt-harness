@@ -253,7 +253,7 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p results/deepswe
-          harbor run -p deepswe-bench -i "$TASK" \
+          harbor run -p deepswe-bench/tasks -i "$TASK" \
             --agent-import-path eval.gt_central_agent:MiniSweCentralAgent \
             -m "$MODEL" -o results/deepswe \
             --job-name "deepswe-central-${GITHUB_RUN_ID}-${TASK}" \
