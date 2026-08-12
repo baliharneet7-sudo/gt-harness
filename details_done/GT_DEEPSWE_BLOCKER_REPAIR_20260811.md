@@ -89,6 +89,19 @@ producer/consumer/timing/accounting census gates, strict lifecycle tests,
 `artifacts/deepswe_provider_free_31554230078/` and
 `artifacts/deepswe_provider_free_31554230078.log`.
 
+After switching the task snapshot to the v1.1 catalog-compatible commit, the
+same source-built gate was rerun on final commit `3b9b1150e2fa798f7b08582702821145c956cc76`:
+
+```text
+workflow: 31554933728
+result:   success
+READY:    yes
+SMOKE_APPROVED: yes
+```
+
+The final log is retained at
+`artifacts/deepswe_provider_free_31554933728.log`.
+
 ## DeepSWE data captured locally
 
 Fetched with `curl.exe` from `https://deepswe.datacurve.ai/`:
