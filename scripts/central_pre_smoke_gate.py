@@ -9,6 +9,7 @@ provider or task-container cost.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -130,6 +131,23 @@ def run(label: str, *command: str) -> bool:
     completed = subprocess.run(command, cwd=ROOT, check=False)
     if completed.returncode:
         print(f"FAILED: {label} (exit {completed.returncode})")
+        # CI can truncate a large successful-test stream before the useful
+        # failure summary.  Re-run only the failing gate with captured output
+        # so the exact environment/collection error is replayable.
+        if label == "strict agent lifecycle tests":
+            diagnostic = subprocess.run(
+                (*command, "--maxfail=1", "--tb=short"),
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=dict(os.environ),
+            )
+            tail = ((diagnostic.stdout or "") + (diagnostic.stderr or ""))[-12000:]
+            if tail:
+                print("STRICT_TEST_DIAGNOSTIC_BEGIN")
+                print(tail)
+                print("STRICT_TEST_DIAGNOSTIC_END")
         return False
     print(f"PASSED: {label}")
     return True
