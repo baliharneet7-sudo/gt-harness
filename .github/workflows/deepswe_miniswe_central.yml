@@ -9,10 +9,10 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id passed to litellm (DeepSWE parity default)"
+        description: "DeepSeek V4 Flash model id passed to litellm"
         type: string
         required: true
-        default: "openrouter/xiaomi/mimo-v2.5-pro"
+        default: "deepseek-v4-flash"
       parallel:
         description: "Maximum concurrent DeepSWE tasks"
         type: string

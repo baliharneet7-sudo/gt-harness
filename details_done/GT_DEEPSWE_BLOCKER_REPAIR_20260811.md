@@ -3,9 +3,11 @@
 ## Scope
 
 This repair addresses only defects reproduced in the DeepSWE ten-task smoke
-(`31550154123`). It does not change the retrieval model, provider payload
-policy, or paid benchmark configuration other than making the existing index
-timeout explicit.
+(`31550154123`). That smoke used `openrouter/xiaomi/mimo-v2.5-pro`; it is not
+the intended DeepSeek V4 measurement. The active task workflow now defaults to
+the established bare `deepseek-v4-flash` model ID. It remains pinned to the
+DeepSWE `v1.0.0` task checkout; the public website's v1.1 artifacts are
+leaderboard/catalog metadata and are not used as task inputs.
 
 ## Reproduced defects and fixes
 

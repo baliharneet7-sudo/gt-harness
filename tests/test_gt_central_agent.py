@@ -142,6 +142,20 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     assert "--ak repository_initial_index_timeout_sec=60" in workflow
 
 
+def test_deepswe_workflow_uses_deepseek_v4_and_pins_v1_task_checkout():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "deepswe_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'default: "deepseek-v4-flash"' in workflow
+    assert workflow.count("ref: v1.0.0") == 2
+    assert "v1.1" not in workflow
+    assert "mimo-v2.5-pro" not in workflow
+
+
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
     defaulted = MiniSweCentralAgent(
         logs_dir=tmp_path / "defaulted",
