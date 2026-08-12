@@ -71,6 +71,20 @@ contain the registered `objective_c` parser. The provider-free workflow builds
 `vendor/gt-index-src` from source on its runner; this local binary mismatch is
 intentionally not hidden by changing the census gate.
 
+The source-built verification then passed on the repaired commit:
+
+```text
+workflow: 31554230078
+commit:   7bd17564d3c3832a7bb29275b7bde07e041c1475
+result:   success
+```
+
+Its log proves the parser-complete repository substrate, `READY`, all 17
+producer/consumer/timing/accounting census gates, strict lifecycle tests,
+`SMOKE_APPROVED`, and static checks. The receipt and log are retained at
+`artifacts/deepswe_provider_free_31554230078/` and
+`artifacts/deepswe_provider_free_31554230078.log`.
+
 ## DeepSWE data captured locally
 
 Fetched with `curl.exe` from `https://deepswe.datacurve.ai/`:
@@ -95,8 +109,6 @@ aggregated model/configuration rows, not a GT-on row for this smoke.
 
 ## Remaining gate
 
-No new paid smoke was launched by this repair. Before another paid run, build
-the source index binary, run `central_feature_census.py`,
-`central_readiness_audit.py`, and `central_pre_smoke_gate.py` with that binary,
-then retain their logs with the intended commit. Only after those gates pass
-should the repaired ten-task DeepSWE smoke be dispatched.
+No new paid smoke was launched by this repair. The source-built provider-free
+gate is now green; the remaining step is an explicitly authorized repaired
+ten-task DeepSWE smoke, followed by the existing receipt/outcome audit.
