@@ -838,6 +838,37 @@ class MiniSweCentralAgent(BaseAgent):
             return None
         return NetworkAllowlist()
 
+    def to_agent_info(self):
+        """Serialize agent identity using the active runner's model class.
+
+        Harbor and Pier intentionally expose equivalent but distinct Pydantic
+        ``AgentInfo`` classes.  A custom agent imported by Pier must return
+        Pier's class at this boundary; Harbor-only runs continue to use the
+        superclass implementation.
+        """
+
+        try:
+            from pier.models.trial.result import (
+                AgentInfo as PierAgentInfo,
+            )
+            from pier.models.trial.result import (
+                ModelInfo as PierModelInfo,
+            )
+        except ImportError:
+            return super().to_agent_info()
+
+        model_info = None
+        if getattr(self, "_parsed_model_name", None):
+            model_info = PierModelInfo(
+                name=self._parsed_model_name,
+                provider=getattr(self, "_parsed_model_provider", None),
+            )
+        return PierAgentInfo(
+            name=self.name(),
+            version=self.version() or "unknown",
+            model_info=model_info,
+        )
+
     async def setup(self, environment: BaseEnvironment) -> None:
         """No install by design: task images contain no private runtime artifact."""
 

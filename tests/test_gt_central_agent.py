@@ -196,6 +196,16 @@ def test_central_agent_exposes_pier_compatibility_hooks_without_agent_install():
     assert allowlist is None or getattr(allowlist, "domains", []) == []
 
 
+def test_central_agent_agent_info_uses_runner_model_boundary():
+    agent = MiniSweCentralAgent(logs_dir=Path("/tmp/gt-pier-agent-info"), model_name="test")
+    info = agent.to_agent_info()
+
+    assert info.name == agent.name()
+    assert info.version == agent.version()
+    assert info.model_info is not None
+    assert info.model_info.name == "test"
+
+
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
     defaulted = MiniSweCentralAgent(
         logs_dir=tmp_path / "defaulted",
