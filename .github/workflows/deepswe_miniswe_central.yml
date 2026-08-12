@@ -205,6 +205,12 @@ jobs:
       - name: Prove current provider-free runtime before task execution
         run: |
           set -euo pipefail
+          # GITHUB_ENV is available to later steps, but make the exact
+          # source-built binary explicit for every subprocess in this proof
+          # step.  The strict pytest child must not fall back to the stale
+          # wheel/cache binary.
+          export GT_INDEX_BINARY="$RUNNER_TEMP/gt-index"
+          test -x "$GT_INDEX_BINARY"
           python scripts/verify_gt_index_runtime.py
           python scripts/central_readiness_audit.py
           python scripts/central_pre_smoke_gate.py
