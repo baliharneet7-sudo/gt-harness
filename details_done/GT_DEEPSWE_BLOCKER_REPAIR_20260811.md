@@ -168,11 +168,26 @@ The contract is guarded by
 `test_deepswe_workflow_uses_pier_v11_verifier_protocol`, which rejects a direct
 Harbor invocation and requires the pinned Pier version and task selector.
 
+The exact-head provider-free certification was rerun after this workflow
+change:
+
+```text
+workflow: 31555714691
+commit:   9805b81bce28f73dfc96af554f13141589cbc9f1
+result:   success
+READY:    yes
+SMOKE_APPROVED: yes
+provider calls: 0
+```
+
+The downloaded log and receipt are retained at
+`artifacts/deepswe_provider_free_31555714691/` and
+`artifacts/deepswe_provider_free_31555714691/run.log`.
+
 ## Remaining gate
 
-The new runner contract has passed the focused workflow tests.  The source-
-built provider-free gate remains green for the pinned task snapshot; it must be
-rerun on the final workflow commit before any paid smoke, because the runner
-changed from direct Harbor to Pier.  Only after that exact gate passes should
-the authorized repaired ten-task DeepSWE smoke be dispatched, followed by the
-existing receipt/outcome audit.
+The new runner contract and the exact source-built provider-free gate are now
+green.  The authorized repaired ten-task DeepSWE smoke is now dispatchable from
+commit `9805b81`, using DeepSeek V4 Flash, the v1.1 main snapshot, and Pier's
+separate-verifier lifecycle.  Its result must still be treated as a diagnostic
+GT-on smoke until a matched baseline and receipt/outcome audit are complete.
