@@ -59,11 +59,11 @@ from gt_engine.uplift_policy import (
 
 _MANIFEST_COMMAND = (
     "set -o pipefail; LC_ALL=C find . -xdev "
-    "( -type d ( -name .git -o -name .hg -o -name .svn -o "
+    "\\( -type d \\( -name .git -o -name .hg -o -name .svn -o "
     "-name .gt -o -name .groundtruth -o -name node_modules -o "
     "-name .venv -o -name venv -o -name __pycache__ -o "
     "-name .tox -o -name .mypy_cache -o -name .ruff_cache -o "
-    "-name dist -o -name build -o -name target ) -prune ) -o -mindepth 1 "
+    "-name dist -o -name build -o -name target \\) -prune \\) -o -mindepth 1 "
     "-printf '%y\\t%s\\t%T@\\t%C@\\t%P\\t%l\\n' 2>/dev/null "
     "| LC_ALL=C sort | LC_ALL=C awk 'NR <= 50001'"
 )

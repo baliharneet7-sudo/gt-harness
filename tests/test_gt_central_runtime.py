@@ -121,6 +121,29 @@ def test_workspace_manifest_prunes_known_derived_trees_before_entry_bound():
         assert f"-name {directory}" in command
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX shell")
+def test_workspace_manifest_command_is_shell_parseable_and_prunes_derived_trees(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "ignored.txt").write_text("secret\n", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "ignored.js").write_text("ignored\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-lc", central_runtime._MANIFEST_COMMAND],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "src/app.py" in result.stdout
+    assert ".git/ignored.txt" not in result.stdout
+    assert "node_modules/ignored.js" not in result.stdout
+
+
 @pytest.mark.asyncio
 async def test_sensor_recovery_from_unhealthy_snapshot_rehashes_all_source():
     class Result:

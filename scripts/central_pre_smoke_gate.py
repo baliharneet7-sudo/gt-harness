@@ -47,6 +47,7 @@ RELEASE_TESTS = (
     "tests/test_gt_central_agent.py::test_action_conditioned_missing_evidence_returns_before_mutation_once",
     "tests/test_gt_central_agent.py::test_action_conditioned_decision_is_observation_only_in_shadow",
     "tests/test_gt_central_runtime.py::test_workspace_manifest_prunes_known_derived_trees_before_entry_bound",
+    "tests/test_gt_central_runtime.py::test_workspace_manifest_command_is_shell_parseable_and_prunes_derived_trees",
     "tests/test_gt_central_runtime.py::test_sensor_recovery_from_unhealthy_snapshot_rehashes_all_source",
     "tests/test_decision_sufficiency.py",
     "tests/test_central_release_gate.py",
