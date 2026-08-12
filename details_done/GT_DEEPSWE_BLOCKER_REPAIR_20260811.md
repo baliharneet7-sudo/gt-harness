@@ -202,6 +202,13 @@ are host-owned. The Harbor-only runtime remains import-compatible when Pier
 is absent. The focused hook test is green; the exact source-built gate must be
 rerun on this commit before another paid dispatch.
 
+The next dispatch, `31556650765`, passed both provider routing and the install/
+allowlist boundary, then exposed a final runner-model boundary: Pier rejected
+Harbor's `AgentInfo` instance during result construction. The central agent
+now serializes its identity with Pier's equivalent `AgentInfo`/`ModelInfo` when
+Pier is installed and retains Harbor's superclass type otherwise. That fix is
+covered by a focused test and the direct Pier import witness.
+
 ## Remaining gate
 
 The new runner contract and the exact source-built provider-free gate are now
