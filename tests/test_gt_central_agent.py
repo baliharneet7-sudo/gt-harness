@@ -188,6 +188,14 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'kwargs["api_base"] = base' in workflow
 
 
+def test_central_agent_exposes_pier_compatibility_hooks_without_agent_install():
+    agent = MiniSweCentralAgent(logs_dir=Path("/tmp/gt-pier-hooks"), model_name="test")
+
+    assert agent.install_spec() is None
+    allowlist = agent.network_allowlist()
+    assert allowlist is None or getattr(allowlist, "domains", []) == []
+
+
 def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
     defaulted = MiniSweCentralAgent(
         logs_dir=tmp_path / "defaulted",

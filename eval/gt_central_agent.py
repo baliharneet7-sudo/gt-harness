@@ -811,6 +811,33 @@ class MiniSweCentralAgent(BaseAgent):
     def version(self) -> str | None:
         return "host-central-v1"
 
+    def install_spec(self):
+        """Declare no in-container install for Harbor or Pier.
+
+        The central runtime is host-owned: the task environment receives only
+        literal commands and host-generated observations.  Pier 0.3.x asks
+        custom agents for this hook before creating the v1.1 agent environment;
+        returning ``None`` preserves the same no-install contract used by the
+        Harbor runner.
+        """
+
+        return None
+
+    def network_allowlist(self):
+        """Return Pier's empty agent allowlist when Pier is present.
+
+        Provider calls are made by this host-owned agent process, not from the
+        task container.  The optional import keeps the class usable with the
+        Harbor-only local/runtime test environment, where Pier is not a
+        dependency.
+        """
+
+        try:
+            from pier.models.agent.network import NetworkAllowlist
+        except ImportError:
+            return None
+        return NetworkAllowlist()
+
     async def setup(self, environment: BaseEnvironment) -> None:
         """No install by design: task images contain no private runtime artifact."""
 
