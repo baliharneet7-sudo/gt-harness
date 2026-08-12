@@ -1214,8 +1214,8 @@ class MiniSweCentralAgent(BaseAgent):
         if api_base:
             openrouter = "openrouter.ai" in api_base.lower()
             if openrouter:
-                if model == "deepseek-v4-flash":
-                    model = "deepseek/deepseek-v4-flash"
+                if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+                    model = "deepseek/deepseek-v4-flash-0731"
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
                 provider = (

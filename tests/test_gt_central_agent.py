@@ -227,7 +227,7 @@ def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
         / "deepswe_miniswe_central.yml"
     ).read_text(encoding="utf-8")
 
-    assert 'default: "deepseek-v4-flash"' in workflow
+    assert 'default: "deepseek-v4-flash-0731"' in workflow
     assert workflow.count("ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9") == 2
     assert "v1.0.0" not in workflow
     assert "v1.1 catalog-compatible" in workflow
@@ -274,10 +274,10 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
-        model_name="deepseek-v4-flash",
+        model_name="deepseek-v4-flash-0731",
     )._build_model()
 
-    assert model.config.model_name == "openai/deepseek/deepseek-v4-flash"
+    assert model.config.model_name == "openai/deepseek/deepseek-v4-flash-0731"
     assert model.config.model_kwargs["api_base"] == "https://openrouter.ai/api/v1"
     assert "api_key" not in model.config.model_kwargs
     assert model.config.model_kwargs["extra_body"] == {
@@ -305,7 +305,7 @@ def test_openrouter_model_builder_does_not_override_unset_data_policy(
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
-        model_name="deepseek-v4-flash",
+        model_name="deepseek-v4-flash-0731",
     )._build_model()
 
     assert "data_collection" not in model.config.model_kwargs["extra_body"]["provider"]
@@ -324,7 +324,7 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "GT_OPENROUTER_DATA_COLLECTION: allow" in workflow
     assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
     assert "GT_COMMIT: ${{ github.sha }}" not in workflow
-    assert 'm = "deepseek/deepseek-v4-flash"' in workflow
+    assert 'm = "deepseek/deepseek-v4-flash-0731"' in workflow
     assert '"only": ["deepseek"]' in workflow
     assert '"allow_fallbacks": False' in workflow
     assert '"data_collection": "allow"' in workflow

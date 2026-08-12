@@ -16,7 +16,7 @@ on:
         description: "DeepSeek V4 Flash model id passed to litellm"
         type: string
         required: true
-        default: "deepseek-v4-flash"
+        default: "deepseek-v4-flash-0731"
       parallel:
         description: "Maximum concurrent DeepSWE tasks"
         type: string
@@ -244,8 +244,8 @@ jobs:
               raise SystemExit("baseline task order/set does not match treatment plan")
           manifest = payload.get("manifest") or {}
           expected_model = os.environ["MODEL"]
-          if expected_model == "deepseek-v4-flash":
-              expected_model = "deepseek/deepseek-v4-flash"
+          if expected_model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+              expected_model = "deepseek/deepseek-v4-flash-0731"
           required = {
               "benchmark_sha": os.environ["BENCH_SHA"],
               "model": expected_model,
@@ -412,8 +412,8 @@ jobs:
           base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
           kwargs = {"temperature": 1.0, "max_tokens": 8, "num_retries": 0}
           if os.environ.get("PROVIDER") == "openrouter":
-              if m == "deepseek-v4-flash":
-                  m = "deepseek/deepseek-v4-flash"
+              if m in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+                  m = "deepseek/deepseek-v4-flash-0731"
               if not m.startswith("openai/"):
                   m = f"openai/{m}"
               kwargs["api_key"] = os.environ["OPENROUTER_API_KEY"]
@@ -639,12 +639,12 @@ jobs:
               )
               provider_route_valid = bool(
                   provider_proof.get("requested_model")
-                  == "openai/deepseek/deepseek-v4-flash"
+                  == "openai/deepseek/deepseek-v4-flash-0731"
                   and provider_proof.get("requested_provider") == "deepseek"
                   and provider_proof.get("allow_fallbacks") is False
                   and provider_proof.get("require_parameters") is True
                   and (receipt.get("provider_route") or {}).get("model")
-                  == "openai/deepseek/deepseek-v4-flash"
+                  == "openai/deepseek/deepseek-v4-flash-0731"
                   and (receipt.get("provider_route") or {}).get("api_base")
                   == "https://openrouter.ai/api/v1"
                   and ((receipt.get("provider_route") or {}).get("provider_policy") or {}).get("only")
@@ -695,8 +695,8 @@ jobs:
               else "configured"
           )
           model_identity = os.environ.get("MODEL") or ""
-          if provider_identity.startswith("openrouter") and model_identity == "deepseek-v4-flash":
-              model_identity = "deepseek/deepseek-v4-flash"
+          if provider_identity.startswith("openrouter") and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+              model_identity = "deepseek/deepseek-v4-flash-0731"
           out = {"schema": "gt.deepswe.central.evaluation.v1.1",
                  "manifest": {"benchmark_sha": os.environ.get("BENCH_SHA"),
                               "gt_commit": os.environ.get("GT_SHA"),

@@ -2,7 +2,7 @@ from scripts.deepswe_release_gate import assess_deepswe_release
 
 IDENTITY = {
     "benchmark_sha": "b" * 40,
-    "model": "deepseek/deepseek-v4-flash",
+    "model": "deepseek/deepseek-v4-flash-0731",
     "provider": "openrouter:deepseek:only:no-fallback",
     "temperature": 1.0,
     "step_limit": 300,
