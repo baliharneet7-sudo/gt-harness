@@ -247,10 +247,12 @@ jobs:
                   out.write(f"{name}={clean}\n")
           PY
           if [ "${PROVIDER:-configured}" = "openrouter" ]; then
-            # Force the model process onto LiteLLM's native OpenRouter route;
-            # otherwise the repository's configured OpenAI-compatible gateway
-            # wins even when an OpenRouter secret is present.
-            echo "OPENAI_BASE_URL=" >> "$GITHUB_ENV"
+            # Force Mini-SWE's actual model builder onto OpenRouter.  Merely
+            # supplying OPENROUTER_API_KEY is insufficient: a model string
+            # containing `deepseek/` otherwise selects LiteLLM's native
+            # DeepSeek provider and bypasses OpenRouter.
+            echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
+            echo "OPENAI_API_KEY=${OPENROUTER_API_KEY}" >> "$GITHUB_ENV"
           fi
       - name: Resolve exact DeepSWE task budget
         run: |
@@ -270,9 +272,10 @@ jobs:
           base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
           kwargs = {"temperature": 1.0, "max_tokens": 8, "num_retries": 0}
           if os.environ.get("PROVIDER") == "openrouter":
-              if not m.startswith("openrouter/"):
-                  m = f"openrouter/{m}"
+              if not m.startswith("openai/"):
+                  m = f"openai/{m}"
               kwargs["api_key"] = os.environ["OPENROUTER_API_KEY"]
+              kwargs["api_base"] = base or "https://openrouter.ai/api/v1"
           elif base:
               # Mirror MiniSweCentralAgent._build_model: the gateway receives
               # the bare DeepSeek model id through an OpenAI provider route.
