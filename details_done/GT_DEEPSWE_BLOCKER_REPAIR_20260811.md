@@ -5,9 +5,11 @@
 This repair addresses only defects reproduced in the DeepSWE ten-task smoke
 (`31550154123`). That smoke used `openrouter/xiaomi/mimo-v2.5-pro`; it is not
 the intended DeepSeek V4 measurement. The active task workflow now defaults to
-the established bare `deepseek-v4-flash` model ID. It remains pinned to the
-DeepSWE `v1.0.0` task checkout; the public website's v1.1 artifacts are
-leaderboard/catalog metadata and are not used as task inputs.
+the established bare `deepseek-v4-flash` model ID. The upstream repository
+does not publish a `v1.1` tag, so the workflow uses immutable main commit
+`435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`, whose 113 task IDs match the
+published v1.1 catalog. The public website's v1.1 artifacts are therefore
+represented by a reproducible task snapshot, not by a fabricated tag.
 
 ## Reproduced defects and fixes
 
@@ -111,11 +113,10 @@ reference row is `mini-swe-agent`, max effort, 241/452 passed attempts,
 pass@1 `0.5331858407`, pass@4 `0.8053097345`, across 113 tasks and four runs.
 That is an external aggregate reference, not a GT-on row for this smoke.
 
-The repository-wide workflow audit found no `v1.1` DeepSWE task reference.
-The only active DeepSWE workflow is pinned to `v1.0.0` in both checkout steps
-and verifies commit `c33fa70e68d11d85f9e58abcd5d78643705e916e`. Unrelated
-Terminal-Bench release comments mentioning `v1.1.0` are not DeepSWE task
-inputs and were not changed.
+The active DeepSWE workflow is pinned to that immutable snapshot in both
+checkout steps, verifies the commit, and requires exactly 113 task manifests.
+Unrelated Terminal-Bench release comments mentioning `v1.1.0` are not
+DeepSWE task inputs and were not changed.
 
 ## Remaining gate
 

@@ -1,4 +1,7 @@
-# DeepSWE v1.0.0 ten-task diagnostic smoke for the current host-owned central runtime.
+# DeepSWE v1.1 catalog-compatible ten-task diagnostic smoke for the current
+# host-owned central runtime.  The upstream repository has no v1.1 tag; this
+# workflow pins the immutable main snapshot whose 113 task IDs match the
+# published v1.1 catalog.
 # This workflow intentionally does not reuse the retired Pier/artifact_deepswe agent.
 # It clones the pinned DeepSWE task set, runs Harbor 0.20 with
 # eval.gt_central_agent:MiniSweCentralAgent, and preserves the central receipt and
@@ -19,7 +22,7 @@ on:
         required: true
         default: "10"
       task_ids:
-        description: "Optional comma-separated DeepSWE v1.0.0 task IDs; empty selects two per language"
+        description: "Optional comma-separated DeepSWE v1.1 catalog task IDs; empty selects two per language"
         type: string
         required: false
         default: ""
@@ -74,16 +77,19 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: datacurve-ai/deep-swe
-          ref: v1.0.0
+          ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
           path: deepswe-bench
-      - name: Prove DeepSWE v1.0.0 provenance
+      - name: Prove DeepSWE v1.1 catalog-compatible provenance
         id: bench
         working-directory: deepswe-bench
         run: |
           set -euo pipefail
           sha=$(git rev-parse HEAD)
-          test "$sha" = "c33fa70e68d11d85f9e58abcd5d78643705e916e" || {
-            echo "::error::unexpected DeepSWE v1.0.0 checkout: $sha"; exit 1;
+          test "$sha" = "435ee89ec2f2e2289f33b0da4f992f0b7b7266b9" || {
+            echo "::error::unexpected DeepSWE v1.1 catalog snapshot: $sha"; exit 1;
+          }
+          test "$(find tasks -mindepth 2 -maxdepth 2 -name task.toml | wc -l)" -eq 113 || {
+            echo "::error::DeepSWE v1.1 catalog snapshot must contain 113 tasks"; exit 1;
           }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Select ten balanced DeepSWE tasks
@@ -152,7 +158,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: datacurve-ai/deep-swe
-          ref: v1.0.0
+          ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
           path: deepswe-bench
       - uses: actions/setup-python@v5
         with:
@@ -360,7 +366,7 @@ jobs:
                            "total_tokens": metrics.get("total_tokens"),
                            "total_gt_context_chars": metrics.get("total_gt_context_chars_added"),
                            "wall_time_sec": metrics.get("wall_time_sec")})
-          out = {"schema": "gt.deepswe.central.smoke.v1", "tasks": expected, "rows": rows, "missing": missing,
+          out = {"schema": "gt.deepswe.central.smoke.v1.1", "tasks": expected, "rows": rows, "missing": missing,
                  "solved": sum(r["solved"] for r in rows), "planned": len(expected)}
           Path("DEEPSWE_SMOKE_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
           md = ["# DeepSWE central ten-task smoke", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens |", "|---|---:|---:|---|---:|---:|---:|---:|---:|"]

@@ -142,7 +142,7 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     assert "--ak repository_initial_index_timeout_sec=60" in workflow
 
 
-def test_deepswe_workflow_uses_deepseek_v4_and_pins_v1_task_checkout():
+def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
@@ -151,8 +151,9 @@ def test_deepswe_workflow_uses_deepseek_v4_and_pins_v1_task_checkout():
     ).read_text(encoding="utf-8")
 
     assert 'default: "deepseek-v4-flash"' in workflow
-    assert workflow.count("ref: v1.0.0") == 2
-    assert "v1.1" not in workflow
+    assert workflow.count("ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9") == 2
+    assert "v1.0.0" not in workflow
+    assert "v1.1 catalog-compatible" in workflow
     assert "mimo-v2.5-pro" not in workflow
 
 
