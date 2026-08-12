@@ -252,10 +252,12 @@ gains. A provider-free pass alone is not success.
 
 ## 24. Exact next engineering step
 
-Run the complete source-built Linux provider-free workflow at the exact commit. It must
-build the current indexer, provision the pinned Snowflake ONNX backend, run the new
-persistent-state kernel/integration/release tests, and print `READY` and
-`SMOKE_APPROVED`. Only after that proof should a paid matched diagnostic be authorized.
+The complete source-built Linux provider-free workflow passed at implementation commit
+`003a5b7` (run `31646939206`). It built the current indexer, provisioned the pinned
+Snowflake ONNX backend, ran the persistent-state kernel/integration/release tests,
+printed `READY` and `SMOKE_APPROVED`, and uploaded a receipt with `provider_calls: 0`.
+The exact next engineering step is a separately authorized frozen matched diagnostic;
+no paid run is implied by the provider-free proof.
 
 ```text
 RECOMMENDATION:

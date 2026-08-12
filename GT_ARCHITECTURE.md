@@ -42,6 +42,11 @@ updates reuse the central immutable `ValidationClassification`, including the
 canonical declared-check ID, so shell wrappers do not strand a satisfied task
 check and raw return codes are never reinterpreted as validation authority.
 
+Provider-free workflow `31646939206` passed the implementation at `003a5b7` with
+the source-built current indexer, pinned Snowflake ONNX backend, central tests,
+`READY`, `SMOKE_APPROVED`, and a receipt recording zero provider calls. This is
+runtime-integrity evidence, not a solve-rate or efficiency result.
+
 GroundTruth is an in-process deterministic evidence and control layer owned by
 `eval.gt_central_agent.MiniSweCentralAgent`. It is not an MCP sidecar and the
 model does not invoke it.

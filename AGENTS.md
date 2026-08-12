@@ -63,6 +63,13 @@ state, or a disabled applicable treatment. Provider-free proof establishes only
 integration integrity. No solve-rate or efficiency benefit may be claimed until
 a frozen matched evaluation counts the bootstrap overhead.
 
+Provider-free workflow `31646939206` passed the implementation at `003a5b7`:
+current-source indexer build, pinned Snowflake ONNX asset, full central tests,
+`READY`, `SMOKE_APPROVED`, all mandatory 17-feature census lines, and an uploaded
+receipt with `provider_calls: 0`. This proves implementation integrity only. It
+does not prove that persistent state improves solves or efficiency, and it does
+not authorize a paid run.
+
 
 ## What counts as GT working
 

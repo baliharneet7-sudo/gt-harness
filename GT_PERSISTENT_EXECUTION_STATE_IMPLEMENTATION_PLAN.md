@@ -29,8 +29,10 @@ every normal executor request. All extra calls and context must be visible in me
 - [x] Reused the shared validator's canonical declared-check ID; no state-side command reparsing.
 - [x] Proved reads cannot satisfy creation obligations and unattributed exits cannot manufacture validation failure.
 - [x] Passed focused lint, bytecode, and local runtime tests.
-- [ ] Pass the authoritative Linux source-built provider-free workflow at the exact pushed commit.
-- [ ] Inspect its receipt for one bootstrap, zero bootstrap actions, every-boundary state use, and every-call exact delivery.
+- [x] Passed the authoritative Linux source-built provider-free workflow at implementation commit `003a5b7` (run `31646939206`).
+- [x] Verified `READY`, `SMOKE_APPROVED`, every required all-17 census line, current-source graph coverage, the real pinned ONNX asset, and the uploaded `provider_calls: 0` receipt.
+- [ ] Run the same provider-free workflow on the final documentation commit so exact-SHA certification remains current.
+- [ ] Inspect a live receipt for one bootstrap, zero bootstrap actions, every-boundary state use, and every-call exact delivery.
 - [ ] Obtain separate approval for one paid matched diagnostic.
 - [ ] Freeze or kill the mechanism based on causal outcome and efficiency evidence.
 
@@ -131,6 +133,8 @@ mechanism with `enable_persistent_execution_state=false` or `integration_mode=of
 The local implementation and all non-stale-binary workflow tests are green. Local
 `central_readiness_audit.py` and `central_pre_smoke_gate.py` correctly fail closed
 because the checked-in Windows `gt-index.exe` lacks Objective-C; no gate was weakened.
-The authoritative source-built Linux gate and any paid causal evaluation remain
-undone. Therefore the correct current status is
-`IMPLEMENTED, AWAITING SOURCE-BUILT CERTIFICATION, NOT BENCHMARK-PROVEN`.
+The source-built Linux gate passed at implementation commit `003a5b7` in workflow
+`31646939206`: the current indexer, pinned Snowflake ONNX asset, central tests,
+`READY`, `SMOKE_APPROVED`, and the zero-provider-call receipt all passed. A live
+receipt and any paid causal evaluation remain undone. Therefore the correct current
+status is `IMPLEMENTED AND PROVIDER-FREE CERTIFIED, NOT BENCHMARK-PROVEN`.
