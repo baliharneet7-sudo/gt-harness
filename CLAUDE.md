@@ -1007,3 +1007,34 @@ deadline, and final receipts use the atomic repository-session result.
 provider delivery, preflight accounting, and decision receipts. GitHub proof
 must build the current Go indexer; a stale local Windows binary is not
 authoritative.
+
+## Final promotion repair contract (2026-08-12)
+
+GroundTruth now keeps three identities separate: broad ranked candidates,
+semantic content claims, and action-bound decision claims. Semantic identity is
+path/span/symbol/relation/text only; GraphDB row IDs and channel/revision
+metadata cannot cause redelivery. Decision identity additionally binds the
+operation, target, and support type.
+
+Certified structural text must come from the exact GraphDB edge endpoint.
+`StructuralLink` retains endpoint symbol/line metadata, the channel keeps every
+span in a file, and unresolved endpoints remain rank-only. Fusion preserves
+per-channel representatives so support cannot certify another channel's span.
+Import and co-change relations cannot authorize a model return.
+
+Retrieval performs a budget precheck before repository or embedding work. A
+positive partial character budget is enforced while complete spans are packed,
+so selection cannot precede a host-side budget discard. It caches identical
+state/revision/visibility queries in a bounded session cache,
+and reserves up to 3,000 of 12,000 task characters for post-mutation,
+diagnostic, and validation opportunities. Each provider boundary is accounted
+by opportunity, candidates, selection, delivery, visibility, abstention reason,
+cache status, and latency. This is implementation accounting, not causal proof.
+
+DeepSWE treatment must enable context compaction, completion control, progress
+control, and adaptive validation timeout. The release gate rejects disabled
+controls, work after budget closure, missing opportunity accounting, duplicate
+content claims, and non-material/non-endpoint-aligned decision evidence.
+Preflight remains SHADOW until a separately authorized outcome smoke. Local
+Windows native-index results are not authoritative while the checked-in binary
+lacks Objective-C; the pushed Linux build remains the substrate authority.

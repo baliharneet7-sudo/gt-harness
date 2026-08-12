@@ -1,4 +1,4 @@
-# DeepSWE v1.1 catalog-compatible ten-task diagnostic smoke for the current
+# DeepSWE v1.1 catalog-compatible bounded evaluation for the current
 # host-owned central runtime.  The upstream repository has no v1.1 tag; this
 # workflow pins the immutable main snapshot whose 113 task IDs match the
 # published v1.1 catalog.
@@ -7,7 +7,7 @@
 # runs verifier.collect hooks (including the commit-to-patch collector), and
 # grades the pristine verifier checkout.  Mini-SWE still runs through the
 # host-owned eval.gt_central_agent:MiniSweCentralAgent import.
-name: DeepSWE Mini-SWE central ten-task smoke
+name: DeepSWE Mini-SWE central evaluation
 
 on:
   workflow_dispatch:
@@ -27,6 +27,11 @@ on:
         type: string
         required: false
         default: ""
+      task_count:
+        description: "Expected task count (10 diagnostic; 20 promotion cohort; up to 113)"
+        type: string
+        required: true
+        default: "10"
       step_limit:
         description: "Mini-SWE model-call limit per task (DeepSWE parity is 300)"
         type: string
@@ -75,6 +80,7 @@ jobs:
       bench_sha: ${{ steps.bench.outputs.sha }}
     env:
       TASK_IDS: ${{ inputs.task_ids }}
+      TASK_COUNT: ${{ inputs.task_count }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,7 +104,7 @@ jobs:
             echo "::error::DeepSWE v1.1 catalog snapshot must contain 113 tasks"; exit 1;
           }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-      - name: Select ten balanced DeepSWE tasks
+      - name: Select balanced DeepSWE tasks
         id: select
         run: |
           set -euo pipefail
@@ -107,6 +113,9 @@ jobs:
           from pathlib import Path
 
           root = Path("deepswe-bench/tasks")
+          target = int(os.environ["TASK_COUNT"])
+          if not 1 <= target <= 113:
+              raise SystemExit(f"TASK_COUNT must be between 1 and 113, got {target}")
           explicit = [x.strip() for x in os.environ.get("TASK_IDS", "").split(",") if x.strip()]
           rows = []
           for p in sorted(root.iterdir()):
@@ -119,8 +128,10 @@ jobs:
           names = {name for name, _ in rows}
           if explicit:
               missing = sorted(set(explicit) - names)
-              if missing or len(explicit) != 10:
-                  raise SystemExit(f"explicit DeepSWE smoke requires exactly 10 valid IDs; missing={missing}")
+              if missing or len(explicit) != target:
+                  raise SystemExit(
+                      f"explicit DeepSWE cohort requires exactly {target} valid IDs; missing={missing}"
+                  )
               selected = explicit
           else:
               by_lang = {}
@@ -129,8 +140,16 @@ jobs:
               langs = [lang for lang in ("go", "python", "typescript", "javascript", "rust") if lang in by_lang]
               if len(langs) != 5:
                   raise SystemExit(f"expected five DeepSWE language families, got {sorted(by_lang)}")
-              selected = [name for lang in langs for name in by_lang[lang][:2]]
-              if len(selected) != 10:
+              selected = []
+              for index in range(max(len(by_lang[lang]) for lang in langs)):
+                  for lang in langs:
+                      if index < len(by_lang[lang]):
+                          selected.append(by_lang[lang][index])
+                          if len(selected) == target:
+                              break
+                  if len(selected) == target:
+                      break
+              if len(selected) != target:
                   raise SystemExit(f"balanced selection produced {len(selected)} tasks")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write("tasks=" + json.dumps(selected, separators=(",", ":")) + "\n")
@@ -309,10 +328,10 @@ jobs:
             --ak enable_preemptive_retrieval=true \
             --ak enable_decision_sufficiency=true \
             --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
-            --ak enable_context_compaction=false \
-            --ak enable_completion_controller=false \
-            --ak enable_progress_control=false \
-            --ak enable_adaptive_validation_timeout=false \
+            --ak enable_context_compaction=true \
+            --ak enable_completion_controller=true \
+            --ak enable_progress_control=true \
+            --ak enable_adaptive_validation_timeout=true \
             --ak enable_replay_capture=false \
             --ak enable_task_start_advisory=false \
             --ak step_limit="$STEP_LIMIT" \

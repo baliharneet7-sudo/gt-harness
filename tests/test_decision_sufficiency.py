@@ -177,6 +177,21 @@ def test_certified_exact_target_absent_from_request_is_return_eligible() -> None
     assert result.bundle.selecting_request_hash == "request-1"
     assert result.bundle.claims[0].support_kind == "mechanical_exact"
     assert result.bundle.claims[0].claim_id == _candidate().claim_hash
+    assert result.bundle.claims[0].decision_claim_id
+    assert result.bundle.claims[0].decision_claim_id != result.bundle.claims[0].claim_id
+
+
+def test_decision_claim_identity_changes_with_operation_not_repository_content() -> None:
+    edit = _compile(_proposal(ActionOperation.EDIT))
+    delete = _compile(_proposal(ActionOperation.DELETE))
+
+    assert edit.bundle is not None
+    assert delete.bundle is not None
+    assert edit.bundle.claims[0].claim_id == delete.bundle.claims[0].claim_id
+    assert (
+        edit.bundle.claims[0].decision_claim_id
+        != delete.bundle.claims[0].decision_claim_id
+    )
 
 
 def test_claim_already_visible_in_selecting_request_passes() -> None:
@@ -262,6 +277,8 @@ def test_certified_structural_claim_requires_explicit_action_target_anchor() -> 
         "graph_edge:7",
         "trust:CERTIFIED",
         "structural_certified",
+        "edge_endpoint_symbol:caller",
+        "edge_endpoint_start:4",
         "delivery_support:certified",
         "support_channel:structural",
         "action_target:src/app.py",
@@ -279,10 +296,67 @@ def test_certified_structural_claim_requires_explicit_action_target_anchor() -> 
     assert result.bundle.claims[0].support_kind == "certified_structural"
 
 
+def test_structural_claim_without_edge_aligned_span_cannot_authorize_return() -> None:
+    candidate = _candidate(
+        path="src/caller.py",
+        relation="CALLS",
+        provenance=(
+            "graph_edge:7",
+            "trust:CERTIFIED",
+            "structural_certified",
+            "delivery_support:certified",
+            "support_channel:structural",
+            "action_target:src/app.py",
+        ),
+    )
+
+    result = _compile(retrieval=_retrieval((candidate,)))
+
+    assert result.disposition is DecisionSufficiencyDisposition.PASS
+    assert "structural_span_not_edge_aligned" in result.reason_codes
+
+
+def test_generic_import_neighbor_cannot_authorize_model_return() -> None:
+    """A real import edge is repository evidence, not decision sufficiency.
+
+    This is the live awilix failure class: an edit target was imported by a
+    test file, but the selected test span covered an unrelated behavior.  It
+    may remain rankable/deliverable; it cannot stop the selected edit.
+    """
+
+    candidate = _candidate(
+        path="src/__tests__/container.test.ts",
+        relation="inverse:IMPORTS",
+        provenance=(
+            "graph_edge:91",
+            "trust:CERTIFIED",
+            "structural_certified",
+            "delivery_support:certified",
+            "support_channel:structural",
+            "action_target:src/errors.ts",
+        ),
+        text="it('supports Symbol.toStringTag', () => expect(container).toBeDefined())",
+    )
+    proposal = _proposal(targets=("src/errors.ts",))
+
+    result = _compile(proposal, _retrieval((candidate,)))
+
+    assert result.disposition is DecisionSufficiencyDisposition.PASS
+    assert "no_decision_relevant_evidence" in result.reason_codes
+
+
 def test_real_structural_channel_emits_action_target_and_becomes_return_eligible() -> None:
     documents = (
-        RepositoryDocument("src/app.py", "def update_contract(): pass"),
-        RepositoryDocument("src/caller.py", "def caller(): update_contract()"),
+        RepositoryDocument(
+            "src/app.py",
+            "def update_contract(): pass",
+            symbol="update_contract",
+        ),
+        RepositoryDocument(
+            "src/caller.py",
+            "def caller(): update_contract()",
+            symbol="caller",
+        ),
     )
     retrieval = HybridRetriever(
         documents,
@@ -294,6 +368,10 @@ def test_real_structural_channel_emits_action_target_and_becomes_return_eligible
                 confidence=0.99,
                 provenance=("graph_edge:7", "trust:CERTIFIED"),
                 certified=True,
+                source_symbol="update_contract",
+                source_start_line=1,
+                target_symbol="caller",
+                target_start_line=1,
             ),
         ),
     ).retrieve(
@@ -384,9 +462,10 @@ def test_real_structural_cochange_cannot_certify_even_if_link_is_marked_certifie
 
     result = _compile(retrieval=retrieval)
 
-    assert retrieval.selected_context
+    assert retrieval.ranked_files
+    assert retrieval.selected_context == ()
     assert result.disposition is DecisionSufficiencyDisposition.PASS
-    assert "no_certified_mechanical_evidence" in result.reason_codes
+    assert "retrieval_evidence_incomplete" in result.reason_codes
 
 
 def test_structural_claim_without_exact_target_anchor_passes() -> None:

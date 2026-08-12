@@ -1314,3 +1314,39 @@ dense readiness, exact delivery timing and request hashes, preflight accounting,
 and every decision receipt. Provider-free GitHub certification must build the
 current Go indexer; a stale local Windows binary never justifies weakening the
 gate.
+
+## Final promotion repair contract (2026-08-12)
+
+Do not equate a ranked repository candidate, a provider-deliverable content
+claim, and a decision-authorizing claim. A content claim is identified only by
+path/span/symbol/relation/text; graph row IDs, channel support, and unrelated
+source revisions cannot make it new. A decision claim is separately bound to
+the proposed operation and exact target.
+
+Structural payloads must be edge-endpoint aligned. GraphDB source/target
+symbols and lines survive into `StructuralLink`; unresolved file-level
+neighbors may rank but cannot certify delivery or `RETURN_ELIGIBLE`. RRF must
+deliver the representative that owns the certificate; it may never borrow an
+exact or structural certificate to expose another channel's unrelated span.
+Generic `IMPORTS` and co-change evidence cannot authorize action return.
+
+Live retrieval is budget-first. A closed budget executes zero channels. A
+positive partial character budget is enforced while complete evidence spans
+are packed, so the host never marks an over-budget frame selected and then
+discards it.
+Identical query/source/visibility/budget state reuses the bounded runtime cache.
+The task budget reserves up to 3,000 characters for post-mutation, diagnostic,
+and validation opportunities. Every provider boundary records a typed
+opportunity plus candidate, selected, delivered, visible, abstention, cache,
+latency, and reason accounting. Delivery count alone is neither engine work nor
+causal help.
+
+DeepSWE treatment requires all four fail-open outcome controls: provider-budget
+compaction, completion control, semantic progress control, and adaptive
+validation timeout. `scripts/central_release_gate.py` fails closed when any is
+disabled, when retrieval runs after budget closure, when opportunity accounting
+is absent, or when decision evidence lacks semantic/endpoint identity. The
+workflow remains `SHADOW` for pre-action return until a separately authorized
+matched smoke passes. The local Windows `gt-index.exe` remains non-authoritative
+when it lacks `objective_c`; only the Linux build gate may certify the native
+substrate.

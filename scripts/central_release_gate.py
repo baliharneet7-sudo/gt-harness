@@ -248,6 +248,28 @@ def _decision_sufficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         )
         if any(str(claim.get("claim_id") or "") in visible_ids for claim in claims):
             failures.append(f"{label}:decision_repeated_visible_claim:{index}")
+        for claim in claims:
+            if not str(claim.get("claim_id") or "") or not str(
+                claim.get("decision_claim_id") or ""
+            ):
+                failures.append(f"{label}:decision_claim_identity_missing:{index}")
+            support_kind = str(claim.get("support_kind") or "")
+            if support_kind != "certified_structural":
+                continue
+            relation = str(claim.get("relation") or "").strip().lower()
+            if relation not in {
+                "calls",
+                "inverse:calls",
+                "asserted_by",
+                "inverse:asserted_by",
+            }:
+                failures.append(f"{label}:decision_relation_not_material:{index}")
+            provenance = tuple(str(item).lower() for item in claim.get("provenance") or ())
+            if not any(
+                item.startswith(("edge_endpoint_symbol:", "edge_endpoint_start:"))
+                for item in provenance
+            ):
+                failures.append(f"{label}:decision_span_not_edge_aligned:{index}")
     return ReleaseGateCheck(
         "decision_sufficiency",
         not failures,
@@ -268,6 +290,73 @@ def _delivery(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     )
 
 
+def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Require the four fail-open controls used by the frozen treatment."""
+
+    configuration = receipt.get("component_configuration") or {}
+    required = (
+        "context_compaction",
+        "completion_controller",
+        "progress_control",
+        "adaptive_validation_timeout",
+    )
+    failures = tuple(
+        f"{label}:{name}_disabled"
+        for name in required
+        if configuration.get(name) is not True
+    )
+    return ReleaseGateCheck(
+        "outcome_preservation_controls",
+        not failures,
+        failures,
+        {
+            "task": label,
+            "configuration": {name: configuration.get(name) for name in required},
+        },
+    )
+
+
+def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    runtime = receipt.get("preemptive_retrieval") or {}
+    if runtime.get("enabled") is False:
+        return ReleaseGateCheck(
+            "retrieval_efficiency",
+            True,
+            (),
+            {"task": label, "enabled": False},
+        )
+    decisions = runtime.get("decisions") or []
+    failures: list[str] = []
+    for index, row in enumerate(decisions, start=1):
+        if not str(row.get("opportunity_kind") or ""):
+            failures.append(f"{label}:retrieval_opportunity_missing:{index}")
+        reasons = set(row.get("reason_codes") or ())
+        channels = row.get("channel_receipts") or []
+        if reasons & {
+            "task_character_budget",
+            "task_character_budget_closed_precheck",
+            "opportunity_budget_reserved_precheck",
+        } and channels:
+            failures.append(f"{label}:retrieval_work_after_budget_closed:{index}")
+        if row.get("cache_hit") is True and any(
+            float(channel.get("latency_ms") or 0.0) > 0.0 for channel in channels
+        ):
+            failures.append(f"{label}:retrieval_cache_hit_has_channel_latency:{index}")
+    accounting = runtime.get("opportunity_accounting") or {}
+    if decisions and (
+        accounting.get("schema") != "gt.retrieval_opportunity_accounting.v1"
+        or int(accounting.get("opportunities") or -1) != len(decisions)
+    ):
+        failures.append(f"{label}:retrieval_opportunity_accounting_invalid")
+    metrics = receipt.get("metrics") or {}
+    if int(metrics.get("preemptive_retrieval_duplicate_claims") or 0) > 0:
+        failures.append(f"{label}:preemptive_duplicate_claims")
+    return ReleaseGateCheck(
+        "retrieval_efficiency",
+        not failures,
+        tuple(failures),
+        {"task": label, "decisions": len(decisions)},
+    )
 def _baseline_shield(receipts: Iterable[dict[str, Any]]) -> ReleaseGateCheck:
     failures: list[str] = []
     count = 0
@@ -311,6 +400,8 @@ def audit_treatment_runtime(
         _delivery(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
+        _outcome_preservation(receipt, label),
+        _retrieval_efficiency(receipt, label),
     )
 
 

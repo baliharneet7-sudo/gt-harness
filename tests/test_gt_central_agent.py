@@ -188,6 +188,13 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     assert workflow.count("--ak enable_decision_sufficiency=true") == 1
     assert "audit_treatment_runtime" in workflow
     assert "GT treatment release gate failed" in workflow
+    assert "--ak enable_context_compaction=true" in workflow
+    assert "--ak enable_completion_controller=true" in workflow
+    assert "--ak enable_progress_control=true" in workflow
+    assert "--ak enable_adaptive_validation_timeout=true" in workflow
+    assert 'TASK_COUNT: ${{ inputs.task_count }}' in workflow
+    assert "target = int(os.environ[\"TASK_COUNT\"])" in workflow
+    assert "len(explicit) != target" in workflow
 
 
 def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
@@ -870,6 +877,153 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
         assert dense["backend_identity"].startswith(
             "snowflake_onnx:Snowflake/snowflake-arctic-embed-m@sha256:"
         )
+
+
+@pytest.mark.asyncio
+async def test_closed_preemptive_task_budget_skips_retrieval_before_channels(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text("def greet(): return 'hello'\n")
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+        preemptive_retrieval_task_budget_chars=0,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Change src/greeter.py.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decision = receipt["preemptive_retrieval"]["decisions"][0]
+    assert decision["status"] == "abstained"
+    assert decision["reason_codes"] == ["task_character_budget_closed_precheck"]
+    assert decision["channel_receipts"] == []
+    assert receipt["metrics"]["preemptive_retrieval_budget_closed_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_character_budget_never_selects_then_discards_a_frame(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+        preemptive_retrieval_task_budget_chars=16,
+        preemptive_retrieval_priority_reserve_chars=0,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Change src/greeter.py greet.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decision = receipt["preemptive_retrieval"]["decisions"][0]
+    assert decision["channel_receipts"]
+    assert decision["selected_evidence"] == []
+    assert decision["selected_character_count"] == 0
+    assert decision["remaining_budget_chars"] == 16
+    assert "context_character_budget" in decision["reason_codes"]
+    assert "task_character_budget" not in decision["reason_codes"]
+    assert receipt["preemptive_retrieval"]["deliveries"] == []
+
+
+@pytest.mark.asyncio
+async def test_repeated_unchanged_retrieval_state_reuses_bounded_cache(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text("def greet(): return 'hello'\n")
+
+    model = _ScriptedModel(
+        [
+            "cat src/greeter.py",
+            "cat src/greeter.py",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect src/greeter.py.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decisions = receipt["preemptive_retrieval"]["decisions"]
+    assert len(decisions) == 3
+    assert decisions[1]["opportunity_kind"] == "post_read_search"
+    assert decisions[2]["opportunity_kind"] == "post_read_search"
+    assert decisions[1]["cache_hit"] is False
+    assert decisions[2]["cache_hit"] is True
+    assert receipt["metrics"]["preemptive_retrieval_cache_hits"] == 1
+    accounting = receipt["preemptive_retrieval"]["opportunity_accounting"]
+    assert accounting["opportunities"] == 3
+    assert accounting["by_kind"]["post_read_search"]["cache_hits"] == 1
+
+
+@pytest.mark.asyncio
+async def test_priority_reserve_skips_low_value_work_but_preserves_later_diagnostic(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text("def greet(): return 'hello'\n")
+
+        async def exec(self, command, env=None, **kwargs):
+            self.commands.append((command, env))
+            if command == "false":
+                return ExecResult(return_code=1, stdout="", stderr="failure in greet")
+            return ExecResult(return_code=0, stdout="ok", stderr="")
+
+    model = _ScriptedModel(["false", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_preemptive_retrieval=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+        preemptive_retrieval_task_budget_chars=500,
+        preemptive_retrieval_priority_reserve_chars=500,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Repair greet in src/greeter.py.", TransferEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decisions = receipt["preemptive_retrieval"]["decisions"]
+    assert decisions[0]["reason_codes"] == ["opportunity_budget_reserved_precheck"]
+    assert decisions[0]["channel_receipts"] == []
+    assert decisions[1]["opportunity_kind"] == "post_diagnostic"
+    assert decisions[1]["channel_receipts"]
 
 
 @pytest.mark.asyncio
@@ -2522,6 +2676,7 @@ async def test_actual_loop_tracks_edit_lints_and_submits_without_private_context
     assert metrics["tokens_per_assistant_step"] == 12.0
     assert metrics["actions_per_assistant_step"] == 1.0
     assert metrics["elapsed_seconds"] > 0
+    assert metrics["wall_time_sec"] == metrics["elapsed_seconds"]
     assert metrics["successful_actions"] == 5
     assert metrics["failed_actions"] == 0
     assert metrics["check_actions"] == 1

@@ -214,6 +214,8 @@ def build_hybrid_repository(
         provenance: tuple[str, ...],
         *,
         certified: bool = False,
+        source_document: RepositoryDocument | None = None,
+        target_document: RepositoryDocument | None = None,
     ) -> None:
         if (
             not source_path
@@ -236,6 +238,14 @@ def build_hybrid_repository(
                 confidence=max(0.0, min(1.0, float(confidence))),
                 provenance=provenance,
                 certified=bool(certified),
+                source_symbol=(source_document.symbol if source_document else None),
+                source_start_line=(
+                    source_document.start_line if source_document else None
+                ),
+                target_symbol=(target_document.symbol if target_document else None),
+                target_start_line=(
+                    target_document.start_line if target_document else None
+                ),
             )
         )
 
@@ -311,6 +321,7 @@ def build_hybrid_repository(
 
         seen_spans: set[tuple[str, int, int, str]] = set()
         loaded_node_paths: dict[int, str] = {}
+        loaded_node_documents: dict[int, RepositoryDocument] = {}
         for raw_id, raw_name, raw_path, raw_start, raw_end, raw_signature in node_rows:
             path = _canonical_repo_path(root, str(raw_path or ""))
             start = max(1, int(raw_start or 1))
@@ -349,16 +360,16 @@ def build_hybrid_repository(
             provenance = [f"graph_node:{int(raw_id)}", "checkout_source"]
             if truncated:
                 provenance.append("bounded_source_span")
-            documents.append(
-                RepositoryDocument(
-                    path=path,
-                    text=text,
-                    start_line=start,
-                    end_line=bounded_end,
-                    symbol=name,
-                    provenance=tuple(provenance),
-                )
+            document = RepositoryDocument(
+                path=path,
+                text=text,
+                start_line=start,
+                end_line=bounded_end,
+                symbol=name,
+                provenance=tuple(provenance),
             )
+            documents.append(document)
+            loaded_node_documents[int(raw_id)] = document
             total_chars += len(text)
 
         edge_columns = _columns(connection, "edges")
@@ -406,6 +417,8 @@ def build_hybrid_repository(
                         str(trust or "").upper() == "CERTIFIED"
                         and float(confidence_value or 0.0) >= 0.95
                     ),
+                    source_document=loaded_node_documents.get(int(source_id)),
+                    target_document=loaded_node_documents.get(int(target_id)),
                 )
 
         assertion_columns = _columns(connection, "assertions")
@@ -438,6 +451,8 @@ def build_hybrid_repository(
                     float(score or 0.0),
                     (f"graph_assertion:{int(assertion_id)}", "test_assertion"),
                     certified=float(score or 0.0) >= 0.95,
+                    source_document=loaded_node_documents.get(int(target_id or 0)),
+                    target_document=loaded_node_documents.get(int(test_id or 0)),
                 )
 
         closure_columns = _columns(connection, "closure")
@@ -469,6 +484,8 @@ def build_hybrid_repository(
                     float(confidence_value or 0.0),
                     (f"graph_closure:depth={int(depth or 0)}", "verified_closure"),
                     certified=float(confidence_value or 0.0) >= 0.95,
+                    source_document=loaded_node_documents.get(int(source_id or 0)),
+                    target_document=loaded_node_documents.get(int(target_id or 0)),
                 )
 
         cochange_columns = _columns(connection, "cochanges")

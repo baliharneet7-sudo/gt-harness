@@ -110,3 +110,44 @@ waiting exceeds the bounded index subprocess timeout, preventing a timed-out
 coroutine from racing a live index worker. Final graph state comes from the
 atomic repository session. `scripts/central_release_gate.py` rejects substrate,
 dense, delivery, preflight, or decision-receipt violations before paid work.
+
+## Final promotion repair (2026-08-12)
+
+The live DeepSWE diagnostic exposed three objects that must not be collapsed
+into one word such as "evidence": a repository candidate may be broad and
+useful for ranking; a provider-deliverable content claim must name one complete,
+grounded span; and a decision claim must additionally be mechanically material
+to the exact proposed action.
+
+`RetrievalCandidate.content_claim_id` now hashes only semantic content
+(path/span/symbol/relation/text). Graph row IDs, channel receipts, revision IDs,
+and delivery support do not create a new fact. `claim_hash` remains a
+compatibility alias. Decision bundles carry a separate `decision_claim_id`
+bound to content, operation, target, and support kind.
+
+Graph structure is no longer file-only at delivery time. `StructuralLink`
+retains source and target symbol/line endpoints from GraphDB. The structural
+channel indexes every document span per path and selects the exact endpoint;
+an unresolved endpoint remains rankable but receives
+`edge_endpoint_unresolved` and cannot certify delivery or action return. RRF
+retains its per-channel representatives, so an exact-path certificate cannot be
+borrowed to deliver an unrelated structural span. Generic import and co-change
+facts can rank context, but they cannot authorize pre-action return.
+
+Retrieval is budget-first and event-accounted. A zero/closed delivery budget
+runs no channel. A positive partial character budget is enforced while
+complete spans are packed, so selection cannot precede a host-side budget
+discard. Identical state/revision/visibility/configuration queries use
+a bounded 128-entry result cache. Up to 3,000 of the 12,000 task characters is
+reserved for post-mutation, diagnostic, and validation opportunities so
+task-start and read/search traffic cannot consume the failure-recovery budget.
+Every provider boundary records opportunity kind, candidates, selection,
+delivery, abstention reason, cache status, latency, and exact visibility hashes.
+This accounting is measurement, not a claim that a delivery helped.
+
+The DeepSWE treatment workflow now enables bounded provider-budget compaction,
+the fail-open completion controller, semantic progress control, and adaptive
+validation timeouts. The release gate rejects disabled controls, work after a
+closed budget, missing opportunity accounting, duplicate content claims, and
+non-material or non-endpoint-aligned decision evidence. Preflight remains
+`SHADOW`; no action-changing claim is made before a separately approved smoke.

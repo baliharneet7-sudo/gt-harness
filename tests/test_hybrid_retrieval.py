@@ -280,7 +280,9 @@ def test_claim_identity_ignores_global_revision_but_tracks_semantic_evidence():
         != original.claim_hash
     )
     assert replace(original, relation="IMPORTS").claim_hash != original.claim_hash
-    assert replace(original, provenance=("graph_edge:8",)).claim_hash != original.claim_hash
+    # Physical graph row IDs are rebuild-local.  The same bounded semantic
+    # fact must retain one delivery identity after an unrelated graph rebuild.
+    assert replace(original, provenance=("graph_edge:8",)).claim_hash == original.claim_hash
     assert (
         replace(
             original,
@@ -292,6 +294,129 @@ def test_claim_identity_ignores_global_revision_but_tracks_semantic_evidence():
         ).claim_hash
         == original.claim_hash
     )
+
+
+def test_structural_channel_returns_the_edge_endpoint_span_not_arbitrary_file_span():
+    documents = (
+        RepositoryDocument(
+            "src/errors.ts",
+            "export class ResolutionError {}",
+            1,
+            1,
+            "ResolutionError",
+        ),
+        RepositoryDocument(
+            "src/container.test.ts",
+            "it('surfaces ResolutionError', () => expect(resolve()).toThrow(ResolutionError))",
+            10,
+            10,
+            "surfaces_resolution_error",
+        ),
+        RepositoryDocument(
+            "src/container.test.ts",
+            "it('supports Symbol.toStringTag', () => expect(container).toBeDefined())",
+            80,
+            80,
+            "symbol_to_string_tag",
+        ),
+    )
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                "src/errors.ts",
+                "src/container.test.ts",
+                "ASSERTED_BY",
+                confidence=1.0,
+                certified=True,
+                source_symbol="ResolutionError",
+                source_start_line=1,
+                target_symbol="surfaces_resolution_error",
+                target_start_line=10,
+            ),
+        ),
+        dense_backend=None,
+    ).retrieve(
+        RetrievalState(
+            task_text="change ResolutionError",
+            intent=RetrievalIntent.CHANGE_IMPACT,
+            active_paths=("src/errors.ts",),
+            source_revision="source-1",
+        ),
+        selection_limit=1,
+        token_budget=200,
+    )
+
+    structural = next(
+        row
+        for row in result.ranked_spans
+        if row.channel is RetrievalChannel.STRUCTURAL
+    )
+    assert structural.start_line == 10
+    assert structural.symbol == "surfaces_resolution_error"
+    assert "Symbol.toStringTag" not in structural.text
+
+
+def test_unresolved_structural_endpoint_never_carries_alignment_certificate():
+    documents = (
+        RepositoryDocument("src/errors.ts", "export class ResolutionError {}"),
+        RepositoryDocument(
+            "src/container.test.ts",
+            "it('supports Symbol.toStringTag', () => expect(container).toBeDefined())",
+            80,
+            80,
+            "symbol_to_string_tag",
+        ),
+    )
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                "src/errors.ts",
+                "src/container.test.ts",
+                "ASSERTED_BY",
+                confidence=1.0,
+                certified=True,
+                target_symbol="missing_test_symbol",
+                target_start_line=10,
+            ),
+        ),
+        dense_backend=None,
+    ).retrieve(
+        RetrievalState(
+            task_text="change ResolutionError",
+            intent=RetrievalIntent.CHANGE_IMPACT,
+            active_paths=("src/errors.ts",),
+            source_revision="source-1",
+        ),
+        selection_limit=1,
+    )
+
+    structural = next(
+        row
+        for row in result.ranked_spans
+        if row.channel is RetrievalChannel.STRUCTURAL
+    )
+    assert "edge_endpoint_unresolved" in structural.provenance
+    assert not any(item.startswith("edge_endpoint_start:") for item in structural.provenance)
+    assert result.selected_context == ()
+
+
+def test_closed_token_budget_does_not_execute_any_retrieval_channel() -> None:
+    class MustNotRun:
+        channel = RetrievalChannel.EXACT
+
+        def retrieve(self, state, *, limit):  # pragma: no cover - RED sentinel
+            raise AssertionError("retrieval ran after its delivery budget closed")
+
+    result = HybridRetriever((), channels=(MustNotRun(),)).retrieve(
+        _state(),
+        token_budget=0,
+    )
+
+    assert result.abstained is True
+    assert result.reason_codes == ("context_budget_closed",)
+    assert result.channel_receipts == ()
 
 
 def test_retrieved_unchanged_evidence_keeps_claim_across_unrelated_revisions():
@@ -453,6 +578,67 @@ def test_high_confidence_cochange_fact_is_not_alone_a_delivery_certificate():
     assert result.abstained is True
 
 
+def test_certified_structural_candidate_without_edge_endpoint_abstains() -> None:
+    class StructuralOnly:
+        channel = RetrievalChannel.STRUCTURAL
+
+        def retrieve(self, state: RetrievalState, *, limit: int):
+            del state, limit
+            return (
+                RetrievalCandidate(
+                    path="tests/test_container.py",
+                    start_line=80,
+                    end_line=80,
+                    symbol="unrelated_test",
+                    text="def test_unrelated(): pass",
+                    channel=self.channel,
+                    channel_rank=1,
+                    relation="ASSERTED_BY",
+                    provenance=("structural_certified", "action_target:src/errors.py"),
+                    source_revision="source-1",
+                ),
+            )
+
+    result = HybridRetriever((), channels=(StructuralOnly(),)).retrieve(_state())
+
+    assert result.selected_context == ()
+    assert result.reason_codes == ("insufficient_independent_support",)
+
+
+def test_exact_certificate_delivers_exact_span_not_unaligned_structural_representative() -> None:
+    class StaticChannel:
+        def __init__(self, candidate: RetrievalCandidate) -> None:
+            self.channel = candidate.channel
+            self.candidate = candidate
+
+        def retrieve(self, state: RetrievalState, *, limit: int):
+            del state, limit
+            return (self.candidate,)
+
+    exact = replace(
+        _candidate("src/errors.py", RetrievalChannel.EXACT, 1, text="class ResolutionError: pass"),
+        provenance=("exact_path",),
+    )
+    unrelated = replace(
+        _candidate(
+            "src/errors.py",
+            RetrievalChannel.STRUCTURAL,
+            1,
+            text="def unrelated_helper(): pass",
+        ),
+        relation="CALLS",
+        provenance=("structural_certified",),
+    )
+
+    result = HybridRetriever(
+        (),
+        channels=(StaticChannel(exact), StaticChannel(unrelated)),
+    ).retrieve(_state(task_text="repair src/errors.py"), selection_limit=1)
+
+    assert result.selected_context[0].text == "class ResolutionError: pass"
+    assert result.selected_context[0].channel is RetrievalChannel.EXACT
+
+
 def test_rrf_is_equal_weight_k60_and_aggregates_unique_files_deterministically():
     channel_results = {
         RetrievalChannel.LEXICAL: (
@@ -514,6 +700,32 @@ def test_hybrid_selection_excludes_active_paths_and_prior_claims():
     )
     assert dense_receipt.available is True
     assert dense_receipt.backend_identity == "fake-dense-v1"
+
+
+def test_character_budget_is_applied_before_evidence_is_selected():
+    document = RepositoryDocument(
+        "src/allocator.py",
+        "def release_allocator(value):\n    return value\n",
+        start_line=1,
+        end_line=2,
+        symbol="release_allocator",
+    )
+    state = _state(task_text="Change src/allocator.py release_allocator")
+
+    result = HybridRetriever((document,), dense_backend=None).retrieve(
+        state,
+        token_budget=200,
+        character_budget=16,
+    )
+
+    assert result.selected_context == ()
+    assert result.selected_character_count == 0
+    assert result.character_budget == 16
+    assert "context_character_budget" in result.reason_codes
+    assert build_preemptive_frame(result, state, trigger="task_start") is None
+    # Candidate discovery was necessary to learn the exact complete-span size,
+    # but no evidence may be marked selected and discarded later by the host.
+    assert result.channel_receipts
 
 
 def test_optional_dense_backend_failure_is_fail_open_and_receipted():

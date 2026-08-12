@@ -94,6 +94,10 @@ def test_builder_uses_exact_indexed_spans_and_directed_graph_links(tmp_path):
     assert repository.structural_links[0].source_path == "src/allocator.py"
     assert repository.structural_links[0].target_path == "tests/test_allocator.py"
     assert repository.structural_links[0].relation == "TESTED_BY"
+    assert repository.structural_links[0].source_symbol == "allocate"
+    assert repository.structural_links[0].source_start_line == 1
+    assert repository.structural_links[0].target_symbol == "test_allocate"
+    assert repository.structural_links[0].target_start_line == 1
 
 
 def test_builder_is_bounded_deterministically_and_reports_incomplete(tmp_path):

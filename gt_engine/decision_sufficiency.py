@@ -7,6 +7,7 @@ Every ambiguity degrades to PASS.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -25,6 +26,14 @@ _INCOMPLETE_RETRIEVAL_REASONS = frozenset(
     }
 )
 _COCHANGE_MARKERS = ("cochange", "co-change", "git_cochange")
+_DECISION_RELEVANT_STRUCTURAL_RELATIONS = frozenset(
+    {
+        "calls",
+        "inverse:calls",
+        "asserted_by",
+        "inverse:asserted_by",
+    }
+)
 
 
 class DecisionSufficiencyDisposition(StrEnum):
@@ -78,6 +87,7 @@ class ProviderVisibleState:
 @dataclass(frozen=True, slots=True)
 class DecisionEvidenceClaim:
     claim_id: str
+    decision_claim_id: str
     path: str
     start_line: int
     end_line: int
@@ -170,8 +180,13 @@ def _support_kind(
     if (
         "support_channel:structural" in provenance
         and "structural_certified" in provenance
-        and bool(candidate.relation)
+        and str(candidate.relation or "").strip().lower()
+        in _DECISION_RELEVANT_STRUCTURAL_RELATIONS
         and _target_anchor(candidate, target_path)
+        and any(
+            item.startswith(("edge_endpoint_symbol:", "edge_endpoint_start:"))
+            for item in provenance
+        )
     ):
         return "certified_structural"
     return None
@@ -189,6 +204,7 @@ def _complete_claim(
     *,
     target_path: str,
     support_kind: str,
+    operation: ActionOperation,
 ) -> DecisionEvidenceClaim | None:
     text = str(candidate.text or "").strip()
     start = candidate.start_line
@@ -200,6 +216,16 @@ def _complete_claim(
         return None
     return DecisionEvidenceClaim(
         claim_id=candidate.claim_hash,
+        decision_claim_id=hashlib.sha256(
+            "\x00".join(
+                (
+                    candidate.content_claim_id,
+                    operation.value,
+                    target_path,
+                    support_kind,
+                )
+            ).encode("utf-8")
+        ).hexdigest(),
         path=candidate.path,
         start_line=start,
         end_line=end,
@@ -279,14 +305,45 @@ def compile_decision_sufficiency(
 
     certified: list[DecisionEvidenceClaim] = []
     incomplete_certified = False
+    structurally_anchored_but_not_decision_relevant = False
+    structurally_relevant_but_unaligned = False
     for candidate in material:
         support_kind = _support_kind(candidate, target_path)
         if support_kind is None:
+            provenance = {str(item).strip().lower() for item in candidate.provenance}
+            if (
+                _target_anchor(candidate, target_path)
+                and "support_channel:structural" in provenance
+                and "structural_certified" in provenance
+                and str(candidate.relation or "").strip().lower()
+                in _DECISION_RELEVANT_STRUCTURAL_RELATIONS
+                and not any(
+                    item.startswith(("edge_endpoint_symbol:", "edge_endpoint_start:"))
+                    for item in provenance
+                )
+            ):
+                structurally_relevant_but_unaligned = True
+            if (
+                _target_anchor(candidate, target_path)
+                and "support_channel:structural" in provenance
+                and "structural_certified" in provenance
+                and str(candidate.relation or "").strip().lower()
+                not in _DECISION_RELEVANT_STRUCTURAL_RELATIONS
+                and not any(
+                    marker
+                    in " ".join(
+                        (str(candidate.relation or ""), *sorted(provenance))
+                    ).lower()
+                    for marker in _COCHANGE_MARKERS
+                )
+            ):
+                structurally_anchored_but_not_decision_relevant = True
             continue
         claim = _complete_claim(
             candidate,
             target_path=target_path,
             support_kind=support_kind,
+            operation=proposed.operation,
         )
         if claim is None:
             incomplete_certified = True
@@ -296,7 +353,15 @@ def compile_decision_sufficiency(
         return _pass(
             "certified_evidence_incomplete"
             if incomplete_certified
-            else "no_certified_mechanical_evidence"
+            else (
+                "structural_span_not_edge_aligned"
+                if structurally_relevant_but_unaligned
+                else (
+                    "no_decision_relevant_evidence"
+                    if structurally_anchored_but_not_decision_relevant
+                    else "no_certified_mechanical_evidence"
+                )
+            )
         )
 
     claim_ids = tuple(claim.claim_id for claim in certified)

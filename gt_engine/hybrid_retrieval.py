@@ -460,6 +460,10 @@ class StructuralLink:
     confidence: float = 1.0
     provenance: tuple[str, ...] = ()
     certified: bool = False
+    source_symbol: str | None = None
+    source_start_line: int | None = None
+    target_symbol: str | None = None
+    target_start_line: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_path", _normalize_path(self.source_path))
@@ -492,31 +496,29 @@ class RetrievalCandidate:
             raise ValueError("candidate rank must be one-based")
 
     @property
-    def claim_hash(self) -> str:
-        """Semantic evidence identity, independent of global workspace revision."""
+    def content_claim_id(self) -> str:
+        """Stable identity of the bounded semantic content delivered to a model.
+
+        Channel support and GraphDB row IDs prove how a candidate was found;
+        they are not part of what the fact *is*.  Keeping them in the identity
+        caused an unchanged span to be delivered again after each graph rebuild.
+        """
 
         normalized_text = " ".join(str(self.text or "").split())
-        normalized_provenance = tuple(
-            sorted(
-                {
-                    " ".join(str(item).split())
-                    for item in self.provenance
-                    if item
-                    and not str(item).startswith(
-                        ("delivery_support:", "support_channel:")
-                    )
-                }
-            )
-        )
         return _stable_hash(
             self.path.lower(),
             str(self.start_line or 0),
             str(self.end_line or 0),
             str(self.symbol or ""),
             str(self.relation or "").lower(),
-            "\n".join(normalized_provenance),
             normalized_text,
         )
+
+    @property
+    def claim_hash(self) -> str:
+        """Backward-compatible name for :attr:`content_claim_id`."""
+
+        return self.content_claim_id
 
 
 @dataclass(frozen=True)
@@ -526,6 +528,7 @@ class RankedFile:
     channel_ranks: tuple[tuple[RetrievalChannel, int], ...]
     representative: RetrievalCandidate
     provenance: tuple[str, ...]
+    channel_candidates: tuple[tuple[RetrievalChannel, RetrievalCandidate], ...] = ()
 
     @property
     def support_count(self) -> int:
@@ -555,6 +558,8 @@ class HybridRetrievalResult:
     query_hash: str
     token_budget: int
     selected_token_count: int
+    character_budget: int | None = None
+    selected_character_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -944,8 +949,60 @@ class StructuralRetrievalChannel:
         documents: Sequence[RepositoryDocument],
         links: Sequence[StructuralLink],
     ) -> None:
-        self._documents = {document.path.lower(): document for document in documents}
+        documents_by_path: dict[str, list[RepositoryDocument]] = defaultdict(list)
+        for document in documents:
+            documents_by_path[document.path.lower()].append(document)
+        self._documents = {
+            path: tuple(
+                sorted(
+                    rows,
+                    key=lambda row: (
+                        row.start_line or 0,
+                        str(row.symbol or "").lower(),
+                        row.text,
+                    ),
+                )
+            )
+            for path, rows in documents_by_path.items()
+        }
         self._links = tuple(links)
+
+    def _endpoint_document(
+        self,
+        path: str,
+        *,
+        symbol: str | None,
+        start_line: int | None,
+        state: RetrievalState,
+    ) -> tuple[RepositoryDocument | None, bool]:
+        documents = self._documents.get(path)
+        if not documents:
+            return None, False
+        normalized_symbol = _canonical_symbol(symbol)
+        exact = tuple(
+            document
+            for document in documents
+            if (start_line is None or document.start_line == start_line)
+            and (
+                not normalized_symbol
+                or _canonical_symbol(document.symbol) == normalized_symbol
+            )
+        )
+        if exact:
+            return exact[0], bool(normalized_symbol or start_line is not None)
+        query_terms = set(_tokens(state.sparse_query_text()))
+
+        def relevance(document: RepositoryDocument) -> tuple[int, int, int, str]:
+            symbol_terms = set(_tokens(document.symbol or ""))
+            text_terms = set(_tokens(document.text))
+            return (
+                len(query_terms & symbol_terms),
+                len(query_terms & text_terms),
+                -(document.start_line or 0),
+                str(document.symbol or "").lower(),
+            )
+
+        return max(documents, key=relevance), False
 
     def retrieve(
         self,
@@ -969,19 +1026,39 @@ class StructuralRetrievalChannel:
                 candidate_path = target
                 relation = link.relation
                 action_target = source
+                endpoint_symbol = link.target_symbol
+                endpoint_start_line = link.target_start_line
             elif target in seeds and source not in seeds:
                 candidate_path = source
                 relation = f"inverse:{link.relation}"
                 action_target = target
+                endpoint_symbol = link.source_symbol
+                endpoint_start_line = link.source_start_line
             else:
                 continue
-            document = self._documents.get(candidate_path)
+            document, endpoint_aligned = self._endpoint_document(
+                candidate_path,
+                symbol=endpoint_symbol,
+                start_line=endpoint_start_line,
+                state=state,
+            )
             if document is None:
                 continue
             provenance = (
                 *link.provenance,
                 f"structural:{relation}",
                 f"action_target:{action_target}",
+                *(
+                    (f"edge_endpoint_symbol:{endpoint_symbol}",)
+                    if endpoint_aligned and endpoint_symbol
+                    else ()
+                ),
+                *(
+                    (f"edge_endpoint_start:{endpoint_start_line}",)
+                    if endpoint_aligned and endpoint_start_line is not None
+                    else ()
+                ),
+                *(("edge_endpoint_unresolved",) if not endpoint_aligned else ()),
             )
             if link.certified:
                 provenance = (*provenance, "structural_certified")
@@ -1078,6 +1155,10 @@ def reciprocal_rank_fusion(
                 channel_ranks=channel_ranks,
                 representative=representative,
                 provenance=provenance,
+                channel_candidates=tuple(
+                    (channel, by_channel[channel])
+                    for channel in sorted(by_channel, key=lambda value: _CHANNEL_ORDER[value])
+                ),
             )
         )
     return tuple(sorted(fused, key=lambda row: (-row.fused_score, row.path.lower(), row.path)))
@@ -1114,14 +1195,31 @@ def _is_test_path(path: str) -> bool:
     )
 
 
-def _delivery_support_kind(ranked: RankedFile, state: RetrievalState) -> str | None:
-    channels = {channel for channel, _ in ranked.channel_ranks}
-    if RetrievalChannel.STRUCTURAL in channels and "structural_certified" in ranked.provenance:
-        return "certified"
-    if RetrievalChannel.EXACT in channels and (
-        "exact_path" in ranked.provenance or "exact_symbol" in ranked.provenance
+def _delivery_support(
+    ranked: RankedFile,
+    state: RetrievalState,
+) -> tuple[str, RetrievalCandidate] | None:
+    candidates = dict(ranked.channel_candidates)
+    channels = set(candidates)
+    structural = candidates.get(RetrievalChannel.STRUCTURAL)
+    structural_provenance = set(structural.provenance) if structural else set()
+    structural_endpoint_aligned = bool(
+        structural
+        and any(
+            item.startswith(("edge_endpoint_symbol:", "edge_endpoint_start:"))
+            for item in structural_provenance
+        )
+    )
+    if (
+        structural is not None
+        and structural_endpoint_aligned
+        and "structural_certified" in structural_provenance
     ):
-        return "certified"
+        return "certified", structural
+    exact = candidates.get(RetrievalChannel.EXACT)
+    exact_provenance = set(exact.provenance) if exact else set()
+    if exact is not None and exact_provenance & {"exact_path", "exact_symbol"}:
+        return "certified", exact
     if (
         state.intent is RetrievalIntent.VALIDATION_CONTEXT
         and _is_test_path(ranked.path)
@@ -1139,7 +1237,12 @@ def _delivery_support_kind(ranked: RankedFile, state: RetrievalState) -> str | N
         # relevance. For typed validation retrieval it is nevertheless useful
         # candidate context when the file is mechanically a test. Mark it as a
         # candidate so the provider sees no false certification claim.
-        return "validation_candidate"
+        candidate = candidates.get(RetrievalChannel.DENSE) or exact
+        if candidate is None:
+            candidate = candidates.get(RetrievalChannel.LEXICAL) or candidates.get(
+                RetrievalChannel.BM25
+            )
+        return ("validation_candidate", candidate) if candidate is not None else None
     # Lexical, BM25, and weak exact-token overlap are correlated sparse
     # signals, not three independent confirmations.
     families: set[str] = set()
@@ -1151,9 +1254,19 @@ def _delivery_support_kind(ranked: RankedFile, state: RetrievalState) -> str | N
         families.add("sparse")
     # Dense reranks a pool produced by sparse and structural retrieval.  It is
     # useful for ordering, but cannot independently certify its own input.
-    if RetrievalChannel.STRUCTURAL in channels:
+    structural_relation = str(structural.relation or "").lower() if structural else ""
+    if (
+        structural_endpoint_aligned
+        and structural is not None
+        and "cochange" not in structural_relation
+    ):
         families.add("structural")
-    return "corroborated" if len(families) >= 2 else None
+    if len(families) < 2:
+        return None
+    candidate = structural or exact or candidates.get(RetrievalChannel.LEXICAL)
+    if candidate is None:
+        candidate = candidates.get(RetrievalChannel.BM25)
+    return ("corroborated", candidate) if candidate is not None else None
 
 
 def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
@@ -1211,8 +1324,35 @@ class HybridRetriever:
         top_k: int = 20,
         selection_limit: int = 3,
         token_budget: int = 1_200,
+        character_budget: int | None = None,
     ) -> HybridRetrievalResult:
         started = time.perf_counter()
+        normalized_character_budget = (
+            None if character_budget is None else max(0, int(character_budget))
+        )
+        if (
+            token_budget < 1
+            or selection_limit < 1
+            or normalized_character_budget == 0
+        ):
+            return HybridRetrievalResult(
+                ranked_files=(),
+                ranked_spans=(),
+                selected_context=(),
+                abstained=True,
+                reason_codes=(
+                    "context_character_budget_closed"
+                    if normalized_character_budget == 0
+                    else "context_budget_closed",
+                ),
+                channel_receipts=(),
+                latency_ms=(time.perf_counter() - started) * 1_000.0,
+                query_hash=state.query_hash,
+                token_budget=max(0, token_budget),
+                selected_token_count=0,
+                character_budget=normalized_character_budget,
+                selected_character_count=0,
+            )
         channel_results: dict[RetrievalChannel, tuple[RetrievalCandidate, ...]] = {}
         receipts: list[ChannelReceipt] = []
         stale_candidates_rejected = 0
@@ -1332,17 +1472,19 @@ class HybridRetriever:
         selected: list[RetrievalCandidate] = []
         selected_rendered: list[str] = []
         selected_tokens = 0
+        selected_characters = 0
         saw_supported = False
         skipped_budget = False
+        skipped_character_budget = False
         skipped_duplicate = False
         for ranked in ranked_files:
             if len(selected) >= max(0, selection_limit):
                 break
-            support_kind = _delivery_support_kind(ranked, state)
-            if support_kind is None:
+            supported = _delivery_support(ranked, state)
+            if supported is None:
                 continue
+            support_kind, candidate = supported
             saw_supported = True
-            candidate = ranked.representative
             candidate = replace(
                 candidate,
                 provenance=tuple(
@@ -1376,9 +1518,16 @@ class HybridRetriever:
             if combined_tokens > max(0, token_budget):
                 skipped_budget = True
                 continue
+            if (
+                normalized_character_budget is not None
+                and len(combined) > normalized_character_budget
+            ):
+                skipped_character_budget = True
+                continue
             selected.append(candidate)
             selected_rendered.append(rendered)
             selected_tokens = combined_tokens
+            selected_characters = len(combined)
             exposed.add(candidate.claim_hash)
 
         reasons: list[str] = []
@@ -1392,6 +1541,8 @@ class HybridRetriever:
             reasons.append("already_visible_or_delivered")
         if skipped_budget:
             reasons.append("context_budget")
+        if skipped_character_budget:
+            reasons.append("context_character_budget")
         if selected:
             reasons.append("selected_bounded_context")
         elif saw_supported and not skipped_budget and not skipped_duplicate:
@@ -1408,6 +1559,8 @@ class HybridRetriever:
             query_hash=state.query_hash,
             token_budget=max(0, token_budget),
             selected_token_count=selected_tokens,
+            character_budget=normalized_character_budget,
+            selected_character_count=selected_characters,
         )
 
 

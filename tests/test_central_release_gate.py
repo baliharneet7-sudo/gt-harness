@@ -13,6 +13,12 @@ STATIC = {
 def _treatment() -> dict:
     return {
         "integration_mode": "active",
+        "component_configuration": {
+            "context_compaction": True,
+            "completion_controller": True,
+            "progress_control": True,
+            "adaptive_validation_timeout": True,
+        },
         "repository_intelligence": {
             "status": "passed",
             "required": True,
@@ -114,6 +120,18 @@ def test_release_gate_fails_closed_when_dense_asset_is_missing():
     assert "treatment-1:dense_backend_receipt_missing" in report.failures
 
 
+def test_release_gate_fails_closed_when_outcome_preservation_is_disabled():
+    receipt = _treatment()
+    receipt["component_configuration"]["context_compaction"] = False
+    receipt["component_configuration"]["completion_controller"] = False
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:context_compaction_disabled" in report.failures
+    assert "treatment-1:completion_controller_disabled" in report.failures
+
+
 def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
     receipt = _treatment()
     receipt["repository_intelligence"] = {
@@ -141,6 +159,25 @@ def test_release_gate_fails_closed_on_selected_pending_retrieval():
     assert "treatment-1:preemptive_selected_not_delivered" in report.failures
 
 
+def test_release_gate_rejects_retrieval_work_after_task_budget_closed():
+    receipt = _treatment()
+    receipt["preemptive_retrieval"]["decisions"] = [
+        {
+            "status": "abstained",
+            "opportunity_kind": "post_read_search",
+            "ranked_files": [{"path": "src/a.py"}],
+            "selected_evidence": [{"path": "src/a.py"}],
+            "reason_codes": ["task_character_budget"],
+            "channel_receipts": [{"channel": "dense", "latency_ms": 1200}],
+        }
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:retrieval_work_after_budget_closed:1" in report.failures
+
+
 def test_release_gate_fails_closed_on_uncertified_decision_return():
     receipt = _treatment()
     receipt["metrics"]["preflight_calls"] = 1
@@ -164,6 +201,45 @@ def test_release_gate_fails_closed_on_uncertified_decision_return():
 
     assert report.passed is False
     assert "treatment-1:decision_bundle_missing:1" in report.failures
+
+
+def test_release_gate_rejects_generic_import_as_decision_sufficiency():
+    receipt = _treatment()
+    receipt["metrics"]["preflight_calls"] = 1
+    receipt["features"]["preflight_receipts"] = [
+        {"decision": {"disposition": "pass"}, "applied_disposition": "pass"}
+    ]
+    receipt["decision_sufficiency"]["decisions"] = [
+        {
+            "disposition": "return_eligible",
+            "return_eligible": True,
+            "selecting_request_hash": "request-1",
+            "retrieval": {"provider_visible_claim_ids": []},
+            "bundle": {
+                "complete": True,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "selecting_request_hash": "request-1",
+                "claims": [
+                    {
+                        "claim_id": "claim-1",
+                        "support_kind": "certified_structural",
+                        "relation": "inverse:IMPORTS",
+                        "provenance": [
+                            "structural_certified",
+                            "action_target:src/errors.ts",
+                            "edge_endpoint_start:80",
+                        ],
+                    }
+                ],
+            },
+        }
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:decision_relation_not_material:1" in report.failures
 
 
 def test_release_gate_fails_closed_on_bad_delivery_hash_and_timing():
