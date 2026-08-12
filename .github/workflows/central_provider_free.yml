@@ -2,11 +2,6 @@ name: GT central provider-free certification
 
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: "Optional checkout ref; empty certifies the dispatched workflow SHA"
-        type: string
-        default: ""
 
 jobs:
   provider_free:
@@ -21,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.sha }}
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -203,7 +198,6 @@ jobs:
           receipt = {
               "schema": "gt.central.provider-free.v1",
               "run_id": os.environ.get("GITHUB_RUN_ID", ""),
-              "requested_ref": "${{ inputs.ref }}",
               "dispatch_sha": "${{ github.sha }}",
               "commit": subprocess.check_output(
                   ["git", "rev-parse", "HEAD"], text=True

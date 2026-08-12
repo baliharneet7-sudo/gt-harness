@@ -23,7 +23,7 @@ RELEASE_TESTS = (
     "tests/test_gt_central_agent.py::test_partial_completion_plan_executes_no_private_predicates",
     "tests/test_gt_central_agent.py::test_custom_probe_failure_is_not_reframed_as_model_guidance",
     "tests/test_gt_central_agent.py::test_context_transform_preserves_oversized_read_before_budget_pressure",
-    "tests/test_gt_central_agent.py::test_context_soft_character_limit_never_starts_compaction_epoch",
+    "tests/test_gt_central_agent.py::test_context_soft_character_limit_starts_one_safe_compaction_epoch",
     "tests/test_gt_central_agent.py::test_execution_budget_reserve_exits_before_outer_timeout",
     "tests/test_gt_central_agent.py::test_provider_budget_failure_stops_before_model_query_and_is_receipted",
     "tests/test_gt_central_agent.py::test_over_budget_next_request_does_not_confirm_pending_guidance",
@@ -186,6 +186,18 @@ def exact_commit_is_pushed() -> bool:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    dispatch_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        approved = (
+            dirty.returncode == 0
+            and not dirty.stdout.strip()
+            and bool(dispatch_sha)
+            and bool(local)
+            and local == dispatch_sha
+        )
+        print(f"detached_ci=true local={local[:12]} dispatch={dispatch_sha[:12]}")
+        print("PASSED: exact pushed commit" if approved else "FAILED: exact pushed commit")
+        return approved
     remote = subprocess.run(
         ("git", "rev-parse", f"origin/{branch}"),
         cwd=ROOT,

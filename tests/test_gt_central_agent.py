@@ -340,7 +340,8 @@ def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
     assert "gt_engine/diagnostics.py" in workflow
     assert "scripts/deepswe_release_gate.py" in workflow
     assert '["git", "rev-parse", "HEAD"]' in workflow
-    assert "ref: ${{ inputs.ref || github.sha }}" in workflow
+    assert "ref: ${{ github.sha }}" in workflow
+    assert "inputs.ref" not in workflow
     assert '"dispatch_sha": "${{ github.sha }}"' in workflow
     assert '"provider_calls": 0' in workflow
 
