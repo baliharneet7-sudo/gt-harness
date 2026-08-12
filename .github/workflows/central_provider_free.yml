@@ -107,6 +107,8 @@ jobs:
             tests/test_replay_bundle.py \
             tests/test_preemptive_retrieval_frame.py \
             tests/test_hybrid_retrieval.py \
+            tests/test_decision_sufficiency.py \
+            tests/test_central_release_gate.py \
             tests/test_hybrid_repository.py \
             tests/test_graph_retrieval_repairs.py \
             tests/test_snowflake_onnx_backend.py \
@@ -132,6 +134,7 @@ jobs:
             gt_engine/repository_mirror.py gt_engine/graph_evidence.py \
             gt_engine/graph_context.py gt_engine/task_contract.py \
             gt_engine/indexer.py gt_engine/hybrid_retrieval.py \
+            gt_engine/decision_sufficiency.py \
             gt_engine/hybrid_repository.py gt_engine/preemptive_retrieval.py \
             gt_engine/component_registry.py gt_engine/contributions.py \
             gt_engine/retrieval_profile.py \
@@ -142,6 +145,7 @@ jobs:
             gt_engine/uplift_policy.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
+            scripts/central_release_gate.py \
             scripts/central_feature_census.py \
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_trajectory_audit.py \
@@ -173,6 +177,8 @@ jobs:
             tests/test_gt_on_experiment.py \
             tests/test_preemptive_retrieval_frame.py \
             tests/test_hybrid_retrieval.py \
+            tests/test_decision_sufficiency.py \
+            tests/test_central_release_gate.py \
             tests/test_hybrid_repository.py \
             tests/test_graph_retrieval_repairs.py \
             tests/test_snowflake_onnx_backend.py \

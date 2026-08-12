@@ -982,3 +982,28 @@ current-source graph, pinned real ONNX backend, all language/runtime tests,
 `READY`, `SMOKE_APPROVED`, and static checks. The receipt records zero provider
 calls. The implementation repair is therefore verified; outcome benefit is
 not. A corrected paid smoke still requires separate authorization.
+
+## Decision-sufficiency and release boundary (2026-08-12)
+
+The action boundary now has a separately gated deterministic
+`decision_sufficiency` stage after model selection and before
+`environment.exec`. Only a current, complete, mechanically certified claim for
+a single-target `EDIT`, `CREATE`, or `DELETE` can become `RETURN_ELIGIBLE`, and
+only when exact provider-prepared messages prove the model has not already seen
+it. Ambiguous parsing, incomplete visibility, stale source or graph revision,
+sparse/dense-only support, co-change evidence, duplicate evidence, and budget
+overflow all produce `PASS`.
+
+This action check does not rerun the Snowflake ONNX embedder. It uses a bounded
+target-and-neighbor slice of the already refreshed repository with exact,
+sparse-ranking, and certified structural channels. Paid workflows remain in
+`SHADOW`, so eligibility is measured without changing the command or adding a
+model call; `ASSISTIVE_SAFE` requires separate approval.
+
+Derived trees are pruned before manifest bounds, unhealthy sensor recovery
+rehashes every supported source, graph waiting exceeds the index subprocess
+deadline, and final receipts use the atomic repository-session result.
+`scripts/central_release_gate.py` validates substrate/dense readiness, exact
+provider delivery, preflight accounting, and decision receipts. GitHub proof
+must build the current Go indexer; a stale local Windows binary is not
+authoritative.

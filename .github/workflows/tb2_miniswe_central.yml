@@ -436,7 +436,7 @@ jobs:
             off)
               FEATURE_ARGS+=(
                 --ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
-                --ak enable_preemptive_retrieval=false
+                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
                 --ak enable_all_features=false --ak enable_submit_readiness=false
                 --ak enable_lint=false --ak enable_feature_guidance=false
                 --ak enable_context_frontier=false --ak enable_context_compaction=false
@@ -446,7 +446,7 @@ jobs:
             audit)
               FEATURE_ARGS+=(
                 --ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
-                --ak enable_preemptive_retrieval=false
+                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
                 --ak enable_all_features=true --ak enable_submit_readiness=true
                 --ak enable_repository_intelligence=true
                 --ak enable_lint=false --ak enable_feature_guidance=false
@@ -462,6 +462,7 @@ jobs:
                 --ak preflight_mode=shadow --ak enable_lint=false
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
                 --ak enable_preemptive_retrieval=true
+                --ak enable_decision_sufficiency=true
                 --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=false --ak enable_completion_controller=false
                 --ak enable_progress_control=false --ak enable_adaptive_validation_timeout=false
@@ -474,7 +475,7 @@ jobs:
                 --ak enable_repository_intelligence=false
                 --ak preflight_mode=shadow --ak enable_lint=true
                 --ak enable_feature_guidance=false --ak enable_context_frontier=false
-                --ak enable_preemptive_retrieval=false
+                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
                 --ak enable_context_compaction=false --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
                 --ak require_graph_ready=false
@@ -487,6 +488,7 @@ jobs:
                 --ak preflight_mode=shadow --ak enable_lint=true
                 --ak enable_feature_guidance=true --ak enable_context_frontier=true
                 --ak enable_preemptive_retrieval=true
+                --ak enable_decision_sufficiency=true
                 --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=true --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
@@ -598,6 +600,7 @@ jobs:
 
           from gt_engine.deep_metrics import extract_trajectory
           from gt_engine.delivery_audit import audit_provider_deliveries
+          from scripts.central_release_gate import audit_treatment_runtime
 
           expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
           arm = os.environ.get("GT_ARM") or ""
@@ -640,6 +643,13 @@ jobs:
                       provider_delivery_failures,
                       provider_delivery_totals,
                   ) = audit_provider_deliveries(receipt, task=task_name)
+                  treatment_release_failures = []
+                  if dense_required:
+                      treatment_release_failures = [
+                          failure
+                          for check in audit_treatment_runtime(receipt, label=task_name)
+                          for failure in check.failures
+                      ]
                   receipt_metrics.append({
                       "task": task_name,
                       "feature_count": (receipt.get("features") or {}).get("feature_count"),
@@ -731,6 +741,7 @@ jobs:
                           "surfaces"
                       ),
                       "provider_delivery_failures": provider_delivery_failures,
+                      "treatment_release_failures": treatment_release_failures,
                   })
               results = list(task_dir.rglob("result.json"))
               if not results:
@@ -793,6 +804,11 @@ jobs:
               row["task"]
               for row in receipt_metrics
               if row["provider_delivery_failures"]
+          ]
+          invalid_treatment_release = [
+              row["task"]
+              for row in receipt_metrics
+              if row["treatment_release_failures"]
           ]
           call1_gt_changed_tasks = [
               row["task"]
@@ -886,6 +902,7 @@ jobs:
               "invalid_repository_intelligence_tasks": invalid_intelligence,
               "invalid_dense_backend_tasks": invalid_dense,
               "invalid_provider_delivery_tasks": invalid_provider_deliveries,
+              "invalid_treatment_release_tasks": invalid_treatment_release,
               "dense_backend_required": dense_required,
               "call1_gt_changed_tasks": call1_gt_changed_tasks,
               "trial_results": trials,
@@ -903,7 +920,8 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write(body)
           print(body[:4000])
-          if invalid_intelligence or invalid_dense or invalid_provider_deliveries:
+          if (invalid_intelligence or invalid_dense or invalid_provider_deliveries
+                  or invalid_treatment_release):
               sys.exit(2)
           EOF
 

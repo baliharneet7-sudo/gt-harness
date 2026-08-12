@@ -953,9 +953,10 @@ class StructuralRetrievalChannel:
         *,
         limit: int,
     ) -> tuple[RetrievalCandidate, ...]:
+        action_targets = state.action.targets if state.action is not None else ()
         seeds = {
             _normalize_path(path).lower()
-            for path in (*state.active_paths, *state.changed_paths)
+            for path in (*state.active_paths, *state.changed_paths, *action_targets)
             if _normalize_path(path)
         }
         if not seeds:
@@ -967,15 +968,21 @@ class StructuralRetrievalChannel:
             if source in seeds and target not in seeds:
                 candidate_path = target
                 relation = link.relation
+                action_target = source
             elif target in seeds and source not in seeds:
                 candidate_path = source
                 relation = f"inverse:{link.relation}"
+                action_target = target
             else:
                 continue
             document = self._documents.get(candidate_path)
             if document is None:
                 continue
-            provenance = (*link.provenance, f"structural:{relation}")
+            provenance = (
+                *link.provenance,
+                f"structural:{relation}",
+                f"action_target:{action_target}",
+            )
             if link.certified:
                 provenance = (*provenance, "structural_certified")
             row = (

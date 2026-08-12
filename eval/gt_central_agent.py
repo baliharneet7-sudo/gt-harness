@@ -82,6 +82,12 @@ from gt_engine.contributions import (
     GTContribution,
     compile_contributions,
 )
+from gt_engine.decision_sufficiency import (
+    DecisionEvidenceBundle,
+    DecisionSufficiencyDisposition,
+    ProviderVisibleState,
+    compile_decision_sufficiency,
+)
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.hybrid_repository import HybridRepository, build_hybrid_repository
@@ -102,7 +108,9 @@ from gt_engine.preflight import (
     PREFLIGHT_FEATURE_PLACEMENT,
     ActionDisposition,
     ActionOperation,
+    EvidenceGrade,
     MutationCertainty,
+    PreflightDecision,
     PreflightMode,
     ProposedAction,
     SegmentRole,
@@ -236,6 +244,15 @@ def _graph_gate_degraded_fallback(
 
     del initial_failures  # retained in the receipt as historical evidence
     return bool(current_failures)
+
+
+def _resolved_repository_evidence(
+    observed: RepositoryEvidence,
+    session: RepositorySession | None,
+) -> RepositoryEvidence:
+    """Use the session's final atomic state after any recovered refresh."""
+
+    return session.evidence if session is not None else observed
 
 
 def _provider_request_receipt(
@@ -422,6 +439,55 @@ def _retrieval_action_state(
     )
 
 
+def _provider_visible_claim_ids(
+    messages: list[dict[str, Any]],
+    candidates: tuple[Any, ...],
+) -> tuple[str, ...]:
+    """Certify exact candidate text already present in the selecting request.
+
+    Claim ledgers cover GT-originated evidence.  This additional check covers
+    normal Mini-SWE observations such as ``sed``/``cat`` output.  Exact text
+    containment is deliberately conservative: normalized or fuzzy matches do
+    not prove that the model received the same source fact.
+    """
+
+    visible_strings: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            visible_strings.append(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                collect(nested)
+
+    collect(messages)
+    return tuple(
+        dict.fromkeys(
+            str(candidate.claim_hash)
+            for candidate in candidates
+            if str(getattr(candidate, "text", ""))
+            and any(str(candidate.text) in value for value in visible_strings)
+        )
+    )
+
+
+def _render_decision_evidence(bundle: DecisionEvidenceBundle) -> tuple[str, ...]:
+    """Render complete certified claims without truncating source evidence."""
+
+    return tuple(
+        (
+            f"[GT certified evidence: {claim.path}:{claim.start_line}-{claim.end_line}"
+            + (f"; {claim.relation}" if claim.relation else "")
+            + "]\n"
+            + claim.text
+        )
+        for claim in bundle.claims
+    )
+
+
 def _mini_config() -> dict[str, Any]:
     import yaml
 
@@ -528,6 +594,7 @@ class MiniSweCentralAgent(BaseAgent):
         enable_repository_intelligence: bool = True,
         require_graph_ready: bool = False,
         repository_initial_index_timeout_sec: float = 60.0,
+        repository_refresh_timeout_sec: float = 35.0,
         enable_task_start_advisory: bool = False,
         enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
@@ -542,6 +609,7 @@ class MiniSweCentralAgent(BaseAgent):
         preemptive_retrieval_selection_limit: int | None = None,
         preemptive_retrieval_dense_candidate_limit: int | None = None,
         preemptive_retrieval_model_dir: str | None = None,
+        enable_decision_sufficiency: bool = False,
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
         completion_check_timeout_sec: float = 10.0,
@@ -620,6 +688,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_context_frontier = False
             enable_preemptive_retrieval = False
+            enable_decision_sufficiency = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_progress_control = False
@@ -628,6 +697,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_task_start_advisory = False
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
+            enable_decision_sufficiency = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -636,6 +706,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_task_start_advisory = False
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
+            enable_decision_sufficiency = False
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
@@ -646,6 +717,12 @@ class MiniSweCentralAgent(BaseAgent):
         self.require_graph_ready = bool(require_graph_ready)
         self.repository_initial_index_timeout_sec = max(
             1.0, float(repository_initial_index_timeout_sec)
+        )
+        # ``refresh_index_files`` has its own 30-second subprocess budget.
+        # A shorter asyncio deadline abandons the await but cannot stop the
+        # worker thread, allowing stale and current refreshes to race.
+        self.repository_refresh_timeout_sec = max(
+            35.0, float(repository_refresh_timeout_sec)
         )
         self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_feature_guidance = bool(enable_feature_guidance)
@@ -719,6 +796,7 @@ class MiniSweCentralAgent(BaseAgent):
         self.preemptive_retrieval_model_dir = str(
             preemptive_retrieval_model_dir or ""
         ).strip()
+        self.enable_decision_sufficiency = bool(enable_decision_sufficiency)
         self._preemptive_dense_backend: SnowflakeOnnxDenseBackend | None = None
         self._preemptive_dense_backend_error = ""
         self.enable_context_compaction = enable_context_compaction
@@ -1788,6 +1866,7 @@ class MiniSweCentralAgent(BaseAgent):
         contribution_compilations: list[dict[str, Any]] = []
         preemptive_retrieval_decisions: list[dict[str, Any]] = []
         preemptive_retrieval_deliveries: list[dict[str, Any]] = []
+        decision_sufficiency_receipts: list[dict[str, Any]] = []
         delivered_preemptive_claim_ids: set[str] = set()
         preemptive_retrieval_chars_delivered = 0
         preemptive_repository: HybridRepository | None = None
@@ -3304,6 +3383,199 @@ class MiniSweCentralAgent(BaseAgent):
                             preflight = pass_decision(
                                 proposed, f"preflight_exception:{type(exc).__name__}"
                             )
+                        sufficiency_row: dict[str, Any] | None = None
+                        if self.enable_decision_sufficiency:
+                            sufficiency_row = {
+                                "action_id": proposed.action_id,
+                                "cycle_id": proposed.cycle_id,
+                                "model_call": calls,
+                                "source_revision": source_revision,
+                                "graph_revision": graph_source_revision,
+                                "selecting_request_hash": request_payload_sha256,
+                                "disposition": "pass",
+                                "return_eligible": False,
+                                "reason_codes": ["repository_substrate_unavailable"],
+                            }
+                            target_paths = tuple(
+                                dict.fromkeys(
+                                    path
+                                    for target in proposed.targets
+                                    if (
+                                        path := _workspace_target_path(
+                                            target.path,
+                                            cwd=self.cwd,
+                                        )
+                                    )
+                                )
+                            )
+                            if (
+                                preemptive_repository is not None
+                                and preemptive_repository.complete
+                                and preemptive_repository_revision
+                                == graph_source_revision
+                                and target_paths
+                            ):
+                                target_keys = {
+                                    path.lower().replace("\\", "/")
+                                    for path in target_paths
+                                }
+                                adjacent_paths = set(target_keys)
+                                selected_links = []
+                                for link in preemptive_repository.structural_links:
+                                    source_key = link.source_path.lower().replace("\\", "/")
+                                    target_key = link.target_path.lower().replace("\\", "/")
+                                    if source_key in target_keys or target_key in target_keys:
+                                        selected_links.append(link)
+                                        adjacent_paths.update((source_key, target_key))
+                                selected_documents = tuple(
+                                    document
+                                    for document in preemptive_repository.documents
+                                    if document.path.lower().replace("\\", "/")
+                                    in adjacent_paths
+                                )
+                                if len(selected_documents) > 256 or len(selected_links) > 256:
+                                    sufficiency_row["reason_codes"] = [
+                                        "action_repository_slice_limit"
+                                    ]
+                                elif selected_documents:
+                                    try:
+                                        action_retriever = HybridRetriever(
+                                            selected_documents,
+                                            structural_links=tuple(selected_links),
+                                        )
+                                        action_state = RetrievalState(
+                                            task_text=instruction,
+                                            intent=RetrievalIntent.CHANGE_IMPACT,
+                                            action=_retrieval_action_state(
+                                                proposed,
+                                                target_paths=target_paths,
+                                            ),
+                                            diagnostics=retrieval_diagnostics,
+                                            validation_state=retrieval_validation_state,
+                                            source_revision=graph_source_revision,
+                                        )
+                                        action_result = await asyncio.wait_for(
+                                            asyncio.to_thread(
+                                                action_retriever.retrieve,
+                                                action_state,
+                                                channel_limit=min(
+                                                    32,
+                                                    self.preemptive_retrieval_channel_limit,
+                                                ),
+                                                top_k=min(
+                                                    12,
+                                                    self.preemptive_retrieval_top_k,
+                                                ),
+                                                selection_limit=1,
+                                                token_budget=min(
+                                                    160,
+                                                    self.preemptive_retrieval_token_budget,
+                                                ),
+                                            ),
+                                            timeout=self.preflight_timeout_sec,
+                                        )
+                                        visible_claim_ids = _provider_visible_claim_ids(
+                                            provider_messages,
+                                            action_result.selected_context,
+                                        )
+                                        sufficiency = compile_decision_sufficiency(
+                                            proposed,
+                                            action_result,
+                                            ProviderVisibleState(
+                                                selecting_request_hash=(
+                                                    request_payload_sha256
+                                                ),
+                                                source_revision=source_revision,
+                                                graph_revision=graph_source_revision,
+                                                selecting_request_claim_ids=(
+                                                    visible_claim_ids
+                                                ),
+                                                complete=True,
+                                            ),
+                                            current_source_revision=source_revision,
+                                            current_graph_revision=(
+                                                graph_source_revision
+                                            ),
+                                            max_evidence_tokens=160,
+                                            max_evidence_chars=480,
+                                            max_evidence_claims=1,
+                                        )
+                                        sufficiency_row.update(sufficiency.as_dict())
+                                        sufficiency_row["retrieval"] = {
+                                            "query_hash": action_result.query_hash,
+                                            "latency_ms": action_result.latency_ms,
+                                            "selected_claim_ids": [
+                                                candidate.claim_hash
+                                                for candidate in action_result.selected_context
+                                            ],
+                                            "provider_visible_claim_ids": list(
+                                                visible_claim_ids
+                                            ),
+                                            "reason_codes": list(
+                                                action_result.reason_codes
+                                            ),
+                                        }
+                                        if (
+                                            sufficiency.disposition
+                                            is DecisionSufficiencyDisposition.RETURN_ELIGIBLE
+                                            and sufficiency.bundle is not None
+                                            and preflight.disposition
+                                            is ActionDisposition.PASS
+                                        ):
+                                            evidence = _render_decision_evidence(
+                                                sufficiency.bundle
+                                            )
+                                            preflight = PreflightDecision(
+                                                disposition=(
+                                                    ActionDisposition.RETURN_TO_MODEL
+                                                ),
+                                                command=proposed.raw_command,
+                                                evidence=evidence,
+                                                reason_codes=(
+                                                    "certified_missing_decision_evidence",
+                                                ),
+                                                confidence=1.0,
+                                                source_revision=source_revision,
+                                                evidence_grade=(
+                                                    EvidenceGrade.STRUCTURAL
+                                                    if any(
+                                                        claim.support_kind
+                                                        == "certified_structural"
+                                                        for claim in sufficiency.bundle.claims
+                                                    )
+                                                    else EvidenceGrade.DIRECT
+                                                ),
+                                                evidence_ids=tuple(
+                                                    claim.claim_id
+                                                    for claim in sufficiency.bundle.claims
+                                                ),
+                                            )
+                                        elif (
+                                            sufficiency.return_eligible
+                                            and preflight.disposition
+                                            is not ActionDisposition.PASS
+                                        ):
+                                            sufficiency_row["reason_codes"] = [
+                                                *sufficiency_row.get("reason_codes", []),
+                                                "existing_preflight_preferred",
+                                            ]
+                                    except TimeoutError:
+                                        sufficiency_row["reason_codes"] = [
+                                            "decision_sufficiency_timeout"
+                                        ]
+                                    except Exception as exc:
+                                        sufficiency_row["reason_codes"] = [
+                                            "decision_sufficiency_exception:"
+                                            + type(exc).__name__
+                                        ]
+                                else:
+                                    sufficiency_row["reason_codes"] = [
+                                        "action_target_not_indexed"
+                                    ]
+                            elif not target_paths:
+                                sufficiency_row["reason_codes"] = [
+                                    "action_target_unavailable"
+                                ]
                         if preflight.latency_ms <= 0:
                             preflight = replace(
                                 preflight,
@@ -3352,6 +3624,14 @@ class MiniSweCentralAgent(BaseAgent):
                             revision=snapshot.revision,
                             source_revision=source_revision,
                         )
+                        if sufficiency_row is not None:
+                            sufficiency_row["applied_disposition"] = (
+                                applied_disposition.value
+                            )
+                            sufficiency_row["applied_reason_codes"] = list(
+                                applied_reasons
+                            )
+                            decision_sufficiency_receipts.append(sufficiency_row)
                     if applied_disposition == ActionDisposition.RETURN_TO_MODEL:
                         pending_reconsideration_cycle = proposed.cycle_id
                         outputs.append(
@@ -3571,7 +3851,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         repository_session.refresh,
                                         source_revision=graph_source_revision,
                                     ),
-                                    timeout=5,
+                                    timeout=self.repository_refresh_timeout_sec,
                                 )
                             except TimeoutError:
                                 repository_session.invalidate(
@@ -4338,6 +4618,10 @@ class MiniSweCentralAgent(BaseAgent):
                 self.enable_repository_intelligence
                 and self.integration_mode is GTIntegrationMode.ACTIVE
                 and self.runtime_mode == "treatment"
+            )
+            repository_evidence = _resolved_repository_evidence(
+                repository_evidence,
+                repository_session,
             )
             repository_applicability = classify_repository_applicability(repository_evidence)
             # Keep task-start substrate applicability authoritative.  A task
@@ -5163,6 +5447,20 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "preflight_mode": self.preflight_mode.value,
                 "preflight_calls": len(preflight_rows),
+                "decision_sufficiency_calls": len(decision_sufficiency_receipts),
+                "decision_sufficiency_return_eligible": sum(
+                    row.get("disposition") == "return_eligible"
+                    for row in decision_sufficiency_receipts
+                ),
+                "decision_sufficiency_returns_applied": sum(
+                    row.get("applied_disposition") == "return_to_model"
+                    for row in decision_sufficiency_receipts
+                ),
+                "decision_sufficiency_existing_visibility_passes": sum(
+                    "evidence_already_provider_visible"
+                    in (row.get("reason_codes") or ())
+                    for row in decision_sufficiency_receipts
+                ),
                 "preflight_candidate_dispositions": {
                     disposition: sum(
                         row["decision"]["disposition"] == disposition for row in preflight_rows
@@ -5483,7 +5781,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "repository_initial_index_timeout_sec": (
                                 self.repository_initial_index_timeout_sec
                             ),
+                            "repository_refresh_timeout_sec": (
+                                self.repository_refresh_timeout_sec
+                            ),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
+                            "decision_sufficiency": self.enable_decision_sufficiency,
                             "preemptive_retrieval_token_budget": (
                                 self.preemptive_retrieval_token_budget
                             ),
@@ -5612,6 +5914,11 @@ class MiniSweCentralAgent(BaseAgent):
                             "dense_backend_error": (
                                 self._preemptive_dense_backend_error
                             ),
+                        },
+                        "decision_sufficiency": {
+                            "schema": "gt.decision_sufficiency_runtime.v1",
+                            "enabled": self.enable_decision_sufficiency,
+                            "decisions": decision_sufficiency_receipts,
                         },
                         "contribution_compiler": {
                             "schema": "gt.contribution_compiler.runtime.v1",

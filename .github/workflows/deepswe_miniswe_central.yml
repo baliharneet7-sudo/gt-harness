@@ -283,10 +283,12 @@ jobs:
             --ak enable_repository_intelligence=true \
             --ak require_graph_ready=true \
             --ak repository_initial_index_timeout_sec=60 \
+            --ak repository_refresh_timeout_sec=60 \
             --ak enable_lint=true \
             --ak enable_feature_guidance=true \
             --ak enable_context_frontier=true \
             --ak enable_preemptive_retrieval=true \
+            --ak enable_decision_sufficiency=true \
             --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
             --ak enable_context_compaction=false \
             --ak enable_completion_controller=false \
@@ -338,6 +340,7 @@ jobs:
           from pathlib import Path
           from gt_engine.delivery_audit import audit_provider_deliveries
           from gt_engine.runtime_gate import audit_runtime_receipt
+          from scripts.central_release_gate import audit_treatment_runtime
 
           expected = json.loads(os.environ.get("EXPECTED") or "[]")
           rows, missing = [], []
@@ -361,6 +364,12 @@ jobs:
               intel = receipt.get("repository_intelligence") or {}
               _, failures, totals = audit_provider_deliveries(receipt, task=task)
               runtime_failures, runtime_gate = audit_runtime_receipt(receipt, task=task)
+              treatment_checks = audit_treatment_runtime(receipt, label=task)
+              treatment_failures = [
+                  failure
+                  for check in treatment_checks
+                  for failure in check.failures
+              ]
               rewards = (result.get("verifier_result") or {}).get("rewards") or {}
               solved = bool(rewards) and all(isinstance(v, (int, float)) and v >= 1 for v in rewards.values())
               preemptive = receipt.get("preemptive_retrieval") or {}
@@ -376,6 +385,7 @@ jobs:
                            "delivery_failures": failures,
                            "runtime_gate_failures": runtime_failures,
                            "runtime_gate": runtime_gate,
+                           "treatment_release_failures": treatment_failures,
                            "provider_calls": metrics.get("api_calls"),
                            "assistant_steps": metrics.get("assistant_steps"),
                            "effective_actions": metrics.get("effective_task_actions"),
@@ -397,6 +407,8 @@ jobs:
               raise SystemExit("provider-delivery audit failed")
           if any(r["runtime_gate_failures"] for r in rows):
               raise SystemExit("GT runtime integrity gate failed")
+          if any(r["treatment_release_failures"] for r in rows):
+              raise SystemExit("GT treatment release gate failed")
           PY
       - name: Publish merged smoke result
         if: always()

@@ -40,6 +40,7 @@ class EvidenceAuthority(StrEnum):
 class OpportunityKind(StrEnum):
     LOCALIZATION_CONTRACTION = "localization_contraction"
     EDIT_CONTRADICTION = "edit_contradiction"
+    DECISION_EVIDENCE_GAP = "decision_evidence_gap"
     DECLARED_CHECK_FAILURE = "declared_check_failure"
     REPEATED_FAILURE = "repeated_failure"
     STALE_BATCH = "stale_batch"
@@ -83,6 +84,7 @@ class CertifiedOpportunity:
 _RETURN_KINDS = frozenset(
     {
         OpportunityKind.EDIT_CONTRADICTION,
+        OpportunityKind.DECISION_EVIDENCE_GAP,
         OpportunityKind.STALE_BATCH,
         OpportunityKind.SUBMIT_DEBT,
     }

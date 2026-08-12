@@ -58,6 +58,7 @@ def test_paid_context_arms_enable_the_pinned_live_retriever():
             in workflow
         )
         assert workflow.count("--ak enable_preemptive_retrieval=true") == 2
+        assert workflow.count("--ak enable_decision_sufficiency=true") == 2
         assert workflow.count(
             '--ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"'
         ) == 2
@@ -82,6 +83,8 @@ def test_central_matrix_provisions_and_proves_dense_backend_inside_each_run_job(
     assert '"tokenizer_sha256": os.environ["SNOWFLAKE_TOKENIZER_SHA256"]' in run_block
     assert 'Path("dense-backend-proof.json").write_text' in run_block
     assert "results/terminal-bench/dense-backend-proof.json" not in run_block
+    assert "audit_treatment_runtime" in workflow
+    assert "invalid_treatment_release_tasks" in workflow
     upload_paths = (
         "path: |\n"
         "            results/terminal-bench/\n"

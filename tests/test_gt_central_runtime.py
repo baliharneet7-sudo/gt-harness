@@ -113,6 +113,41 @@ async def test_large_manifest_bound_does_not_turn_sort_limit_into_sigpipe_failur
     assert "head -n" not in central_runtime._MANIFEST_COMMAND
 
 
+def test_workspace_manifest_prunes_known_derived_trees_before_entry_bound():
+    command = central_runtime._MANIFEST_COMMAND
+
+    assert "-prune" in command
+    for directory in (".git", "node_modules", "target", ".venv", "build", "dist"):
+        assert f"-name {directory}" in command
+
+
+@pytest.mark.asyncio
+async def test_sensor_recovery_from_unhealthy_snapshot_rehashes_all_source():
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    calls: list[str] = []
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            calls.append(command)
+            if command.startswith("sha256sum"):
+                return Result("a" * 64 + "  src/app.py\n")
+            return Result("f\t300000\t2.0\t2.0\tsrc/app.py\t\n")
+
+    unhealthy = WorkspaceSnapshot("old", {}, False, "temporary manifest failure")
+    snapshot = await WorkspaceSensor().scan(
+        Environment(), cwd="/app", previous=unhealthy
+    )
+
+    assert snapshot.healthy is True
+    assert snapshot.entries["src/app.py"].digest == "a" * 64
+    assert source_revision_receipt(snapshot).complete is True
+    assert any(command.startswith("sha256sum") for command in calls)
+
+
 def test_ctime_detects_same_size_rewrite_even_when_mtime_is_preserved():
     before = _snapshot("r1", **{"same.py": FileState("f", 4, "1.0", "1.0", "")})
     after = _snapshot("r2", **{"same.py": FileState("f", 4, "1.0", "2.0", "")})

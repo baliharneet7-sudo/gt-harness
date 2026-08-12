@@ -58,7 +58,12 @@ from gt_engine.uplift_policy import (
 )
 
 _MANIFEST_COMMAND = (
-    "set -o pipefail; LC_ALL=C find . -xdev -mindepth 1 "
+    "set -o pipefail; LC_ALL=C find . -xdev "
+    "( -type d ( -name .git -o -name .hg -o -name .svn -o "
+    "-name .gt -o -name .groundtruth -o -name node_modules -o "
+    "-name .venv -o -name venv -o -name __pycache__ -o "
+    "-name .tox -o -name .mypy_cache -o -name .ruff_cache -o "
+    "-name dist -o -name build -o -name target ) -prune ) -o -mindepth 1 "
     "-printf '%y\\t%s\\t%T@\\t%C@\\t%P\\t%l\\n' 2>/dev/null "
     "| LC_ALL=C sort | LC_ALL=C awk 'NR <= 50001'"
 )
@@ -1322,10 +1327,9 @@ class WorkspaceSensor:
             return self._degraded(previous, snapshot.reason, elapsed)
         if elapsed > self.max_seconds:
             return replace(snapshot, healthy=False, reason="workspace scan time exceeded")
-        if previous is not None and not previous.healthy:
-            return snapshot
+        comparison_previous = previous if previous is not None and previous.healthy else None
 
-        if previous is None:
+        if comparison_previous is None:
             changed = [
                 path
                 for path, state in sorted(snapshot.entries.items())
@@ -1349,14 +1353,14 @@ class WorkspaceSensor:
                     or _may_be_content_signature_source(path)
                 )
                 and (
-                    previous.entries.get(path) is None
-                    or not _same_metadata(previous.entries[path], state)
+                    comparison_previous.entries.get(path) is None
+                    or not _same_metadata(comparison_previous.entries[path], state)
                 )
             ]
         entries = dict(snapshot.entries)
-        if previous is not None:
+        if comparison_previous is not None:
             for path, state in tuple(entries.items()):
-                old = previous.entries.get(path)
+                old = comparison_previous.entries.get(path)
                 if old is not None and _same_metadata(old, state) and old.digest:
                     entries[path] = replace(
                         state,
@@ -2716,7 +2720,11 @@ class CentralFeatureRuntime:
             kind=(
                 OpportunityKind.SUBMIT_DEBT
                 if "proven_submit_blocker" in decision.reason_codes
-                else OpportunityKind.EDIT_CONTRADICTION
+                else (
+                    OpportunityKind.DECISION_EVIDENCE_GAP
+                    if "certified_missing_decision_evidence" in decision.reason_codes
+                    else OpportunityKind.EDIT_CONTRADICTION
+                )
             ),
             authority=authority,
             source_revision=decision.source_revision or proposed.source_revision,

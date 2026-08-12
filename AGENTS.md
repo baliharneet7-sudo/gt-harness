@@ -1282,3 +1282,35 @@ exists online and
 must not be rerun; after freeze, verify its metadata and run only the matched
 GT-on arm. The next generalization benchmark is Terminal-Bench 2.0 through
 Mini-SWE, not OpenHands or OpenAgents.
+
+## Decision-sufficiency and release boundary (2026-08-12)
+
+The action boundary now has a separately gated deterministic
+`decision_sufficiency` stage. It receives the normalized `ProposedAction`
+after model selection and before `environment.exec`, but it may return an
+action only for a current, complete, mechanically certified repository claim
+that is absent from the exact selecting provider request and retained history.
+Only a single-target `EDIT`, `CREATE`, or `DELETE` is eligible. Ambiguous
+parsing, incomplete provider visibility, stale semantic or graph revision,
+sparse/dense-only support, co-change evidence, duplicate evidence, and any
+budget overflow produce `PASS`. Evidence is complete-fact only and never
+contains the raw command.
+
+This stage is not a second retrieval pipeline and does not execute the
+Snowflake ONNX embedder per action. It takes a bounded target-and-neighbor slice
+from the already refreshed repository substrate and uses exact, sparse-ranking,
+and certified structural evidence to decide sufficiency. The frozen hybrid
+retriever remains the general next-observation retrieval engine. Paid workflows
+keep preflight in `SHADOW`: eligible decisions are receipted but the original
+command and batch behavior are preserved. `ASSISTIVE_SAFE` requires a separate
+provider-free and matched-smoke approval.
+
+Repository readiness is fail-closed. Manifest construction prunes derived
+trees before entry limits; recovery from an unhealthy sensor snapshot rehashes
+all supported source; graph refresh waits longer than the indexer's bounded
+subprocess deadline; and final receipts resolve graph evidence from the atomic
+session state. `scripts/central_release_gate.py` checks these substrate facts,
+dense readiness, exact delivery timing and request hashes, preflight accounting,
+and every decision receipt. Provider-free GitHub certification must build the
+current Go indexer; a stale local Windows binary never justifies weakening the
+gate.

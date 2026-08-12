@@ -73,3 +73,40 @@ delivery, and zero extra calls/actions. Exact-tree GitHub provider-free run
 required before freeze. Archived run `31421610097` has zero eligible pairs
 because it omitted exact controls. End-to-end solve
 uplift and non-regression remain unproven until the frozen GT-on evaluations.
+
+## Pre-execution decision sufficiency
+
+The engine has a narrow, opt-in compiler between typed proposal normalization
+and host execution:
+
+```text
+ProposedAction
+  -> bounded target/structural-neighbor repository slice
+  -> hybrid ranking without per-action dense inference
+  -> exact selecting-request visibility check
+  -> certified complete evidence bundle or PASS
+  -> SHADOW receipt, or separately gated ASSISTIVE_SAFE return
+```
+
+It does not predict an action, rewrite a command, or add generic advice. A
+single-target mutation is `RETURN_ELIGIBLE` only when one current
+exact/mechanical or certified structural claim is missing from what the model
+already saw. Semantic and graph revisions are checked independently. Ambiguous
+parsing, incomplete state, staleness, sparse/dense-only evidence, co-change
+evidence, duplicates, and complete-evidence budget overflow fail to `PASS`.
+
+Visibility is certified from exact provider-prepared messages, including
+ordinary Mini-SWE tool observations such as `sed` or `cat`; no marker or model
+acknowledgement is used. A biting perturbation disabling this check caused a
+duplicate second return, and the restored end-to-end test rejects it. DeepSWE
+and Terminal-Bench workflows currently qualify this mechanism in `SHADOW`, so
+it cannot change execution or add calls during treatment measurement.
+
+## Substrate recovery invariants
+
+Derived trees are pruned before manifest entry limits. Recovery after an
+unhealthy sensor snapshot performs a complete supported-source rehash. Host
+waiting exceeds the bounded index subprocess timeout, preventing a timed-out
+coroutine from racing a live index worker. Final graph state comes from the
+atomic repository session. `scripts/central_release_gate.py` rejects substrate,
+dense, delivery, preflight, or decision-receipt violations before paid work.

@@ -24,6 +24,8 @@ from eval.gt_central_agent import (
     _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
+    _provider_visible_claim_ids,
+    _resolved_repository_evidence,
     _retrieval_intent,
     _stable_provider_prefix,
     _workspace_target_path,
@@ -39,7 +41,11 @@ from gt_engine.decision_point_eval import (
     validate_decision_point_row,
 )
 from gt_engine.delivery_audit import audit_provider_deliveries
-from gt_engine.hybrid_retrieval import RetrievalIntent
+from gt_engine.hybrid_retrieval import (
+    RetrievalCandidate,
+    RetrievalChannel,
+    RetrievalIntent,
+)
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -105,6 +111,28 @@ def test_workspace_target_path_is_relative_to_resolved_cwd(path, cwd, expected):
     assert _workspace_target_path(path, cwd=cwd) == expected
 
 
+def test_provider_visibility_accounts_for_normal_miniswe_read_output():
+    candidate = RetrievalCandidate(
+        path="src/greeter.py",
+        start_line=1,
+        end_line=2,
+        symbol="greet",
+        text="def greet(name):\n    return f'hello {name}'",
+        channel=RetrievalChannel.EXACT,
+        channel_rank=1,
+        relation=None,
+        provenance=("exact_path",),
+        source_revision="graph-1",
+    )
+
+    visible = _provider_visible_claim_ids(
+        [{"role": "tool", "content": "file output:\n" + candidate.text}],
+        (candidate,),
+    )
+
+    assert visible == (candidate.claim_hash,)
+
+
 def test_recovered_initial_graph_failure_does_not_remain_degraded():
     """A transient pre-source snapshot must not invalidate a later fresh graph."""
 
@@ -116,6 +144,22 @@ def test_recovered_initial_graph_failure_does_not_remain_degraded():
         initial_failures=("no_supported_source",),
         current_failures=("graph_not_current",),
     ) is True
+
+
+def test_final_repository_evidence_uses_recovered_session_state():
+    stale = RepositoryEvidence(available=False, status="refresh_timeout")
+    recovered = RepositoryEvidence(
+        available=True,
+        status="source_backed",
+        source_revision="graph-2",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    session = type("Session", (), {"evidence": recovered})()
+
+    assert _resolved_repository_evidence(stale, session) is recovered
+    assert _resolved_repository_evidence(stale, None) is stale
 
 
 def test_merge_gate_does_not_promote_recovered_transient_repository_failures():
@@ -140,6 +184,10 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     ).read_text(encoding="utf-8")
 
     assert "--ak repository_initial_index_timeout_sec=60" in workflow
+    assert "--ak repository_refresh_timeout_sec=60" in workflow
+    assert workflow.count("--ak enable_decision_sufficiency=true") == 1
+    assert "audit_treatment_runtime" in workflow
+    assert "GT treatment release gate failed" in workflow
 
 
 def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
@@ -214,6 +262,21 @@ def test_initial_index_timeout_is_configurable_and_clamped(tmp_path):
 
     assert defaulted.repository_initial_index_timeout_sec == 1.0
     assert configured.repository_initial_index_timeout_sec == 42.5
+
+
+def test_incremental_refresh_timeout_is_configurable_and_not_shorter_than_indexer(tmp_path):
+    defaulted = MiniSweCentralAgent(
+        logs_dir=tmp_path / "defaulted-refresh",
+        model_name="test",
+    )
+    configured = MiniSweCentralAgent(
+        logs_dir=tmp_path / "configured-refresh",
+        model_name="test",
+        repository_refresh_timeout_sec=60,
+    )
+
+    assert defaulted.repository_refresh_timeout_sec >= 35.0
+    assert configured.repository_refresh_timeout_sec == 60.0
 
 
 def test_recovered_refresh_failure_is_not_current_failure():
@@ -807,6 +870,86 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
         assert dense["backend_identity"].startswith(
             "snowflake_onnx:Snowflake/snowflake-arctic-embed-m@sha256:"
         )
+
+
+@pytest.mark.asyncio
+async def test_action_conditioned_missing_evidence_returns_before_mutation_once(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hello {name}'\n"
+            )
+
+    original = "rm src/greeter.py"
+    revised = "rm -f src/greeter.py"
+    model = _ScriptedModel(
+        [original, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    environment = TransferEnvironment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="assistive_safe",
+        enable_preemptive_retrieval=True,
+        enable_decision_sufficiency=True,
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Make the requested behavior change.", environment, AgentContext())
+
+    executed = [command for command, _env in environment.commands]
+    assert original not in executed
+    assert revised in executed
+    assert len(model.observed_history) == 3
+    assert "[GT certified evidence: src/greeter.py:" in "\n".join(
+        model.observed_history[1]
+    )
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decisions = receipt["decision_sufficiency"]["decisions"]
+    assert decisions[0]["disposition"] == "return_eligible"
+    assert decisions[0]["applied_disposition"] == "return_to_model"
+    assert decisions[1]["disposition"] == "pass"
+    assert "evidence_already_provider_visible" in decisions[1]["reason_codes"]
+
+
+@pytest.mark.asyncio
+async def test_action_conditioned_decision_is_observation_only_in_shadow(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "greeter.py").write_text("def greet():\n    return 'hello'\n")
+
+    mutation = "rm src/greeter.py"
+    model = _ScriptedModel([mutation, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    environment = TransferEnvironment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="shadow",
+        enable_preemptive_retrieval=True,
+        enable_decision_sufficiency=True,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Make the requested behavior change.", environment, AgentContext())
+
+    assert mutation in [command for command, _env in environment.commands]
+    assert len(model.observed_history) == 2
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    decision = receipt["decision_sufficiency"]["decisions"][0]
+    assert decision["disposition"] == "return_eligible"
+    assert decision["applied_disposition"] == "pass"
+    assert "shadow_observe_only" in decision["applied_reason_codes"]
 
 
 @pytest.mark.skipif(

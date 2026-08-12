@@ -28,12 +28,40 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-009 | complete | Bounded paired decision-point utility evaluation and report complete | `DECISION_POINT_UTILITY_RESULTS.md`; captures `31530343093`, `31531620414`, `31532480146`; controls `31534502404`, `31534732127`, `31534734333` | outcome smoke gate |
 | GT-FINAL-010 | complete | Repaired GT integration passes exact provider-free GitHub certification | commit `338b391`; provider-free run `31544885372` | request authorization for corrected matched smoke |
 | GT-FINAL-010A | pending | Corrected ten-task matched smoke preserves runtime integrity and reports outcome/resource deltas | new GT-on artifacts plus existing matched control where scientifically usable | paid run requires separate authorization |
+| GT-FINAL-010B | complete | Conservative decision-sufficiency compiler and actual Mini-SWE action boundary are provider-free proven | `gt_engine/decision_sufficiency.py`; action-loop SHADOW/ASSISTIVE_SAFE tests; biting visibility perturbation | certify exact tree on GitHub |
+| GT-FINAL-010C | complete | DeepSWE substrate failures have generalized repairs and release-gate coverage | derived-tree manifest pruning; unhealthy-snapshot full rehash; refresh-race removal; archived artifact replay blocks exactly 3/10 defective substrates | certify current Go indexer on GitHub |
+| GT-FINAL-010D | in_progress | Current exact tree passes the full provider-free GitHub workflow with current-source indexer and pinned Snowflake asset | pending workflow run | commit/push required before dispatch |
+| GT-FINAL-010E | pending | Ten-task SHADOW qualification reports all decision receipts and zero runtime-release failures | paid GitHub smoke artifacts | requires 010D and authorization |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
 | GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
 | GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
 | GT-FINAL-014 | pending | Final causal report and verdict complete | `GROUNDTRUTH_FINAL_REPORT.md` | close project |
 
 ## Current stop state
+
+### 2026-08-12 implementation update
+
+The current worktree implements the missing conservative decision boundary and
+the three generalized DeepSWE substrate repairs. The per-action boundary does
+not run dense inference; it uses one bounded target-and-structural-neighbor
+slice and returns eligibility only for complete mechanically certified evidence
+absent from the exact selecting provider request. Paid workflows remain
+`SHADOW`, so this new accounting cannot alter commands or add model calls.
+
+Local widened verification is 303 passed, 3 failed, 1 skipped. All three
+failures share one environment cause: the untracked Windows `gt-index.exe` is
+older than the current Objective-C language registry. Go is not installed on
+this workstation and Docker Desktop is not running, so the required authority
+is the existing GitHub provider-free job that builds the current Go source.
+The real Snowflake test is the one skip because its pinned asset is provisioned
+by that same workflow. Ruff, Python compilation, four workflow YAML parses,
+diff checking, focused action-loop tests, decision tests, and release-gate tests
+pass. Archived DeepSWE replay makes seven healthy receipts pass and blocks
+exactly `arktype`, `boa`, and `csstree` for their recorded substrate failures.
+
+No paid run is approved from the dirty/unpushed tree. The immediate remaining
+work is GT-FINAL-010D: review, commit/push, and run the exact provider-free
+workflow. Only a green exact-SHA result can advance to GT-FINAL-010E.
 
 `GT-FINAL-010` is complete. ARB remains the retrieval-only authority and the
 paired decision-point work remains a behavioral proxy, not model
