@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id for harbor -m; TokenRouter requires deepseek/deepseek-v4-flash-0731"
+        description: "Model id for harbor -m; native DeepSeek requires deepseek-v4-flash"
         type: string
-        default: "deepseek/deepseek-v4-flash-0731"
+        default: "deepseek-v4-flash"
       provider:
         description: "OpenAI-compatible provider route"
         type: choice
