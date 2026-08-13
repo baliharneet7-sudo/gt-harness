@@ -27,6 +27,8 @@ from eval.gt_central_agent import (
     _message_context_chars,
     _partition_recovered_repository_failures,
     _preemptive_lifecycle_budget,
+    _provider_response_identity,
+    _provider_response_summary,
     _provider_route_configuration,
     _provider_visible_claim_ids,
     _resolved_repository_evidence,
@@ -69,16 +71,12 @@ from gt_engine.uplift_policy import GTPolicyMode
 
 def test_preemptive_lifecycle_budget_preserves_late_failure_capacity():
     assert _preemptive_lifecycle_budget("task_start", task_budget_chars=12_000) == (800, 1)
-    assert _preemptive_lifecycle_budget(
-        "post_read_search", task_budget_chars=12_000
-    ) == (2_400, 1)
+    assert _preemptive_lifecycle_budget("post_read_search", task_budget_chars=12_000) == (2_400, 1)
     assert _preemptive_lifecycle_budget("post_mutation", task_budget_chars=12_000) == (
         3_600,
         2,
     )
-    assert _preemptive_lifecycle_budget(
-        "post_diagnostic", task_budget_chars=12_000
-    ) == (5_200, 2)
+    assert _preemptive_lifecycle_budget("post_diagnostic", task_budget_chars=12_000) == (5_200, 2)
     assert _preemptive_lifecycle_budget("post_other", task_budget_chars=12_000) == (0, 0)
 
 
@@ -158,14 +156,20 @@ def test_provider_visibility_accounts_for_normal_miniswe_read_output():
 def test_recovered_initial_graph_failure_does_not_remain_degraded():
     """A transient pre-source snapshot must not invalidate a later fresh graph."""
 
-    assert _graph_gate_degraded_fallback(
-        initial_failures=("no_supported_source", "graph_missing"),
-        current_failures=(),
-    ) is False
-    assert _graph_gate_degraded_fallback(
-        initial_failures=("no_supported_source",),
-        current_failures=("graph_not_current",),
-    ) is True
+    assert (
+        _graph_gate_degraded_fallback(
+            initial_failures=("no_supported_source", "graph_missing"),
+            current_failures=(),
+        )
+        is False
+    )
+    assert (
+        _graph_gate_degraded_fallback(
+            initial_failures=("no_supported_source",),
+            current_failures=("graph_not_current",),
+        )
+        is True
+    )
 
 
 def test_final_repository_evidence_uses_recovered_session_state():
@@ -186,14 +190,9 @@ def test_final_repository_evidence_uses_recovered_session_state():
 
 def test_merge_gate_does_not_promote_recovered_transient_repository_failures():
     workflow = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "tb2_miniswe_central.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_central.yml"
     ).read_text(encoding="utf-8")
-    merge_block = workflow[
-        workflow.index("invalid_intelligence = [") : workflow.index("out = [")
-    ]
+    merge_block = workflow[workflow.index("invalid_intelligence = [") : workflow.index("out = [")]
     assert "repository_intelligence_transient_failures" not in merge_block
 
 
@@ -214,8 +213,8 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     assert "--ak enable_completion_controller=true" in workflow
     assert "--ak enable_progress_control=true" in workflow
     assert "--ak enable_adaptive_validation_timeout=true" in workflow
-    assert 'TASK_COUNT: ${{ inputs.task_count }}' in workflow
-    assert "target = int(os.environ[\"TASK_COUNT\"])" in workflow
+    assert "TASK_COUNT: ${{ inputs.task_count }}" in workflow
+    assert 'target = int(os.environ["TASK_COUNT"])' in workflow
     assert "len(explicit) != target" in workflow
 
 
@@ -247,7 +246,7 @@ def test_deepswe_workflow_uses_pier_v11_verifier_protocol():
     # runner, not by a direct Harbor invocation.
     assert '"datacurve-pier==0.3.1"' in workflow
     assert "pier run -p deepswe-bench/tasks" in workflow
-    assert "--include-task-name \"$TASK\"" in workflow
+    assert '--include-task-name "$TASK"' in workflow
     assert "eval.pier_gt_adapter:PierMiniSweCentralAgent" in workflow
     assert "harbor run -p deepswe-bench/tasks" not in workflow
 
@@ -295,9 +294,7 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
     assert route["provider_policy"]["data_collection"] == "allow"
 
 
-def test_openrouter_model_builder_does_not_override_unset_data_policy(
-    monkeypatch, tmp_path
-):
+def test_openrouter_model_builder_does_not_override_unset_data_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
@@ -309,6 +306,53 @@ def test_openrouter_model_builder_does_not_override_unset_data_policy(
     )._build_model()
 
     assert "data_collection" not in model.config.model_kwargs["extra_body"]["provider"]
+
+
+def test_provider_response_identity_records_actual_model_route_without_secrets():
+    row = _provider_response_identity(
+        {
+            "role": "assistant",
+            "extra": {
+                "response": {
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "provider": "deepseek",
+                    "system_fingerprint": "fp-current",
+                    "api_key": "must-not-escape",
+                }
+            },
+        }
+    )
+
+    assert row == {
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "provider": "deepseek",
+        "system_fingerprint": "fp-current",
+    }
+    assert "must-not-escape" not in json.dumps(row)
+
+
+def test_provider_response_summary_fails_closed_on_mixed_or_missing_identity():
+    summary = _provider_response_summary(
+        (
+            {
+                "model": "deepseek/deepseek-v4-flash-0731",
+                "provider": "deepseek",
+                "system_fingerprint": "fp-a",
+            },
+            {
+                "model": "fallback-model",
+                "provider": "other",
+                "system_fingerprint": "",
+            },
+        )
+    )
+
+    assert summary["response_count"] == 2
+    assert summary["model_identity_complete"] is True
+    assert summary["fingerprint_identity_complete"] is False
+    assert summary["stable_model_identity"] is False
+    assert summary["stable_provider_identity"] is False
+    assert summary["stable_fingerprint_identity"] is False
 
 
 def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
@@ -330,13 +374,17 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert '"data_collection": "allow"' in workflow
     assert "provider-route-proof.json" in workflow
     assert "exact provider route gate failed" in workflow
+    assert '"system_fingerprint": str(response.get("system_fingerprint") or "")' in workflow
+    assert "actual provider response identity gate failed" in workflow
+    assert 'executor_identity.get("models") == [expected_response_model]' in workflow
+    assert "--ak gt_request_token_budget=1200" in workflow
     assert "--ak preflight_mode=assistive_safe" in workflow
     assert "timeout --signal=TERM --kill-after=30s 6000s pier run" in workflow
     assert "provider_query_started.json" in workflow
     assert "central_receipt.json -print -quit" in workflow
     assert "infra-only retry: no GT provider query started" in workflow
     assert 'rewards.get("reward") == 1' in workflow
-    assert 'and not exception' in workflow
+    assert "and not exception" in workflow
     assert "all(isinstance(v" not in workflow
     assert "gt.deepswe.central.evaluation.v1.1" in workflow
     assert "DEEPSWE_EVALUATION_RESULTS.json" in workflow
@@ -344,7 +392,7 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "baseline_run_id:" in workflow
     assert "baseline_artifact_name:" in workflow
     assert "scripts/deepswe_release_gate.py" in workflow
-    assert "--phase \"${{ inputs.release_phase }}\"" in workflow
+    assert '--phase "${{ inputs.release_phase }}"' in workflow
     assert "Download frozen GT-off comparison before any paid task" in workflow
     assert "BASELINE_APPROVED" in workflow
     assert "needs: [plan, baseline]" in workflow
@@ -360,10 +408,7 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
 
 def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
     workflow = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "central_provider_free.yml"
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "central_provider_free.yml"
     ).read_text(encoding="utf-8")
 
     assert "tests/test_diagnostics.py" in workflow
@@ -468,10 +513,7 @@ async def test_system_information_is_invariant_to_host_kernel_release(tmp_path):
                 )
             if command.startswith("uname "):
                 return ExecResult(
-                    stdout=(
-                        f"Linux\n{self.release}\n{self.version}\n"
-                        "x86_64\n/app\n"
-                    ),
+                    stdout=(f"Linux\n{self.release}\n{self.version}\nx86_64\n/app\n"),
                     return_code=0,
                 )
             return await super().exec(command, cwd, env, timeout_sec, user)
@@ -479,9 +521,7 @@ async def test_system_information_is_invariant_to_host_kernel_release(tmp_path):
     first = MiniSweCentralAgent(logs_dir=tmp_path / "first", model_name="test")
     second = MiniSweCentralAgent(logs_dir=tmp_path / "second", model_name="test")
 
-    first_info = await first._system_information(
-        KernelEnvironment("6.17.0-1020-azure", "runner-a")
-    )
+    first_info = await first._system_information(KernelEnvironment("6.17.0-1020-azure", "runner-a"))
     second_info = await second._system_information(
         KernelEnvironment("6.17.0-1022-azure", "runner-b")
     )
@@ -569,6 +609,36 @@ def test_source_less_task_blocks_preemptive_repository_retrieval():
             diagnostics=(),
         )
         == "validation_pass_no_diagnostic"
+    )
+
+
+def test_persistent_bootstrap_owns_task_start_retrieval_delivery():
+    from eval import gt_central_agent as central_agent
+
+    gate = central_agent._preemptive_retrieval_gate_reason
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=False,
+            evidence_action=0,
+            persistent_bootstrap_selected=True,
+        )
+        == "persistent_bootstrap_owns_task_start"
+    )
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=False,
+            evidence_action=1,
+            persistent_bootstrap_selected=True,
+        )
+        is None
     )
 
 
@@ -682,9 +752,7 @@ async def test_oversized_changed_source_is_hydrated_and_digest_verified(tmp_path
         revision="w1",
         healthy=True,
         entries={
-            "generated.py": FileState(
-                "f", len(payload), "1", "1", "", digest=digest, content=None
-            )
+            "generated.py": FileState("f", len(payload), "1", "1", "", digest=digest, content=None)
         },
     )
 
@@ -823,14 +891,14 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
             self.observed_history.append(self.observed)
             if self.query_count == 1:
                 self.bootstrap_kwargs = dict(kwargs)
-                catalog_blob = self.observed[-1].split("CERTIFIED CATALOG\n", 1)[1].split(
-                    "\n\nSelect only", 1
-                )[0]
+                catalog_blob = (
+                    self.observed[-1]
+                    .split("CERTIFIED CATALOG\n", 1)[1]
+                    .split("\n\nSelect only", 1)[0]
+                )
                 catalog = json.loads(catalog_blob)
                 focus = next(item["id"] for item in catalog if item["kind"] == "focus")
-                validation = next(
-                    item["id"] for item in catalog if item["kind"] == "validation"
-                )
+                validation = next(item["id"] for item in catalog if item["kind"] == "validation")
                 command = json.dumps(
                     {
                         "primary_focus_id": focus,
@@ -888,9 +956,7 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
                     "retrieval_relevance": 1.0,
                 },
             ),
-            definitions=(
-                {"path": "src/service.py", "line": 1, "symbol": "save_user"},
-            ),
+            definitions=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
             project_checks=("pytest tests/test_service.py -q",),
             status="source_backed",
             source_revision=graph_source_revision,
@@ -970,27 +1036,44 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert persistent["initial_retrieval"]["calls"] == 1
     assert persistent["initial_retrieval"]["provider_calls"] == 0
     assert persistent["initial_retrieval"]["action_executions"] == 0
-    assert persistent["initial_retrieval"]["ranked_files"][0]["path"] == (
-        "src/service.py"
-    )
-    assert {
-        row["channel"] for row in persistent["initial_retrieval"]["channel_receipts"]
-    } == {"exact", "lexical", "bm25", "dense", "structural"}
+    assert persistent["initial_retrieval"]["ranked_files"][0]["path"] == ("src/service.py")
+    assert {row["channel"] for row in persistent["initial_retrieval"]["channel_receipts"]} == {
+        "exact",
+        "lexical",
+        "bm25",
+        "dense",
+        "structural",
+    }
     assert receipt["metrics"]["persistent_state_initial_retrieval_calls"] == 1
     assert persistent["initial_retrieval"]["runtime_cache_seeded"] is True
     task_start_retrieval = receipt["preemptive_retrieval"]["decisions"][0]
     assert task_start_retrieval["opportunity_kind"] == "task_start"
-    assert task_start_retrieval["cache_hit"] is True
-    assert all(
-        float(row["latency_ms"]) == 0.0
-        for row in task_start_retrieval["channel_receipts"]
-    )
+    assert task_start_retrieval["cache_hit"] is False
+    assert task_start_retrieval["channel_receipts"] == []
     assert persistent["bootstrap"]["action_executions"] == 0
     assert persistent["bootstrap"]["status"] == "selected"
     assert persistent["metrics"]["context_compilations"] == 2
     assert persistent["metrics"]["preflight_projections"] == 2
     assert persistent["metrics"]["postflight_commits"] == 2
     assert len(persistent["deliveries"]) == 2
+    first_executor_view = "\n".join(model.observed_history[1])
+    assert "Bootstrap-selected repository context" in first_executor_view
+    assert "def save_user():" in first_executor_view
+    assert "[GT repository evidence:" not in first_executor_view
+    assert task_start_retrieval["status"] == "abstained"
+    assert task_start_retrieval["reason_codes"] == ["persistent_bootstrap_owns_task_start"]
+    assert persistent["deliveries"][0]["selected_evidence"] == [
+        {
+            "path": "src/service.py",
+            "start_line": 1,
+            "end_line": 2,
+            "symbol": "save_user",
+            "claim_id": persistent["deliveries"][0]["selected_evidence"][0]["claim_id"],
+            "support_kind": "certified_identity",
+            "retrieval_rank": 0,
+            "supporting_channels": [],
+        }
+    ]
     assert persistent["valid"] is True
     assert not any("bootstrap-selection" in item for item in model.observed_history[1])
     executed = [command for command, _ in environment.commands]
@@ -1218,9 +1301,10 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     assert delivery["predictive"] is False
     assert delivery["selected_evidence"]
     assert all(row["support_kind"] for row in delivery["selected_evidence"])
-    assert delivery["request_payload_sha256"] == receipt["model_call_contexts"][0][
-        "request_payload_sha256"
-    ]
+    assert (
+        delivery["request_payload_sha256"]
+        == receipt["model_call_contexts"][0]["request_payload_sha256"]
+    )
     call = receipt["model_call_contexts"][0]
     assert call["control_provider_messages_sha256"]
     assert call["control_request_payload_sha256"]
@@ -1235,9 +1319,7 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
     compiler = receipt["contribution_compiler"]
     assert compiler["candidate_count"] == compiler["accounted_count"]
-    assert compiler["calls"][0]["selected_surfaces"] == [
-        "preemptive_retrieval"
-    ]
+    assert compiler["calls"][0]["selected_surfaces"] == ["preemptive_retrieval"]
     replay = load_replay_bundle(tmp_path / "gt_replay")
     pair_validation = validate_decision_point_row(
         replay["calls"][0], task_id="preemptive-retrieval"
@@ -1246,9 +1328,7 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     if model_dir:
         dense = next(
             row
-            for row in receipt["preemptive_retrieval"]["decisions"][0][
-                "channel_receipts"
-            ]
+            for row in receipt["preemptive_retrieval"]["decisions"][0]["channel_receipts"]
             if row["channel"] == "dense"
         )
         assert dense["available"] is True
@@ -1417,9 +1497,7 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
 
     original = "rm src/greeter.py"
     revised = "rm -f src/greeter.py"
-    model = _ScriptedModel(
-        [original, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
-    )
+    model = _ScriptedModel([original, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     environment = TransferEnvironment()
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -1440,9 +1518,7 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
     assert original not in executed
     assert revised in executed
     assert len(model.observed_history) == 3
-    assert "[GT certified evidence: src/greeter.py:" in "\n".join(
-        model.observed_history[1]
-    )
+    assert "[GT certified evidence: src/greeter.py:" in "\n".join(model.observed_history[1])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     decisions = receipt["decision_sufficiency"]["decisions"]
     assert decisions[0]["disposition"] == "return_eligible"
@@ -1535,9 +1611,7 @@ async def test_live_snowflake_retrieval_is_cold_once_then_steady_state(tmp_path)
     assert decisions[1]["cold_start"] is False
     assert decisions[1]["timeout_sec"] == 2.0
     assert "preemptive_retrieval_timeout" not in decisions[1]["reason_codes"]
-    dense = next(
-        row for row in decisions[1]["channel_receipts"] if row["channel"] == "dense"
-    )
+    dense = next(row for row in decisions[1]["channel_receipts"] if row["channel"] == "dense")
     assert dense["available"] is True
     assert dense["failed"] is False
 
@@ -1628,9 +1702,7 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     preemptive = receipt["preemptive_retrieval"]
     assert preemptive["deliveries"] == []
     assert preemptive["decisions"][0]["status"] == "abstained"
-    assert preemptive["decisions"][0]["reason_codes"] == [
-        "not_applicable_no_supported_source"
-    ]
+    assert preemptive["decisions"][0]["reason_codes"] == ["not_applicable_no_supported_source"]
     call = receipt["model_call_contexts"][0]
     assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
     assert call["control_request_payload_sha256"] == call["request_payload_sha256"]
@@ -1709,12 +1781,10 @@ async def test_paid_environment_path_transfers_only_selected_source_files(tmp_pa
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     plan = next(
-        row for row in receipt["repository_work_receipts"]
-        if row["kind"] == "source_mirror_plan"
+        row for row in receipt["repository_work_receipts"] if row["kind"] == "source_mirror_plan"
     )
     transfer = next(
-        row for row in receipt["repository_work_receipts"]
-        if row["kind"] == "mirror_transfer"
+        row for row in receipt["repository_work_receipts"] if row["kind"] == "mirror_transfer"
     )
     assert plan["paths"] == ["app.py"]
     assert plan["excluded_artifacts"] == 2
@@ -1727,10 +1797,7 @@ async def test_paid_environment_path_transfers_only_selected_source_files(tmp_pa
         for command in transfer_commands
     )
     assert receipt["metrics"]["repository_mirror_files"] == 1
-    assert (
-        receipt["host_execution"]["category_counts"]["repository_transfer"]
-        >= 2
-    )
+    assert receipt["host_execution"]["category_counts"]["repository_transfer"] >= 2
 
 
 @pytest.mark.asyncio
@@ -1798,8 +1865,7 @@ async def test_strict_graph_gate_allows_current_certified_graph(tmp_path):
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
             root = Path(target_dir)
             (root / "app.py").write_text(
-                "def target(value):\n    return value + 1\n\n"
-                "def caller():\n    return target(1)\n",
+                "def target(value):\n    return value + 1\n\ndef caller():\n    return target(1)\n",
                 encoding="utf-8",
             )
 
@@ -2147,9 +2213,7 @@ async def test_receipt_hashes_the_provider_prepared_messages_not_private_extra(t
 
 
 @pytest.mark.asyncio
-async def test_provider_query_marker_proves_whether_a_paid_call_started(
-    monkeypatch, tmp_path
-):
+async def test_provider_query_marker_proves_whether_a_paid_call_started(monkeypatch, tmp_path):
     monkeypatch.setenv("GT_COMMIT", "a" * 40)
     monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-be-persisted")
     model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
@@ -2912,8 +2976,7 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--ak policy_mode=certified_active" in workflow
     assert "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off" in workflow
     assert (
-        "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow"
-        in workflow
+        "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow" in workflow
     )
     assert "--ak preflight_mode=shadow" in workflow
     assert "--ak enable_context_compaction=true" in workflow
@@ -3399,8 +3462,7 @@ async def test_assistive_safe_runs_one_discovered_project_check_at_submit(tmp_pa
     assert commands.count("pytest -q") == 1
     assert commands.count(submit) == 1
     assert any(
-        "tests/test_app.py::test_behavior FAILED" in item
-        for item in model.observed_history[2]
+        "tests/test_app.py::test_behavior FAILED" in item for item in model.observed_history[2]
     )
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
     assert receipt["metrics"]["project_validation_probe_execs"] == 1
@@ -3564,8 +3626,7 @@ async def test_distinct_successful_experiments_do_not_emit_false_stall(tmp_path)
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     assert receipt["metrics"]["progress_frame_deliveries"] == 0
     assert not any(
-        row["current"] in {"STALLED", "CONTRADICTED"}
-        for row in receipt["progress"]["transitions"]
+        row["current"] in {"STALLED", "CONTRADICTED"} for row in receipt["progress"]["transitions"]
     )
     observations = receipt["progress"]["observations"][:3]
     assert len({row["command_sha256"] for row in observations}) == 3
@@ -3617,8 +3678,7 @@ async def test_failed_reader_does_not_consume_anchor_or_create_fallback_stall(tm
         for row in receipt["progress"]["observations"]
     )
     assert all(
-        "Execution state STALLED" not in "\n".join(history)
-        for history in model.observed_history
+        "Execution state STALLED" not in "\n".join(history) for history in model.observed_history
     )
 
 

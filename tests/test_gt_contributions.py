@@ -41,9 +41,7 @@ def test_contribution_compiler_accounts_every_candidate_once():
     assert result.candidate_count == 2
     assert result.accounted_count == 2
     assert result.payload == "src/a.py:10 — definition A\n\nsrc/b.py:20 — caller B"
-    assert all(
-        row.disposition is ContributionDisposition.SELECTED for row in result.accounting
-    )
+    assert all(row.disposition is ContributionDisposition.SELECTED for row in result.accounting)
 
 
 def test_contribution_compiler_accepts_current_raw_and_graph_revisions():
@@ -67,10 +65,7 @@ def test_contribution_compiler_accepts_current_raw_and_graph_revisions():
     )
 
     assert result.payload
-    assert all(
-        row.disposition is ContributionDisposition.SELECTED
-        for row in result.accounting
-    )
+    assert all(row.disposition is ContributionDisposition.SELECTED for row in result.accounting)
 
 
 def test_contribution_compiler_deduplicates_claims_across_surfaces():
@@ -148,3 +143,42 @@ def test_controller_only_contribution_is_accounted_but_never_rendered():
 def test_invalid_evidence_contribution_fails_closed():
     with pytest.raises(ValueError, match="grounded evidence"):
         _contribution(payload="", claim_ids=(), fact_ids=())
+
+
+def test_contribution_compiler_enforces_one_combined_token_budget():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    first = _contribution(
+        surface="persistent_execution_state",
+        payload=" ".join(["state"] * 8),
+        claim_ids=("state",),
+        fact_ids=(),
+        priority=10,
+    )
+    second = _contribution(
+        surface="preemptive_retrieval",
+        payload=" ".join(["source"] * 8),
+        claim_ids=("source",),
+        fact_ids=(),
+        priority=20,
+    )
+    third = _contribution(
+        surface="feature_fact",
+        payload=" ".join(["failure"] * 8),
+        claim_ids=("failure",),
+        fact_ids=(),
+        priority=30,
+    )
+
+    result = compile_contributions(
+        (third, second, first),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=10_000,
+        budget_tokens=17,
+    )
+
+    assert result.token_count <= 17
+    assert result.selected_ids == (first.contribution_id, second.contribution_id)
+    dispositions = {row.contribution_id: row.disposition for row in result.accounting}
+    assert dispositions[third.contribution_id] is ContributionDisposition.BUDGET

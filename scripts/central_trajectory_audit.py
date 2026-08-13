@@ -49,9 +49,21 @@ def _sha256(path: Path) -> str:
 
 
 def _task_name(path: Path) -> str:
+    result_path = path.parent.parent / "result.json"
+    if result_path.exists():
+        try:
+            task_name = str(_load(result_path).get("task_name") or "").strip()
+        except (OSError, ValueError, json.JSONDecodeError):
+            task_name = ""
+        if task_name:
+            return task_name.rsplit("/", 1)[-1]
     for parent in path.parents:
         if "-task-" in parent.name:
             return parent.name.split("-task-", 1)[1]
+        if "__" in parent.name:
+            candidate = parent.name.split("__", 1)[0].strip()
+            if candidate:
+                return candidate
     return path.parent.name
 
 
@@ -187,9 +199,7 @@ def _delivery_report(receipt: dict[str, Any], task: str) -> tuple[list[dict[str,
                 "first_eligible_call": row["first_eligible_call"],
                 "delivered_before_call": row["delivered_before_call"],
                 "deterministic_status": (
-                    "VALID"
-                    if concrete and row["deterministic_status"] == "VALID"
-                    else "INVALID"
+                    "VALID" if concrete and row["deterministic_status"] == "VALID" else "INVALID"
                 ),
                 "causal_status": "UNIDENTIFIABLE_NO_REPLAY_STATE",
                 "semantic_utilization": str(raw.get("semantic_utilization") or "unreported"),
@@ -215,7 +225,9 @@ def audit_task(trajectory_path: Path, receipt_path: Path, task: str) -> dict[str
     action_count = _trajectory_action_count(trajectory)
     recorded_actions = receipt.get("actions")
     if isinstance(recorded_actions, int) and recorded_actions != action_count:
-        failures.append(f"{task}:trajectory_receipt_action_count_mismatch:{action_count}!={recorded_actions}")
+        failures.append(
+            f"{task}:trajectory_receipt_action_count_mismatch:{action_count}!={recorded_actions}"
+        )
     replay_available = _replay_state_available(receipt)
     if replay_available:
         for row in deliveries:
@@ -283,9 +295,7 @@ def audit_run_root(root: Path) -> dict[str, Any]:
         "provider_delivery_totals": provider_delivery_totals,
         "failures": failures,
         "audit_status": (
-            "DETERMINISTIC_AUDIT_CERTIFIED"
-            if deterministic_ok
-            else "DETERMINISTIC_AUDIT_FAILED"
+            "DETERMINISTIC_AUDIT_CERTIFIED" if deterministic_ok else "DETERMINISTIC_AUDIT_FAILED"
         ),
         "certification": {
             "deterministic_integrity": "CERTIFIED" if deterministic_ok else "FAILED",
@@ -294,8 +304,7 @@ def audit_run_root(root: Path) -> dict[str, Any]:
             if deterministic_ok and replay_available
             else "UNIDENTIFIABLE",
             "causality_basis": (
-                "counterfactual_replay_required; "
-                "anchor_following_is_not_causal_proof"
+                "counterfactual_replay_required; anchor_following_is_not_causal_proof"
             ),
         },
     }

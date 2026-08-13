@@ -70,6 +70,20 @@ def _bounded(value: Any, limit: int) -> str:
     return text[:limit]
 
 
+def _complete_excerpt(value: Any, limit: int = 1_200) -> str:
+    """Return complete source lines within a fixed byte-independent bound."""
+
+    selected: list[str] = []
+    used = 0
+    for line in str(value or "").replace("\x00", "").splitlines():
+        required = len(line) + (1 if selected else 0)
+        if used + required > max(0, int(limit)):
+            break
+        selected.append(line)
+        used += required
+    return "\n".join(selected).strip()
+
+
 def _path(value: Any) -> str:
     raw = str(value or "").strip().replace("\\", "/")
     if raw.startswith("/app/"):
@@ -175,6 +189,10 @@ class BootstrapCatalogItem:
     retrieval_rank: int = 0
     support_channels: tuple[str, ...] = ()
     provenance: tuple[str, ...] = ()
+    source_start_line: int = 0
+    source_end_line: int = 0
+    source_claim_id: str = ""
+    source_excerpt: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -191,6 +209,9 @@ class BootstrapCatalogItem:
             "retrieval_rank": self.retrieval_rank,
             "support_channels": list(self.support_channels),
             "provenance": list(self.provenance),
+            "source_start_line": self.source_start_line,
+            "source_end_line": self.source_end_line,
+            "source_claim_id": self.source_claim_id,
         }
 
 
@@ -391,6 +412,7 @@ class PersistentContextFrame:
     provider_call: int
     token_count: int
     reason_codes: tuple[str, ...] = ()
+    selected_evidence: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -402,6 +424,7 @@ class PersistentContextFrame:
             "provider_call": self.provider_call,
             "token_count": self.token_count,
             "reason_codes": list(self.reason_codes),
+            "selected_evidence": [dict(item) for item in self.selected_evidence],
         }
 
 
@@ -418,6 +441,10 @@ def _catalog_item(
     retrieval_rank: int = 0,
     support_channels: tuple[str, ...] = (),
     provenance: tuple[str, ...] = (),
+    source_start_line: int = 0,
+    source_end_line: int = 0,
+    source_claim_id: str = "",
+    source_excerpt: str = "",
 ) -> BootstrapCatalogItem:
     normalized_path = _path(path)
     normalized_anchors = tuple(
@@ -447,9 +474,11 @@ def _catalog_item(
         support_channels=tuple(
             dict.fromkeys(_bounded(channel, 40) for channel in support_channels if channel)
         ),
-        provenance=tuple(
-            dict.fromkeys(_bounded(item, 160) for item in provenance if item)
-        )[:16],
+        provenance=tuple(dict.fromkeys(_bounded(item, 160) for item in provenance if item))[:16],
+        source_start_line=max(0, int(source_start_line)),
+        source_end_line=max(0, int(source_end_line)),
+        source_claim_id=str(source_claim_id or ""),
+        source_excerpt=_complete_excerpt(source_excerpt),
     )
 
 
@@ -569,9 +598,30 @@ def build_bootstrap_catalog(
                 ),
             )
 
-    document_by_path: dict[str, RepositoryDocument] = {}
+    documents_by_path: dict[str, list[RepositoryDocument]] = {}
     for document in documents:
-        document_by_path.setdefault(_path(document.path), document)
+        documents_by_path.setdefault(_path(document.path), []).append(document)
+    document_by_path = {
+        path: path_documents[0]
+        for path, path_documents in documents_by_path.items()
+        if path_documents
+    }
+
+    def source_document(item: BootstrapCatalogItem) -> RepositoryDocument | None:
+        path_documents = documents_by_path.get(item.path, ())
+        wanted_symbol = _bounded(item.symbol, 160)
+        if wanted_symbol:
+            exact = next(
+                (
+                    document
+                    for document in path_documents
+                    if _bounded(document.symbol, 160) == wanted_symbol
+                ),
+                None,
+            )
+            if exact is not None:
+                return exact
+        return path_documents[0] if len(path_documents) == 1 else None
 
     # The accepted HybridRetriever is the task-localization authority shared
     # with the live provider-boundary path.  Its ranking is not a certified
@@ -671,6 +721,42 @@ def build_bootstrap_catalog(
                 anchors=(normalized,),
             ),
         )
+
+    # Source bytes never enter the bootstrap selection request. They remain in
+    # the immutable host-owned catalog so a valid selected ID can be resolved
+    # to exactly one checkout-backed span for the first executor request.
+    enriched: dict[str, tuple[int, BootstrapCatalogItem]] = {}
+    for item_id, (priority, item) in candidates.items():
+        document = source_document(item)
+        if document is None or not item.path:
+            enriched[item_id] = (priority, item)
+            continue
+        excerpt = _complete_excerpt(document.text)
+        start_line = max(1, int(document.start_line or 1))
+        end_line = max(start_line, int(document.end_line or start_line))
+        claim_id = (
+            _stable_id(
+                "bootstrap-source",
+                item.path,
+                str(start_line),
+                str(end_line),
+                item.symbol,
+                excerpt,
+            )
+            if excerpt
+            else ""
+        )
+        enriched[item_id] = (
+            priority,
+            replace(
+                item,
+                source_start_line=start_line,
+                source_end_line=end_line,
+                source_claim_id=claim_id,
+                source_excerpt=excerpt,
+            ),
+        )
+    candidates = enriched
 
     ordered = sorted(
         candidates.values(),
@@ -855,9 +941,7 @@ def bootstrap_visible_item_ids(messages: list[dict[str, str]]) -> frozenset[str]
         return frozenset()
     content = str(messages[-1].get("content") or "")
     try:
-        payload = content.split("CERTIFIED CATALOG\n", 1)[1].split(
-            "\n\nSelect only", 1
-        )[0]
+        payload = content.split("CERTIFIED CATALOG\n", 1)[1].split("\n\nSelect only", 1)[0]
         rows = json.loads(payload)
     except (IndexError, TypeError, ValueError, json.JSONDecodeError):
         return frozenset()
@@ -884,9 +968,7 @@ class PersistentExecutionStateEngine:
     ) -> None:
         task_digest = hashlib.sha256(str(task or "").encode("utf-8")).hexdigest()
         self._catalog = catalog
-        self._workspace_root = posixpath.normpath(
-            str(workspace_root or "/app").replace("\\", "/")
-        )
+        self._workspace_root = posixpath.normpath(str(workspace_root or "/app").replace("\\", "/"))
         self._links = self._certified_links(structural_links)
         self._present_paths = frozenset(
             self._state_path(item) for item in present_paths if self._state_path(item)
@@ -1122,9 +1204,7 @@ class PersistentExecutionStateEngine:
     ) -> tuple[StateObligation, ...]:
         existing = {
             item.obligation_id: item
-            for item in (
-                self._snapshot.obligations if obligations is None else obligations
-            )
+            for item in (self._snapshot.obligations if obligations is None else obligations)
         }
         changed = frozenset(changed_paths)
         for link in self._links:
@@ -1176,9 +1256,7 @@ class PersistentExecutionStateEngine:
                 status=ObligationStatus.SATISFIED,
                 satisfied_revision=source_revision,
             )
-            if item.status is ObligationStatus.OPEN
-            and item.kind in kinds
-            and item.path in paths
+            if item.status is ObligationStatus.OPEN and item.kind in kinds and item.path in paths
             else item
             for item in obligations
         )
@@ -1214,17 +1292,13 @@ class PersistentExecutionStateEngine:
         )
         normalized_changed = tuple(
             dict.fromkeys(
-                self._state_path(path)
-                for path in changed_paths
-                if self._state_path(path)
+                self._state_path(path) for path in changed_paths if self._state_path(path)
             )
         )
         normalized_graph_changed = tuple(
             dict.fromkeys(
                 self._state_path(path)
-                for path in (
-                    changed_paths if graph_changed_paths is None else graph_changed_paths
-                )
+                for path in (changed_paths if graph_changed_paths is None else graph_changed_paths)
                 if self._state_path(path)
             )
         )
@@ -1247,11 +1321,7 @@ class PersistentExecutionStateEngine:
         }:
             current_focus_path = focus_paths[0]
             matched_focus = next(
-                (
-                    item.item_id
-                    for item in self._catalog.items
-                    if item.path == current_focus_path
-                ),
+                (item.item_id for item in self._catalog.items if item.path == current_focus_path),
                 "",
             )
             current_focus_id = matched_focus
@@ -1311,16 +1381,13 @@ class PersistentExecutionStateEngine:
                     action_id=proposed.action_id,
                 )
                 declared_scope = any(
-                    item.kind is CatalogItemKind.VALIDATION
-                    and completed_check in item.anchors
+                    item.kind is CatalogItemKind.VALIDATION and completed_check in item.anchors
                     for item in self._catalog.items
                 )
                 validation_targets = targets
                 if declared_scope:
                     validation_targets = validation_targets | frozenset(
-                        item.path
-                        for item in obligations
-                        if item.kind == "validate_related_test"
+                        item.path for item in obligations if item.kind == "validate_related_test"
                     )
                 obligations = self._satisfy_paths(
                     obligations,
@@ -1438,9 +1505,7 @@ class PersistentExecutionStateEngine:
         if not current_source_revision or not current_graph_revision:
             self._record("graph_rebase", disposition="revision_missing")
             return self._snapshot
-        bound_graph_source_revision = str(
-            current_graph_source_revision or current_source_revision
-        )
+        bound_graph_source_revision = str(current_graph_source_revision or current_source_revision)
         if evidence.source_revision and evidence.source_revision != bound_graph_source_revision:
             self._metrics["stale_rejections"] += 1
             self._record("graph_rebase", disposition="evidence_source_revision_mismatch")
@@ -1448,9 +1513,7 @@ class PersistentExecutionStateEngine:
         self._links = self._certified_links(structural_links)
         if present_paths is not None:
             self._present_paths = frozenset(
-                self._state_path(path)
-                for path in present_paths
-                if self._state_path(path)
+                self._state_path(path) for path in present_paths if self._state_path(path)
             )
         obligations = tuple(
             replace(item, status=ObligationStatus.INVALIDATED)
@@ -1462,9 +1525,7 @@ class PersistentExecutionStateEngine:
         )
         normalized_changed = tuple(
             dict.fromkeys(
-                self._state_path(path)
-                for path in changed_paths
-                if self._state_path(path)
+                self._state_path(path) for path in changed_paths if self._state_path(path)
             )
         )
         if normalized_changed:
@@ -1473,9 +1534,7 @@ class PersistentExecutionStateEngine:
                 source_revision=current_source_revision,
                 obligations=obligations,
             )
-        required_ids = frozenset(
-            item.item_id for item in self._catalog.items if item.required
-        )
+        required_ids = frozenset(item.item_id for item in self._catalog.items if item.required)
         current_focus_id = (
             self._snapshot.current_focus_id
             if self._snapshot.current_focus_id in required_ids
@@ -1493,19 +1552,13 @@ class PersistentExecutionStateEngine:
             current_focus_id=current_focus_id,
             current_focus_path=current_focus_path,
             ordered_item_ids=tuple(
-                item_id
-                for item_id in self._snapshot.ordered_item_ids
-                if item_id in required_ids
+                item_id for item_id in self._snapshot.ordered_item_ids if item_id in required_ids
             ),
             risk_item_ids=tuple(
-                item_id
-                for item_id in self._snapshot.risk_item_ids
-                if item_id in required_ids
+                item_id for item_id in self._snapshot.risk_item_ids if item_id in required_ids
             ),
             validation_item_ids=tuple(
-                item_id
-                for item_id in self._snapshot.validation_item_ids
-                if item_id in required_ids
+                item_id for item_id in self._snapshot.validation_item_ids if item_id in required_ids
             ),
             obligations=obligations,
             last_transition="graph_rebased",
@@ -1544,6 +1597,29 @@ class PersistentExecutionStateEngine:
                     f"{focus_prefix}: {focus.label}.",
                 )
             )
+            if (
+                focus.source_excerpt
+                and focus.source_claim_id
+                and focus.path not in snapshot.files_inspected
+            ):
+                support_label = (
+                    "certified path/symbol identity"
+                    if focus.certified
+                    else "ranked relevance; checkout source identity certified"
+                )
+                lines.append(
+                    (
+                        focus.source_claim_id,
+                        (
+                            "Bootstrap-selected repository context "
+                            f"[{support_label}] {focus.path}:"
+                            f"{focus.source_start_line}-{focus.source_end_line}\n"
+                            "```\n"
+                            f"{focus.source_excerpt}\n"
+                            "```"
+                        ),
+                    )
+                )
         elif snapshot.current_focus_path:
             lines.append(
                 (
@@ -1707,6 +1783,24 @@ class PersistentExecutionStateEngine:
         rendered = "\n".join((header, *selected)) if selected else ""
         token_count = token_counter(rendered) if rendered else 0
         reason_codes = () if rendered else ("no_complete_state_fact_within_budget",)
+        focus_id = self._snapshot.current_focus_id or self._snapshot.primary_focus_id
+        focus = self._item(focus_id)
+        selected_evidence: tuple[dict[str, Any], ...] = ()
+        if focus is not None and focus.source_claim_id and focus.source_claim_id in claim_ids:
+            selected_evidence = (
+                {
+                    "path": focus.path,
+                    "start_line": focus.source_start_line,
+                    "end_line": focus.source_end_line,
+                    "symbol": focus.symbol,
+                    "claim_id": focus.source_claim_id,
+                    "support_kind": (
+                        "certified_identity" if focus.certified else "bootstrap_ranked_candidate"
+                    ),
+                    "retrieval_rank": focus.retrieval_rank,
+                    "supporting_channels": list(focus.support_channels),
+                },
+            )
         frame = PersistentContextFrame(
             kind=kind if rendered else ContextFrameKind.NONE,
             rendered_text=rendered,
@@ -1716,6 +1810,7 @@ class PersistentExecutionStateEngine:
             provider_call=provider_call,
             token_count=token_count,
             reason_codes=reason_codes,
+            selected_evidence=selected_evidence,
         )
         self._last_compiled_version = self._snapshot.version
         self._record("provider_context", **frame.as_dict())

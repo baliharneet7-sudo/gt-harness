@@ -20,6 +20,7 @@ def _treatment() -> dict:
             "adaptive_validation_timeout": True,
             "preemptive_retrieval": True,
             "persistent_execution_state": True,
+            "gt_request_token_budget": 1200,
         },
         "repository_intelligence": {
             "status": "passed",
@@ -146,7 +147,18 @@ def _treatment() -> dict:
             "valid": True,
         },
         "features": {"effect_trace": [], "preflight_receipts": []},
-        "contribution_compiler": {"calls": []},
+        "contribution_compiler": {
+            "calls": [
+                {
+                    "call": 1,
+                    "candidate_count": 1,
+                    "accounted_count": 1,
+                    "payload_tokens": 20,
+                    "token_budget": 1200,
+                    "selected_surfaces": ["persistent_execution_state"],
+                }
+            ]
+        },
         "model_call_contexts": [
             {
                 "call": 1,
@@ -195,6 +207,16 @@ def _off() -> dict:
     receipt["model_call_contexts"][0]["provider_view_changed"] = False
     receipt["model_call_contexts"][0]["provider_changed_message_indices"] = []
     return receipt
+
+
+def test_treatment_gate_rejects_unified_contribution_budget_expansion():
+    receipt = _treatment()
+    receipt["contribution_compiler"]["calls"][0]["payload_tokens"] = 1201
+
+    report = audit_release([receipt], static_evidence=STATIC)
+
+    assert report.passed is False
+    assert "treatment-1:contribution_token_budget_exceeded:1" in report.failures
 
 
 def test_release_gate_accepts_complete_evidence_contract():
@@ -324,9 +346,7 @@ def test_release_gate_rejects_missing_or_unwired_initial_hybrid_retrieval():
 def test_release_gate_rejects_fallback_bootstrap_and_hidden_extra_calls():
     receipt = _treatment()
     receipt["persistent_execution_state"]["bootstrap"]["status"] = "invalid_fallback"
-    receipt["persistent_execution_state"]["state"]["bootstrap_status"] = (
-        "invalid_fallback"
-    )
+    receipt["persistent_execution_state"]["state"]["bootstrap_status"] = "invalid_fallback"
     receipt["calls"] = 3
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])

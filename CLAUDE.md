@@ -1198,3 +1198,61 @@ workflow can clear that gate. No new paid run, solve uplift, efficiency uplift,
 or non-regression claim exists yet. The existing online DeepSWE-off result is
 usable only if its frozen artifact satisfies the exact comparison manifest;
 otherwise it is descriptive, not the release control.
+
+
+## DeepSWE provider-and-delivery regression repair (2026-08-12)
+
+The observed `4/10 -> 1/10` change is not a persistent-execution-state
+result and is not a valid same-model A/B comparison. Run `31557391617`
+served all 1,450 recorded assistant responses as `deepseek-v4-flash` with
+one stable fingerprint. Run `31575925244` served 1,136 responses as
+`deepseek/deepseek-v4-flash` across two reported upstream providers
+(StreamLake and GMICloud) with no fingerprint. The persistent-state workflow
+then failed provider preflight before executing a task. Outcome causality is
+therefore confounded by provider identity and by a simultaneous delivery-policy
+change.
+
+The delivery change was nevertheless a real GT defect. The earlier good run
+had five preemptive deliveries totaling 11,339 characters; all five occurred
+on one task. The 1/10 run had 53 preemptive deliveries totaling 117,395
+characters across all ten tasks. A repaired graph/source-revision seam had
+activated large generic task-start frames, and persistent bootstrap would have
+duplicated the same task-start authority.
+
+The current contract is:
+
+1. Persistent bootstrap exclusively owns task-start localization after a valid
+   selection. The generic preemptive task-start frame abstains with
+   `persistent_bootstrap_owns_task_start`; later action/result-conditioned
+   retrieval remains active.
+2. The bootstrap selection request contains bounded catalog metadata and no
+   source bytes. The first executor request receives exactly the selected
+   checkout-backed symbol span, with path/span/claim provenance. In a
+   multi-symbol file the selected symbol, never the first file span, owns the
+   excerpt. Once the executor reads that path, the excerpt is not repeated.
+3. All visible GT surfaces share one 1,200-token request budget. The
+   contribution compiler accounts every candidate, emits only complete facts,
+   and the release gate rejects missing calls, unaccounted candidates,
+   duplicate surfaces, or budget overflow.
+4. JavaScript/TypeScript validators invoked through literal `npx`,
+   `npm exec --`, `pnpm exec`, `yarn exec`, or `bunx` are recognized
+   without scanning source text. Dynamic executor forms and help/version/list
+   commands abstain. Pipeline outcomes remain unattributed unless the shell
+   mechanically proves terminal ownership.
+5. Every live receipt records actual response model/provider/fingerprint
+   identity for executor and bootstrap calls. DeepSWE merge requires a stable
+   response model equal to the provider preflight result, and requires the
+   fingerprint to match when the provider supplies one. Requested model names
+   alone are not parity proof.
+6. DeepSWE artifact discovery reads the task ID from the adjacent Pier result,
+   so task directories without `-task-` no longer collapse into a false
+   one-task audit.
+
+The archived 1/10 artifacts now audit as ten tasks with 71 timely, hash-valid
+visible deliveries and 121,201 visible characters. That proves the old engine
+delivered what it selected; it does not make the selection useful. Local
+Python tests for the repaired boundaries pass. The only local census blocker
+is the known stale Windows `gt-index.exe` missing Objective-C; the source-built
+Linux provider-free workflow remains authoritative. No new solve,
+non-regression, or efficiency claim exists until that pushed workflow passes
+and the external provider route can produce an exact response-identity proof.

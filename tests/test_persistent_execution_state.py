@@ -48,9 +48,7 @@ def _evidence(source_revision: str = "source-1") -> RepositoryEvidence:
                 "retrieval_relevance": 1.0,
             },
         ),
-        definitions=(
-            {"path": "src/service.py", "line": 10, "symbol": "save_user"},
-        ),
+        definitions=({"path": "src/service.py", "line": 10, "symbol": "save_user"},),
         callers=(
             {
                 "path": "src/api.py",
@@ -142,11 +140,7 @@ def test_graph_first_catalog_contains_only_bounded_certified_inputs():
     assert any(item.kind.value == "validation" for item in catalog.items)
     assert all("notes/history.md" not in item.anchors for item in catalog.items)
     assert all(item.item_id.startswith("pes-") for item in catalog.items)
-    assert all(
-        item.required
-        for item in catalog.items
-        if item.kind.value == "validation"
-    )
+    assert all(item.required for item in catalog.items if item.kind.value == "validation")
 
 
 def test_inferred_project_check_is_a_nonblocking_candidate_not_a_task_requirement():
@@ -538,6 +532,116 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
     assert engine.metrics["graph_rebases"] == 1
 
 
+def test_initial_frame_contains_only_bootstrap_selected_checkout_span():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user and run its test.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+
+    frame = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=1,
+        max_tokens=512,
+    )
+
+    assert frame.kind is ContextFrameKind.INITIAL
+    assert "src/service.py" in frame.rendered_text
+    assert "def save_user():" in frame.rendered_text
+    assert "def create_user():" not in frame.rendered_text
+    assert "Bootstrap-selected repository context" in frame.rendered_text
+    assert frame.selected_evidence == (
+        {
+            "path": "src/service.py",
+            "start_line": 10,
+            "end_line": 12,
+            "symbol": "save_user",
+            "claim_id": frame.selected_evidence[0]["claim_id"],
+            "support_kind": "certified_identity",
+            "retrieval_rank": 0,
+            "supporting_channels": [],
+        },
+    )
+
+    read = _proposed("sed -n '1,40p' src/service.py")
+    engine.commit_postflight(
+        read,
+        returncode=0,
+        output="def save_user():\n    return None",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="unknown",
+    )
+    after_read = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=2,
+        max_tokens=512,
+    )
+
+    assert "Bootstrap-selected repository context" not in after_read.rendered_text
+    assert "def save_user():" not in after_read.rendered_text
+    assert after_read.selected_evidence == ()
+
+
+def test_bootstrap_selected_symbol_uses_its_exact_span_in_a_multi_symbol_file():
+    catalog = build_bootstrap_catalog(
+        instruction="Fix save_user in src/service.py.",
+        evidence=_evidence(),
+        documents=(
+            RepositoryDocument(
+                path="src/service.py",
+                start_line=1,
+                end_line=2,
+                symbol="unrelated_helper",
+                text="def unrelated_helper():\n    return 'wrong span'",
+                provenance=("graph_node",),
+            ),
+            RepositoryDocument(
+                path="src/service.py",
+                start_line=10,
+                end_line=12,
+                symbol="save_user",
+                text="def save_user():\n    return 'selected span'",
+                provenance=("graph_node",),
+            ),
+        ),
+        structural_links=(),
+        explicit_checks=(),
+        task_deliverables=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    focus = next(
+        item
+        for item in catalog.items
+        if item.path == "src/service.py" and item.symbol == "save_user"
+    )
+
+    assert focus.source_start_line == 10
+    assert focus.source_end_line == 12
+    assert "selected span" in focus.source_excerpt
+    assert "wrong span" not in focus.source_excerpt
+
+
 def test_graph_discovery_after_edit_updates_state_without_a_second_model_plan():
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -574,9 +678,7 @@ def test_graph_discovery_after_edit_updates_state_without_a_second_model_plan():
         present_paths=("src/service.py", "src/api.py"),
     )
 
-    graph_obligations = [
-        item for item in engine.snapshot.obligations if item.relation == "calls"
-    ]
+    graph_obligations = [item for item in engine.snapshot.obligations if item.relation == "calls"]
     assert len(graph_obligations) == 1
     assert graph_obligations[0].path == "src/api.py"
     assert graph_obligations[0].blocking is False
@@ -661,9 +763,7 @@ def test_successful_current_validation_advances_ready_without_inventing_completi
         current_graph_revision="graph-2",
         graph_complete=True,
     )
-    test_action = _proposed(
-        "pytest tests/test_service.py -q", source_revision="source-2", call=2
-    )
+    test_action = _proposed("pytest tests/test_service.py -q", source_revision="source-2", call=2)
     engine.commit_postflight(
         test_action,
         returncode=0,
@@ -831,9 +931,7 @@ def test_stale_revision_never_mutates_or_emits_state():
         current_graph_revision="graph-1",
         validation_status="unknown",
     )
-    frame = engine.compile_context(
-        current_source_revision="other", provider_call=1, max_tokens=512
-    )
+    frame = engine.compile_context(current_source_revision="other", provider_call=1, max_tokens=512)
 
     assert projection.considered is False
     assert "stale_proposed_revision" in projection.reason_codes

@@ -35,6 +35,18 @@ every normal executor request. All extra calls and context must be visible in me
 - [ ] Inspect a paid live receipt for one bootstrap, zero bootstrap actions, every-boundary state use, and every-call exact delivery.
 - [ ] Obtain separate approval for one paid matched diagnostic.
 - [ ] Freeze or kill the mechanism based on causal outcome and efficiency evidence.
+- [x] Diagnosed the apparent `4/10 -> 1/10` change as a provider-confounded,
+  pre-persistent comparison and repaired the independent task-start delivery
+  flood it exposed.
+- [x] Made bootstrap selection own task-start delivery, attached one exact
+  selected source span, and stopped repeating that span after an observed read.
+- [x] Added a single request-wide GT contribution budget and release gate.
+- [x] Added actual response-model/provider/fingerprint receipts and DeepSWE
+  merge enforcement.
+- [ ] Pass the authoritative source-built Linux provider-free workflow at the
+  repaired commit.
+- [ ] Clear the external provider preflight and obtain an outcome-authorized
+  GT-on comparison; no paid persistent-state task has executed yet.
 
 ## Surprises & Discoveries
 

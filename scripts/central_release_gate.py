@@ -60,22 +60,25 @@ class ReleaseGateReport:
 
 
 def _bool(value: Any) -> bool:
-    return value is True or value == 1 or str(value).strip().lower() in {
-        "true",
-        "ready",
-        "passed",
-        "pass",
-        "approved",
-        "smoke_approved",
-    }
+    return (
+        value is True
+        or value == 1
+        or str(value).strip().lower()
+        in {
+            "true",
+            "ready",
+            "passed",
+            "pass",
+            "approved",
+            "smoke_approved",
+        }
+    )
 
 
 def _check_static(static: dict[str, Any] | None) -> ReleaseGateCheck:
     failures: list[str] = []
     if not isinstance(static, dict):
-        return ReleaseGateCheck(
-            "static_provider_free", False, ("missing_static_evidence",), {}
-        )
+        return ReleaseGateCheck("static_provider_free", False, ("missing_static_evidence",), {})
     # These names intentionally accept the direct output names used by the
     # existing census/readiness/pre-smoke scripts.  Missing is never inferred
     # as pass.
@@ -110,9 +113,7 @@ def _substrate(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     excluded = bool(intelligence.get("denominator_excluded"))
     failures: list[str] = []
     if excluded and applicability == "not_applicable_no_supported_source":
-        return ReleaseGateCheck(
-            "repository_substrate", True, (), {"applicability": applicability}
-        )
+        return ReleaseGateCheck("repository_substrate", True, (), {"applicability": applicability})
     status = str(intelligence.get("status") or "")
     if status not in {"passed", "source_backed", "healthy", "available"}:
         failures.append(f"{label}:repository_status:{status or 'missing'}")
@@ -125,7 +126,9 @@ def _substrate(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     if intelligence.get("required") and int(metrics.get("repository_intelligence_valid") or 0) <= 0:
         failures.append(f"{label}:repository_intelligence_not_valid")
     return ReleaseGateCheck(
-        "repository_substrate", not failures, tuple(failures),
+        "repository_substrate",
+        not failures,
+        tuple(failures),
         {"task": label, "status": status, "applicability": applicability},
     )
 
@@ -134,8 +137,7 @@ def _dense(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     intelligence = receipt.get("repository_intelligence") or {}
     if (
         intelligence.get("denominator_excluded") is True
-        and str(intelligence.get("applicability") or "")
-        == "not_applicable_no_supported_source"
+        and str(intelligence.get("applicability") or "") == "not_applicable_no_supported_source"
     ):
         return ReleaseGateCheck(
             "dense_backend",
@@ -161,8 +163,7 @@ def _dense(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
         content_hashed_identity = (
             str(backend.get("backend") or "") == "snowflake_onnx"
             and bool(str(backend.get("model_name") or ""))
-            and re.fullmatch(r"[0-9a-f]{64}", str(backend.get("model_sha256") or ""))
-            is not None
+            and re.fullmatch(r"[0-9a-f]{64}", str(backend.get("model_sha256") or "")) is not None
         )
         if not legacy_identity and not content_hashed_identity:
             failures.append(f"{label}:dense_backend_identity_missing")
@@ -171,7 +172,9 @@ def _dense(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
         if int(backend.get("provider_calls") or 0) != 0:
             failures.append(f"{label}:dense_backend_provider_calls")
     return ReleaseGateCheck(
-        "dense_backend", not failures, tuple(failures),
+        "dense_backend",
+        not failures,
+        tuple(failures),
         {"task": label, "available": bool(isinstance(backend, dict) and backend.get("available"))},
     )
 
@@ -200,7 +203,9 @@ def _preflight(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     if isinstance(false_interventions, (int, float)) and false_interventions > 0:
         failures.append(f"{label}:preflight_false_interventions")
     return ReleaseGateCheck(
-        "preflight_precision", not failures, tuple(failures),
+        "preflight_precision",
+        not failures,
+        tuple(failures),
         {"task": label, "calls": int(metrics.get("preflight_calls") or 0), "rows": len(rows)},
     )
 
@@ -243,9 +248,7 @@ def _decision_sufficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
             != str(row.get("selecting_request_hash") or "")
         ):
             failures.append(f"{label}:decision_bundle_invalid:{index}")
-        visible_ids = set(
-            (row.get("retrieval") or {}).get("provider_visible_claim_ids") or []
-        )
+        visible_ids = set((row.get("retrieval") or {}).get("provider_visible_claim_ids") or [])
         if any(str(claim.get("claim_id") or "") in visible_ids for claim in claims):
             failures.append(f"{label}:decision_repeated_visible_claim:{index}")
         for claim in claims:
@@ -278,16 +281,13 @@ def _decision_sufficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     )
 
 
-def _persistent_execution_state(
-    receipt: dict[str, Any], label: str
-) -> ReleaseGateCheck:
+def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     """Fail closed if the graph-first living state is absent or only bootstrapped."""
 
     intelligence = receipt.get("repository_intelligence") or {}
     source_less = bool(
         intelligence.get("denominator_excluded") is True
-        and str(intelligence.get("applicability") or "")
-        == "not_applicable_no_supported_source"
+        and str(intelligence.get("applicability") or "") == "not_applicable_no_supported_source"
     )
     configuration = receipt.get("component_configuration") or {}
     runtime = receipt.get("persistent_execution_state") or {}
@@ -330,11 +330,9 @@ def _persistent_execution_state(
         failures.append(f"{label}:persistent_initial_retrieval_call_count")
     if str(initial_retrieval.get("status") or "") not in {"selected", "abstained"}:
         failures.append(f"{label}:persistent_initial_retrieval_incomplete")
-    if (
-        not str(initial_retrieval.get("query_hash") or "")
-        or str(initial_retrieval.get("source_revision") or "")
-        != str(initial_catalog.get("graph_source_revision") or "")
-    ):
+    if not str(initial_retrieval.get("query_hash") or "") or str(
+        initial_retrieval.get("source_revision") or ""
+    ) != str(initial_catalog.get("graph_source_revision") or ""):
         failures.append(f"{label}:persistent_initial_retrieval_revision_or_query")
     if set(initial_channels) != {"exact", "lexical", "bm25", "dense", "structural"}:
         failures.append(f"{label}:persistent_initial_retrieval_channels")
@@ -356,9 +354,10 @@ def _persistent_execution_state(
         failures.append(f"{label}:persistent_initial_retrieval_not_in_catalog")
     if str(bootstrap.get("status") or "") != "selected":
         failures.append(f"{label}:persistent_bootstrap_not_selected")
-    if int(bootstrap.get("logical_calls") or 0) != 1 or int(
-        bootstrap.get("provider_calls") or 0
-    ) != 1:
+    if (
+        int(bootstrap.get("logical_calls") or 0) != 1
+        or int(bootstrap.get("provider_calls") or 0) != 1
+    ):
         failures.append(f"{label}:persistent_bootstrap_not_exactly_one_call")
     if int(bootstrap.get("action_executions") or 0) != 0:
         failures.append(f"{label}:persistent_bootstrap_action_executed")
@@ -388,9 +387,7 @@ def _persistent_execution_state(
 
     executor_calls = int(receipt.get("executor_calls") or 0)
     actions = int(receipt.get("actions") or 0)
-    host_executed = int(
-        (receipt.get("host_execution") or {}).get("decision_actions") or 0
-    )
+    host_executed = int((receipt.get("host_execution") or {}).get("decision_actions") or 0)
     if executor_calls <= 0:
         failures.append(f"{label}:persistent_state_no_executor_call")
     if int(runtime_metrics.get("context_compilations") or 0) != len(
@@ -430,13 +427,46 @@ def _persistent_execution_state(
 
 def _delivery(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     runtime_failures, runtime_summary = audit_runtime_receipt(receipt, task=label)
-    _rows, delivery_failures, delivery_summary = audit_provider_deliveries(
-        receipt, task=label
-    )
+    _rows, delivery_failures, delivery_summary = audit_provider_deliveries(receipt, task=label)
     failures = [*runtime_failures, *delivery_failures]
     return ReleaseGateCheck(
-        "delivery_timing_accounting", not failures, tuple(failures),
+        "delivery_timing_accounting",
+        not failures,
+        tuple(failures),
         {"runtime": runtime_summary, "provider": delivery_summary},
+    )
+
+
+def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    runtime = receipt.get("contribution_compiler") or {}
+    calls = runtime.get("calls") or []
+    configuration = receipt.get("component_configuration") or {}
+    configured_budget = int(configuration.get("gt_request_token_budget") or 0)
+    executor_calls = int(receipt.get("executor_calls") or 0)
+    failures: list[str] = []
+    if configured_budget <= 0:
+        failures.append(f"{label}:gt_request_token_budget_missing")
+    if len(calls) != executor_calls:
+        failures.append(f"{label}:contribution_compiler_call_count")
+    for index, row in enumerate(calls, start=1):
+        if int(row.get("candidate_count") or 0) != int(row.get("accounted_count") or 0):
+            failures.append(f"{label}:contribution_unaccounted:{index}")
+        if int(row.get("token_budget") or 0) != configured_budget:
+            failures.append(f"{label}:contribution_token_budget_mismatch:{index}")
+        if int(row.get("payload_tokens") or 0) > configured_budget:
+            failures.append(f"{label}:contribution_token_budget_exceeded:{index}")
+        selected_surfaces = tuple(row.get("selected_surfaces") or ())
+        if len(selected_surfaces) != len(set(selected_surfaces)):
+            failures.append(f"{label}:contribution_surface_duplicate:{index}")
+    return ReleaseGateCheck(
+        "contribution_budget",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "calls": len(calls),
+            "configured_token_budget": configured_budget,
+        },
     )
 
 
@@ -451,9 +481,7 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         "adaptive_validation_timeout",
     )
     failures = tuple(
-        f"{label}:{name}_disabled"
-        for name in required
-        if configuration.get(name) is not True
+        f"{label}:{name}_disabled" for name in required if configuration.get(name) is not True
     )
     return ReleaseGateCheck(
         "outcome_preservation_controls",
@@ -494,6 +522,8 @@ def _project_validation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck
         tuple(failures),
         {"task": label, "probes": len(probes)},
     )
+
+
 def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     runtime = receipt.get("preemptive_retrieval") or {}
     if runtime.get("enabled") is False:
@@ -510,11 +540,15 @@ def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
             failures.append(f"{label}:retrieval_opportunity_missing:{index}")
         reasons = set(row.get("reason_codes") or ())
         channels = row.get("channel_receipts") or []
-        if reasons & {
-            "task_character_budget",
-            "task_character_budget_closed_precheck",
-            "opportunity_budget_reserved_precheck",
-        } and channels:
+        if (
+            reasons
+            & {
+                "task_character_budget",
+                "task_character_budget_closed_precheck",
+                "opportunity_budget_reserved_precheck",
+            }
+            and channels
+        ):
             failures.append(f"{label}:retrieval_work_after_budget_closed:{index}")
         if row.get("cache_hit") is True and any(
             float(channel.get("latency_ms") or 0.0) > 0.0 for channel in channels
@@ -535,6 +569,8 @@ def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         tuple(failures),
         {"task": label, "decisions": len(decisions)},
     )
+
+
 def _baseline_shield(receipts: Iterable[dict[str, Any]]) -> ReleaseGateCheck:
     failures: list[str] = []
     count = 0
@@ -560,7 +596,9 @@ def _baseline_shield(receipts: Iterable[dict[str, Any]]) -> ReleaseGateCheck:
         if int(metrics.get("provider_view_changed_calls") or 0) != 0:
             failures.append(f"{label}:provider_view_changed_metric")
     return ReleaseGateCheck(
-        "baseline_shield", count > 0 and not failures, tuple(failures),
+        "baseline_shield",
+        count > 0 and not failures,
+        tuple(failures),
         {"off_receipts": count},
     )
 
@@ -576,6 +614,7 @@ def audit_treatment_runtime(
         _substrate(receipt, label),
         _dense(receipt, label),
         _delivery(receipt, label),
+        _contribution_budget(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _persistent_execution_state(receipt, label),
@@ -610,7 +649,10 @@ def audit_release(
     return ReleaseGateReport(
         "gt.release_gate.v1",
         "READY" if not failures and treatment else "BLOCKED",
-        len(treatment), tuple(checks), failures, summary,
+        len(treatment),
+        tuple(checks),
+        failures,
+        summary,
     )
 
 

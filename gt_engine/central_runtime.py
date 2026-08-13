@@ -36,6 +36,7 @@ from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
     EvidenceGrade,
+    ExecutableInvocation,
     PreflightDecision,
     PreflightMode,
     ProposedAction,
@@ -835,15 +836,121 @@ def _shell_segments(command: str) -> tuple[tuple[str, ...], ...]:
     return shell_segments(command)
 
 
+_JS_TEST_RUNNERS = frozenset({"jest", "vitest", "mocha", "ava", "tap"})
+_JS_TEST_INTROSPECTION_FLAGS = frozenset(
+    {"--help", "-h", "--version", "-v", "--listtests", "--showconfig"}
+)
+_TSC_INTROSPECTION_FLAGS = frozenset(
+    {"--help", "-h", "--version", "-v", "--showconfig", "--init", "--listfilesonly"}
+)
+_NPX_VALUE_OPTIONS = frozenset({"--package", "-p", "--cache", "--userconfig"})
+_NPX_SAFE_OPTIONS = frozenset(
+    {"--yes", "-y", "--no", "--quiet", "-q", "--offline", "--prefer-offline"}
+)
+
+
+def _validation_invocation(words: tuple[str, ...]) -> ExecutableInvocation:
+    """Unwrap literal package executors only for validation classification.
+
+    General action parsing deliberately retains the package manager as the
+    executable. Validation needs the literal package binary while still
+    failing closed on dynamic `-c`/`--call` forms and ambiguous options.
+    """
+
+    invocation = normalize_executable_invocation(words)
+    if invocation.executable is None:
+        return invocation
+    executable = invocation.executable.lower()
+    args = list(invocation.arguments)
+    inner: str | None = None
+    inner_args: tuple[str, ...] = ()
+    extra_wrappers: tuple[str, ...] = ()
+
+    if executable == "npx":
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            option = args[index]
+            lowered = option.lower()
+            if lowered in {"-c", "--call"}:
+                return ExecutableInvocation(None, confidence=0.0)
+            if "=" in option and lowered.split("=", 1)[0] in _NPX_VALUE_OPTIONS:
+                index += 1
+                continue
+            if lowered in _NPX_SAFE_OPTIONS:
+                index += 1
+                continue
+            if lowered in _NPX_VALUE_OPTIONS:
+                if index + 1 >= len(args):
+                    return ExecutableInvocation(None, confidence=0.0)
+                index += 2
+                continue
+            return ExecutableInvocation(None, confidence=0.0)
+        if index < len(args):
+            inner, inner_args = args[index], tuple(args[index + 1 :])
+            extra_wrappers = ("npx",)
+    elif executable == "npm" and args and args[0].lower() in {"exec", "x"}:
+        if len(args) >= 3 and args[1] == "--":
+            inner, inner_args = args[2], tuple(args[3:])
+            extra_wrappers = (f"npm:{args[0].lower()}",)
+        else:
+            return ExecutableInvocation(None, confidence=0.0)
+    elif executable in {"pnpm", "yarn"} and len(args) >= 2 and args[0].lower() == "exec":
+        if any(arg.lower() in {"-c", "--call"} for arg in args[1:]):
+            return ExecutableInvocation(None, confidence=0.0)
+        inner, inner_args = args[1], tuple(args[2:])
+        extra_wrappers = (f"{executable}:exec",)
+    elif executable == "bunx" and args:
+        if args[0].lower() in {"-c", "--call"} or args[0].startswith("-"):
+            return ExecutableInvocation(None, confidence=0.0)
+        inner, inner_args = args[0], tuple(args[1:])
+        extra_wrappers = ("bunx",)
+
+    if inner is None:
+        return invocation
+    normalized_inner = inner.rsplit("/", 1)[-1]
+    if not normalized_inner or any(character in normalized_inner for character in "$`(){}"):
+        return ExecutableInvocation(None, confidence=0.0)
+    return ExecutableInvocation(
+        executable=normalized_inner,
+        arguments=inner_args,
+        environment_assignments=invocation.environment_assignments,
+        wrappers=(*invocation.wrappers, *extra_wrappers),
+        requested_timeout_sec=invocation.requested_timeout_sec,
+        confidence=1.0,
+    )
+
+
 def _validation_authority(words: tuple[str, ...]) -> ValidationAuthority:
     """Recognize real validator invocations only from executable positions."""
-    invocation = normalize_executable_invocation(words)
+
+    invocation = _validation_invocation(words)
     if invocation.executable is None:
         return ValidationAuthority.NONE
     executable = invocation.executable.lower()
     args = invocation.arguments
     if executable in {"pytest", "py.test", "ctest"}:
         return ValidationAuthority.STANDARD_RUNNER
+    if executable in _JS_TEST_RUNNERS:
+        if any(arg.lower() in _JS_TEST_INTROSPECTION_FLAGS for arg in args):
+            return ValidationAuthority.NONE
+        return ValidationAuthority.STANDARD_RUNNER
+    if executable == "tsc":
+        lowered_args = {arg.lower() for arg in args}
+        return (
+            ValidationAuthority.NONE
+            if lowered_args & _TSC_INTROSPECTION_FLAGS
+            else ValidationAuthority.STANDARD_RUNNER
+        )
+    if executable in {"tsx", "node"}:
+        script_name = next(
+            (arg.rsplit("/", 1)[-1] for arg in args if arg and not arg.startswith("-")),
+            "",
+        )
+        return (
+            ValidationAuthority.CUSTOM_PROBE
+            if re.search(r"(?:^|[._-])(?:test|tests|verify|check)(?:[._-]|$)", script_name, re.I)
+            else ValidationAuthority.NONE
+        )
     if executable in {"npm", "pnpm", "yarn", "mvn", "gradle", "cargo", "go"}:
         return (
             ValidationAuthority.STANDARD_RUNNER
@@ -881,10 +988,7 @@ def _standard_runner_project_scoped(invocation: Any) -> bool:
     executable = invocation.executable.lower()
     args = tuple(invocation.arguments)
     if executable in {"pytest", "py.test"}:
-        return not any(
-            not arg.startswith("-") or "::" in arg
-            for arg in args
-        )
+        return not any(not arg.startswith("-") or "::" in arg for arg in args)
     if executable in {"python", "python3", "python3.12", "python3.11"}:
         if len(args) >= 2 and args[:2] in {("-m", "pytest"), ("-m", "unittest")}:
             return not any(not arg.startswith("-") or "::" in arg for arg in args[2:])
@@ -895,6 +999,10 @@ def _standard_runner_project_scoped(invocation: Any) -> bool:
         return bool(args and args[0] == "test" and len(args) == 1)
     if executable in {"ctest", "unittest"}:
         return not any(not arg.startswith("-") for arg in args)
+    if executable in _JS_TEST_RUNNERS:
+        return not any(not arg.startswith("-") and arg.lower() not in {"run"} for arg in args)
+    if executable == "tsc":
+        return not any(arg in {"-p", "--project"} for arg in args)
     return False
 
 
@@ -924,9 +1032,7 @@ def classify_validation_command(
                         index
                         for index in range(len(segments) - 1, -1, -1)
                         if (
-                            segments[index][0].rsplit("/", 1)[-1].lower()
-                            if segments[index]
-                            else ""
+                            segments[index][0].rsplit("/", 1)[-1].lower() if segments[index] else ""
                         )
                         not in {"cd", "echo", "printf", "true", "false"}
                     ),
@@ -940,13 +1046,13 @@ def classify_validation_command(
             check_segments = ()
         if len(check_segments) == 1:
             check_words = check_segments[0]
-            check_invocation = normalize_executable_invocation(check_words)
+            check_invocation = _validation_invocation(check_words)
             for index, segment in enumerate(segments):
                 if tuple(segment) == tuple(check_words):
                     declared_check_id = check
                     declared_segment_index = index
                     break
-                segment_invocation = normalize_executable_invocation(segment)
+                segment_invocation = _validation_invocation(segment)
                 if (
                     check_invocation.confidence == 1.0
                     and segment_invocation.confidence == 1.0
@@ -991,7 +1097,7 @@ def classify_validation_command(
         command_class = "exploration_or_unknown"
         authority = ValidationAuthority.NONE
     invocation = (
-        normalize_executable_invocation(segments[validator_segment_index])
+        _validation_invocation(segments[validator_segment_index])
         if validator_segment_index is not None
         else None
     )
@@ -1155,8 +1261,7 @@ class EvidenceLedger:
             effective_grounded = bool(
                 classification.status is ValidationStatus.FAIL
                 or (
-                    classification.status is ValidationStatus.PASS
-                    and classification.project_scoped
+                    classification.status is ValidationStatus.PASS and classification.project_scoped
                 )
             )
         evidence = CheckEvidence(
@@ -1293,9 +1398,7 @@ class WorkspaceSensor:
             _workspace_relative_path(path) for path in tracked_paths if str(path or "").strip()
         }
         shebang_candidates = {
-            _workspace_relative_path(path)
-            for path in shebang_paths
-            if str(path or "").strip()
+            _workspace_relative_path(path) for path in shebang_paths if str(path or "").strip()
         }
         try:
             kwargs = {
@@ -1326,13 +1429,7 @@ class WorkspaceSensor:
             return self._degraded(previous, "manifest command failed", elapsed)
         raw = result.stdout or ""
         external = tuple(
-            sorted(
-                {
-                    path
-                    for raw_path in external_paths
-                    if (path := _safe_external_path(raw_path))
-                }
-            )
+            sorted({path for raw_path in external_paths if (path := _safe_external_path(raw_path))})
         )
         if external:
             try:
@@ -1413,6 +1510,7 @@ class WorkspaceSensor:
                         digest=old.digest,
                         content=old.content,
                     )
+
         def bounded_batches(paths: Iterable[str]) -> tuple[tuple[str, ...], ...]:
             """Bound each host command without truncating revision completeness."""
 
@@ -3616,8 +3714,7 @@ class CentralFeatureRuntime:
                         self._initial_source_paths is None
                         or _workspace_relative_path(path) in self._initial_source_paths
                     )
-                    and
-                    (
+                    and (
                         candidate := classify_change(
                             path,
                             kind=(
@@ -3687,10 +3784,7 @@ class CentralFeatureRuntime:
                         and (path.rsplit("/", 1)[0] if "/" in path else "") == parent
                         and bool(
                             created_languages
-                            & {
-                                capability.name
-                                for capability in candidate_capabilities(path)
-                            }
+                            & {capability.name for capability in candidate_capabilities(path)}
                         )
                         and concrete_precedent(path)
                     ),
@@ -4235,14 +4329,11 @@ class CentralFeatureRuntime:
                 outcome = "pending_decision_claim"
             elif linked_claim_ids:
                 suppressed = any(
-                    claims[claim_id].get("invalidated_reason")
-                    == "task_start_advisory_disabled"
+                    claims[claim_id].get("invalidated_reason") == "task_start_advisory_disabled"
                     for claim_id in linked_claim_ids
                 )
                 outcome = (
-                    "controller_state_suppressed"
-                    if suppressed
-                    else "expired_unconsumed_claim"
+                    "controller_state_suppressed" if suppressed else "expired_unconsumed_claim"
                 )
             elif trace.get("disposition") == "engine_internal_state":
                 # A producer event proves that the effect performed
@@ -4413,11 +4504,15 @@ class CentralFeatureRuntime:
             return FeatureDeliveryDisposition.PRIVATE_INELIGIBLE
         status = str(receipt.delivery_status or "")
         reason = str(receipt.delivery_reason or "")
-        if status == "delivered" or (
-            receipt.feature_id,
-            receipt.revision,
-            "",
-        ) in self._guided_keys:
+        if (
+            status == "delivered"
+            or (
+                receipt.feature_id,
+                receipt.revision,
+                "",
+            )
+            in self._guided_keys
+        ):
             return FeatureDeliveryDisposition.CANDIDATE_DELIVERED
         if reason == "represented_in_action_history":
             return FeatureDeliveryDisposition.CANDIDATE_REPRESENTED
@@ -4494,9 +4589,7 @@ class CentralFeatureRuntime:
             if item.delivery_status == "delivered"
             and item.delivery_reason == "represented_in_action_history"
         )
-        delivery_dispositions = [
-            self._delivery_disposition(item) for item in self.receipts
-        ]
+        delivery_dispositions = [self._delivery_disposition(item) for item in self.receipts]
         delivery_disposition_counts = {
             disposition.value: delivery_dispositions.count(disposition)
             for disposition in FeatureDeliveryDisposition
@@ -4554,9 +4647,7 @@ class CentralFeatureRuntime:
             "semantic_decisions": self._decisions.summary(),
             "structural_evidence": dict(self._structural_evidence),
             "feature_opportunities": opportunity_rows,
-            "certification_decisions": [
-                dict(item) for item in self._certification_decisions
-            ],
+            "certification_decisions": [dict(item) for item in self._certification_decisions],
             "feature_applicability": feature_applicability,
             "all_feature_opportunities_accounted": (
                 set(feature_applicability) == set(CENTRAL_FEATURE_IDS)

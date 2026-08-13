@@ -161,9 +161,7 @@ async def test_sensor_recovery_from_unhealthy_snapshot_rehashes_all_source():
             return Result("f\t300000\t2.0\t2.0\tsrc/app.py\t\n")
 
     unhealthy = WorkspaceSnapshot("old", {}, False, "temporary manifest failure")
-    snapshot = await WorkspaceSensor().scan(
-        Environment(), cwd="/app", previous=unhealthy
-    )
+    snapshot = await WorkspaceSensor().scan(Environment(), cwd="/app", previous=unhealthy)
 
     assert snapshot.healthy is True
     assert snapshot.entries["src/app.py"].digest == "a" * 64
@@ -444,6 +442,70 @@ def test_validation_classifier_handles_timeout_without_matching_probes():
     assert classification.is_validation is False
 
 
+def test_validation_classifier_unwraps_javascript_package_executors():
+    commands = (
+        "npx jest --no-coverage",
+        "npm exec -- vitest run",
+        "npm x -- mocha test/unit.js",
+        "pnpm exec vitest run",
+        "yarn exec jest --runInBand",
+        "bunx ava test/api.test.js",
+    )
+
+    for command in commands:
+        classification = classify_validation_command(command)
+        assert classification.is_validation is True, command
+        assert classification.authority is ValidationAuthority.STANDARD_RUNNER, command
+
+
+def test_validation_classifier_recognizes_tsc_but_not_introspection_modes():
+    assert classify_validation_command("npx tsc --noEmit").is_validation
+    assert classify_validation_command("pnpm exec tsc --build").is_validation
+    assert classify_validation_command("yarn exec tsc -p tsconfig.json").is_validation
+
+    for command in (
+        "npx tsc --help",
+        "npx tsc --version",
+        "npx tsc --showConfig",
+        "npx tsc --init",
+        "npx tsc --listFilesOnly",
+    ):
+        assert classify_validation_command(command).is_validation is False, command
+
+
+def test_javascript_test_runner_introspection_does_not_claim_validation():
+    for command in (
+        "npx jest --help",
+        "npx jest --version",
+        "npx jest --listTests",
+        "npx vitest --help",
+    ):
+        assert classify_validation_command(command).is_validation is False, command
+
+
+def test_dynamic_package_executor_and_source_text_never_claim_validation():
+    for command in (
+        "npm exec --call 'jest --runInBand'",
+        "npx -c 'vitest run'",
+        "cat package.json | grep jest",
+        "python3 - <<'PY'\nprint('npx jest --no-coverage')\nPY",
+    ):
+        assert classify_validation_command(command).is_validation is False, command
+
+
+def test_javascript_validator_pipeline_remains_unattributed_without_pipefail():
+    classification = classify_validation_command("npx jest --no-coverage | tail -20").with_result(
+        result_code=0,
+        output="1 failed\n",
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+
+    assert classification.is_validation is True
+    assert classification.status is ValidationStatus.UNKNOWN
+    assert classification.status_attributed is False
+
+
 def test_first_standard_runner_failure_is_controller_only_not_duplicate_guidance():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Implement the requested change", revision="r0")
@@ -483,9 +545,7 @@ def test_custom_probe_failure_never_claims_required_check_or_reaches_model():
     summary = runtime.summary()
     classification = classify_validation_command(command)
     assert classification.authority is ValidationAuthority.CUSTOM_PROBE
-    covering = next(
-        row for row in summary["receipts"] if row["feature_id"] == "covering_red"
-    )
+    covering = next(row for row in summary["receipts"] if row["feature_id"] == "covering_red")
     assert covering["model_visible"] is False
     assert covering["payload"]["validation_authority"] == "custom_probe"
     assert summary["produced_counts"]["submit_refusal"] == 0
@@ -496,9 +556,7 @@ def test_custom_probe_failure_never_claims_required_check_or_reaches_model():
 
 def test_declared_check_failure_remains_grounded_and_visible():
     runtime = CentralFeatureRuntime(model_visible=True)
-    runtime.begin_task(
-        "Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",)
-    )
+    runtime.begin_task("Run `pytest -q`.", revision="r0", explicit_checks=("pytest -q",))
     classification = classify_validation_command("pytest -q", ("pytest -q",))
     assert classification.authority is ValidationAuthority.DECLARED
 
@@ -512,9 +570,7 @@ def test_declared_check_failure_remains_grounded_and_visible():
     )
 
     summary = runtime.summary()
-    covering = next(
-        row for row in summary["receipts"] if row["feature_id"] == "covering_red"
-    )
+    covering = next(row for row in summary["receipts"] if row["feature_id"] == "covering_red")
     assert covering["model_visible"] is True
     assert covering["payload"]["validation_authority"] == "declared"
     assert covering["payload"]["declared_check_id"] == "pytest -q"
@@ -889,9 +945,7 @@ def test_newfile_precedent_is_one_shot_per_task_not_per_created_filename():
     )
 
     rows = [
-        row
-        for row in runtime.summary()["receipts"]
-        if row["feature_id"] == "newfile_precedent"
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "newfile_precedent"
     ]
     assert len(rows) == 1
     assert rows[0]["action"] == 1
@@ -955,9 +1009,7 @@ def test_signature_delta_is_coalesced_into_its_first_eligible_edit_frame():
 
     # signature_delta is produced at the edit boundary with concrete evidence,
     # so it enters the single first-eligible delivery arbitration...
-    produced = [
-        row for row in result["receipts"] if row["feature_id"] == "signature_delta"
-    ]
+    produced = [row for row in result["receipts"] if row["feature_id"] == "signature_delta"]
     assert produced
     assert all(feature_payload_grounded("signature_delta", row["payload"]) for row in produced)
     # Bounded arbitration uses one provider frame, but includes distinct
@@ -968,9 +1020,7 @@ def test_signature_delta_is_coalesced_into_its_first_eligible_edit_frame():
     )
     assert "signature_delta" in edit_frame["contributing_features"]
     assert edit_frame["evidence_action"] == 2
-    delivered = next(
-        row for row in result["receipts"] if row["feature_id"] == "signature_delta"
-    )
+    delivered = next(row for row in result["receipts"] if row["feature_id"] == "signature_delta")
     assert delivered["model_visible"] is True
     assert delivered["delivery_status"] == "delivered"
     frame = next(
@@ -1125,7 +1175,7 @@ async def test_sensor_discovers_bounded_extensionless_shebang_source():
             if command.startswith("sha256sum"):
                 return Result(("d" * 64) + "  run-script\n")
             if command.startswith("python3 -c"):
-                return Result(f"{{\"run-script\":\"{encoded}\"}}\n")
+                return Result(f'{{"run-script":"{encoded}"}}\n')
             if "base64" in command:
                 return Result(f"run-script\t{encoded}\n")
             return Result("f\t36\t2.0\t2.0\trun-script\t\n")
@@ -1159,9 +1209,7 @@ async def test_sensor_captures_all_extensionless_sources_in_one_action():
     class Environment:
         async def exec(self, command, **kwargs):
             if "find . -xdev" in command:
-                return Result(
-                    "".join(f"f\t{len(source)}\t2.0\t2.0\t{path}\t\n" for path in paths)
-                )
+                return Result("".join(f"f\t{len(source)}\t2.0\t2.0\t{path}\t\n" for path in paths))
             if command.startswith("sha256sum"):
                 return Result("".join(("d" * 64) + f"  {path}\n" for path in paths))
             if command.startswith("python3 -c"):
@@ -1259,9 +1307,9 @@ def test_task_external_paths_is_allowlisted_and_deduplicated():
 
 
 def test_task_shebang_paths_requires_explicit_script_path():
-    assert task_shebang_paths(
-        "Run the Python script at /app/tools/run-check and inspect it."
-    ) == ("tools/run-check",)
+    assert task_shebang_paths("Run the Python script at /app/tools/run-check and inspect it.") == (
+        "tools/run-check",
+    )
     assert task_shebang_paths("Run /app/decomp against the input file.") == ()
 
 
@@ -1523,9 +1571,7 @@ def test_generated_binary_data_cannot_trigger_validation_debt_after_source_edits
         )
 
     summary = runtime.summary()
-    action_three = [
-        row for row in summary["receipts"] if row["action"] == 3
-    ]
+    action_three = [row for row in summary["receipts"] if row["action"] == 3]
     surface = next(row for row in action_three if row["feature_id"] == "GT_CHANGE_SURFACE")
     assert surface["payload"]["source_relevant"] == []
     assert not any(row["feature_id"] == "GT_EDIT_CHECK" for row in action_three)
@@ -1790,9 +1836,7 @@ def test_predecided_actions_are_audited_without_cancellation():
     runtime.record_predecided_continuation(evidence_action=1, executed=2)
 
     stamped = next(
-        effect
-        for effect in runtime.summary()["effects"]
-        if effect["feature_id"] == "covering_red"
+        effect for effect in runtime.summary()["effects"] if effect["feature_id"] == "covering_red"
     )
     assert stamped["predecided_actions_cancelled"] == 0
     assert stamped["predecided_actions_executed_after_evidence"] == 2
@@ -1820,9 +1864,7 @@ def test_grounded_payloads_require_concrete_evidence():
     )
 
     covering = next(
-        row
-        for row in runtime.summary()["receipts"]
-        if row["feature_id"] == "covering_red"
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "covering_red"
     )
     assert covering["model_visible"] is True
     assert feature_payload_grounded("covering_red", covering["payload"]) is True
@@ -1852,9 +1894,7 @@ def test_empty_failure_diagnostic_never_reaches_model_feedback():
     )
 
     covering = next(
-        row
-        for row in runtime.summary()["receipts"]
-        if row["feature_id"] == "covering_red"
+        row for row in runtime.summary()["receipts"] if row["feature_id"] == "covering_red"
     )
     assert covering["model_visible"] is False
     assert feature_payload_grounded("covering_red", covering["payload"]) is False
@@ -1895,9 +1935,7 @@ def test_repeated_grounded_failure_is_explicitly_suppressed_not_orphaned():
     assert duplicate["delivery_status"] == "suppressed"
     assert duplicate["delivery_reason"] == "semantic_duplicate"
     delivered_ids = {
-        trace["effect_id"]
-        for trace in summary["effect_trace"]
-        if trace["provider_delivery_ids"]
+        trace["effect_id"] for trace in summary["effect_trace"] if trace["provider_delivery_ids"]
     }
     assert duplicate["receipt_id"] not in delivered_ids
     # The recovery effect is a legitimate next decision candidate and may be

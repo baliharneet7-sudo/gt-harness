@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
@@ -45,6 +47,10 @@ def _normalized_payload(payload: str) -> str:
     return "\n".join(line.rstrip() for line in payload.strip().splitlines())
 
 
+def _default_token_counter(text: str) -> int:
+    return len(re.findall(r"\w+|[^\w\s]", str(text or ""), re.UNICODE))
+
+
 @dataclass(frozen=True, slots=True)
 class GTContribution:
     contribution_id: str
@@ -76,9 +82,7 @@ class GTContribution:
         normalized = _normalized_payload(payload)
         claims = tuple(dict.fromkeys(str(item) for item in claim_ids if str(item)))
         facts = tuple(dict.fromkeys(str(item) for item in fact_ids if str(item)))
-        if kind is ContributionKind.EVIDENCE and not (
-            normalized and (claims or facts)
-        ):
+        if kind is ContributionKind.EVIDENCE and not (normalized and (claims or facts)):
             raise ValueError("grounded evidence requires payload plus a claim or fact ID")
         identity = {
             "surface": str(surface),
@@ -124,6 +128,8 @@ class CompiledContributions:
     payload: str
     selected_ids: tuple[str, ...]
     accounting: tuple[ContributionAccounting, ...]
+    token_count: int = 0
+    token_budget: int | None = None
 
     @property
     def candidate_count(self) -> int:
@@ -137,6 +143,8 @@ class CompiledContributions:
         return {
             "schema": "gt.contribution_compiler.v1",
             "payload_chars": len(self.payload),
+            "payload_tokens": self.token_count,
+            "token_budget": self.token_budget,
             "selected_ids": list(self.selected_ids),
             "candidate_count": self.candidate_count,
             "accounted_count": self.accounted_count,
@@ -150,15 +158,15 @@ def compile_contributions(
     current_source_revision: str | tuple[str, ...],
     current_call: int,
     budget_chars: int,
+    budget_tokens: int | None = None,
+    token_counter: Callable[[str], int] = _default_token_counter,
 ) -> CompiledContributions:
     """Select complete contributions deterministically; ambiguity omits text."""
 
     if isinstance(current_source_revision, str):
         valid_revisions = {current_source_revision}
     else:
-        valid_revisions = {
-            str(revision) for revision in current_source_revision if str(revision)
-        }
+        valid_revisions = {str(revision) for revision in current_source_revision if str(revision)}
     decisions: dict[str, ContributionAccounting] = {}
     selected: list[GTContribution] = []
     selected_claims: set[str] = set()
@@ -166,6 +174,7 @@ def compile_contributions(
     selected_payload_hashes: set[str] = set()
     used_chars = 0
     limit = max(0, int(budget_chars))
+    token_limit = None if budget_tokens is None else max(0, int(budget_tokens))
 
     ordered = sorted(
         enumerate(contributions),
@@ -197,9 +206,19 @@ def compile_contributions(
         else:
             separator_chars = 2 if selected else 0
             required = separator_chars + len(contribution.payload)
-            if used_chars + required > limit:
+            candidate_payload = "\n\n".join(
+                (*[item.payload for item in selected], contribution.payload)
+            )
+            over_token_budget = bool(
+                token_limit is not None and token_counter(candidate_payload) > token_limit
+            )
+            if used_chars + required > limit or over_token_budget:
                 disposition = ContributionDisposition.BUDGET
-                reasons = ("complete_contribution_does_not_fit",)
+                reasons = (
+                    "complete_contribution_exceeds_token_budget"
+                    if over_token_budget
+                    else "complete_contribution_does_not_fit",
+                )
             else:
                 selected.append(contribution)
                 selected_claims.update(contribution.claim_ids)
@@ -220,6 +239,8 @@ def compile_contributions(
         payload=payload,
         selected_ids=tuple(item.contribution_id for item in selected),
         accounting=accounting,
+        token_count=token_counter(payload),
+        token_budget=token_limit,
     )
 
 

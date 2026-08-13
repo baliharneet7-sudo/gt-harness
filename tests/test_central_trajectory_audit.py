@@ -24,8 +24,13 @@ def test_direct_trajectory_audit_invocation_bootstraps_project_imports():
     assert "Fail-closed trajectory audit" in result.stdout
 
 
-def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
-    task = root / "trial-task-demo" / "agent"
+def _write_bundle(
+    root: Path,
+    *,
+    complete_hashes: bool = True,
+    task_directory: str = "trial-task-demo",
+) -> None:
+    task = root / task_directory / "agent" if task_directory else root / "agent"
     task.mkdir(parents=True)
     trajectory = {
         "info": {"exit_status": "Submitted"},
@@ -35,11 +40,7 @@ def _write_bundle(root: Path, *, complete_hashes: bool = True) -> None:
                 "role": "assistant",
                 "content": "",
                 "reasoning_content": "inspect",
-                "extra": {
-                    "actions": [
-                        {"command": "cat app.py", "tool_call_id": "call-1"}
-                    ]
-                },
+                "extra": {"actions": [{"command": "cat app.py", "tool_call_id": "call-1"}]},
             },
             {
                 "role": "tool",
@@ -135,3 +136,20 @@ def test_audit_fails_closed_on_missing_context_accounting(tmp_path):
 
     assert report["audit_status"] == "DETERMINISTIC_AUDIT_FAILED"
     assert any("missing_context_fact_accounting" in item for item in report["failures"])
+
+
+def test_audit_discovers_deepswe_trial_layout_by_task_name(tmp_path):
+    for task_name in ("alpha-fix", "beta-fix"):
+        trial = (
+            tmp_path
+            / f"deepswe-central-123-{task_name}"
+            / "results"
+            / "deepswe"
+            / f"deepswe-central-123-{task_name}"
+            / f"{task_name}__trial"
+        )
+        _write_bundle(trial, task_directory="")
+
+    report = audit_run_root(tmp_path)
+
+    assert set(report["tasks"]) == {"alpha-fix", "beta-fix"}

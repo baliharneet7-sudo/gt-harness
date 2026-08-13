@@ -439,6 +439,7 @@ jobs:
               "schema": "gt.provider_route_proof.v1",
               "requested_model": m,
               "response_model": str(response.get("model") or ""),
+              "system_fingerprint": str(response.get("system_fingerprint") or ""),
               "requested_provider": (
                   "deepseek" if os.environ.get("PROVIDER") == "openrouter" else "configured"
               ),
@@ -475,6 +476,7 @@ jobs:
                 --ak persistent_state_bootstrap_input_tokens=2000
                 --ak persistent_state_bootstrap_output_tokens=512
                 --ak persistent_state_context_tokens=512
+                --ak gt_request_token_budget=1200
                 --ak preemptive_retrieval_model_dir="$MODEL_DIR"
                 --ak enable_context_compaction=false
                 --ak enable_completion_controller=false
@@ -496,6 +498,7 @@ jobs:
                 --ak persistent_state_bootstrap_input_tokens=2000
                 --ak persistent_state_bootstrap_output_tokens=512
                 --ak persistent_state_context_tokens=512
+                --ak gt_request_token_budget=1200
                 --ak preemptive_retrieval_model_dir="$MODEL_DIR"
                 --ak enable_context_compaction=true
                 --ak enable_completion_controller=true
@@ -652,6 +655,28 @@ jobs:
                   and (receipt.get("provider_route") or {}).get("credential_in_receipt")
                   is False
               )
+              response_identity = receipt.get("provider_response_identity") or {}
+              executor_identity = response_identity.get("executor") or {}
+              bootstrap_identity = response_identity.get("bootstrap") or {}
+              expected_response_model = str(provider_proof.get("response_model") or "")
+              expected_fingerprint = str(provider_proof.get("system_fingerprint") or "")
+              response_identity_valid = bool(
+                  expected_response_model
+                  and executor_identity.get("response_count")
+                  and executor_identity.get("stable_model_identity") is True
+                  and executor_identity.get("models") == [expected_response_model]
+                  and bootstrap_identity.get("model") == expected_response_model
+                  and (
+                      not expected_fingerprint
+                      or (
+                          executor_identity.get("stable_fingerprint_identity") is True
+                          and executor_identity.get("system_fingerprints")
+                          == [expected_fingerprint]
+                          and bootstrap_identity.get("system_fingerprint")
+                          == expected_fingerprint
+                      )
+                  )
+              )
               rows.append({"task": task, "solved": solved, "rewards": rewards,
                            "exception": exception,
                            "graph_status": intel.get("status"),
@@ -659,6 +684,8 @@ jobs:
                            "graph_failures": intel.get("failures") or [],
                            "dense_available": bool(dense_backend.get("available")),
                            "provider_route_valid": provider_route_valid,
+                           "provider_response_identity_valid": response_identity_valid,
+                           "provider_response_identity": response_identity,
                            "provider_route_proof": provider_proof,
                            "provider_delivery_count": totals.get("delivery_count"),
                            "provider_delivery_chars": totals.get("visible_chars"),
@@ -697,11 +724,32 @@ jobs:
           model_identity = os.environ.get("MODEL") or ""
           if provider_identity.startswith("openrouter") and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
               model_identity = "deepseek/deepseek-v4-flash-0731"
+          response_models = sorted({
+              model
+              for row in rows
+              for model in ((row.get("provider_response_identity") or {}).get("executor") or {}).get("models", [])
+              if model
+          })
+          response_providers = sorted({
+              provider
+              for row in rows
+              for provider in ((row.get("provider_response_identity") or {}).get("executor") or {}).get("providers", [])
+              if provider
+          })
+          response_fingerprints = sorted({
+              fingerprint
+              for row in rows
+              for fingerprint in ((row.get("provider_response_identity") or {}).get("executor") or {}).get("system_fingerprints", [])
+              if fingerprint
+          })
           out = {"schema": "gt.deepswe.central.evaluation.v1.1",
                  "manifest": {"benchmark_sha": os.environ.get("BENCH_SHA"),
                               "gt_commit": os.environ.get("GT_SHA"),
                               "model": model_identity,
                               "provider": provider_identity,
+                              "provider_response_models": response_models,
+                              "provider_response_providers": response_providers,
+                              "provider_system_fingerprints": response_fingerprints,
                               "temperature": 1.0,
                               "step_limit": int(os.environ.get("STEP_LIMIT") or 0),
                               "execution_budget_sec": 5400,
@@ -726,6 +774,8 @@ jobs:
               raise SystemExit("GT treatment release gate failed")
           if any(not r["provider_route_valid"] for r in rows):
               raise SystemExit("exact provider route gate failed")
+          if any(not r["provider_response_identity_valid"] for r in rows):
+              raise SystemExit("actual provider response identity gate failed")
           PY
       - name: Enforce outcome-first DeepSWE release gate
         if: ${{ !inputs.diagnostic_only }}
