@@ -1435,6 +1435,13 @@ class MiniSweCentralAgent(BaseAgent):
                     if data_collection in {"allow", "deny"}:
                         provider_policy["data_collection"] = data_collection
                     kwargs["extra_body"] = {"provider": provider_policy}
+            elif "deepseek.com" in api_base.lower():
+                # The native DeepSeek endpoint exposes bare model IDs.  Do
+                # not translate this into the qualified TokenRouter catalog
+                # ID: that produces a deterministic 400 before the first
+                # agent action.
+                if model == "deepseek-v4-flash-0731":
+                    model = "deepseek-v4-flash"
             else:
                 # OpenAI-compatible gateways still require the gateway's exact
                 # catalog identifier.  Preserve the same DeepSeek checkpoint
