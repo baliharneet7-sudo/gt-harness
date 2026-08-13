@@ -109,10 +109,10 @@ the current Go source and certify the pushed commit.
 
 ## Remaining gates
 
-1. Commit and push only the tracked repair files.
-2. Run the source-built Linux provider-free workflow and require every census
-   line, `READY`, `SMOKE_APPROVED`, the real Snowflake ONNX proof, and zero
-   provider calls.
+1. [Complete] Commit and push only the tracked repair files: `9be71ad`.
+2. [Complete] Source-built Linux provider-free workflow `31655082336` passed
+   at `9be71ad`: current indexer, pinned Snowflake ONNX, every census line,
+   `READY`, `SMOKE_APPROVED`, static checks, and `provider_calls: 0`.
 3. Do not dispatch a paid task while OpenRouter rejects the pinned official
    DeepSeek endpoint. A successful one-call preflight must produce the exact
    response identity first.
@@ -126,6 +126,6 @@ the current Go source and certify the pushed commit.
 
 ## Current status
 
-`IMPLEMENTED_UNVERIFIED`: local behavior is proven, but the authoritative
-source-built Linux gate has not yet certified this exact uncommitted tree and
-the external provider route is still blocked. No paid outcome claim is made.
+`VERIFIED_COMPLETE` for implementation integrity at runtime commit `9be71ad`.
+The external provider route remains blocked, so live outcome validation is not
+complete and no paid outcome claim is made.

@@ -43,8 +43,8 @@ every normal executor request. All extra calls and context must be visible in me
 - [x] Added a single request-wide GT contribution budget and release gate.
 - [x] Added actual response-model/provider/fingerprint receipts and DeepSWE
   merge enforcement.
-- [ ] Pass the authoritative source-built Linux provider-free workflow at the
-  repaired commit.
+- [x] Passed authoritative source-built Linux provider-free workflow
+  `31655082336` at repaired runtime commit `9be71ad`.
 - [ ] Clear the external provider preflight and obtain an outcome-authorized
   GT-on comparison; no paid persistent-state task has executed yet.
 

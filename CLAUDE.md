@@ -1256,3 +1256,15 @@ is the known stale Windows `gt-index.exe` missing Objective-C; the source-built
 Linux provider-free workflow remains authoritative. No new solve,
 non-regression, or efficiency claim exists until that pushed workflow passes
 and the external provider route can produce an exact response-identity proof.
+
+
+### Authoritative provider-free certification
+
+Workflow `31655082336` passed at runtime commit
+`9be71ad9309d99bfe2eb6d7d942a89bdae8d39b3`. It built the current Linux
+indexer, provisioned the pinned Snowflake ONNX asset, passed repository and
+language substrate proof, central runtime tests, all required all-17,
+grounding, timing, visibility, and context-accounting lines, `READY`,
+`SMOKE_APPROVED`, and static checks. Its receipt records
+`provider_calls: 0`. This upgrades the repair to implementation-certified;
+it does not establish solve uplift, non-regression, or efficiency.
