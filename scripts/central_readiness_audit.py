@@ -70,12 +70,42 @@ def _has_explicit_policy_arms(workflow: str) -> bool:
     )
 
 
+def _first_position_after(source: str, needles: tuple[str, ...], *, start: int = 0) -> int:
+    """Return the first executable lifecycle boundary after ``start``.
+
+    Production uses the one-shot direct provider transport while deterministic
+    scripted tests retain Mini-SWE's public query adapter.  Readiness must
+    recognize both branches without depending on the removed retry-wrapped
+    call spelling.
+    """
+
+    positions = tuple(
+        position
+        for needle in needles
+        if (position := source.find(needle, start)) >= 0
+    )
+    return min(positions, default=-1)
+
+
 def audit() -> dict[str, bool]:
     source = inspect.getsource(MiniSweCentralAgent)
     run_source = inspect.getsource(MiniSweCentralAgent.run)
     setup_source = inspect.getsource(MiniSweCentralAgent.setup)
     validation_source = inspect.getsource(ValidationClassification)
     observation_source = inspect.getsource(CentralFeatureRuntime.observe_action)
+    persistent_compile_position = run_source.find(
+        "persistent_state_engine.compile_context("
+    )
+    provider_dispatch_position = _first_position_after(
+        run_source,
+        ("_direct_provider_message,", "model.query,"),
+        start=max(0, persistent_compile_position),
+    )
+    provider_request_receipt_position = _first_position_after(
+        run_source,
+        ("_provider_request_receipt(",),
+        start=max(0, persistent_compile_position),
+    )
     # The paid ten-task smoke dispatches the central matrix workflow.  Keep
     # the older engine workflow in the audit as a second release surface, but
     # never let a correctly configured sibling mask a stale dispatch target.
@@ -227,8 +257,8 @@ def audit() -> dict[str, bool]:
             < run_source.find("preemptive_retriever.retrieve,")
             < run_source.find("build_bootstrap_catalog(")
             < run_source.find("await self._run_persistent_state_bootstrap(")
-            < run_source.find("persistent_state_engine.compile_context(")
-            < run_source.find("model.query, query_messages")
+            < persistent_compile_position
+            < provider_dispatch_position
             and run_source.find("persistent_state_engine.project_preflight(")
             < run_source.find("self._host_executions.exec(")
             and run_source.find("persistent_state_engine.commit_postflight(")
@@ -296,22 +326,22 @@ def audit() -> dict[str, bool]:
         "context_compiler_precedes_model_query": (
             0
             <= run_source.find("record_context_compiler_call(")
-            < run_source.find("model.query, query_messages")
+            < provider_dispatch_position
         ),
         "provider_prepared_hash_precedes_model_query": (
-            0
-            <= run_source.find("_provider_request_receipt(model, query_messages)")
-            < run_source.find("model.query, query_messages")
+            persistent_compile_position
+            < provider_request_receipt_position
+            < provider_dispatch_position
         ),
         "repository_frontier_precedes_model_query": (
             0
             <= run_source.find("compile_incremental_frontier(")
-            < run_source.find("model.query, query_messages")
+            < provider_dispatch_position
         ),
         "preemptive_hybrid_retrieval_precedes_model_query": (
             0
             <= run_source.find("preemptive_retriever.retrieve,")
-            < run_source.find("model.query, query_messages")
+            < provider_dispatch_position
             and "ProviderEvidenceSurface.PREEMPTIVE_RETRIEVAL" in run_source
             and "preemptive_retrieval_deliveries" in run_source
         ),

@@ -1,6 +1,24 @@
 from __future__ import annotations
 
-from scripts.central_readiness_audit import _has_explicit_policy_arms, audit
+from scripts.central_readiness_audit import (
+    _first_position_after,
+    _has_explicit_policy_arms,
+    audit,
+)
+
+
+def test_readiness_finds_direct_or_scripted_dispatch_after_compilation():
+    source = "compile_context()\n_direct_provider_message,\nmodel.query,"
+
+    assert _first_position_after(
+        source,
+        ("_direct_provider_message,", "model.query,"),
+        start=source.index("compile_context()"),
+    ) == source.index("_direct_provider_message,")
+    assert _first_position_after(
+        "compile_context()\nmodel.query,",
+        ("_direct_provider_message,", "model.query,"),
+    ) == len("compile_context()\n")
 
 
 def test_policy_arm_audit_accepts_yaml_safe_quoted_off_choice():
