@@ -70,6 +70,10 @@ on:
         description: "Maximum Mini-SWE model calls per task; use 1 only for authorized decision-point capture"
         type: string
         default: "100"
+      provider_preflight_timeout_sec:
+        description: "Provider preflight timeout for this run; increase for queued TokenRouter routes"
+        type: string
+        default: "600"
 
 jobs:
   plan:
@@ -169,11 +173,12 @@ jobs:
         env:
           MODEL: ${{ inputs.model }}
           PROVIDER: ${{ inputs.provider }}
+          PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
         run: |
           # Keep provider stalls from consuming the full 20-minute plan job.
           # Coreutils timeout terminates the Python process; a thread timeout
           # would leave the underlying HTTP request alive.
-          timeout --signal=TERM 150s python - <<'EOF'
+          timeout --signal=TERM "${PROVIDER_PREFLIGHT_TIMEOUT_SEC}s" python - <<'EOF'
           import os, sys
           import litellm
 
