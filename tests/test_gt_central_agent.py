@@ -300,6 +300,7 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
     monkeypatch.setenv("GT_OPENROUTER_DATA_COLLECTION", "allow")
+    monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek/deepseek-v4-flash-0731")
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -330,6 +331,7 @@ def test_openrouter_model_builder_does_not_override_unset_data_policy(monkeypatc
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
     monkeypatch.delenv("GT_OPENROUTER_DATA_COLLECTION", raising=False)
+    monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek/deepseek-v4-flash-0731")
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -342,6 +344,7 @@ def test_openrouter_model_builder_does_not_override_unset_data_policy(monkeypatc
 def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.tokenrouter.com/v1")
     monkeypatch.delenv("GT_OPENROUTER_PROVIDER_ONLY", raising=False)
+    monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek/deepseek-v4-flash-0731")
 
     model = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -355,6 +358,21 @@ def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch
     }
     route = _provider_route_configuration(model)
     assert route["thinking_mode"] == "disabled"
+
+
+def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek-v4-flash")
+    monkeypatch.delenv("GT_OPENROUTER_PROVIDER_ONLY", raising=False)
+
+    model = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="deepseek-v4-flash",
+    )._build_model()
+
+    assert model.config.model_name == "openai/deepseek-v4-flash"
+    assert model.config.model_kwargs["api_base"] == "https://api.deepseek.com"
+    assert "extra_body" not in model.config.model_kwargs
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():

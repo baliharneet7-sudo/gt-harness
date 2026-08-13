@@ -86,6 +86,7 @@ jobs:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      GT_LITELLM_MODEL: openai/deepseek-v4-flash
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
@@ -267,6 +268,7 @@ jobs:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      GT_LITELLM_MODEL: openai/deepseek-v4-flash
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7

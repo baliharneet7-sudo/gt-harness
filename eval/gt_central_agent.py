@@ -1406,6 +1406,9 @@ class MiniSweCentralAgent(BaseAgent):
     def _build_model(self) -> LitellmModel:
         assert self.model_name is not None
         model = self.model_name
+        configured_model = (os.environ.get("GT_LITELLM_MODEL") or "").strip()
+        if configured_model:
+            model = configured_model
         # Benchmark runs never retry provider errors: a bad request fails fast
         # instead of burning wall time in litellm backoff.
         kwargs: dict[str, Any] = {"temperature": self.temperature, "num_retries": 0}
@@ -1414,8 +1417,6 @@ class MiniSweCentralAgent(BaseAgent):
             openrouter = "openrouter.ai" in api_base.lower()
             tokenrouter = "tokenrouter.com" in api_base.lower()
             if openrouter:
-                if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-                    model = "deepseek/deepseek-v4-flash-0731"
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
                 provider = (os.environ.get("GT_OPENROUTER_PROVIDER_ONLY") or "").strip()
@@ -1440,8 +1441,6 @@ class MiniSweCentralAgent(BaseAgent):
                 # not translate this into the qualified TokenRouter catalog
                 # ID. LiteLLM still needs its openai-compatible provider
                 # prefix when a custom api_base is supplied.
-                if model == "deepseek-v4-flash-0731":
-                    model = "deepseek-v4-flash"
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
             else:
@@ -1449,8 +1448,6 @@ class MiniSweCentralAgent(BaseAgent):
                 # catalog identifier.  Preserve the same DeepSeek checkpoint
                 # used by the frozen OpenRouter route; never silently fall back
                 # to another V4 family model.
-                if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-                    model = "deepseek/deepseek-v4-flash-0731"
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
                 if tokenrouter:
