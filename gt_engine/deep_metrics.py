@@ -152,6 +152,7 @@ DIAGNOSTIC_METRICS = (
     "context_frontier_candidate_languages",
     "context_frontier_delivered_languages",
     "repository_intelligence_valid",
+    "repository_substrate_valid",
     "repository_graph_degraded_fallback",
     "repository_graph_schema_valid",
     "repository_graph_nodes",

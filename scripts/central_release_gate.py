@@ -109,22 +109,41 @@ def _check_static(static: dict[str, Any] | None) -> ReleaseGateCheck:
 
 def _substrate(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     intelligence = receipt.get("repository_intelligence") or {}
+    evidence = receipt.get("repository_evidence") or {}
     applicability = str(intelligence.get("applicability") or "")
     excluded = bool(intelligence.get("denominator_excluded"))
     failures: list[str] = []
     if excluded and applicability == "not_applicable_no_supported_source":
         return ReleaseGateCheck("repository_substrate", True, (), {"applicability": applicability})
     status = str(intelligence.get("status") or "")
-    if status not in {"passed", "source_backed", "healthy", "available"}:
-        failures.append(f"{label}:repository_status:{status or 'missing'}")
-    if intelligence.get("failures"):
-        failures.append(f"{label}:repository_failures_present")
     graph_gate = intelligence.get("graph_gate") or {}
     if graph_gate.get("blocked") is True:
         failures.append(f"{label}:graph_gate_blocked")
+    if graph_gate.get("failures"):
+        failures.append(f"{label}:graph_gate_failures_present")
+    if evidence:
+        if evidence.get("substrate_ready") is not True:
+            failures.append(f"{label}:repository_substrate_not_ready")
+        if evidence.get("index_current") is not True:
+            failures.append(f"{label}:repository_index_not_current")
+        if evidence.get("intelligence_valid") is not True:
+            failures.append(f"{label}:repository_evidence_invalid")
+    else:
+        # Legacy receipts did not separate graph health from downstream GT
+        # mechanism health. Keep their strict fallback without allowing a
+        # bootstrap/delivery failure to redefine a proven current graph in new
+        # receipts.
+        if status not in {"passed", "source_backed", "healthy", "available"}:
+            failures.append(f"{label}:repository_status:{status or 'missing'}")
+        if intelligence.get("failures"):
+            failures.append(f"{label}:repository_failures_present")
     metrics = receipt.get("metrics") or {}
-    if intelligence.get("required") and int(metrics.get("repository_intelligence_valid") or 0) <= 0:
-        failures.append(f"{label}:repository_intelligence_not_valid")
+    if intelligence.get("required"):
+        if "repository_substrate_valid" in metrics:
+            if int(metrics.get("repository_substrate_valid") or 0) <= 0:
+                failures.append(f"{label}:repository_substrate_metric_invalid")
+        elif not evidence and int(metrics.get("repository_intelligence_valid") or 0) <= 0:
+            failures.append(f"{label}:repository_intelligence_not_valid")
     return ReleaseGateCheck(
         "repository_substrate",
         not failures,
@@ -363,6 +382,10 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         failures.append(f"{label}:persistent_bootstrap_action_executed")
     if bootstrap.get("response_received") is not True:
         failures.append(f"{label}:persistent_bootstrap_response_missing")
+    if str(bootstrap.get("transport") or "") != "direct_single_provider_call":
+        failures.append(f"{label}:persistent_bootstrap_transport_not_single_call")
+    if str(bootstrap.get("provider_query_marker_error") or ""):
+        failures.append(f"{label}:persistent_bootstrap_marker_failed")
     if not str(bootstrap.get("request_payload_sha256") or "") or not str(
         bootstrap.get("provider_messages_sha256") or ""
     ):
@@ -390,16 +413,49 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     host_executed = int((receipt.get("host_execution") or {}).get("decision_actions") or 0)
     if executor_calls <= 0:
         failures.append(f"{label}:persistent_state_no_executor_call")
-    if int(runtime_metrics.get("context_compilations") or 0) != len(
-        receipt.get("model_call_contexts") or []
-    ):
+    model_call_contexts = receipt.get("model_call_contexts") or []
+    if int(runtime_metrics.get("context_compilations") or 0) != len(model_call_contexts):
         failures.append(f"{label}:persistent_context_compilation_count")
     if int(runtime_metrics.get("preflight_projections") or 0) != actions:
         failures.append(f"{label}:persistent_preflight_projection_count")
     if int(runtime_metrics.get("postflight_commits") or 0) != host_executed:
         failures.append(f"{label}:persistent_postflight_commit_count")
-    if len(deliveries) != executor_calls:
-        failures.append(f"{label}:persistent_delivery_not_every_executor_call")
+    dispatched_contexts = [
+        row
+        for row in model_call_contexts
+        if row.get("dispatch_status") in {"invoked", "response_received", "response_error"}
+    ]
+    delivered_contexts = 0
+    for index, row in enumerate(model_call_contexts, start=1):
+        frame = row.get("persistent_execution_state")
+        call = int(row.get("call") or index)
+        if not isinstance(frame, dict) or int(frame.get("provider_call") or 0) != call:
+            failures.append(f"{label}:persistent_call_accounting_missing:{call}")
+            continue
+        delivered = bool(row.get("persistent_execution_state_delivered"))
+        kind = str(frame.get("kind") or "")
+        reasons = tuple(frame.get("reason_codes") or ())
+        dispatched = row.get("dispatch_status") in {
+            "invoked",
+            "response_received",
+            "response_error",
+        }
+        if delivered:
+            delivered_contexts += 1
+            if kind == "none" or not frame.get("claim_ids"):
+                failures.append(f"{label}:persistent_delivered_frame_invalid:{call}")
+        elif dispatched and runtime.get("valid") is True and state.get("graph_current") is True:
+            failures.append(f"{label}:persistent_stable_core_missing:{call}")
+        elif kind == "none" and not reasons:
+            failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
+    dispatched_delivery_count = sum(
+        bool(row.get("persistent_execution_state_delivered")) for row in dispatched_contexts
+    )
+    if (
+        len(deliveries) != dispatched_delivery_count
+        or delivered_contexts < dispatched_delivery_count
+    ):
+        failures.append(f"{label}:persistent_delivery_accounting_mismatch")
     if int(metrics.get("persistent_state_bootstrap_calls") or 0) != 1:
         failures.append(f"{label}:persistent_bootstrap_metric_mismatch")
     if int(metrics.get("persistent_state_initial_retrieval_calls") or 0) != 1:
@@ -410,6 +466,8 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         failures.append(f"{label}:persistent_bootstrap_total_mismatch")
     if int(receipt.get("calls") or 0) != executor_calls + 1:
         failures.append(f"{label}:persistent_provider_call_accounting_mismatch")
+    if str(metrics.get("provider_query_marker_error") or ""):
+        failures.append(f"{label}:executor_provider_marker_failed")
 
     return ReleaseGateCheck(
         "persistent_execution_state",
@@ -442,11 +500,11 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
     calls = runtime.get("calls") or []
     configuration = receipt.get("component_configuration") or {}
     configured_budget = int(configuration.get("gt_request_token_budget") or 0)
-    executor_calls = int(receipt.get("executor_calls") or 0)
     failures: list[str] = []
     if configured_budget <= 0:
         failures.append(f"{label}:gt_request_token_budget_missing")
-    if len(calls) != executor_calls:
+    model_call_contexts = receipt.get("model_call_contexts") or []
+    if len(calls) != len(model_call_contexts):
         failures.append(f"{label}:contribution_compiler_call_count")
     for index, row in enumerate(calls, start=1):
         if int(row.get("candidate_count") or 0) != int(row.get("accounted_count") or 0):
@@ -490,6 +548,37 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         {
             "task": label,
             "configuration": {name: configuration.get(name) for name in required},
+        },
+    )
+
+
+def _diagnostic_isolation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Prove the persistent-state-only ablation did not silently enable controls."""
+
+    configuration = receipt.get("component_configuration") or {}
+    disabled = (
+        "context_compaction",
+        "completion_controller",
+        "progress_control",
+        "adaptive_validation_timeout",
+    )
+    failures = [
+        f"{label}:diagnostic_{name}_enabled"
+        for name in disabled
+        if configuration.get(name) is not False
+    ]
+    if configuration.get("persistent_execution_state") is not True:
+        failures.append(f"{label}:diagnostic_persistent_state_disabled")
+    if str(receipt.get("preflight_mode") or "") != "shadow":
+        failures.append(f"{label}:diagnostic_preflight_not_shadow")
+    return ReleaseGateCheck(
+        "diagnostic_profile_isolation",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "preflight_mode": receipt.get("preflight_mode"),
+            "configuration": {name: configuration.get(name) for name in disabled},
         },
     )
 
@@ -607,9 +696,15 @@ def audit_treatment_runtime(
     receipt: dict[str, Any],
     *,
     label: str,
+    profile: str = "certified_full",
 ) -> tuple[ReleaseGateCheck, ...]:
     """Audit one treatment receipt without pretending an A/B control exists."""
 
+    profile_check = (
+        _diagnostic_isolation(receipt, label)
+        if profile == "persistent_state_only"
+        else _outcome_preservation(receipt, label)
+    )
     return (
         _substrate(receipt, label),
         _dense(receipt, label),
@@ -618,7 +713,7 @@ def audit_treatment_runtime(
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _persistent_execution_state(receipt, label),
-        _outcome_preservation(receipt, label),
+        profile_check,
         _project_validation(receipt, label),
         _retrieval_efficiency(receipt, label),
     )

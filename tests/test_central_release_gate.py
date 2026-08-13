@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.central_release_gate import audit_release
+from scripts.central_release_gate import audit_release, audit_treatment_runtime
 
 STATIC = {
     "census_passed": True,
@@ -13,6 +13,7 @@ STATIC = {
 def _treatment() -> dict:
     return {
         "integration_mode": "active",
+        "preflight_mode": "shadow",
         "component_configuration": {
             "context_compaction": True,
             "completion_controller": True,
@@ -107,6 +108,7 @@ def _treatment() -> dict:
                 "provider_calls": 1,
                 "action_executions": 0,
                 "response_received": True,
+                "transport": "direct_single_provider_call",
                 "request_payload_sha256": "bootstrap-request",
                 "provider_messages_sha256": "bootstrap-provider",
                 "visible_catalog_count": 2,
@@ -170,6 +172,15 @@ def _treatment() -> dict:
                 "provider_changed_message_indices": [1],
                 "context_fact_candidates": 0,
                 "context_facts_accounted": 0,
+                "dispatch_status": "response_received",
+                "persistent_execution_state_delivered": True,
+                "persistent_execution_state": {
+                    "kind": "initial",
+                    "provider_call": 1,
+                    "state_version": 2,
+                    "claim_ids": ["state-claim-1"],
+                    "reason_codes": [],
+                },
             }
         ],
     }
@@ -318,12 +329,104 @@ def test_release_gate_rejects_bootstrap_only_or_silently_missing_living_state():
     receipt = _treatment()
     receipt["persistent_execution_state"]["metrics"]["context_compilations"] = 0
     receipt["persistent_execution_state"]["deliveries"] = []
+    receipt["model_call_contexts"][0]["persistent_execution_state"] = None
+    receipt["model_call_contexts"][0]["persistent_execution_state_delivered"] = False
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
     assert report.passed is False
     assert "treatment-1:persistent_context_compilation_count" in report.failures
-    assert "treatment-1:persistent_delivery_not_every_executor_call" in report.failures
+    assert "treatment-1:persistent_call_accounting_missing:1" in report.failures
+
+
+def test_release_gate_rejects_retry_wrapped_bootstrap_transport():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["bootstrap"]["transport"] = (
+        "model_query_single_call"
+    )
+
+    checks = audit_treatment_runtime(receipt, label="task")
+    persistent = next(check for check in checks if check.name == "persistent_execution_state")
+
+    assert persistent.passed is False
+    assert "task:persistent_bootstrap_transport_not_single_call" in persistent.failures
+
+
+def test_release_gate_rejects_any_provider_query_marker_failure():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["bootstrap"]["provider_query_marker_error"] = "OSError"
+    receipt["metrics"]["provider_query_marker_error"] = "OSError"
+
+    checks = audit_treatment_runtime(receipt, label="task")
+    persistent = next(check for check in checks if check.name == "persistent_execution_state")
+
+    assert persistent.passed is False
+    assert "task:persistent_bootstrap_marker_failed" in persistent.failures
+    assert "task:executor_provider_marker_failed" in persistent.failures
+
+
+def test_release_gate_rejects_missing_stable_core_on_dispatched_executor_call():
+    receipt = _treatment()
+    receipt["executor_calls"] = 2
+    receipt["calls"] = 3
+    receipt["persistent_execution_state"]["metrics"]["context_compilations"] = 2
+    receipt["model_call_contexts"].append(
+        {
+            "call": 2,
+            "request_payload_sha256": "request-2",
+            "provider_messages_sha256": "provider-2",
+            "stock_provider_messages_sha256": "provider-2",
+            "provider_view_changed": False,
+            "provider_message_count": 2,
+            "provider_changed_message_indices": [],
+            "context_fact_candidates": 0,
+            "context_facts_accounted": 0,
+            "dispatch_status": "response_received",
+            "persistent_execution_state_delivered": False,
+            "persistent_execution_state": {
+                "kind": "none",
+                "provider_call": 2,
+                "state_version": 2,
+                "claim_ids": [],
+                "reason_codes": ["state_unchanged_already_represented"],
+            },
+        }
+    )
+    receipt["contribution_compiler"]["calls"].append(
+        {
+            "call": 2,
+            "candidate_count": 0,
+            "accounted_count": 0,
+            "payload_tokens": 0,
+            "token_budget": 1200,
+            "selected_surfaces": [],
+        }
+    )
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_stable_core_missing:2" in report.failures
+
+
+def test_persistent_state_only_profile_gates_isolation_not_disabled_full_controls():
+    receipt = _treatment()
+    for name in (
+        "context_compaction",
+        "completion_controller",
+        "progress_control",
+        "adaptive_validation_timeout",
+    ):
+        receipt["component_configuration"][name] = False
+
+    full = audit_treatment_runtime(receipt, label="task", profile="certified_full")
+    diagnostic = audit_treatment_runtime(receipt, label="task", profile="persistent_state_only")
+
+    outcome_check = next(check for check in full if check.name == "outcome_preservation_controls")
+    assert outcome_check.passed is False
+    assert next(
+        check for check in diagnostic if check.name == "diagnostic_profile_isolation"
+    ).passed is True
 
 
 def test_release_gate_rejects_missing_or_unwired_initial_hybrid_retrieval():
@@ -341,6 +444,25 @@ def test_release_gate_rejects_missing_or_unwired_initial_hybrid_retrieval():
     assert "treatment-1:persistent_initial_retrieval_incomplete" in report.failures
     assert "treatment-1:persistent_initial_retrieval_channels" in report.failures
     assert "treatment-1:persistent_initial_retrieval_metric_mismatch" in report.failures
+
+
+def test_graph_substrate_is_not_relabelled_invalid_by_bootstrap_failure():
+    receipt = _treatment()
+    receipt["repository_evidence"] = {
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+    }
+    receipt["repository_intelligence"]["status"] = "failed"
+    receipt["repository_intelligence"]["failures"] = ["persistent_bootstrap_not_selected"]
+    receipt["persistent_execution_state"]["bootstrap"]["status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["state"]["bootstrap_status"] = "invalid_fallback"
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+    substrate = next(check for check in report.checks if check.name == "repository_substrate")
+
+    assert substrate.passed is True
+    assert "treatment-1:persistent_bootstrap_not_selected" in report.failures
 
 
 def test_release_gate_rejects_fallback_bootstrap_and_hidden_extra_calls():

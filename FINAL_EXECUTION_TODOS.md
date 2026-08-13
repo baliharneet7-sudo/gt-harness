@@ -33,7 +33,7 @@ the relevant gate and explicit authorization are recorded.
 | GT-FINAL-010D | in_progress | Current exact tree passes the full provider-free GitHub workflow with current-source indexer and pinned Snowflake asset | pending workflow run | commit/push required before dispatch |
 | GT-FINAL-010E | pending | Ten-task SHADOW qualification reports all decision receipts and zero runtime-release failures | paid GitHub smoke artifacts | requires 010D and authorization |
 | GT-FINAL-011 | pending | Same-wrapper SWE-Live contract and run complete | final A/B artifacts | requires authorization |
-| GT-FINAL-012 | pending | Existing online DeepSWE-off metadata verified; frozen GT-on evaluated first | `DEEPSWE_FINAL_RESULTS.md` | do not rerun baseline |
+| GT-FINAL-012 | pending | Existing DeepSWE-off artifact passes the exact schema/identity/outcome gate, or a new same-workflow control is produced before GT-on comparison | `DEEPSWE_FINAL_RESULTS.md` | never use an invalid or censored control |
 | GT-FINAL-013 | pending | Terminal-Bench 2.0 evaluated through Mini-SWE after DeepSWE | `TERMINAL_BENCH_20_RESULTS.md` | conditional |
 | GT-FINAL-014 | pending | Final causal report and verdict complete | `GROUNDTRUTH_FINAL_REPORT.md` | close project |
 
@@ -183,10 +183,12 @@ smoke and the 89-task run remain blocked pending separate authorization.
   baseline/treatment adapter and its current official protocol.
 - [ ] Analyze every DeepSWE gain/loss by first trajectory divergence; do not
   attribute zero-intervention differences to GT.
-- [ ] Verify and run the existing GitHub-hosted DeepSWE workflow in the
-  GroundTruth repository (`.github/workflows/deepswe_full.yml`/`deepswe_trial.yml`);
-  it launches the pinned Mini-SWE agent through Pier (no OpenHands/OpenAgents
-  path) and still requires a matched GT-off arm.
+- [ ] Verify and run the checked-in GitHub DeepSWE workflow
+  (`.github/workflows/deepswe_miniswe_central.yml`); it pins Pier 0.3.1,
+  performs commit-only patch collection and separate-verifier grading, and
+  launches Mini-SWE only (no OpenHands/OpenAgents path). Its one-rollout,
+  300-call, 5,400-second contract is a matched product experiment, not the
+  official multi-rollout leaderboard protocol.
 - [ ] Run Terminal-Bench 2.0 next through the existing GitHub Mini-SWE/Harbor
   workflows, with all-task and source-applicable results.
 - [ ] Run contemporaneous same-wrapper SWE-Live Lite only after the DeepSWE and

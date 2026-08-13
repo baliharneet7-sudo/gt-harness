@@ -61,6 +61,7 @@ def _write_bundle(
                 "provider_messages_sha256": request_hash,
                 "provider_message_count": 3,
                 "provider_changed_message_indices": [2],
+                "dispatch_status": "response_received",
                 "context_fact_candidates": 1,
                 "context_facts_represented": 1,
                 "context_facts_selected": 0,

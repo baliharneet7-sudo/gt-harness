@@ -15,6 +15,7 @@ def _context(call: int, *, request: str, provider: str) -> dict:
         "provider_messages_sha256": provider,
         "provider_message_count": 4,
         "provider_changed_message_indices": [1, 2, 3],
+        "dispatch_status": "response_received",
         "context_fact_candidates": 0,
         "context_facts_accounted": 0,
     }
@@ -142,6 +143,17 @@ def test_provider_messages_hash_must_match_exact_call_context():
     _rows, failures, _totals = audit_provider_deliveries(receipt)
 
     assert any("delivery_provider_hash_context_mismatch" in item for item in failures)
+
+
+def test_prepared_or_marker_failed_request_cannot_authorize_a_visible_delivery():
+    receipt = _receipt()
+    receipt["model_call_contexts"][0]["dispatch_status"] = "marker_error"
+
+    rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any("delivery_request_not_dispatched" in item for item in failures)
+    assert all(row["dispatch_valid"] is False for row in rows)
+    assert all(row["deterministic_status"] == "INVALID" for row in rows)
 
 
 def test_delivery_requires_an_in_range_gt_changed_provider_message_index():

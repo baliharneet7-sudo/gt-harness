@@ -81,6 +81,36 @@ _PATH_LITERAL_RE = re.compile(
     r"(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+"
     r"(?![A-Za-z0-9_.-])"
 )
+_BACKTICK_ENTITY_RE = re.compile(r"`([^`\r\n]{1,160})`")
+_CALL_ENTITY_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_UPPER_ENTITY_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9_]{3,})(?![A-Za-z0-9_])")
+
+
+def _looks_code_shaped_identifier(value: str) -> bool:
+    return bool(
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+        and (
+            "_" in value
+            or any(character.isupper() for character in value[1:])
+            or value.isupper()
+        )
+    )
+
+
+def _explicit_identifier_tokens(value: str) -> set[str]:
+    """Extract syntax-marked task entities without promoting ordinary prose.
+
+    Sparse and dense channels still receive the complete task.  This narrower
+    surface controls only mechanical exact-symbol certification.
+    """
+
+    text = str(value or "")
+    entities: set[str] = set()
+    for match in _BACKTICK_ENTITY_RE.finditer(text):
+        entities.update(token.lower() for token in _TOKEN_RE.findall(match.group(1)))
+    entities.update(match.group(1).lower() for match in _CALL_ENTITY_RE.finditer(text))
+    entities.update(match.group(1).lower() for match in _UPPER_ENTITY_RE.finditer(text))
+    return entities
 
 
 class RetrievalIntent(StrEnum):
@@ -146,16 +176,20 @@ def _canonical_symbol(symbol: str | None) -> str:
 
 
 def _explicit_identifiers(state: RetrievalState) -> frozenset[str]:
-    action_tokens = state.action.semantic_tokens if state.action else ()
-    material = "\n".join(
-        (
-            state.task_text,
-            " ".join(state.active_symbols),
-            " ".join(state.diagnostics),
-            " ".join(action_tokens),
-        )
+    identifiers = _explicit_identifier_tokens(state.task_text)
+    identifiers.update(
+        canonical
+        for symbol in state.active_symbols
+        if (canonical := _canonical_symbol(symbol))
     )
-    return frozenset(token.lower() for token in _TOKEN_RE.findall(material))
+    identifiers.update(_explicit_identifier_tokens("\n".join(state.diagnostics)))
+    if state.action is not None:
+        identifiers.update(
+            token.lower()
+            for token in state.action.semantic_tokens
+            if _looks_code_shaped_identifier(token)
+        )
+    return frozenset(identifiers)
 
 
 def _canonical_explicit_path(path: str) -> str:

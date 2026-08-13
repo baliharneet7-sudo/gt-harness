@@ -35,8 +35,12 @@ reported:
 | Visible GT deliveries | 71 |
 | Solved | 1/10 |
 
-The previous config contains no `persistent_execution_state` flag; it is the
-correct state-off engineering baseline for the new persistent-state treatment.
+The previous config contains no `persistent_execution_state` flag, so it remains
+a useful engineering witness. It is not automatically accepted as the final
+control. The fail-closed release gate must prove from its manifest and raw rows
+that it is GT-off and matches the current prompt/tool/model/provider/runner/budget
+contract. Missing evidence causes rejection; it does not require a rerun if the
+existing raw artifact can supply that proof.
 
 ## Metrics that must be compared after a valid run
 
@@ -73,3 +77,26 @@ produces a route proof for the exact 0731 model and the first task artifact
 contains a provider query. After that proof, rerun the same ten tasks and
 populate the metric table above. Until then, the only defensible comparison is
 the previous witness plus this blocked-run diagnosis.
+
+## Superseding live diagnostic and final repair
+
+Workflow `31656913063` did execute `abs-module-cache-flags`, but it is rejected
+as outcome evidence: bootstrap returned `error_fallback`, persistent state
+delivered zero frames, and the run exhausted context after 121 executor calls
+and 14.15M tokens. Its current release replay proves that GraphDB, the pinned
+dense backend, timing/accounting, preflight, decision sufficiency, validation,
+and retrieval-efficiency gates were healthy. Only the old bootstrap/lifecycle
+contract fails.
+
+The corrective working tree implements direct one-call/no-retry bootstrap,
+syntax-marked entity authority, task-ranked catalog packing, tiered persistent
+delivery (initial/critical, material delta, or stable core), semantic no-op
+stability, marker/timeout accounting, independent graph-substrate accounting,
+one pre-matrix provider canary, full-profile defaults, and the shared
+`resolved_workspace_v1` prompt contract. The matched workflow records
+`leaderboard_equivalent=false` and attributes results only to the integrated GT
+product. Full details and the exact remaining release order are in
+`details_done/GT_FINAL_STAND_REPAIR_20260812.md`.
+
+This working tree has not yet passed the source-built Linux provider-free gate
+and has no new outcome result.

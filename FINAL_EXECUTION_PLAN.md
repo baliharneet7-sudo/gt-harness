@@ -20,9 +20,14 @@ not evidence that the model used the facts or that tasks were solved.
 4. Allow at most one generalized retrieval repair if one repeated failure class is proven.
 5. Evaluate paired model decision points: identical request with and without the exact GT evidence.
 6. Freeze GT, model, harness, graph, thresholds, prompts, and containers.
-7. Run contemporaneous same-wrapper SWE-bench-Live A/B.
-8. Run DeepSWE only if the primary gate passes.
-9. Run Terminal-Bench 2.1 last, reporting all-task and source-applicable groups.
+7. Run DeepSWE v1.1 first through the frozen Mini-SWE/Pier workflow, using an
+   exact matched control artifact (existing only if it passes every identity
+   and uncensored-outcome gate).
+8. Run Terminal-Bench 2.0 next as the frozen Mini-SWE product diagnostic,
+   reporting all-task and source-applicable groups and explicitly making no
+   Terminal-Bench 2.1 leaderboard claim.
+9. Run a contemporaneous same-wrapper SWE-bench-Live A/B only if it remains
+   necessary for the final product claim.
 10. Write the final causal report and stop the project.
 
 ## Decision-point rule

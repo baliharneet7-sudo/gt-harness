@@ -2,6 +2,12 @@ name: GT central provider-free certification
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Exact GT commit to certify"
+        required: true
+        type: string
 
 jobs:
   provider_free:
@@ -16,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: actions/setup-python@v5
         with:

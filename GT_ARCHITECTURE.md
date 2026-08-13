@@ -333,10 +333,9 @@ The current contract is:
    commands abstain. Pipeline outcomes remain unattributed unless the shell
    mechanically proves terminal ownership.
 5. Every live receipt records actual response model/provider/fingerprint
-   identity for executor and bootstrap calls. DeepSWE merge requires a stable
-   response model equal to the provider preflight result, and requires the
-   fingerprint to match when the provider supplies one. Requested model names
-   alone are not parity proof.
+   identity for executor and bootstrap calls. DeepSWE merge requires complete,
+   stable, matching model, provider, and fingerprint identity; missing identity
+   fails closed. Requested model names alone are not parity proof.
 6. DeepSWE artifact discovery reads the task ID from the adjacent Pier result,
    so task directories without `-task-` no longer collapse into a false
    one-task audit.
@@ -360,4 +359,72 @@ language substrate proof, central runtime tests, all required all-17,
 grounding, timing, visibility, and context-accounting lines, `READY`,
 `SMOKE_APPROVED`, and static checks. Its receipt records
 `provider_calls: 0`. This upgrades the repair to implementation-certified;
-it does not establish solve uplift, non-regression, or efficiency.
+it does not establish solve uplift, non-regression, or efficiency, and it
+predates the current marker/timeout, stable-core, semantic-no-op, and final A/B
+gate repairs.
+
+## Final live-diagnostic repair contract (2026-08-12)
+
+The rejected DeepSWE diagnostic `31656913063` proved a healthy graph and dense
+substrate but a failed persistent bootstrap. The final repair changes only the
+bootstrap/catalog/state/delivery boundaries; it does not redesign the graph or
+add another agent:
+
+```text
+resolved workspace disclosed to both arms
+  -> current graph and five-channel retrieval
+  -> task-ranked bounded catalog
+  -> one direct no-retry bootstrap provider call
+  -> selected certified excerpt in the first executor request
+  -> deterministic state update at every boundary
+  -> initial/critical frame, material delta, or <=96-token stable core
+  -> full-profile outcome-preservation controllers
+```
+
+Exact authority is limited to syntax-marked task entities, active symbols,
+diagnostic entities, and typed code-shaped action tokens. Sparse and dense
+channels may rank ordinary prose but cannot certify it. Task-ranked catalog
+items precede generic graph order. Semantic no-ops do not bump state versions,
+source excerpts and new semantic claims are not repeated, and same-revision
+refresh cannot reopen a satisfied obligation or reorder state. Every applicable
+normal request receives one bounded current-state slice; `NONE` is only a
+fail-open invalid/stale/unavailable-state disposition.
+
+The workflow has one pre-matrix bootstrap canary and no per-task provider
+preflight. `certified_full` is the default, with ACTIVE integration, SHADOW
+preflight, and all outcome-preservation controls enabled. Graph substrate
+validity is reported independently of downstream mechanism validity.
+
+This repair is locally test-verified but not release-certified or
+benchmark-proven. The stale Windows indexer lacks Objective-C, so only the
+pushed source-built Linux provider-free workflow can approve a paid smoke.
+
+
+## Final P0/P1 closure boundary (2026-08-13)
+
+The provider boundary is now single-transport and two-phase: prepare every
+bounded GT contribution, persist the request marker, then commit exposure and
+perform exactly one direct Mini-SWE/LiteLLM `_query`. Provider identity,
+usage, cost, malformed-response state, real timeout type, and effective call
+arguments remain in replayable receipts. A marker failure produces no provider
+call and no visible-delivery receipt.
+
+Persistent state is updated after every actually executed action, including a
+later pre-decided SHADOW batch action whose selection revision became stale
+after an earlier mutation. Graph-derived obligations are recomputed only from
+the successful current rebase; old catalog labels and disappeared edges cannot
+remain current model facts. Every applicable normal request retains a bounded
+CORE with its current focus, while material deltas/critical evidence remain
+one-shot and source excerpts are not repeated.
+
+DeepSWE uses one executable workflow for both a strict GT-off baseline profile
+and the GT-on diagnostic/product profiles. A reusable exact-SHA provider-free
+job gates the paid canary. Censoring, invalid verifier outcomes, missing
+identity, NaN/Inf resources, profile/claim-scope mismatch, and stale baseline
+schemas fail before an A/B claim. This workflow is a matched product
+experiment, not an official leaderboard-equivalent DeepSWE configuration.
+
+The implementation remains release-unverified until Linux rebuilds the current
+Go indexer and the exact pushed provider-free workflow passes. The local
+Windows binary is known stale and lacks Objective-C coverage; that failure is
+not weakened or reclassified.

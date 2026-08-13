@@ -118,14 +118,21 @@ def _catalog() -> BootstrapCatalog:
     )
 
 
-def _proposed(command: str, *, source_revision: str = "source-1", call: int = 1):
+def _proposed(
+    command: str,
+    *,
+    source_revision: str = "source-1",
+    call: int = 1,
+    batch_index: int = 0,
+    batch_size: int = 1,
+):
     return adapt_proposed_action(
         {"command": command, "tool_call_id": f"action-{call}"},
         source_revision=source_revision,
         workspace_revision=f"workspace-{call}",
         model_call=call,
-        batch_index=0,
-        batch_size=1,
+        batch_index=batch_index,
+        batch_size=batch_size,
     )
 
 
@@ -254,6 +261,59 @@ def test_shared_hybrid_retrieval_seeds_bootstrap_when_legacy_graph_query_is_empt
     assert ranked[0].certified is False
     assert "hybrid_ranked_candidate" in ranked[0].provenance
     assert {"lexical", "bm25"} <= set(ranked[0].support_channels)
+
+
+def test_task_ranked_catalog_items_precede_generic_graph_candidates_in_visible_budget():
+    generic_documents = tuple(
+        _document(f"src/generic_{index}.py", f"generic_{index}") for index in range(12)
+    )
+    relevant = _document("src/module_cache.py", "require_cache_info")
+    documents = (*generic_documents, relevant)
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=tuple(
+            {
+                "path": document.path,
+                "line": document.start_line,
+                "symbol": document.symbol,
+            }
+            for document in generic_documents
+        ),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    state = RetrievalState(
+        task_text="Update `require_cache_info()` for ABS_MODULE_PATH.",
+        intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+        source_revision="source-1",
+    )
+    result = HybridRetriever(documents).retrieve(state, selection_limit=2, token_budget=400)
+
+    catalog = build_bootstrap_catalog(
+        instruction=state.task_text,
+        evidence=evidence,
+        documents=documents,
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+        initial_retrieval=result,
+    )
+    relevant_item = next(item for item in catalog.items if item.path == "src/module_cache.py")
+    messages = build_bootstrap_messages(
+        task=state.task_text,
+        catalog=catalog,
+        max_input_tokens=2_000,
+    )
+
+    assert catalog.items.index(relevant_item) < next(
+        index for index, item in enumerate(catalog.items) if item.path.startswith("src/generic_")
+    )
+    assert relevant_item.item_id in bootstrap_visible_item_ids(messages)
 
 
 def test_valid_bootstrap_may_abstain_from_ranked_focus_without_forced_anchor():
@@ -462,6 +522,7 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         provider_call=1,
         max_tokens=512,
     )
+    assert engine.mark_context_dispatched(first) is True
     read = _proposed("sed -n '1,120p' src/service.py")
     projection = engine.project_preflight(read, current_source_revision="source-1")
     engine.commit_postflight(
@@ -478,6 +539,7 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         provider_call=2,
         max_tokens=256,
     )
+    assert engine.mark_context_dispatched(second) is True
     edit = _proposed("sed -i 's/pass/return 1/' src/service.py", call=2)
     engine.project_preflight(edit, current_source_revision="source-1")
     engine.commit_postflight(
@@ -520,16 +582,417 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         "src/api.py",
         "tests/test_service.py",
     }
-    assert second.kind in {ContextFrameKind.DELTA, ContextFrameKind.CORE}
+    assert second.kind is ContextFrameKind.CORE
+    assert second.rendered_text
+    assert second.token_count <= 96
+    assert "Bootstrap-selected repository context" not in second.rendered_text
     assert stale_graph_frame.kind is ContextFrameKind.NONE
     assert "graph_rebase_required" in stale_graph_frame.reason_codes
     assert third.source_revision == "source-2"
-    assert "Current observed repository focus: src/service.py" in third.rendered_text
+    assert "Phase: implementing" in third.rendered_text
+    assert "Related inspect_dependency: src/api.py" in third.rendered_text
     assert "Candidate implementation src/service.py:10" not in third.rendered_text
     assert engine.metrics["context_compilations"] == 4
     assert engine.metrics["preflight_projections"] == 2
     assert engine.metrics["postflight_commits"] == 2
     assert engine.metrics["graph_rebases"] == 1
+
+
+def test_nonmaterial_action_keeps_version_and_emits_bounded_stable_core():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    initial = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    assert engine.mark_context_dispatched(initial) is True
+    version = engine.snapshot.version
+    action = _proposed("echo ok")
+
+    engine.project_preflight(action, current_source_revision="source-1")
+    engine.commit_postflight(
+        action,
+        returncode=0,
+        output="ok",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="unknown",
+    )
+    unchanged = engine.compile_context(
+        current_source_revision="source-1", provider_call=2, max_tokens=512
+    )
+
+    assert initial.kind is ContextFrameKind.INITIAL
+    assert engine.snapshot.version == version
+    assert unchanged.kind is ContextFrameKind.CORE
+    assert unchanged.rendered_text
+    assert "Phase:" in unchanged.rendered_text
+    assert "Bootstrap-selected repository context" not in unchanged.rendered_text
+    assert unchanged.token_count <= 96
+
+
+def test_compiled_but_not_dispatched_claims_remain_eligible_until_dispatch():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+
+    prepared = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    retried = engine.compile_context(
+        current_source_revision="source-1", provider_call=2, max_tokens=512
+    )
+
+    assert prepared.kind is ContextFrameKind.INITIAL
+    assert retried.kind is ContextFrameKind.INITIAL
+    assert retried.claim_ids == prepared.claim_ids
+    assert retried.rendered_text == prepared.rendered_text
+
+    engine.mark_context_dispatched(prepared)
+    stable = engine.compile_context(
+        current_source_revision="source-1", provider_call=3, max_tokens=512
+    )
+
+    assert stable.kind is ContextFrameKind.CORE
+    assert "Bootstrap-selected repository context" not in stable.rendered_text
+    assert stable.token_count <= 96
+
+
+def test_same_revision_graph_rebase_is_a_semantic_noop():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    version = engine.snapshot.version
+    transitions = engine.metrics["material_transitions"]
+
+    engine.rebase_graph(
+        evidence=_evidence("source-1"),
+        structural_links=_links(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        graph_complete=True,
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    assert engine.snapshot.version == version
+    assert engine.metrics["material_transitions"] == transitions
+
+
+def test_repeated_failure_keeps_a_bounded_current_core_after_critical_dispatch():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    action = _proposed("pytest tests/test_service.py -q")
+    engine.commit_postflight(
+        action,
+        returncode=1,
+        output="tests/test_service.py:9: AssertionError: expected 2",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="fail",
+    )
+    critical = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    assert critical.kind is ContextFrameKind.CRITICAL
+    assert engine.mark_context_dispatched(critical) is True
+
+    unchanged = engine.compile_context(
+        current_source_revision="source-1", provider_call=2, max_tokens=512
+    )
+
+    assert unchanged.kind is ContextFrameKind.CORE
+    assert unchanged.rendered_text
+    assert unchanged.token_count <= 96
+    assert "Phase:" in unchanged.rendered_text
+
+
+def test_current_core_names_current_focus_path_without_repeating_source_excerpt():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    initial = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    assert engine.mark_context_dispatched(initial) is True
+    read = _proposed("sed -n '1,80p' src/service.py")
+    engine.commit_postflight(
+        read,
+        returncode=0,
+        output="def save_user(): pass",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="unknown",
+    )
+
+    core = engine.compile_context(
+        current_source_revision="source-1", provider_call=2, max_tokens=512
+    )
+
+    assert core.kind is ContextFrameKind.CORE
+    assert "Current focus path: src/service.py." in core.rendered_text
+    assert "Bootstrap-selected repository context" not in core.rendered_text
+    assert core.token_count <= 96
+
+
+def test_graph_rebase_does_not_render_catalog_labels_from_an_old_graph_revision():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    stale_next = next(item.item_id for item in catalog.items if item.path == "src/api.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus, stale_next],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    delta = engine.compile_context(
+        current_source_revision="source-2", provider_call=1, max_tokens=256
+    )
+
+    assert "Bootstrap-selected next items:" not in delta.rendered_text
+    assert "create_user" not in delta.rendered_text
+
+
+def test_graph_rebase_recomputes_advisory_obligations_from_current_edges_only():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    assert not any(
+        item.status.value == "open" and item.relation != "task_requirement"
+        for item in engine.snapshot.obligations
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-2", provider_call=1, max_tokens=256
+    )
+    assert "(calls from" not in frame.rendered_text
+    assert "(test_assertion from" not in frame.rendered_text
+
+
+def test_executed_batched_validation_is_committed_at_the_current_revision():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user and run its test.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py", call=1)
+    validation = _proposed(
+        "pytest tests/test_service.py -q",
+        call=1,
+        batch_index=1,
+        batch_size=2,
+    )
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=_links(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    engine.commit_postflight(
+        validation,
+        returncode=0,
+        output="1 passed",
+        changed_paths=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="pass",
+        validation_check_id="pytest tests/test_service.py -q",
+    )
+
+    assert engine.snapshot.validation.status is StateValidationStatus.PASS
+    assert engine.snapshot.validation.source_revision == "source-2"
+    assert engine.receipts[-1]["disposition"] == "committed"
+
+
+def test_same_revision_rebase_preserves_bootstrap_selected_optional_focus():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    before = engine.snapshot
+
+    engine.rebase_graph(
+        evidence=_evidence("source-1"),
+        structural_links=_links(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        graph_complete=True,
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    assert engine.snapshot.version == before.version
+    assert engine.snapshot.current_focus_id == focus
+    assert engine.snapshot.ordered_item_ids == (focus,)
 
 
 def test_initial_frame_contains_only_bootstrap_selected_checkout_span():
@@ -778,6 +1241,88 @@ def test_successful_current_validation_advances_ready_without_inventing_completi
     assert engine.snapshot.validation.source_revision == "source-2"
     assert engine.snapshot.phase in {StatePhase.VALIDATING, StatePhase.READY_TO_SUBMIT}
     assert engine.snapshot.current_failure is None
+
+
+def test_same_revision_graph_refresh_does_not_reopen_satisfied_dependency_obligation():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user and run its test.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=_links(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    test_action = _proposed(
+        "pytest tests/test_service.py -q", source_revision="source-2", call=2
+    )
+    engine.commit_postflight(
+        test_action,
+        returncode=0,
+        output="1 passed",
+        changed_paths=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="pass",
+        validation_check_id="pytest tests/test_service.py -q",
+    )
+    satisfied = next(
+        item
+        for item in engine.snapshot.obligations
+        if item.kind == "validate_related_test" and item.path == "tests/test_service.py"
+    )
+    assert satisfied.status.value == "satisfied"
+
+    version = engine.snapshot.version
+    transitions = engine.metrics["material_transitions"]
+    obligations = engine.snapshot.obligations
+
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=_links(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    assert engine.snapshot.version == version
+    assert engine.metrics["material_transitions"] == transitions
+    assert engine.snapshot.obligations == obligations
+
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=_links(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+
+    after_refresh = next(
+        item
+        for item in engine.snapshot.obligations
+        if item.obligation_id == satisfied.obligation_id
+    )
+    assert after_refresh.status.value == "satisfied"
 
 
 def test_canonical_declared_check_satisfies_obligation_through_shell_wrapper():

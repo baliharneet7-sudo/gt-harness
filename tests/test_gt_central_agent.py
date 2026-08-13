@@ -27,6 +27,7 @@ from eval.gt_central_agent import (
     _message_context_chars,
     _partition_recovered_repository_failures,
     _preemptive_lifecycle_budget,
+    _provider_request_receipt,
     _provider_response_identity,
     _provider_response_summary,
     _provider_route_configuration,
@@ -34,6 +35,7 @@ from eval.gt_central_agent import (
     _resolved_repository_evidence,
     _retrieval_intent,
     _stable_provider_prefix,
+    _task_prompt_with_workspace,
     _workspace_target_path,
 )
 from gt_engine.central_runtime import (
@@ -55,6 +57,7 @@ from gt_engine.hybrid_retrieval import (
     RetrievalIntent,
 )
 from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
+from gt_engine.persistent_execution_state import build_bootstrap_catalog
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -129,6 +132,15 @@ def test_current_frontier_failure_remains_fail_closed():
 )
 def test_workspace_target_path_is_relative_to_resolved_cwd(path, cwd, expected):
     assert _workspace_target_path(path, cwd=cwd) == expected
+
+
+def test_workspace_prompt_discloses_resolved_task_root_without_gt_advice():
+    prompt = _task_prompt_with_workspace("Please solve the task.\n", cwd="/app")
+
+    assert prompt.startswith("Please solve the task.")
+    assert "The repository workspace for this task is /app." in prompt
+    assert "Each Bash action starts in that directory" in prompt
+    assert "GT" not in prompt
 
 
 def test_provider_visibility_accounts_for_normal_miniswe_read_output():
@@ -206,7 +218,8 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
 
     assert "--ak repository_initial_index_timeout_sec=60" in workflow
     assert "--ak repository_refresh_timeout_sec=60" in workflow
-    assert workflow.count("--ak enable_decision_sufficiency=true") == 1
+    assert workflow.count("--ak enable_decision_sufficiency=true") == 2
+    assert workflow.count("--ak enable_decision_sufficiency=false") == 1
     assert "audit_treatment_runtime" in workflow
     assert "GT treatment release gate failed" in workflow
     assert "--ak enable_context_compaction=true" in workflow
@@ -261,7 +274,7 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
 
     assert "OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}" in workflow
     assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
-    assert 'm = f"openai/{m}"' in workflow
+    assert 'model = f"openai/{model}"' in workflow
     assert 'kwargs["api_base"] = base' in workflow
 
 
@@ -290,6 +303,7 @@ def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp
     }
     route = _provider_route_configuration(model)
     assert route["credential_in_receipt"] is False
+    assert route["retry_policy"] == "provider_once_no_retry"
     assert route["provider_policy"]["only"] == ["deepseek"]
     assert route["provider_policy"]["data_collection"] == "allow"
 
@@ -331,6 +345,25 @@ def test_provider_response_identity_records_actual_model_route_without_secrets()
     assert "must-not-escape" not in json.dumps(row)
 
 
+def test_provider_request_hash_covers_effective_call_arguments_not_only_messages():
+    model = _ScriptedModel(["echo unused"])
+    messages = [{"role": "user", "content": "same provider-visible message"}]
+
+    _, temp_zero_hash, temp_zero_messages_hash, _ = _provider_request_receipt(
+        model,
+        messages,
+        call_kwargs={"temperature": 0.0, "max_tokens": 512, "timeout": 5.0},
+    )
+    _, temp_one_hash, temp_one_messages_hash, _ = _provider_request_receipt(
+        model,
+        messages,
+        call_kwargs={"temperature": 1.0, "max_tokens": 1024, "timeout": 10.0},
+    )
+
+    assert temp_zero_hash != temp_one_hash
+    assert temp_zero_messages_hash == temp_one_messages_hash
+
+
 def test_provider_response_summary_fails_closed_on_mixed_or_missing_identity():
     summary = _provider_response_summary(
         (
@@ -368,17 +401,36 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "GT_OPENROUTER_DATA_COLLECTION: allow" in workflow
     assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
     assert "GT_COMMIT: ${{ github.sha }}" not in workflow
-    assert 'm = "deepseek/deepseek-v4-flash-0731"' in workflow
+    assert 'model = "deepseek/deepseek-v4-flash-0731"' in workflow
     assert '"only": ["deepseek"]' in workflow
     assert '"allow_fallbacks": False' in workflow
     assert '"data_collection": "allow"' in workflow
     assert "provider-route-proof.json" in workflow
+    assert "BOOTSTRAP_CANARY_APPROVED" in workflow
+    assert '"provider_calls": 1' in workflow
+    assert workflow.count("litellm.completion(") == 1
+    assert "parse_bootstrap_selection" in workflow
+    assert "BootstrapCatalogItem" in workflow
+    assert "ids <= allowed" not in workflow
+    assert '"benchmark_setup_overhead": {' in workflow
+    assert '"system_prompt_sha256": prompt_identity.get("system_prompt_sha256")' in workflow
+    assert '"effective_actions": metrics.get("effective_task_actions")' in workflow
+    assert "Download the single exact bootstrap canary proof" in workflow
     assert "exact provider route gate failed" in workflow
-    assert '"system_fingerprint": str(response.get("system_fingerprint") or "")' in workflow
+    assert '"system_fingerprint": str(raw.get("system_fingerprint") or "")' in workflow
     assert "actual provider response identity gate failed" in workflow
     assert 'executor_identity.get("models") == [expected_response_model]' in workflow
+    assert 'executor_identity.get("stable_provider_identity") is True' in workflow
+    assert '"integration_mode": "off"' in workflow
+    assert '"integration_mode": "off" if arm == "gt_off" else "active"' in workflow
+    assert '"leaderboard_equivalent": False' in workflow
+    assert '"executor_retry_policy": "provider_once_no_retry"' in workflow
+    assert "DeepSWE parity is 300" not in workflow
     assert "--ak gt_request_token_budget=1200" in workflow
-    assert "--ak preflight_mode=assistive_safe" in workflow
+    assert 'default: persistent_state_only' not in workflow
+    assert 'default: certified_full' in workflow
+    assert "--ak preflight_mode=assistive_safe" not in workflow
+    assert workflow.count("--ak preflight_mode=shadow") >= 2
     assert "timeout --signal=TERM --kill-after=30s 6000s pier run" in workflow
     assert "provider_query_started.json" in workflow
     assert "central_receipt.json -print -quit" in workflow
@@ -395,15 +447,35 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert '--phase "${{ inputs.release_phase }}"' in workflow
     assert "Download frozen GT-off comparison before any paid task" in workflow
     assert "BASELINE_APPROVED" in workflow
-    assert "needs: [plan, baseline]" in workflow
+    assert workflow.count('"workspace_prompt_contract": "resolved_workspace_v1"') == 2
+    assert "workspace prompt contract gate failed" in workflow
     assert "needs: [plan, baseline, run]" in workflow
     assert "# DeepSWE central evaluation" in workflow
     assert "ten-task smoke" not in workflow
     assert "diagnostic_only:" in workflow
+    assert "arm:" in workflow
     assert "comparison_profile:" in workflow
     assert "persistent_state_only" in workflow
     assert "PROFILE_ARGS" in workflow
     assert "persistent_state_bootstrap_calls" in workflow
+    assert "provider_free:" in workflow
+    assert "needs: [plan, baseline, provider_free]" in workflow
+    assert "needs.provider_free.result == 'success'" in workflow
+    assert workflow.index("provider_free:") < workflow.index("bootstrap_canary:")
+    assert (
+        '"${{ inputs.arm }}" == "gt_on" && "${{ inputs.diagnostic_only }}" == "true" && '
+        '"${{ inputs.comparison_profile }}" != "persistent_state_only"'
+    ) in workflow
+    assert (
+        '"${{ inputs.arm }}" == "gt_on" && "${{ inputs.diagnostic_only }}" != "true" && '
+        '"${{ inputs.comparison_profile }}" != "certified_full"'
+    ) in workflow
+    assert '"${{ inputs.arm }}" == "gt_off"' in workflow
+    assert '--ak integration_mode=off --ak policy_mode=off' in workflow
+    assert '--ak enable_decision_sufficiency=false' in workflow
+    assert '"arm": arm' in workflow
+    assert '"control"' in workflow
+    assert '"claim_scope": claim_scope' in workflow
 
 
 def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
@@ -416,8 +488,8 @@ def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
     assert "gt_engine/diagnostics.py" in workflow
     assert "scripts/deepswe_release_gate.py" in workflow
     assert '["git", "rev-parse", "HEAD"]' in workflow
-    assert "ref: ${{ github.sha }}" in workflow
-    assert "inputs.ref" not in workflow
+    assert "ref: ${{ inputs.ref || github.sha }}" in workflow
+    assert "workflow_call:" in workflow
     assert '"dispatch_sha": "${{ github.sha }}"' in workflow
     assert '"provider_calls": 0' in workflow
 
@@ -1021,7 +1093,11 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     persistent = receipt["persistent_execution_state"]
     assert model.query_count == 3
-    assert model.bootstrap_kwargs == {"temperature": 0.0, "max_tokens": 512}
+    assert model.bootstrap_kwargs == {
+        "temperature": 0.0,
+        "max_tokens": 512,
+        "tool_choice": {"type": "function", "function": {"name": "bash"}},
+    }
     assert receipt["bootstrap_calls"] == 1
     assert receipt["executor_calls"] == 2
     assert receipt["calls"] == 3
@@ -1052,13 +1128,36 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert task_start_retrieval["channel_receipts"] == []
     assert persistent["bootstrap"]["action_executions"] == 0
     assert persistent["bootstrap"]["status"] == "selected"
+    assert any(
+        "The repository workspace for this task is /app." in content
+        for content in model.observed_history[1]
+    )
+    assert receipt["workspace_prompt"] == {
+        "contract": "resolved_workspace_v1",
+        "path": "/app",
+        "applied": True,
+    }
+    assert receipt["provider_prompt_identity"]["schema"] == (
+        "gt.provider_prompt_identity.v1"
+    )
+    assert all(
+        len(receipt["provider_prompt_identity"][key]) == 64
+        for key in (
+            "system_prompt_sha256",
+            "task_prompt_sha256",
+            "tool_schema_sha256",
+        )
+    )
     assert persistent["metrics"]["context_compilations"] == 2
     assert persistent["metrics"]["preflight_projections"] == 2
     assert persistent["metrics"]["postflight_commits"] == 2
     assert len(persistent["deliveries"]) == 2
     first_executor_view = "\n".join(model.observed_history[1])
+    second_executor_view = "\n".join(model.observed_history[2])
     assert "Bootstrap-selected repository context" in first_executor_view
     assert "def save_user():" in first_executor_view
+    assert "GroundTruth execution state" in second_executor_view
+    assert "Bootstrap-selected repository context" not in second_executor_view
     assert "[GT repository evidence:" not in first_executor_view
     assert task_start_retrieval["status"] == "abstained"
     assert task_start_retrieval["reason_codes"] == ["persistent_bootstrap_owns_task_start"]
@@ -1083,6 +1182,388 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert failures == []
     assert totals["surfaces"]["persistent_execution_state"]["delivery_count"] == 2
     assert all(row["deterministic_status"] == "VALID" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_initial_retrieval_failure_prevents_bootstrap_provider_spend(
+    tmp_path, monkeypatch
+):
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_persistent_execution_state=True,
+        enable_preemptive_retrieval=True,
+        enable_completion_controller=False,
+    )
+    agent._model_factory = lambda: model
+
+    async def fake_repository_session(*args, **kwargs):
+        revision = kwargs["source_revision"]
+        evidence = RepositoryEvidence(
+            available=True,
+            graph_revision="graph-1",
+            anchors=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
+            status="source_backed",
+            source_revision=revision,
+            index_current=True,
+            intelligence_valid=True,
+            substrate_ready=True,
+            index=IndexBuildReceipt(
+                status=IndexBuildStatus.AVAILABLE,
+                graph_db=str(tmp_path / "graph.db"),
+                schema_valid=True,
+                node_count=1,
+                source_files=1,
+                indexable_files=1,
+                graph_revision="graph-1",
+                source_revision=revision,
+            ),
+        )
+        return evidence, SimpleNamespace(
+            root=tmp_path,
+            indexed_source_revision=revision,
+            source_revision=revision,
+            evidence=evidence,
+            refresh_log=[],
+            summary=lambda: {"status": "source_backed"},
+            close=lambda: None,
+        )
+
+    repository = HybridRepository(
+        documents=(
+            RepositoryDocument(
+                path="src/service.py",
+                start_line=1,
+                end_line=2,
+                symbol="save_user",
+                text="def save_user():\n    pass",
+                provenance=("graph_node",),
+            ),
+        ),
+        structural_links=(),
+        source_revision="source-1",
+        complete=True,
+        reason_codes=(),
+        source_file_count=1,
+        document_chars=25,
+    )
+    monkeypatch.setattr(
+        "eval.gt_central_agent.build_hybrid_repository",
+        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+    )
+
+    def fail_retrieval(*args, **kwargs):
+        raise TimeoutError("five-channel retrieval timed out")
+
+    monkeypatch.setattr("eval.gt_central_agent.HybridRetriever.retrieve", fail_retrieval)
+    agent._start_repository_session = fake_repository_session
+
+    await agent.run("Fix src/service.py.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    persistent = receipt["persistent_execution_state"]
+    assert len(model.observed_history) == 1
+    assert persistent["initial_retrieval"]["status"] == "timeout"
+    assert persistent["initialization"]["status"] == "initial_retrieval_unavailable"
+    assert persistent["bootstrap"]["provider_calls"] == 0
+    assert persistent.get("engine") is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_raw_transport_marks_call_and_uses_provider_timeout_without_orphan(
+    monkeypatch, tmp_path
+):
+    document = RepositoryDocument(
+        path="src/service.py",
+        start_line=1,
+        end_line=2,
+        symbol="save_user",
+        text="def save_user():\n    pass",
+    )
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix `save_user()`.",
+        evidence=evidence,
+        documents=(document,),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+
+    class RawModel:
+        config = SimpleNamespace(model_name="test", model_kwargs={})
+
+        def __init__(self):
+            self.calls = 0
+
+        def _prepare_messages_for_api(self, messages):
+            return [
+                {key: value for key, value in row.items() if key != "extra"}
+                for row in messages
+            ]
+
+        def _query(self, messages, **kwargs):
+            self.calls += 1
+            marker = json.loads(
+                (tmp_path / "provider_query_started.json").read_text(encoding="utf-8")
+            )
+            assert marker["last_call_kind"] == "persistent_bootstrap"
+            assert marker["bootstrap_calls_started"] == 1
+            assert marker["executor_calls_started"] == 0
+            assert kwargs["num_retries"] == 0
+            assert kwargs["timeout"] == 5
+            assert kwargs["tool_choice"]["function"]["name"] == "bash"
+            message = SimpleNamespace(
+                model_dump=lambda: {"role": "assistant", "content": "plain JSON, no tool"}
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                model_dump=lambda: {
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "provider": "deepseek",
+                    "system_fingerprint": "fp-test",
+                    "usage": {"prompt_tokens": 41, "completion_tokens": 7},
+                },
+            )
+
+        def _parse_actions(self, response):
+            raise FormatError({"role": "user", "content": "tool required"})
+
+        def _calculate_cost(self, response):
+            return {"cost": 0.25}
+
+    model = RawModel()
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+
+    async def forbidden_wait_for(*args, **kwargs):
+        raise AssertionError("bootstrap must not abandon an uncancellable provider thread")
+
+    monkeypatch.setattr("eval.gt_central_agent.asyncio.wait_for", forbidden_wait_for)
+
+    selection, receipt = await agent._run_persistent_state_bootstrap(
+        model,
+        instruction="Fix `save_user()`.",
+        catalog=catalog,
+        timeout_sec=5,
+    )
+
+    assert selection.valid is False
+    assert selection.reason_codes == ("bootstrap_action_parse_error:FormatError",)
+    assert model.calls == 1
+    assert receipt["provider_calls"] == 1
+    assert receipt["response_received"] is True
+    assert receipt["transport"] == "direct_single_provider_call"
+    assert receipt["provider_query_marker_error"] == ""
+    assert receipt["input_tokens"] == 41
+    assert receipt["output_tokens"] == 7
+    assert receipt["response_identity"] == {
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "provider": "deepseek",
+        "system_fingerprint": "fp-test",
+    }
+
+
+@pytest.mark.asyncio
+async def test_executor_uses_one_direct_provider_transport_and_preserves_hidden_provider(
+    tmp_path,
+):
+    class RawExecutorModel(_ScriptedModel):
+        config = SimpleNamespace(model_name="test", model_kwargs={"num_retries": 0})
+
+        def __init__(self):
+            super().__init__([])
+            self.raw_calls = 0
+            self.public_calls = 0
+
+        def query(self, messages, **kwargs):
+            self.public_calls += 1
+            raise AssertionError("executor must bypass Mini-SWE's retry-wrapped query")
+
+        def _prepare_messages_for_api(self, messages):
+            return [
+                {key: value for key, value in row.items() if key != "extra"}
+                for row in messages
+            ]
+
+        def _query(self, messages, **kwargs):
+            self.raw_calls += 1
+            assert kwargs["num_retries"] == 0
+            message = SimpleNamespace(
+                model_dump=lambda: {
+                    "role": "assistant",
+                    "content": "act",
+                    "tool_calls": [],
+                }
+            )
+            response = SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                _hidden_params={"custom_llm_provider": "deepseek"},
+                model_dump=lambda: {
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "system_fingerprint": "fp-test",
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+                },
+            )
+            return response
+
+        def _parse_actions(self, response):
+            return [
+                {
+                    "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                    "tool_call_id": "call-1",
+                }
+            ]
+
+        def _calculate_cost(self, response):
+            return {"cost": 0.02}
+
+    model = RawExecutorModel()
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+
+    await agent.run("Finish.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert model.raw_calls == 1
+    assert model.public_calls == 0
+    assert receipt["provider_route"]["executor_transport"] == "direct_single_provider_call"
+    assert receipt["provider_route"]["executor_retry_policy"] == "provider_once_no_retry"
+    assert receipt["provider_response_identity"]["executor"]["providers"] == ["deepseek"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_empty_choices_retains_received_response_accounting(tmp_path):
+    document = RepositoryDocument(
+        path="src/service.py",
+        start_line=1,
+        end_line=2,
+        symbol="save_user",
+        text="def save_user():\n    pass",
+    )
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix `save_user()`.",
+        evidence=evidence,
+        documents=(document,),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+
+    class EmptyChoicesModel:
+        config = SimpleNamespace(model_name="test", model_kwargs={})
+
+        def _prepare_messages_for_api(self, messages):
+            return messages
+
+        def _query(self, messages, **kwargs):
+            return SimpleNamespace(
+                choices=[],
+                _hidden_params={"custom_llm_provider": "deepseek"},
+                model_dump=lambda: {
+                    "model": "deepseek/deepseek-v4-flash-0731",
+                    "system_fingerprint": "fp-test",
+                    "usage": {"prompt_tokens": 41, "completion_tokens": 7},
+                },
+            )
+
+        def _parse_actions(self, response):
+            raise AssertionError("empty choices must be typed before action parsing")
+
+        def _calculate_cost(self, response):
+            return {"cost": 0.25}
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    selection, receipt = await agent._run_persistent_state_bootstrap(
+        EmptyChoicesModel(),
+        instruction="Fix `save_user()`.",
+        catalog=catalog,
+        timeout_sec=5,
+    )
+
+    assert selection.valid is False
+    assert selection.reason_codes == ("bootstrap_action_parse_error:EmptyChoices",)
+    assert receipt["provider_calls"] == 1
+    assert receipt["response_received"] is True
+    assert receipt["input_tokens"] == 41
+    assert receipt["output_tokens"] == 7
+    assert receipt["cost"] == 0.25
+    assert receipt["response_identity"]["provider"] == "deepseek"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_marker_failure_prevents_provider_transport(tmp_path):
+    document = RepositoryDocument(
+        path="src/service.py",
+        start_line=1,
+        end_line=2,
+        symbol="save_user",
+        text="def save_user():\n    pass",
+    )
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix `save_user()`.",
+        evidence=evidence,
+        documents=(document,),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+
+    class MustNotQuery:
+        config = SimpleNamespace(model_name="test", model_kwargs={})
+
+        def _prepare_messages_for_api(self, messages):
+            return messages
+
+        def _query(self, messages, **kwargs):
+            raise AssertionError("provider transport must not start without a durable marker")
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._write_provider_query_marker = lambda **kwargs: "OSError"  # type: ignore[method-assign]
+
+    selection, receipt = await agent._run_persistent_state_bootstrap(
+        MustNotQuery(),
+        instruction="Fix `save_user()`.",
+        catalog=catalog,
+        timeout_sec=5,
+    )
+
+    assert selection.valid is False
+    assert selection.reason_codes == ("provider_query_marker_error:OSError",)
+    assert receipt["provider_calls"] == 0
+    assert receipt["response_received"] is False
 
 
 class _ObservedMutationEnvironment(_Environment):
@@ -2226,9 +2707,96 @@ async def test_provider_query_marker_proves_whether_a_paid_call_started(monkeypa
     marker = json.loads(raw)
     assert marker["schema"] == "gt.provider_query_started.v1"
     assert marker["calls_started"] == 1
+    assert marker["bootstrap_calls_started"] == 0
+    assert marker["executor_calls_started"] == 1
+    assert marker["last_call_kind"] == "executor"
     assert marker["gt_commit"] == "a" * 40
     assert len(marker["request_payload_sha256"]) == 64
     assert "must-not-be-persisted" not in raw
+
+
+@pytest.mark.asyncio
+async def test_executor_marker_failure_prevents_provider_transport(tmp_path):
+    class MustNotQuery(_ScriptedModel):
+        def __init__(self):
+            super().__init__(["echo never-executed"])
+            self.queries = 0
+
+        def query(self, messages, **kwargs):
+            self.queries += 1
+            raise AssertionError("provider transport must not start without a durable marker")
+
+    model = MustNotQuery()
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+    agent._write_provider_query_marker = lambda **kwargs: "OSError"  # type: ignore[method-assign]
+    context = AgentContext()
+
+    await agent.run("Finish.", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert model.queries == 0
+    assert receipt["metrics"]["model_query_invocations"] == 0
+    assert receipt["metrics"]["provider_query_marker_error"] == "OSError"
+    assert context.metadata["exit_status"] == "ProviderQueryMarkerError"
+
+
+@pytest.mark.asyncio
+async def test_marker_failure_does_not_consume_or_receipt_pending_visible_evidence(tmp_path):
+    class FailureEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command == "pytest -q":
+                return ExecResult(stdout="tests/test_app.py::test_app FAILED\n", return_code=1)
+            raise AssertionError(command)
+
+    model = _ScriptedModel(
+        ["pytest -q", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: model
+    feedback_calls = 0
+
+    def forced_feedback(*args, **kwargs):
+        nonlocal feedback_calls
+        feedback_calls += 1
+        if feedback_calls == 1:
+            agent._features._prepared_guidance = {  # type: ignore[attr-defined]
+                "feedback": "Validation failed for pytest -q: one grounded failure.",
+                "feature_id": "covering_red",
+                "delivery_id": "forced-grounded-delivery",
+                "effect_ids": [],
+                "claim_ids": ["forced-grounded-claim"],
+                "claim_anchors": [{"command": "pytest -q"}],
+                "evidence_action": 1,
+                "evidence_actions": [1],
+                "revision": "source-0",
+            }
+            return str(agent._features._prepared_guidance["feedback"])  # type: ignore[attr-defined]
+        return ""
+
+    agent._features.model_feedback = forced_feedback  # type: ignore[method-assign]
+    marker_calls = 0
+
+    def marker(**kwargs):
+        nonlocal marker_calls
+        marker_calls += 1
+        return "" if marker_calls == 1 else "OSError"
+
+    agent._write_provider_query_marker = marker  # type: ignore[method-assign]
+
+    await agent.run("Run pytest before finishing.", FailureEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    rows, _failures, totals = audit_provider_deliveries(receipt)
+    assert len(model.observed_history) == 1
+    assert receipt["guidance_deliveries"] == []
+    assert rows == []
+    assert totals["delivery_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -3509,17 +4077,22 @@ async def test_format_error_is_returned_to_model_instead_of_aborting(tmp_path):
 
 @pytest.mark.asyncio
 async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
-    class SlowModel(_ScriptedModel):
-        def query(self, messages):
-            time.sleep(0.05)
-            return super().query(messages)
+    class ProviderTimeoutModel(_ScriptedModel):
+        def __init__(self):
+            super().__init__(["echo never-executed"])
+            self.query_kwargs = None
+
+        def query(self, messages, **kwargs):
+            self.query_kwargs = dict(kwargs)
+            raise TimeoutError("provider-enforced timeout")
 
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
         model_timeout_sec=0.001,
     )
-    agent._model_factory = lambda: SlowModel(["echo never-executed"])
+    model = ProviderTimeoutModel()
+    agent._model_factory = lambda: model
     context = AgentContext()
 
     await agent.run("do it", _Environment(), context)
@@ -3529,7 +4102,59 @@ async def test_model_timeout_writes_a_censored_partial_receipt(tmp_path):
     assert receipt["metrics"]["censored"] is True
     assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
     assert receipt["metrics"]["actions"] == 0
+    assert model.query_kwargs == {"num_retries": 0, "timeout": pytest.approx(0.001)}
     assert context.metadata["exit_status"] == "ModelTimeout"
+
+
+@pytest.mark.asyncio
+async def test_litellm_timeout_is_recorded_as_provider_timeout_not_generic_error(tmp_path):
+    import litellm
+
+    class ProviderTimeoutModel(_ScriptedModel):
+        def query(self, messages, **kwargs):
+            raise litellm.exceptions.Timeout(
+                message="provider timeout",
+                model="test",
+                llm_provider="test",
+            )
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="test")
+    agent._model_factory = lambda: ProviderTimeoutModel(["echo never-executed"])
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["censored"] is True
+    assert receipt["metrics"]["censored_reason"] == "model_request_timeout"
+    assert context.metadata["exit_status"] == "ModelTimeout"
+
+
+@pytest.mark.asyncio
+async def test_executor_never_abandons_provider_thread_with_host_wait_for(monkeypatch, tmp_path):
+    class ProviderTimeoutModel(_ScriptedModel):
+        def query(self, messages, **kwargs):
+            assert kwargs["num_retries"] == 0
+            assert kwargs["timeout"] == pytest.approx(0.001)
+            raise TimeoutError("provider-enforced timeout")
+
+    async def forbidden_wait_for(*args, **kwargs):
+        raise AssertionError("executor must await the provider transport to completion")
+
+    monkeypatch.setattr("eval.gt_central_agent.asyncio.wait_for", forbidden_wait_for)
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        model_timeout_sec=0.001,
+    )
+    agent._model_factory = lambda: ProviderTimeoutModel(["echo never-executed"])
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert context.metadata["exit_status"] == "ModelTimeout"
+    assert receipt["metrics"]["provider_responses_received"] == 0
 
 
 @pytest.mark.asyncio

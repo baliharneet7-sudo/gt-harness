@@ -250,7 +250,7 @@ def test_exact_symbol_certification_requires_unique_explicit_identifier():
         RepositoryDocument("src/two.py", "def calculateTotal(): pass", symbol="calculateTotal"),
     )
     unique_documents = duplicate_documents[:1]
-    state = _state(task_text="repair calculateTotal")
+    state = _state(task_text="repair `calculateTotal()`")
 
     duplicate = ExactRetrievalChannel(duplicate_documents).retrieve(state, limit=10)
     unique = ExactRetrievalChannel(unique_documents).retrieve(state, limit=10)
@@ -261,6 +261,29 @@ def test_exact_symbol_certification_requires_unique_explicit_identifier():
     selected = HybridRetriever(unique_documents, dense_backend=None).retrieve(state)
     assert "delivery_support:certified" in selected.selected_context[0].provenance
     assert "support_channel:exact" in selected.selected_context[0].provenance
+
+
+def test_ordinary_task_prose_cannot_be_promoted_to_exact_symbol_authority():
+    documents = (
+        RepositoryDocument("terminal/terminal.go", "func clear() {}", symbol="clear"),
+        RepositoryDocument(
+            "eval/modules.go",
+            "func require_cache_info() {}",
+            symbol="require_cache_info",
+        ),
+    )
+    state = _state(
+        task_text=(
+            "Clear the module cache and update `require_cache_info()` so "
+            "ABS_MODULE_PATH remains authoritative."
+        )
+    )
+
+    ranked = ExactRetrievalChannel(documents).retrieve(state, limit=10)
+    by_symbol = {row.symbol: row for row in ranked}
+
+    assert "exact_symbol" not in by_symbol["clear"].provenance
+    assert "exact_symbol" in by_symbol["require_cache_info"].provenance
 
 
 def test_exact_path_certification_requires_a_complete_path_token():

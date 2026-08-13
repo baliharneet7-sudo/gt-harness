@@ -572,7 +572,7 @@ def build_bootstrap_catalog(
         line = max(1, int(row.get("line") or row.get("start_line") or 1))
         anchor = f"{path}:{line}" + (f"#{symbol}" if symbol else "")
         add(
-            1,
+            20,
             _catalog_item(
                 CatalogItemKind.FOCUS,
                 f"Candidate implementation {anchor}",
@@ -587,7 +587,7 @@ def build_bootstrap_catalog(
         symbol = _bounded(row.get("symbol"), 160)
         if path:
             add(
-                2,
+                21,
                 _catalog_item(
                     CatalogItemKind.DEPENDENCY,
                     f"Certified caller {path}" + (f"#{symbol}" if symbol else ""),
@@ -640,19 +640,23 @@ def build_bootstrap_catalog(
                 or candidate.source_revision != bound_graph_source_revision
             ):
                 continue
-            if any(
-                item.kind is CatalogItemKind.FOCUS
-                and item.path == normalized
-                and item.symbol == _bounded(candidate.symbol, 160)
-                for _, item in candidates.values()
-            ):
-                continue
             line = max(1, int(candidate.start_line or 1))
             symbol = _bounded(candidate.symbol, 160)
             anchor = f"{normalized}:{line}" + (f"#{symbol}" if symbol else "")
             channels = tuple(channel.value for channel, _ in ranked.channel_ranks)
+            # Hybrid retrieval is the task-conditioned localization authority.
+            # Replace an equivalent generic graph candidate so one path/symbol
+            # cannot consume two bootstrap slots and the ranked evidence is not
+            # hidden behind repository-order anchors.
+            for item_id, (_, existing) in tuple(candidates.items()):
+                if (
+                    existing.kind is CatalogItemKind.FOCUS
+                    and existing.path == normalized
+                    and existing.symbol == symbol
+                ):
+                    candidates.pop(item_id, None)
             add(
-                min(30, 1 + rank),
+                min(18, 1 + rank),
                 _catalog_item(
                     CatalogItemKind.FOCUS,
                     f"Hybrid-ranked repository candidate #{rank}: {anchor}",
@@ -692,7 +696,7 @@ def build_bootstrap_catalog(
             if not normalized or normalized not in document_by_path:
                 continue
             add(
-                3,
+                22,
                 _catalog_item(
                     CatalogItemKind.DEPENDENCY,
                     f"Certified {normalized_relation} {role}: {normalized}"
@@ -1011,9 +1015,12 @@ class PersistentExecutionStateEngine:
             "graph_rebases": 0,
             "material_transitions": 0,
             "stale_rejections": 0,
+            "stable_context_abstentions": 0,
+            "context_dispatches": 0,
         }
         self._receipts: list[dict[str, Any]] = []
-        self._last_compiled_version = 0
+        self._last_dispatched_version = 0
+        self._exposed_claim_ids: set[str] = set()
         self._record("initialize", source_revision=catalog.source_revision)
 
     @classmethod
@@ -1220,6 +1227,13 @@ class PersistentExecutionStateEngine:
                 else "inspect_dependency"
             )
             obligation_id = _stable_id("obligation", kind, source_path, target_path, link.relation)
+            prior = existing.get(obligation_id)
+            if (
+                prior is not None
+                and prior.opened_revision == source_revision
+                and prior.status is not ObligationStatus.INVALIDATED
+            ):
+                continue
             existing[obligation_id] = StateObligation(
                 obligation_id=obligation_id,
                 kind=kind,
@@ -1276,7 +1290,20 @@ class PersistentExecutionStateEngine:
         validation_check_id: str | None = None,
     ) -> PersistentExecutionState:
         self._metrics["postflight_commits"] += 1
-        if proposed.source_revision != self._snapshot.source_revision:
+        # Preflight correctly rejects a proposal selected against stale state.
+        # Postflight is different: the host has already executed this exact
+        # action.  In a SHADOW batch, an earlier action can advance the source
+        # revision before a later, pre-decided validation executes.  Bind that
+        # observed result to the execution/current revision instead of losing
+        # authoritative validation evidence merely because selection was old.
+        selection_revision_rebound = (
+            proposed.source_revision != self._snapshot.source_revision
+        )
+        if selection_revision_rebound and not (
+            proposed.batch_size > 1
+            and proposed.batch_index > 0
+            and current_source_revision == self._snapshot.source_revision
+        ):
             self._metrics["stale_rejections"] += 1
             self._record(
                 "postflight",
@@ -1351,11 +1378,9 @@ class PersistentExecutionStateEngine:
                 phase = StatePhase.IMPLEMENTING
                 transition = "deliverable_changed"
         if normalized_graph_changed:
-            obligations = self._open_adjacent_obligations(
-                normalized_graph_changed,
-                source_revision=current_source_revision,
-                obligations=obligations,
-            )
+            # The pre-edit graph is no longer authoritative.  Current graph
+            # obligations are recomputed only after the incremental refresh
+            # succeeds in ``rebase_graph``.
             validation = StateValidation(
                 status=StateValidationStatus.PENDING,
                 source_revision=current_source_revision,
@@ -1469,9 +1494,16 @@ class PersistentExecutionStateEngine:
             current_failure=failure,
             last_transition=transition,
         )
-        if candidate != self._snapshot:
+        semantic_candidate = replace(
+            candidate,
+            version=self._snapshot.version,
+            last_transition=self._snapshot.last_transition,
+        )
+        if semantic_candidate != self._snapshot:
             candidate = replace(candidate, version=self._snapshot.version + 1)
             self._metrics["material_transitions"] += 1
+        else:
+            candidate = replace(candidate, version=self._snapshot.version)
         self._snapshot = candidate
         self._record(
             "postflight",
@@ -1483,6 +1515,9 @@ class PersistentExecutionStateEngine:
             returncode=int(returncode),
             validation_status=normalized_validation,
             transition=transition,
+            selection_revision_rebound=selection_revision_rebound,
+            proposed_source_revision=proposed.source_revision,
+            committed_source_revision=current_source_revision,
         )
         return self._snapshot
 
@@ -1515,11 +1550,14 @@ class PersistentExecutionStateEngine:
             self._present_paths = frozenset(
                 self._state_path(path) for path in present_paths if self._state_path(path)
             )
+        # OPEN graph-derived obligations describe the previous certified edge
+        # set.  Invalidate them all, then recreate only obligations supported
+        # by the freshly certified links below.  Required task obligations and
+        # completed historical evidence remain intact.
         obligations = tuple(
             replace(item, status=ObligationStatus.INVALIDATED)
             if item.relation != "task_requirement"
             and item.status is ObligationStatus.OPEN
-            and item.path not in self._present_paths
             else item
             for item in self._snapshot.obligations
         )
@@ -1534,10 +1572,14 @@ class PersistentExecutionStateEngine:
                 source_revision=current_source_revision,
                 obligations=obligations,
             )
-        required_ids = frozenset(item.item_id for item in self._catalog.items if item.required)
+        # Bootstrap selection may legitimately choose a non-required focus.
+        # A graph rebase invalidates only catalog items that disappeared; it
+        # must not erase a still-current optional selection merely because the
+        # item was never a completion requirement.
+        catalog_ids = frozenset(item.item_id for item in self._catalog.items)
         current_focus_id = (
             self._snapshot.current_focus_id
-            if self._snapshot.current_focus_id in required_ids
+            if self._snapshot.current_focus_id in catalog_ids
             else ""
         )
         current_focus_path = self._snapshot.current_focus_path
@@ -1552,20 +1594,45 @@ class PersistentExecutionStateEngine:
             current_focus_id=current_focus_id,
             current_focus_path=current_focus_path,
             ordered_item_ids=tuple(
-                item_id for item_id in self._snapshot.ordered_item_ids if item_id in required_ids
+                item_id for item_id in self._snapshot.ordered_item_ids if item_id in catalog_ids
             ),
             risk_item_ids=tuple(
-                item_id for item_id in self._snapshot.risk_item_ids if item_id in required_ids
+                item_id for item_id in self._snapshot.risk_item_ids if item_id in catalog_ids
             ),
             validation_item_ids=tuple(
-                item_id for item_id in self._snapshot.validation_item_ids if item_id in required_ids
+                item_id for item_id in self._snapshot.validation_item_ids if item_id in catalog_ids
             ),
             obligations=obligations,
             last_transition="graph_rebased",
         )
-        if candidate != self._snapshot:
+        canonical_candidate_obligations = tuple(
+            sorted(candidate.obligations, key=lambda item: item.obligation_id)
+        )
+        canonical_snapshot_obligations = tuple(
+            sorted(self._snapshot.obligations, key=lambda item: item.obligation_id)
+        )
+        semantic_candidate = replace(
+            candidate,
+            version=self._snapshot.version,
+            last_transition=self._snapshot.last_transition,
+            obligations=canonical_candidate_obligations,
+        )
+        semantic_snapshot = replace(
+            self._snapshot,
+            obligations=canonical_snapshot_obligations,
+        )
+        if semantic_candidate != semantic_snapshot:
             candidate = replace(candidate, version=self._snapshot.version + 1)
             self._metrics["material_transitions"] += 1
+        else:
+            # Preserve the prior tuple order on a semantic no-op. Reordering
+            # controller state without a version change would make replay and
+            # frame-delta accounting disagree about whether anything changed.
+            candidate = replace(
+                candidate,
+                version=self._snapshot.version,
+                obligations=self._snapshot.obligations,
+            )
         self._snapshot = candidate
         self._record("graph_rebase", disposition="current")
         return self._snapshot
@@ -1578,14 +1645,15 @@ class PersistentExecutionStateEngine:
         focus_id = snapshot.current_focus_id
         if not focus_id and snapshot.graph_revision == self._catalog.graph_revision:
             focus_id = snapshot.primary_focus_id
-        focus = self._item(focus_id)
+        catalog_is_current = snapshot.graph_revision == self._catalog.graph_revision
+        focus = self._item(focus_id) if catalog_is_current else None
         lines: list[tuple[str, str]] = [
             (
                 _stable_id("state-claim", "phase", snapshot.phase.value, snapshot.source_revision),
                 f"Phase: {snapshot.phase.value}.",
             )
         ]
-        if focus is not None:
+        if focus is not None and kind is ContextFrameKind.INITIAL:
             focus_prefix = (
                 "Current certified focus"
                 if focus.certified
@@ -1620,13 +1688,22 @@ class PersistentExecutionStateEngine:
                         ),
                     )
                 )
-        elif snapshot.current_focus_path:
+        elif snapshot.current_focus_path and kind is ContextFrameKind.INITIAL:
             lines.append(
                 (
                     _stable_id("state-claim", "focus-path", snapshot.current_focus_path),
                     f"Current observed repository focus: {snapshot.current_focus_path}.",
                 )
             )
+        if kind is ContextFrameKind.CORE:
+            focus_path = snapshot.current_focus_path or (focus.path if focus else "")
+            if focus_path:
+                lines.append(
+                    (
+                        _stable_id("state-claim", "core-focus-path", focus_path),
+                        f"Current focus path: {focus_path}.",
+                    )
+                )
         open_obligations = [
             item for item in snapshot.obligations if item.status is ObligationStatus.OPEN
         ]
@@ -1634,7 +1711,11 @@ class PersistentExecutionStateEngine:
             obligation_target = obligation.path or obligation.source_path
             lines.append(
                 (
-                    _stable_id("state-claim", obligation.obligation_id, snapshot.source_revision),
+                    _stable_id(
+                        "state-claim",
+                        obligation.obligation_id,
+                        obligation.opened_revision,
+                    ),
                     (
                         f"{'Required' if obligation.blocking else 'Related'} "
                         f"{obligation.kind}: {obligation_target} "
@@ -1669,7 +1750,11 @@ class PersistentExecutionStateEngine:
                     f"Current validation failure: {snapshot.current_failure.diagnostic}.",
                 )
             )
-        if kind in {ContextFrameKind.INITIAL, ContextFrameKind.DELTA, ContextFrameKind.CRITICAL}:
+        if catalog_is_current and kind in {
+            ContextFrameKind.INITIAL,
+            ContextFrameKind.DELTA,
+            ContextFrameKind.CRITICAL,
+        }:
             next_items = [
                 self._item(item_id)
                 for item_id in snapshot.ordered_item_ids
@@ -1756,9 +1841,9 @@ class PersistentExecutionStateEngine:
 
         if self._snapshot.current_failure is not None:
             kind = ContextFrameKind.CRITICAL
-        elif self._last_compiled_version == 0:
+        elif self._last_dispatched_version == 0:
             kind = ContextFrameKind.INITIAL
-        elif self._last_compiled_version != self._snapshot.version:
+        elif self._last_dispatched_version != self._snapshot.version:
             kind = ContextFrameKind.DELTA
         else:
             kind = ContextFrameKind.CORE
@@ -1772,6 +1857,8 @@ class PersistentExecutionStateEngine:
         selected: list[str] = []
         claim_ids: list[str] = []
         for claim_id, line in self._frame_lines(kind):
+            if kind is not ContextFrameKind.CORE and claim_id in self._exposed_claim_ids:
+                continue
             candidate = "\n".join((header, *selected, line))
             if token_counter(candidate) > ceiling:
                 continue
@@ -1780,9 +1867,29 @@ class PersistentExecutionStateEngine:
                 continue
             selected.append(line)
             claim_ids.append(claim_id)
+        if not selected and kind is not ContextFrameKind.CORE:
+            # A real state transition can be executor-visible already (for
+            # example a file read). The external state must still persist in
+            # the next decision without restating one-shot source evidence.
+            kind = ContextFrameKind.CORE
+            ceiling = min(max_tokens, 96)
+            for claim_id, line in self._frame_lines(kind):
+                candidate = "\n".join((header, *selected, line))
+                if token_counter(candidate) > ceiling:
+                    continue
+                if len(candidate.encode("utf-8")) > 4_096:
+                    continue
+                selected.append(line)
+                claim_ids.append(claim_id)
         rendered = "\n".join((header, *selected)) if selected else ""
         token_count = token_counter(rendered) if rendered else 0
-        reason_codes = () if rendered else ("no_complete_state_fact_within_budget",)
+        reason_codes = (
+            ()
+            if rendered
+            else (
+                "state_change_already_represented_or_not_model_material",
+            )
+        )
         focus_id = self._snapshot.current_focus_id or self._snapshot.primary_focus_id
         focus = self._item(focus_id)
         selected_evidence: tuple[dict[str, Any], ...] = ()
@@ -1812,9 +1919,47 @@ class PersistentExecutionStateEngine:
             reason_codes=reason_codes,
             selected_evidence=selected_evidence,
         )
-        self._last_compiled_version = self._snapshot.version
         self._record("provider_context", **frame.as_dict())
         return frame
+
+    def mark_context_dispatched(self, frame: PersistentContextFrame) -> bool:
+        """Commit exposure only after the provider request begins dispatch.
+
+        Request-wide contribution packing can reject a compiled frame. Such a
+        frame was never visible and must remain eligible on the next call.
+        """
+
+        if frame.kind is ContextFrameKind.NONE or not frame.rendered_text:
+            self._record(
+                "provider_context_dispatch",
+                disposition="empty_frame",
+                provider_call=frame.provider_call,
+            )
+            return False
+        if (
+            frame.state_version != self._snapshot.version
+            or frame.source_revision != self._snapshot.source_revision
+        ):
+            self._metrics["stale_rejections"] += 1
+            self._record(
+                "provider_context_dispatch",
+                disposition="stale_frame",
+                provider_call=frame.provider_call,
+                frame_state_version=frame.state_version,
+                current_state_version=self._snapshot.version,
+            )
+            return False
+        self._last_dispatched_version = frame.state_version
+        self._exposed_claim_ids.update(frame.claim_ids)
+        self._metrics["context_dispatches"] += 1
+        self._record(
+            "provider_context_dispatch",
+            disposition="dispatched",
+            provider_call=frame.provider_call,
+            state_version=frame.state_version,
+            claim_ids=list(frame.claim_ids),
+        )
+        return True
 
     def evaluate_completion(self, *, current_source_revision: str) -> dict[str, Any]:
         open_ids = tuple(

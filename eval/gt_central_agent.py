@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import os
 import posixpath
@@ -43,6 +44,7 @@ from harbor.utils.trajectory_utils import format_trajectory_json
 from jinja2 import StrictUndefined, Template
 from minisweagent.config import builtin_config_dir
 from minisweagent.exceptions import InterruptAgentFlow
+from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from gt_engine.central_runtime import (
@@ -107,6 +109,7 @@ from gt_engine.persistent_execution_state import (
     BootstrapSelection,
     BootstrapStatus,
     ContextFrameKind,
+    ObligationStatus,
     PersistentExecutionStateEngine,
     bootstrap_visible_item_ids,
     build_bootstrap_catalog,
@@ -177,6 +180,11 @@ from gt_engine.uplift_policy import (
     OpportunityKind,
     certify_opportunity,
 )
+
+# The persistent artifact is the controller's current decision frame, not an
+# optional advisory. It must be packed before every other model-visible GT
+# surface; otherwise a large retrieval can make the living state disappear.
+PERSISTENT_STATE_CONTRIBUTION_PRIORITY = 0
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -281,7 +289,10 @@ def _model_kwargs(model: Any) -> dict[str, Any]:
 
 
 def _provider_request_receipt(
-    model: Any, messages: list[dict[str, Any]]
+    model: Any,
+    messages: list[dict[str, Any]],
+    *,
+    call_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str, str, int]:
     """Hash the exact messages produced by Mini-SWE's provider adapter.
 
@@ -306,12 +317,18 @@ def _provider_request_receipt(
     # include the actual provider tool schema; otherwise control/treatment
     # requests are not reproducible even when their messages match.
     provider_tools = getattr(model, "tools", None) or [BASH_TOOL]
+    effective_kwargs = _model_kwargs(model)
+    effective_kwargs.update(call_kwargs or {})
+    # Credentials do not define the semantic request and must never influence
+    # a replay identity or escape through future receipt diagnostics.
+    for secret_key in ("api_key", "authorization", "headers"):
+        effective_kwargs.pop(secret_key, None)
     envelope = {
         "model": str(
             getattr(getattr(model, "config", None), "model_name", "")
             or getattr(model, "model_name", "")
         ),
-        "model_kwargs": _model_kwargs(model),
+        "model_kwargs": effective_kwargs,
         "tools": provider_tools,
         "messages": prepared,
     }
@@ -337,9 +354,123 @@ def _provider_route_configuration(model: Any) -> dict[str, Any]:
         "model": model_name,
         "api_base": str(kwargs.get("api_base") or ""),
         "provider_policy": provider_policy,
+        "litellm_retry_policy": (
+            "no_internal_retry" if kwargs.get("num_retries") == 0 else "unverified"
+        ),
+        # Backward-compatible receipt name.  The executor-specific fields
+        # below are authoritative because Mini-SWE's public query wrapper has
+        # a distinct retry layer from LiteLLM itself.
+        "retry_policy": (
+            "provider_once_no_retry"
+            if _supports_direct_provider_transport(model)
+            else "unverified"
+        ),
+        "executor_transport": (
+            "direct_single_provider_call"
+            if _supports_direct_provider_transport(model)
+            else "public_query_fallback"
+        ),
+        "executor_retry_policy": (
+            "provider_once_no_retry" if _supports_direct_provider_transport(model) else "unverified"
+        ),
         "credential_in_receipt": any(
             key in kwargs for key in ("api_key", "authorization", "headers")
         ),
+    }
+
+
+def _supports_direct_provider_transport(model: Any) -> bool:
+    return all(
+        callable(getattr(model, name, None))
+        for name in ("_query", "_prepare_messages_for_api", "_parse_actions")
+    )
+
+
+def _raw_response_dump(response: Any) -> dict[str, Any]:
+    """Preserve non-secret provider identity omitted by LiteLLM model_dump()."""
+
+    payload = dict(response.model_dump())
+    hidden = getattr(response, "_hidden_params", {}) or {}
+    provider = str(
+        payload.get("provider")
+        or payload.get("provider_name")
+        or hidden.get("custom_llm_provider")
+        or ""
+    )
+    if provider:
+        payload["provider"] = provider
+    return payload
+
+
+def _direct_provider_message(
+    model: Any,
+    messages: list[dict[str, Any]],
+    *,
+    allow_parse_error: bool,
+    **query_kwargs: Any,
+) -> dict[str, Any]:
+    """Perform exactly one physical provider call and preserve its accounting."""
+
+    raw_response = model._query(model._prepare_messages_for_api(messages), **query_kwargs)
+    response_dump = _raw_response_dump(raw_response)
+    try:
+        cost_row = model._calculate_cost(raw_response)
+    except Exception:  # noqa: BLE001 - cost is accounting, not delivery authority
+        cost_row = {"cost": 0.0}
+    GLOBAL_MODEL_STATS.add(float(cost_row.get("cost") or 0.0))
+    parse_error = ""
+    choices = tuple(getattr(raw_response, "choices", ()) or ())
+    if not choices or getattr(choices[0], "message", None) is None:
+        message: dict[str, Any] = {"role": "assistant", "content": ""}
+        actions: list[dict[str, Any]] = []
+        parse_error = "EmptyChoices"
+    else:
+        message = dict(choices[0].message.model_dump())
+        try:
+            actions = list(model._parse_actions(raw_response))
+        except Exception as exc:  # noqa: BLE001 - caller decides fail-open behavior
+            if not allow_parse_error:
+                raise
+            actions = []
+            parse_error = type(exc).__name__
+    message["extra"] = {
+        "actions": actions,
+        "response": response_dump,
+        "cost": float(cost_row.get("cost") or 0.0),
+        "timestamp": time.time(),
+    }
+    if parse_error:
+        message["extra"]["bootstrap_parse_error"] = parse_error
+    return message
+
+
+def _is_provider_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    return type(exc).__name__ == "Timeout" and type(exc).__module__.startswith("litellm")
+
+
+class _InitialRetrievalUnavailable(RuntimeError):
+    """Internal fail-closed control flow: graph-first retrieval did not complete."""
+
+
+def _provider_prompt_identity(model: Any, messages: list[dict[str, Any]]) -> dict[str, str]:
+    """Hash the initial system/task messages and the exact Bash tool schema."""
+
+    prepare = getattr(model, "_prepare_messages_for_api", None)
+    prepared = (
+        prepare(messages)
+        if callable(prepare)
+        else [{key: value for key, value in item.items() if key != "extra"} for item in messages]
+    )
+    system = next((item for item in prepared if item.get("role") == "system"), {})
+    task = next((item for item in prepared if item.get("role") == "user"), {})
+    tools = getattr(model, "tools", None) or [BASH_TOOL]
+    return {
+        "schema": "gt.provider_prompt_identity.v1",
+        "system_prompt_sha256": hashlib.sha256(_canonical_json(system)).hexdigest(),
+        "task_prompt_sha256": hashlib.sha256(_canonical_json(task)).hexdigest(),
+        "tool_schema_sha256": hashlib.sha256(_canonical_json(tools)).hexdigest(),
     }
 
 
@@ -824,6 +955,22 @@ def _mini_config() -> dict[str, Any]:
     return yaml.safe_load((builtin_config_dir / "mini.yaml").read_text(encoding="utf-8"))
 
 
+WORKSPACE_PROMPT_CONTRACT = "resolved_workspace_v1"
+
+
+def _task_prompt_with_workspace(task_prompt: str, *, cwd: str) -> str:
+    """Expose the task-image workspace equally to GT-off and GT-on agents."""
+
+    return (
+        task_prompt.rstrip()
+        + "\n\n<workspace>\n"
+        + f"The repository workspace for this task is {cwd}. "
+        + "Each Bash action starts in that directory; do not search the host filesystem "
+        + "to locate the repository.\n"
+        + "</workspace>"
+    )
+
+
 class GTIntegrationMode(StrEnum):
     """One-switch policy for provider-visible GT integration."""
 
@@ -1303,12 +1450,23 @@ class MiniSweCentralAgent(BaseAgent):
             max_input_tokens=self.persistent_state_bootstrap_input_tokens,
         )
         visible_item_ids = bootstrap_visible_item_ids(bootstrap_messages)
+        bootstrap_call_kwargs = {
+            "temperature": 0.0,
+            "max_tokens": self.persistent_state_bootstrap_output_tokens,
+            "num_retries": 0,
+            "timeout": float(timeout_sec),
+            "tool_choice": {"type": "function", "function": {"name": "bash"}},
+        }
         (
             provider_messages,
             request_payload_sha256,
             provider_messages_sha256,
             provider_request_chars,
-        ) = _provider_request_receipt(model, bootstrap_messages)
+        ) = _provider_request_receipt(
+            model,
+            bootstrap_messages,
+            call_kwargs=bootstrap_call_kwargs,
+        )
         receipt: dict[str, Any] = {
             "schema": "gt.persistent_bootstrap.v1",
             "status": BootstrapStatus.ERROR_FALLBACK.value,
@@ -1337,22 +1495,63 @@ class MiniSweCentralAgent(BaseAgent):
             "latency_ms": 0.0,
             "reason_codes": [],
             "response_received": False,
+            "transport": (
+                "direct_single_provider_call"
+                if _supports_direct_provider_transport(model)
+                else "public_query_fallback"
+            ),
         }
+
+        def query_bootstrap_once() -> dict[str, Any]:
+            """Use one direct provider call when Mini-SWE exposes its adapter.
+
+            ``LitellmModel.query`` wraps transport retries and parses tool calls
+            before returning, which made a received no-tool response disappear
+            as a FormatError.  The bootstrap contract is exactly one call, so
+            use the same provider preparation and raw query once, then preserve
+            response accounting even when action parsing fails. Scripted/test
+            models retain the public query fallback.
+            """
+
+            if not _supports_direct_provider_transport(model):
+                public_kwargs = dict(bootstrap_call_kwargs)
+                public_kwargs.pop("num_retries", None)
+                public_kwargs.pop("timeout", None)
+                return model.query(
+                    bootstrap_messages,
+                    **public_kwargs,
+                )
+            return _direct_provider_message(
+                model,
+                bootstrap_messages,
+                allow_parse_error=True,
+                **bootstrap_call_kwargs,
+            )
+
         started = time.perf_counter()
         try:
-            receipt["provider_calls"] = 1
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    model.query,
-                    bootstrap_messages,
-                    temperature=0.0,
-                    max_tokens=self.persistent_state_bootstrap_output_tokens,
-                ),
-                timeout=max(0.001, float(timeout_sec)),
+            marker_error = self._write_provider_query_marker(
+                calls_started=1,
+                bootstrap_calls_started=1,
+                executor_calls_started=0,
+                last_call=0,
+                last_call_kind="persistent_bootstrap",
+                request_payload_sha256=request_payload_sha256,
             )
+            receipt["provider_query_marker_error"] = marker_error
+            if marker_error:
+                reason = f"provider_query_marker_error:{marker_error}"
+                selection = BootstrapSelection(valid=False, reason_codes=(reason,))
+                receipt["selection"] = selection.as_dict()
+                receipt["reason_codes"] = [reason]
+                receipt["status"] = BootstrapStatus.ERROR_FALLBACK.value
+                return selection, receipt
+            receipt["provider_calls"] = 1
+            response = await asyncio.to_thread(query_bootstrap_once)
             receipt["response_received"] = True
             extra = response.get("extra") or {}
             actions = tuple(extra.get("actions") or ())
+            parse_error = str(extra.get("bootstrap_parse_error") or "")
             usage = (extra.get("response") or {}).get("usage") or {}
             receipt.update(
                 {
@@ -1368,7 +1567,12 @@ class MiniSweCentralAgent(BaseAgent):
                     "response_identity": _provider_response_identity(response),
                 }
             )
-            if len(actions) != 1:
+            if parse_error:
+                selection = BootstrapSelection(
+                    valid=False,
+                    reason_codes=(f"bootstrap_action_parse_error:{parse_error}",),
+                )
+            elif len(actions) != 1:
                 selection = BootstrapSelection(
                     valid=False, reason_codes=("bootstrap_action_count",)
                 )
@@ -1386,12 +1590,14 @@ class MiniSweCentralAgent(BaseAgent):
             )
             receipt["reason_codes"] = list(selection.reason_codes)
             return selection, receipt
-        except TimeoutError:
-            selection = BootstrapSelection(valid=False, reason_codes=("bootstrap_timeout",))
-            receipt["selection"] = selection.as_dict()
-            receipt["reason_codes"] = ["bootstrap_timeout"]
-            return selection, receipt
         except Exception as exc:  # noqa: BLE001 - bootstrap degrades deterministically
+            if _is_provider_timeout(exc):
+                selection = BootstrapSelection(
+                    valid=False, reason_codes=("bootstrap_timeout",)
+                )
+                receipt["selection"] = selection.as_dict()
+                receipt["reason_codes"] = ["bootstrap_timeout"]
+                return selection, receipt
             selection = BootstrapSelection(
                 valid=False,
                 reason_codes=(f"bootstrap_error:{type(exc).__name__}",),
@@ -1401,6 +1607,42 @@ class MiniSweCentralAgent(BaseAgent):
             return selection, receipt
         finally:
             receipt["latency_ms"] = round((time.perf_counter() - started) * 1_000.0, 6)
+
+    def _write_provider_query_marker(
+        self,
+        *,
+        calls_started: int,
+        bootstrap_calls_started: int,
+        executor_calls_started: int,
+        last_call: int,
+        last_call_kind: str,
+        request_payload_sha256: str,
+    ) -> str:
+        """Persist a retry-safety marker immediately before provider transport."""
+
+        try:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            (self.logs_dir / "provider_query_started.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "gt.provider_query_started.v1",
+                        "calls_started": max(0, int(calls_started)),
+                        "bootstrap_calls_started": max(0, int(bootstrap_calls_started)),
+                        "executor_calls_started": max(0, int(executor_calls_started)),
+                        "last_call": max(0, int(last_call)),
+                        "last_call_kind": str(last_call_kind),
+                        "request_payload_sha256": str(request_payload_sha256),
+                        "model": str(self.model_name or ""),
+                        "gt_commit": (os.environ.get("GT_COMMIT") or "").strip(),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return type(exc).__name__
+        return ""
 
     async def _system_information(self, environment: BaseEnvironment) -> dict[str, str]:
         configured = str(self.cwd or "").strip()
@@ -2166,6 +2408,8 @@ class MiniSweCentralAgent(BaseAgent):
             **config["agent"],
             **config["model"],
         }
+        task_prompt = self._render(str(config["agent"]["instance_template"]), variables)
+        task_prompt = _task_prompt_with_workspace(task_prompt, cwd=self.cwd)
         messages = [
             model.format_message(
                 role="system",
@@ -2173,9 +2417,10 @@ class MiniSweCentralAgent(BaseAgent):
             ),
             model.format_message(
                 role="user",
-                content=self._render(str(config["agent"]["instance_template"]), variables),
+                content=task_prompt,
             ),
         ]
+        provider_prompt_identity = _provider_prompt_identity(model, messages)
         explicit_checks = explicit_check_commands(instruction)
         task_deliverables = task_deliverable_paths(instruction)
         external_paths = task_external_paths(instruction)
@@ -2576,6 +2821,14 @@ class MiniSweCentralAgent(BaseAgent):
                                 "query_hash": initial_retrieval_state.query_hash,
                                 "reason_codes": [f"initial_retrieval_error:{type(exc).__name__}"],
                             }
+                        if initial_retrieval_result is None:
+                            # Persistent state is graph-first: a catalog built
+                            # after the shared five-channel retrieval failed is
+                            # not an accepted substitute and must not spend the
+                            # one bootstrap provider call.
+                            raise _InitialRetrievalUnavailable(
+                                str(persistent_state_initial_retrieval.get("status") or "error")
+                            )
                         catalog = build_bootstrap_catalog(
                             instruction=instruction,
                             evidence=repository_evidence,
@@ -2647,6 +2900,20 @@ class MiniSweCentralAgent(BaseAgent):
                                 persistent_state_bootstrap.get("cached_tokens") or 0
                             )
                             cost += float(persistent_state_bootstrap.get("cost") or 0.0)
+                except _InitialRetrievalUnavailable:
+                    persistent_state_initialization = {
+                        "enabled": True,
+                        "status": "initial_retrieval_unavailable",
+                        "reason_codes": list(
+                            persistent_state_initial_retrieval.get("reason_codes")
+                            or ("initial_retrieval_unavailable",)
+                        ),
+                    }
+                    persistent_state_bootstrap = {
+                        **persistent_state_bootstrap,
+                        "status": "initial_retrieval_unavailable",
+                        "reason_codes": ["initial_retrieval_unavailable"],
+                    }
                 except TimeoutError:
                     persistent_state_initialization = {
                         "enabled": True,
@@ -2759,6 +3026,29 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                     },
                 }
+                if persistent_state_engine is not None:
+                    persistent_snapshot = persistent_state_engine.snapshot
+                    active_state["decision"]["persistent_execution_state"] = {
+                        "phase": persistent_snapshot.phase.value,
+                        "focus_path": persistent_snapshot.current_focus_path,
+                        "open_obligations": [
+                            {
+                                "kind": obligation.kind,
+                                "path": obligation.path,
+                                "relation": obligation.relation,
+                                "blocking": obligation.blocking,
+                            }
+                            for obligation in persistent_snapshot.obligations
+                            if obligation.status is ObligationStatus.OPEN
+                        ][:8],
+                        "validation": persistent_snapshot.validation.status.value,
+                        "failure": (
+                            persistent_snapshot.current_failure.diagnostic
+                            if persistent_snapshot.current_failure is not None
+                            else ""
+                        ),
+                        "state_version": persistent_snapshot.version,
+                    }
                 (
                     stock_provider_messages,
                     _stock_request_payload_sha256,
@@ -3329,9 +3619,7 @@ class MiniSweCentralAgent(BaseAgent):
                         evidence_action=actions_count,
                         eligible_call=calls,
                         revision=persistent_state_frame.source_revision,
-                        priority=(
-                            0 if persistent_state_frame.kind is ContextFrameKind.CRITICAL else 10
-                        ),
+                        priority=PERSISTENT_STATE_CONTRIBUTION_PRIORITY,
                     )
                 if preemptive_frame is not None:
                     register_contribution(
@@ -3627,6 +3915,28 @@ class MiniSweCentralAgent(BaseAgent):
                         else min(float(self.model_timeout_sec), remaining_for_query)
                     )
                 )
+                query_signature = inspect.signature(model.query)
+                supports_query_kwargs = any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in query_signature.parameters.values()
+                )
+                executor_query_kwargs: dict[str, Any] = {}
+                if _supports_direct_provider_transport(model) or supports_query_kwargs:
+                    executor_query_kwargs["num_retries"] = 0
+                    if planned_query_timeout is not None:
+                        executor_query_kwargs["timeout"] = float(planned_query_timeout)
+                # The request identity covers the actual effective transport
+                # arguments.  Message identity remains a separate stable hash.
+                (
+                    provider_messages,
+                    request_payload_sha256,
+                    provider_messages_sha256,
+                    provider_request_chars,
+                ) = _provider_request_receipt(
+                    model,
+                    query_messages,
+                    call_kwargs=executor_query_kwargs,
+                )
                 request_dispatch_eligible = bool(
                     request_budget.within_limit
                     and (planned_query_timeout is None or planned_query_timeout > 0)
@@ -3636,7 +3946,11 @@ class MiniSweCentralAgent(BaseAgent):
                     control_request_payload_sha256,
                     control_provider_messages_sha256,
                     control_provider_request_chars,
-                ) = _provider_request_receipt(model, control_query_messages)
+                ) = _provider_request_receipt(
+                    model,
+                    control_query_messages,
+                    call_kwargs=executor_query_kwargs,
+                )
                 intervention_capture: dict[str, Any] | None = None
                 if runtime_payload:
                     intervention_capture = {
@@ -3689,62 +4003,55 @@ class MiniSweCentralAgent(BaseAgent):
                     request_payload_sha256=request_payload_sha256,
                     fact_accounting=provider_view_metrics.fact_accounting,
                 )
+                prepared_persistent_delivery: dict[str, Any] | None = None
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
                     and persistent_state_payload
                     and persistent_state_frame is not None
                 ):
-                    persistent_state_deliveries.append(
-                        {
-                            "delivery_id": "persistent-state-"
-                            + hashlib.sha256(
-                                _canonical_json(
-                                    {
-                                        "payload": persistent_state_payload,
-                                        "call": calls,
-                                        "source_revision": source_revision,
-                                    }
-                                )
-                            ).hexdigest()[:20],
-                            "call": calls,
-                            "state_id": persistent_state_engine.snapshot.state_id,
-                            "state_version": persistent_state_frame.state_version,
-                            "frame_kind": persistent_state_frame.kind.value,
-                            "claim_ids": list(persistent_state_frame.claim_ids),
-                            "source_revision": persistent_state_frame.source_revision,
-                            "evidence_action": actions_count,
-                            "first_eligible_call": calls,
-                            "delivered_before_call": calls,
-                            "delivered_before_model_query": True,
-                            "not_predictive": True,
-                            "one_step_late": False,
-                            "request_payload_sha256": request_payload_sha256,
-                            "provider_messages_sha256": provider_messages_sha256,
-                            "message_index": runtime_message_index,
-                            "chars": len(persistent_state_payload),
-                            "tokens": persistent_state_frame.token_count,
-                            "selected_evidence": [
-                                dict(item) for item in persistent_state_frame.selected_evidence
-                            ],
-                        }
-                    )
+                    prepared_persistent_delivery = {
+                        "delivery_id": "persistent-state-"
+                        + hashlib.sha256(
+                            _canonical_json(
+                                {
+                                    "payload": persistent_state_payload,
+                                    "call": calls,
+                                    "source_revision": source_revision,
+                                }
+                            )
+                        ).hexdigest()[:20],
+                        "call": calls,
+                        "state_id": persistent_state_engine.snapshot.state_id,
+                        "state_version": persistent_state_frame.state_version,
+                        "frame_kind": persistent_state_frame.kind.value,
+                        "claim_ids": list(persistent_state_frame.claim_ids),
+                        "source_revision": persistent_state_frame.source_revision,
+                        "evidence_action": actions_count,
+                        "first_eligible_call": calls,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "not_predictive": True,
+                        "one_step_late": False,
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "message_index": runtime_message_index,
+                        "chars": len(persistent_state_payload),
+                        "tokens": persistent_state_frame.token_count,
+                        "selected_evidence": [
+                            dict(item) for item in persistent_state_frame.selected_evidence
+                        ],
+                    }
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
                     and preemptive_payload
                     and preemptive_frame is not None
                 ):
-                    delivered_preemptive_claim_ids.update(preemptive_frame.claim_ids)
-                    preemptive_retrieval_chars_delivered += len(preemptive_payload)
-                    preemptive_retrieval_chars_by_lifecycle[lifecycle_group] = (
-                        preemptive_retrieval_chars_by_lifecycle.get(lifecycle_group, 0)
-                        + len(preemptive_payload)
-                    )
-                    delivery_receipt = dict(
+                    prepared_preemptive_delivery = dict(
                         preemptive_compilation.receipt if preemptive_compilation else {}
                     )
-                    delivery_receipt.update(
+                    prepared_preemptive_delivery.update(
                         {
                             "status": "delivered",
                             "prepared_call": calls,
@@ -3761,16 +4068,8 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                         }
                     )
-                    preemptive_retrieval_deliveries.append(delivery_receipt)
-                    preemptive_retrieval_decisions[-1]["status"] = "delivered"
-                    preemptive_retrieval_decisions[-1]["delivery_receipt"] = delivery_receipt
-                if (
-                    request_dispatch_eligible
-                    and runtime_message_index is not None
-                    and pending_guidance
-                ):
-                    delivery_metadata = self._features.confirm_prepared_guidance() or {}
-                    pending_guidance = ""
+                else:
+                    prepared_preemptive_delivery = None
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
@@ -3778,11 +4077,7 @@ class MiniSweCentralAgent(BaseAgent):
                 ):
                     fact_ids = [fact.fact_id for fact in frontier_decision.facts]
                     claim_ids = [fact.claim_id for fact in frontier_decision.facts]
-                    delivered_frontier_fact_ids.update(fact_ids)
-                    delivered_frontier_claim_ids.update(claim_ids)
-                    frontier_chars_delivered += len(frontier_payload)
-                    frontier_deliveries.append(
-                        {
+                    prepared_frontier_delivery = {
                             "call": calls,
                             "source_revision": source_revision,
                             "graph_revision": (
@@ -3808,58 +4103,15 @@ class MiniSweCentralAgent(BaseAgent):
                                 else None
                             ),
                         }
-                    )
-                    semantic_utilization.register(
-                        frontier_deliveries[-1],
-                        call=calls,
-                        source_revision=source_revision,
-                    )
-                if delivery_metadata is not None:
-                    evidence_action = int(delivery_metadata.get("evidence_action") or 0)
-                    guidance_deliveries.append(
-                        {
-                            "delivery_id": delivery_metadata.get("delivery_id"),
-                            "effect_ids": delivery_metadata.get("effect_ids", []),
-                            "feature_id": delivery_metadata.get("feature_id"),
-                            "contributing_features": delivery_metadata.get(
-                                "contributing_features", []
-                            ),
-                            "claim_ids": delivery_metadata.get("claim_ids", []),
-                            "claim_anchors": delivery_metadata.get("claim_anchors", []),
-                            "certified_opportunity": delivery_metadata.get("certified_opportunity"),
-                            "decision_need_id": delivery_metadata.get("decision_need_id"),
-                            "decision_need_kind": delivery_metadata.get("decision_need_kind"),
-                            "decision_frame_id": delivery_metadata.get("decision_frame_id"),
-                            "evidence_action": evidence_action,
-                            "evidence_actions": delivery_metadata.get("evidence_actions", []),
-                            "revision": delivery_metadata.get("revision"),
-                            "source_revision": source_revision,
-                            "prepared_after_call": pending_prepared_after_call,
-                            "first_eligible_call": pending_prepared_after_call + 1,
-                            "delivered_before_call": calls,
-                            "decision_window": "first_next_model_call",
-                            "not_predictive": evidence_action <= actions_count,
-                            "one_step_late": calls != pending_prepared_after_call + 1,
-                            "delivered_before_model_query": True,
-                            "request_payload_sha256": request_payload_sha256,
-                            "message_index": runtime_message_index,
-                            "chars": len(guidance_payload),
-                        }
-                    )
-                    semantic_utilization.register(
-                        guidance_deliveries[-1],
-                        call=calls,
-                        source_revision=source_revision,
-                    )
+                else:
+                    prepared_frontier_delivery = None
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
                     and progress_payload
                     and prepared_progress_fact is not None
                 ):
-                    delivered_progress_fact_ids.add(prepared_progress_fact.fact_id)
-                    progress_fact_deliveries.append(
-                        {
+                    prepared_progress_delivery = {
                             "fact_id": prepared_progress_fact.fact_id,
                             "evidence_action": prepared_progress_fact.evidence_action,
                             "first_eligible_call": prepared_progress_fact.eligible_call,
@@ -3872,8 +4124,8 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "one_step_late": (calls != prepared_progress_fact.eligible_call),
                         }
-                    )
-                    pending_progress_fact = None
+                else:
+                    prepared_progress_delivery = None
                 context_parts = {
                     "system_user_chars": 0,
                     "assistant_chars": 0,
@@ -3967,7 +4219,7 @@ class MiniSweCentralAgent(BaseAgent):
                             if persistent_state_frame is not None
                             else None
                         ),
-                        "persistent_execution_state_delivered": bool(persistent_state_payload),
+                        "persistent_execution_state_delivered": False,
                         "context_frontier": frontier_decision.as_dict(),
                         "context_frontier_delivered": bool(frontier_payload),
                         "provider_view_compacted": provider_view_metrics.compacted,
@@ -4184,59 +4436,189 @@ class MiniSweCentralAgent(BaseAgent):
                         solver_exhausted_reason = "deadline_reserve_reached"
                         deadline_reserve_exits += 1
                         break
-                    model_query_invocations += 1
-                    try:
-                        (self.logs_dir / "provider_query_started.json").write_text(
-                            json.dumps(
-                                {
-                                    "schema": "gt.provider_query_started.v1",
-                                    "calls_started": model_query_invocations,
-                                    "last_call": calls,
-                                    "request_payload_sha256": request_payload_sha256,
-                                    "model": str(self.model_name or ""),
-                                    "gt_commit": (os.environ.get("GT_COMMIT") or "").strip(),
-                                },
-                                indent=2,
-                            )
-                            + "\n",
-                            encoding="utf-8",
+                    next_model_query_invocation = model_query_invocations + 1
+                    provider_query_marker_error = self._write_provider_query_marker(
+                        calls_started=(
+                            int(persistent_state_bootstrap.get("provider_calls") or 0)
+                            + next_model_query_invocation
+                        ),
+                        bootstrap_calls_started=int(
+                            persistent_state_bootstrap.get("provider_calls") or 0
+                        ),
+                        executor_calls_started=next_model_query_invocation,
+                        last_call=calls,
+                        last_call_kind="executor",
+                        request_payload_sha256=request_payload_sha256,
+                    )
+                    if provider_query_marker_error:
+                        provider_evidence.mark_not_sent(
+                            call=calls,
+                            reason="provider_query_marker_error",
                         )
-                    except OSError as exc:
-                        provider_query_marker_error = type(exc).__name__
+                        replay_bundle.record_not_sent(
+                            call=calls,
+                            reason="provider_query_marker_error",
+                        )
+                        model_call_contexts[-1]["dispatch_status"] = "marker_error"
+                        terminal = "ProviderQueryMarkerError"
+                        solver_exhausted_reason = "provider_query_marker_error"
+                        break
+                    model_query_invocations = next_model_query_invocation
                     model_call_contexts[-1]["dispatch_status"] = "invoked"
                     replay_bundle.record_invocation(call=calls)
                     provider_evidence.mark_dispatched(
                         call=calls,
                         request_hash=request_payload_sha256,
                     )
+                    # Visible evidence becomes authoritative only after the
+                    # durable marker succeeds and dispatch begins.  Until this
+                    # point all surfaces are prepared data, not deliveries.
+                    if prepared_preemptive_delivery is not None and preemptive_frame is not None:
+                        delivered_preemptive_claim_ids.update(preemptive_frame.claim_ids)
+                        preemptive_retrieval_chars_delivered += len(preemptive_payload)
+                        preemptive_retrieval_chars_by_lifecycle[lifecycle_group] = (
+                            preemptive_retrieval_chars_by_lifecycle.get(lifecycle_group, 0)
+                            + len(preemptive_payload)
+                        )
+                        preemptive_retrieval_deliveries.append(
+                            prepared_preemptive_delivery
+                        )
+                        preemptive_retrieval_decisions[-1]["status"] = "delivered"
+                        preemptive_retrieval_decisions[-1]["delivery_receipt"] = (
+                            prepared_preemptive_delivery
+                        )
+                    if prepared_frontier_delivery is not None:
+                        delivered_frontier_fact_ids.update(
+                            prepared_frontier_delivery["fact_ids"]
+                        )
+                        delivered_frontier_claim_ids.update(
+                            prepared_frontier_delivery["claim_ids"]
+                        )
+                        frontier_chars_delivered += len(frontier_payload)
+                        frontier_deliveries.append(prepared_frontier_delivery)
+                        semantic_utilization.register(
+                            prepared_frontier_delivery,
+                            call=calls,
+                            source_revision=source_revision,
+                        )
+                    if guidance_payload and runtime_message_index is not None:
+                        delivery_metadata = self._features.confirm_prepared_guidance() or {}
+                        pending_guidance = ""
+                        if delivery_metadata:
+                            evidence_action = int(
+                                delivery_metadata.get("evidence_action") or 0
+                            )
+                            guidance_delivery = {
+                                "delivery_id": delivery_metadata.get("delivery_id"),
+                                "effect_ids": delivery_metadata.get("effect_ids", []),
+                                "feature_id": delivery_metadata.get("feature_id"),
+                                "contributing_features": delivery_metadata.get(
+                                    "contributing_features", []
+                                ),
+                                "claim_ids": delivery_metadata.get("claim_ids", []),
+                                "claim_anchors": delivery_metadata.get("claim_anchors", []),
+                                "certified_opportunity": delivery_metadata.get(
+                                    "certified_opportunity"
+                                ),
+                                "decision_need_id": delivery_metadata.get(
+                                    "decision_need_id"
+                                ),
+                                "decision_need_kind": delivery_metadata.get(
+                                    "decision_need_kind"
+                                ),
+                                "decision_frame_id": delivery_metadata.get(
+                                    "decision_frame_id"
+                                ),
+                                "evidence_action": evidence_action,
+                                "evidence_actions": delivery_metadata.get(
+                                    "evidence_actions", []
+                                ),
+                                "revision": delivery_metadata.get("revision"),
+                                "source_revision": source_revision,
+                                "prepared_after_call": pending_prepared_after_call,
+                                "first_eligible_call": pending_prepared_after_call + 1,
+                                "delivered_before_call": calls,
+                                "decision_window": "first_next_model_call",
+                                "not_predictive": evidence_action <= actions_count,
+                                "one_step_late": calls != pending_prepared_after_call + 1,
+                                "delivered_before_model_query": True,
+                                "request_payload_sha256": request_payload_sha256,
+                                "provider_messages_sha256": provider_messages_sha256,
+                                "message_index": runtime_message_index,
+                                "chars": len(guidance_payload),
+                                "query_started_at": query_started_at,
+                            }
+                            guidance_deliveries.append(guidance_delivery)
+                            semantic_utilization.register(
+                                guidance_delivery,
+                                call=calls,
+                                source_revision=source_revision,
+                            )
+                    if (
+                        prepared_progress_delivery is not None
+                        and prepared_progress_fact is not None
+                    ):
+                        delivered_progress_fact_ids.add(prepared_progress_fact.fact_id)
+                        progress_fact_deliveries.append(prepared_progress_delivery)
+                        pending_progress_fact = None
+                    if (
+                        prepared_persistent_delivery is not None
+                        and persistent_state_engine is not None
+                        and persistent_state_frame is not None
+                        and persistent_state_engine.mark_context_dispatched(
+                            persistent_state_frame
+                        )
+                    ):
+                        persistent_state_deliveries.append(prepared_persistent_delivery)
+                        model_call_contexts[-1]["persistent_execution_state_delivered"] = True
                     if (
                         pending_preflight_evidence is not None
                         and int(pending_preflight_evidence.get("eligible_call") or 0) == calls
                     ):
                         pending_preflight_evidence = None
-                    message = await asyncio.wait_for(
-                        asyncio.to_thread(model.query, query_messages),
-                        timeout=query_timeout,
-                    )
-                except TimeoutError:
-                    replay_bundle.record_error(call=calls, error_type="TimeoutError")
-                    model_call_contexts[-1]["dispatch_status"] = "response_error"
-                    if (
-                        deadline is not None
-                        and deadline - time.monotonic() <= self.deadline_reserve_sec + 0.01
-                    ):
-                        terminal = "DeadlineReserveReached"
-                        solver_exhausted_reason = "deadline_reserve_reached"
-                        deadline_reserve_exits += 1
+                    # A host-side wait_for cannot cancel the provider thread.
+                    # Delegate the timeout to the transport and await the
+                    # thread to completion so every started call is accounted.
+                    if _supports_direct_provider_transport(model):
+                        message = await asyncio.to_thread(
+                            _direct_provider_message,
+                            model,
+                            query_messages,
+                            allow_parse_error=False,
+                            **executor_query_kwargs,
+                        )
                     else:
-                        terminal = "ModelTimeout"
-                        censored_reason = "model_request_timeout"
-                    break
-                except InterruptAgentFlow as flow:
-                    replay_bundle.record_error(call=calls, error_type="InterruptAgentFlow")
-                    model_call_contexts[-1]["dispatch_status"] = "response_error"
-                    messages.extend(flow.messages)
-                    continue
+                        message = await asyncio.to_thread(
+                            model.query,
+                            query_messages,
+                            **executor_query_kwargs,
+                        )
+                except Exception as exc:  # noqa: BLE001 - typed below or re-raised
+                    if _is_provider_timeout(exc):
+                        replay_bundle.record_error(
+                            call=calls, error_type=type(exc).__name__
+                        )
+                        model_call_contexts[-1]["dispatch_status"] = "response_error"
+                        if (
+                            deadline is not None
+                            and deadline - time.monotonic()
+                            <= self.deadline_reserve_sec + 0.01
+                        ):
+                            terminal = "DeadlineReserveReached"
+                            solver_exhausted_reason = "deadline_reserve_reached"
+                            deadline_reserve_exits += 1
+                        else:
+                            terminal = "ModelTimeout"
+                            censored_reason = "model_request_timeout"
+                        break
+                    if isinstance(exc, InterruptAgentFlow):
+                        replay_bundle.record_error(
+                            call=calls, error_type="InterruptAgentFlow"
+                        )
+                        model_call_contexts[-1]["dispatch_status"] = "response_error"
+                        messages.extend(exc.messages)
+                        continue
+                    raise
                 replay_bundle.record_response(call=calls, response=message)
                 provider_responses_received += 1
                 provider_response_identities.append(_provider_response_identity(message))
@@ -6676,6 +7058,14 @@ class MiniSweCentralAgent(BaseAgent):
                 "repository_intelligence_valid": int(
                     intelligence_status in {"disabled", "shadow", "passed"}
                 ),
+                "repository_substrate_valid": int(
+                    repository_applicability == "not_applicable_no_supported_source"
+                    or (
+                        repository_evidence.substrate_ready
+                        and not graph_gate_blocked
+                        and not final_graph_gate_reasons
+                    )
+                ),
                 "repository_graph_gate_enabled": int(self.require_graph_ready),
                 "repository_graph_gate_blocked": int(graph_gate_blocked),
                 "repository_graph_degraded_fallback": int(graph_degraded_fallback),
@@ -7202,6 +7592,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "policy_mode": self.policy_mode.value,
                         "preflight_mode": self.preflight_mode.value,
                         "provider_route": _provider_route_configuration(model),
+                        "provider_prompt_identity": provider_prompt_identity,
                         "provider_response_identity": {
                             "executor": _provider_response_summary(provider_response_identities),
                             "bootstrap": dict(
@@ -7275,6 +7666,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "workspace_sensor_reason": snapshot.reason,
                         "workspace_capture_backend": self._sensor.capture_backend,
                         "task_working_directory": dict(self._cwd_receipt),
+                        "workspace_prompt": {
+                            "contract": WORKSPACE_PROMPT_CONTRACT,
+                            "path": self.cwd,
+                            "applied": True,
+                        },
                         "source_revision": source_revision,
                         "semantic_source_revision": {
                             "revision": source_receipt.revision,
@@ -7364,6 +7760,16 @@ class MiniSweCentralAgent(BaseAgent):
                         "metrics": deep_metrics,
                         "repository_intelligence": {
                             "status": intelligence_status,
+                            "substrate_status": (
+                                "not_applicable"
+                                if repository_applicability
+                                == "not_applicable_no_supported_source"
+                                else "passed"
+                                if repository_evidence.substrate_ready
+                                and not graph_gate_blocked
+                                and not final_graph_gate_reasons
+                                else "failed"
+                            ),
                             "required": repository_required,
                             "frontier_required": frontier_required,
                             "applicability": repository_applicability,

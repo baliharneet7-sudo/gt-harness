@@ -58,13 +58,25 @@ state, or a disabled applicable treatment. Provider-free proof establishes only
 integration integrity. No solve-rate or efficiency benefit may be claimed until
 a frozen matched evaluation counts the bootstrap overhead.
 
+Release accounting is **17 + 1**, not a silently renamed 18-feature census.
+`CENTRAL_FEATURE_IDS` remains the executable registry of the 17 historical
+FACT/CAP feature paths. Persistent execution state is the additional product
+mechanism and must be proven separately: graph-first creation, exactly one
+bounded bootstrap, more than one deterministic state read/update when the
+trajectory permits it, a bounded frame in each applicable dispatched executor
+request, exact provider-view/request hashes, and postflight/rebase receipts.
+Neither 17/17 feature proof alone nor persistent-state initialization alone is a
+complete GT-on treatment proof.
+
 Provider-free workflow `31647174958` passed runtime commit
 `e0c63ae15be6eeff9eae67ffe873f3b44e2da31f`:
 current-source indexer build, pinned Snowflake ONNX asset, full central tests,
 `READY`, `SMOKE_APPROVED`, all mandatory 17-feature census lines, and an uploaded
 receipt with `provider_calls: 0`. This proves implementation integrity only. It
 does not prove that persistent state improves solves or efficiency, and it does
-not authorize a paid run.
+not authorize a paid run. It predates the current marker/timeout, stable-core,
+semantic-no-op, and final A/B gate repairs; those require a new exact-commit
+source-built provider-free proof.
 
 
 Minimal coding agent harness. Score >30% on Terminal-bench and SWE-bench Verified with the smallest, most readable harness possible. Karpathy nano-aesthetic applied to agent harnesses.
@@ -1001,10 +1013,15 @@ registry instead of inferring activity from old modules or documents.
 
 GitHub provider-free workflow `31526751148` passed at `e4eab72`, including the
 real dense witness, readiness, all-17 census, exact pushed-tree check, and
-`SMOKE_APPROVED`. The next release gate is paired decision-point utility. Do
-not rerun the existing online DeepSWE-off arm. After freeze, verify its
-metadata, run GT-on, then use Terminal-Bench 2.0
-with Mini-SWE. OpenHands/OpenAgents are outside this evaluation.
+`SMOKE_APPROVED`. The next release gate is paired decision-point utility. The
+existing online DeepSWE-off arm is reusable only after it passes the exact
+evaluation-v1.1 schema and full task/model/provider/runner/prompt/tool/limit/
+outcome identity gate. If it is censored, older-schema, or identity-incomplete,
+the same checked-in Mini-SWE workflow must produce a new GT-off control; never
+force an invalid A/B merely to avoid rerunning baseline. After freeze, run the
+matched arm, then use Terminal-Bench 2.0 as a Mini-SWE product diagnostic.
+TB2.0 is not a Terminal-Bench 2.1 leaderboard claim. OpenHands/OpenAgents are
+outside this evaluation.
 
 ## Final live-integration repair (2026-08-11)
 
@@ -1269,3 +1286,119 @@ grounding, timing, visibility, and context-accounting lines, `READY`,
 `SMOKE_APPROVED`, and static checks. Its receipt records
 `provider_calls: 0`. This upgrades the repair to implementation-certified;
 it does not establish solve uplift, non-regression, or efficiency.
+
+## Final live-diagnostic repair contract (2026-08-12)
+
+DeepSWE diagnostic workflow `31656913063` is rejected outcome evidence. Its
+single task, `abs-module-cache-flags`, ended in `ContextBudgetExhausted` after
+121 executor calls, 121 actions, 14.15M model tokens, and 888 seconds. The graph
+was healthy (754 nodes, 2,242 edges, 45 source files), the pinned Snowflake ONNX
+backend was available, and all provider-visible evidence was timely and
+hash-accounted. Release replay passes graph substrate, dense retrieval,
+delivery, contribution budget, preflight, decision sufficiency, project
+validation, and retrieval efficiency. It rejects only the old persistent-state
+bootstrap/lifecycle contract.
+
+The permanent repair rules are:
+
+1. Bootstrap is exactly one direct provider transport call with
+   `num_retries=0`, forced Bash tool choice, temperature zero, and no action
+   execution. A received but unparsable response retains usage, cost, provider
+   identity, and a typed parse error. Release rejects retry-wrapped transport.
+2. Exact-symbol authority comes only from syntax-marked task entities, active
+   symbols, exact diagnostic entities, or code-shaped typed-action tokens.
+   Ordinary prose remains available to lexical/BM25/dense ranking but cannot
+   certify a common word such as `clear`. The failed task's certified entities
+   are `require` and `ABS_MODULE_PATH`, not `terminal/terminal.go#clear`.
+3. Hybrid task-ranked catalog entries precede generic GraphDB repository-order
+   anchors and replace equivalent generic entries.
+4. Persistent state is evaluated at every provider/preflight/postflight/rebase
+   boundary. Every graph-applicable executor request receives exactly one
+   bounded current slice: initial/critical up to 512 packing tokens, a material
+   delta up to 256, or an unchanged-state core up to 96. `NONE` is reserved for
+   explicit fail-open invalid/stale/unavailable state. Semantic no-ops do not
+   increment state version or reorder obligations; source excerpts and new
+   semantic claims are one-shot, while the small current core is intentionally
+   repeatable. A claim becomes exposed only after selection, insertion, and
+   provider dispatch.
+5. Graph substrate health is independent of downstream bootstrap or delivery
+   validity. A healthy graph cannot be relabeled invalid because another GT
+   mechanism failed.
+6. DeepSWE performs one provider bootstrap canary before the matrix, not one
+   paid preflight per task. The canary uses the production bootstrap parser and
+   records nonzero calls, tokens, cost, and latency. The default final profile is `certified_full` with
+   ACTIVE integration, SHADOW preflight, context compaction, completion,
+   progress, and adaptive-validation controls enabled.
+7. Provider transport is fail-closed on marker-write failure. Bootstrap and
+   executor calls use no provider retries, delegate timeout to the provider,
+   and await transport completion; the host never abandons an uncancellable
+   provider thread while finalizing a contradictory receipt.
+8. The resolved task workspace is disclosed in the ordinary Mini-SWE task
+   prompt for both GT-off and GT-on. A final comparison must use the same
+   `resolved_workspace_v1` prompt contract in both arms; an older baseline
+   without it is not exact prompt parity. The final A/B gate also requires a
+   proven GT-off baseline arm, ACTIVE `certified_full` treatment, nonempty
+   observed model/provider/fingerprint identity, exact prompt/tool hashes, and
+   all-in efficiency including the one pre-matrix bootstrap canary.
+
+Local widened runtime tests, static checks, Python compilation, and workflow
+parsing pass. Archived replay now fails only the five expected old-bootstrap
+conditions. The current working tree is **not** release-certified: local
+census, readiness, and pre-smoke remain fail-closed because the stale Windows
+`gt-index.exe` lacks Objective-C and the tree is not the exact pushed commit.
+Only a pushed source-built Linux provider-free workflow may print `READY` and
+`SMOKE_APPROVED` for this repair. No new solve, flip, non-regression, or
+efficiency claim exists.
+
+
+## Final P0/P1 closure boundary (2026-08-13)
+
+The final benchmark path has one physical-call boundary. When the installed
+Mini-SWE model exposes `_query`, `_prepare_messages_for_api`, and
+`_parse_actions`, both the one-time persistent bootstrap and every executor
+request call `_query` exactly once. The public `model.query()` wrapper is not
+used on that path because its tenacity loop can turn one logical receipt into
+multiple paid provider attempts. The direct adapter preserves Mini-SWE cost
+accounting, copies the non-secret provider identity from LiteLLM hidden
+metadata, records usage/cost/identity before parsing choices, types an empty or
+unparsable response, and recognizes the real LiteLLM timeout class. The exact
+request hash includes effective per-call temperature, output limit, timeout,
+retry, and tool-choice arguments; the message-list hash remains separate.
+
+Visible-delivery state is now two-phase. Retrieval, frontier, feature, progress,
+and persistent-state contributions may be prepared before the provider marker,
+but claim deduplication, producer confirmation, visible-delivery receipts, and
+exposure state are committed only after the marker succeeds and dispatch
+begins. The authoritative delivery audit rejects `prepared_not_sent` and
+`marker_error` contexts. Marker failure therefore produces zero provider
+transport and zero visible deliveries.
+
+Persistent execution state binds postflight to observed execution rather than
+selection time only. A later action in a pre-decided SHADOW batch may commit at
+the current revision after an earlier mutation; an unrelated stale proposal is
+still rejected. Source edits no longer open obligations from the pre-edit
+graph. A successful rebase invalidates old open advisory obligations and
+recomputes only those supported by the current certified edge set. Old catalog
+line/symbol labels are not rendered after a graph revision change. Repeated
+failures fall back to a bounded stable CORE instead of disappearing, and CORE
+includes the current focus path without repeating a source excerpt.
+
+The DeepSWE workflow is fail-closed before spend: the exact-SHA source-built
+provider-free reusable workflow must pass before the one paid bootstrap canary.
+The same workflow can now produce a schema-compatible `gt_off`/`baseline`
+control as well as the gated GT-on profiles. Baseline and treatment outcomes
+must contain a boolean solve, an official 0/1 verifier reward that agrees with
+it, complete observed identity, finite nonnegative resources, and no censoring.
+Censored baseline rows cannot manufacture flips. `persistent_state_only` is a
+mechanism diagnostic; only `certified_full` is labeled the integrated product.
+The one-rollout, 300-call, 5,400-second DeepSWE experiment is matched product
+evidence, not official leaderboard equivalence.
+
+Local broad tests pass apart from the explicitly fail-closed Windows indexer
+checks: the checked-in `gt-index.exe` predates Objective-C registry support.
+This is not waived. The current source-built Linux provider-free workflow must
+rebuild the indexer, provision the pinned Snowflake ONNX asset, and pass census,
+readiness, pre-smoke, static, workflow, and receipt gates at the exact pushed
+commit. Until then the status is implementation-verified locally but release-
+unverified; no paid smoke, solve uplift, non-regression, or efficiency claim is
+authorized.

@@ -182,3 +182,35 @@ def test_contribution_compiler_enforces_one_combined_token_budget():
     assert result.selected_ids == (first.contribution_id, second.contribution_id)
     dispositions = {row.contribution_id: row.disposition for row in result.accounting}
     assert dispositions[third.contribution_id] is ContributionDisposition.BUDGET
+
+
+def test_persistent_core_is_selected_before_large_diagnostic_retrieval():
+    from eval.gt_central_agent import PERSISTENT_STATE_CONTRIBUTION_PRIORITY
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    persistent = _contribution(
+        surface="persistent_execution_state",
+        payload="current phase and open obligation",
+        claim_ids=("state-core",),
+        fact_ids=(),
+        priority=PERSISTENT_STATE_CONTRIBUTION_PRIORITY,
+    )
+    diagnostic = _contribution(
+        surface="preemptive_retrieval",
+        payload=" ".join(["diagnostic"] * 1_200),
+        claim_ids=("diagnostic",),
+        fact_ids=(),
+        priority=5,
+    )
+
+    result = compile_contributions(
+        (diagnostic, persistent),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=100_000,
+        budget_tokens=1_200,
+    )
+
+    assert persistent.contribution_id in result.selected_ids
+    dispositions = {row.contribution_id: row.disposition for row in result.accounting}
+    assert dispositions[diagnostic.contribution_id] is ContributionDisposition.BUDGET

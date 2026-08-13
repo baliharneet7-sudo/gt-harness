@@ -202,6 +202,13 @@ def audit_provider_deliveries(
         context = contexts.get(delivered) if isinstance(delivered, int) else None
         if context is None:
             failures.append(f"{task}:delivery_call_context_missing:{index}")
+        dispatch_valid = bool(
+            context
+            and str(context.get("dispatch_status") or "")
+            in {"invoked", "response_received", "response_error"}
+        )
+        if context is not None and not dispatch_valid:
+            failures.append(f"{task}:delivery_request_not_dispatched:{index}")
         request_hash = row["request_payload_sha256"]
         if not request_hash:
             failures.append(f"{task}:delivery_missing_provider_request_hash:{index}")
@@ -260,6 +267,7 @@ def audit_provider_deliveries(
                     f"{task}:preemptive_delivery_semantic_support_missing:{index}"
                 )
         row["timing_valid"] = timing_valid
+        row["dispatch_valid"] = dispatch_valid
         row["semantic_support_valid"] = semantic_support_valid
         row["message_index_valid"] = message_index_valid
         row["hash_valid"] = bool(
@@ -274,6 +282,7 @@ def audit_provider_deliveries(
         row["deterministic_status"] = (
             "VALID"
             if timing_valid
+            and dispatch_valid
             and row["hash_valid"]
             and message_index_valid
             and row["claim_count"] > 0
