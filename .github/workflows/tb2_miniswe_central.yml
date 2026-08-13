@@ -22,8 +22,8 @@ on:
       provider:
         description: "OpenAI-compatible provider route"
         type: choice
-        options: [configured, tokenrouter]
-        default: configured
+        options: [configured, deepseek]
+        default: deepseek
       base_url:
         description: "OpenAI-compatible gateway URL; exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
@@ -83,9 +83,9 @@ jobs:
       tasks: ${{ steps.enum.outputs.tasks }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.provider == 'tokenrouter' && secrets.TOKENROUTER_API_KEY || secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.provider == 'tokenrouter' && 'https://api.tokenrouter.com/v1' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
@@ -148,7 +148,7 @@ jobs:
           import os, sys
 
           cleaned, notes = [], []
-          for name in ("OPENAI_API_KEY", "TOKENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+          for name in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
               raw = os.environ.get(name) or ""
               if not raw:
                   continue
@@ -186,11 +186,10 @@ jobs:
           provider = os.environ.get("PROVIDER") or "configured"
           base = os.environ.get("OPENAI_BASE_URL") or ""
           mname, kwargs = model, {"temperature": 1.0}
-          if provider == "tokenrouter":
-              if model != "deepseek/deepseek-v4-flash-0731":
-                  raise SystemExit("TokenRouter requires exact model deepseek/deepseek-v4-flash-0731")
-              kwargs["api_key"] = os.environ.get("TOKENROUTER_API_KEY", "").strip()
-              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+          if provider == "deepseek":
+              if model != "deepseek-v4-flash":
+                  raise SystemExit("DeepSeek native route requires exact model deepseek-v4-flash")
+              kwargs["api_key"] = os.environ.get("DEEPSEEK_API_KEY", "").strip()
           if base and not model.startswith("openai/"):
               mname = f"openai/{model}"
               kwargs["api_base"] = base
@@ -265,9 +264,9 @@ jobs:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.provider == 'tokenrouter' && secrets.TOKENROUTER_API_KEY || secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.provider == 'tokenrouter' && 'https://api.tokenrouter.com/v1' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
@@ -391,7 +390,7 @@ jobs:
           import os, sys
 
           cleaned = []
-          for name in ("OPENAI_API_KEY", "TOKENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+          for name in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
               raw = os.environ.get(name) or ""
               if not raw:
                   continue
