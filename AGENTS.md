@@ -98,6 +98,18 @@ explicitly reports it; missing cost remains missing rather than fabricated.
 It is never a substitute for the frozen OpenRouter comparison provider and
 cannot be merged into an A/B claim.
 
+Live diagnostic workflow `31671479023` at `2a34fb2` proved the repaired route
+and the executable 17+1 accounting boundary. Its source-built provider-free job
+and one-call canary passed. Before external censoring, the task receipt recorded
+18/18 configured mechanisms, five naturally fired and consumed legacy features,
+29 persistent-state lifecycle uses, and a persistent frame in all ten attempted
+executor requests. The authoritative audit certified 12/12 visible deliveries
+and 34 claims with zero duplicates, late, predictive, grounding, timing, or hash
+failures. TokenRouter then returned HTTP 429 (`Maximum 10 requests within 1
+minutes`) after nine executor responses. This is valid live mechanism evidence
+but not outcome or efficiency evidence; the row is provider-censored and cannot
+be counted as a GT failure or solve.
+
 Provider-free workflow `31647174958` passed runtime commit
 `e0c63ae15be6eeff9eae67ffe873f3b44e2da31f`:
 current-source indexer build, pinned Snowflake ONNX asset, full central tests,

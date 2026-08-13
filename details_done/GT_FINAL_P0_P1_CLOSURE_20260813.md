@@ -136,3 +136,28 @@ central release gate and DeepSWE merge reject a treatment unless all 18 are
 configured and persistent state has repeated lifecycle use. Natural feature
 fires remain a separate N/17 trajectory observation; absent events cannot be
 fabricated to inflate that number.
+
+Exact-SHA workflow `31671479023` at `2a34fb2` then passed the source-built
+provider-free gate and the repaired one-call TokenRouter canary. The live task
+receipt proved the mechanism path before the provider censored the trajectory:
+
+- 18/18 product mechanisms configured;
+- 5/17 legacy features naturally fired and all five were consumed;
+- persistent execution state was applicable, initialized, and repeatedly used
+  across 29 lifecycle operations: one bootstrap, ten context compilations,
+  nine preflight projections, and nine postflight commits;
+- persistent state reached all ten attempted executor requests (one 159-token
+  initial frame and nine 43--47-token bounded current slices);
+- the authoritative trajectory audit certified 12/12 visible deliveries and
+  34 claims with zero duplicates, zero late deliveries, zero predictive
+  deliveries, and zero grounding/hash/timing failures;
+- the current graph and pinned Snowflake ONNX backend were healthy.
+
+The task is **not outcome evidence**. TokenRouter returned nine executor
+responses and then rejected the next physical request with HTTP 429,
+`Maximum 10 requests within 1 minutes`. The row is a provider-censored
+diagnostic (`RateLimitError`), not an unsolved GT treatment and not a solve or
+efficiency comparison. No retry or additional model call was hidden. A
+complete live outcome check requires either a provider route without this
+quota or an explicitly accounted host pacing policy; changing that transport
+policy must not be presented as a GroundTruth mechanism improvement.
