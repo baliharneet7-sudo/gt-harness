@@ -311,6 +311,7 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     )
     configuration = receipt.get("component_configuration") or {}
     runtime = receipt.get("persistent_execution_state") or {}
+    activation = runtime.get("activation") or {}
     initialization = runtime.get("initialization") or {}
     initial_retrieval = runtime.get("initial_retrieval") or {}
     bootstrap = runtime.get("bootstrap") or {}
@@ -323,6 +324,19 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     if configuration.get("persistent_execution_state") is not True:
         failures.append(f"{label}:persistent_state_disabled")
     if source_less:
+        if not isinstance(runtime.get("activation"), dict):
+            failures.append(f"{label}:persistent_activation_missing")
+        elif (
+            activation.get("initial_applicability")
+            != "not_applicable_no_supported_source"
+            or activation.get("current_applicability")
+            != "not_applicable_no_supported_source"
+            or activation.get("ever_applicable") is not False
+            or activation.get("activation_action") is not None
+            or activation.get("activation_call") is not None
+            or activation.get("correctly_abstained") is not True
+        ):
+            failures.append(f"{label}:persistent_abstention_activation_invalid")
         if str(initialization.get("status") or "") != "not_applicable":
             failures.append(f"{label}:persistent_state_bad_not_applicable_status")
         if int(bootstrap.get("provider_calls") or 0) != 0:
@@ -412,22 +426,57 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     executor_calls = int(receipt.get("executor_calls") or 0)
     actions = int(receipt.get("actions") or 0)
     host_executed = int((receipt.get("host_execution") or {}).get("decision_actions") or 0)
+    if not isinstance(runtime.get("activation"), dict):
+        failures.append(f"{label}:persistent_activation_missing")
+    elif activation.get("ever_applicable") is not True or activation.get(
+        "correctly_abstained"
+    ) is not False:
+        failures.append(f"{label}:persistent_activation_state_invalid")
+    activation_action = int(activation.get("activation_action") or 0)
+    activation_call = int(activation.get("activation_call") or 0)
+    if activation.get("initial_applicability") == "not_applicable_no_supported_source":
+        if not (
+            1 <= activation_action <= actions
+            and 2 <= activation_call <= executor_calls
+            and activation.get("current_applicability") == "source_backed"
+        ):
+            failures.append(f"{label}:persistent_dynamic_activation_boundary_invalid")
+    elif not (
+        activation.get("initial_applicability") == "source_backed"
+        and activation.get("current_applicability") == "source_backed"
+        and activation_action == 0
+        and activation_call == 0
+    ):
+        failures.append(f"{label}:persistent_initial_activation_boundary_invalid")
     if executor_calls <= 0:
         failures.append(f"{label}:persistent_state_no_executor_call")
     model_call_contexts = receipt.get("model_call_contexts") or []
-    if int(runtime_metrics.get("context_compilations") or 0) != len(model_call_contexts):
+    eligible_contexts = [
+        row
+        for row in model_call_contexts
+        if int(row.get("call") or 0) >= max(1, activation_call)
+    ]
+    expected_preflights = (
+        actions if activation_action == 0 else max(0, actions - activation_action)
+    )
+    expected_postflights = (
+        host_executed
+        if activation_action == 0
+        else max(0, host_executed - activation_action + 1)
+    )
+    if int(runtime_metrics.get("context_compilations") or 0) != len(eligible_contexts):
         failures.append(f"{label}:persistent_context_compilation_count")
-    if int(runtime_metrics.get("preflight_projections") or 0) != actions:
+    if int(runtime_metrics.get("preflight_projections") or 0) != expected_preflights:
         failures.append(f"{label}:persistent_preflight_projection_count")
-    if int(runtime_metrics.get("postflight_commits") or 0) != host_executed:
+    if int(runtime_metrics.get("postflight_commits") or 0) != expected_postflights:
         failures.append(f"{label}:persistent_postflight_commit_count")
     dispatched_contexts = [
         row
-        for row in model_call_contexts
+        for row in eligible_contexts
         if row.get("dispatch_status") in {"invoked", "response_received", "response_error"}
     ]
     delivered_contexts = 0
-    for index, row in enumerate(model_call_contexts, start=1):
+    for index, row in enumerate(eligible_contexts, start=1):
         frame = row.get("persistent_execution_state")
         call = int(row.get("call") or index)
         if not isinstance(frame, dict) or int(frame.get("provider_call") or 0) != call:
@@ -507,13 +556,23 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
         failures.append(f"{label}:product_mechanism_identity_invalid")
     if int(census.get("configured_mechanism_count") or 0) != 18 or configured_ids != mechanism_ids:
         failures.append(f"{label}:not_all_product_mechanisms_configured")
-    if persistent.get("configured") is not True or persistent.get("exercised") is not True:
-        failures.append(f"{label}:persistent_product_mechanism_not_exercised")
-    if (
-        persistent.get("repeated_deterministic_use") is not True
-        or int(persistent.get("lifecycle_use_count") or 0) <= 1
+    persistent_applicable = persistent.get("applicable") is not False
+    if persistent.get("configured") is not True:
+        failures.append(f"{label}:persistent_product_mechanism_not_configured")
+    if persistent_applicable:
+        if persistent.get("exercised") is not True:
+            failures.append(f"{label}:persistent_product_mechanism_not_exercised")
+        if (
+            persistent.get("repeated_deterministic_use") is not True
+            or int(persistent.get("lifecycle_use_count") or 0) <= 1
+        ):
+            failures.append(f"{label}:persistent_product_mechanism_not_repeated")
+    elif (
+        persistent.get("correctly_abstained") is not True
+        or persistent.get("exercised") is not False
+        or int(persistent.get("bootstrap_calls") or 0) != 0
     ):
-        failures.append(f"{label}:persistent_product_mechanism_not_repeated")
+        failures.append(f"{label}:persistent_product_abstention_invalid")
     # Natural trigger absence is evidence about the trajectory, not a failed
     # feature implementation. Preserve its separate count and never inflate it
     # to manufacture an 18/18 live-fire claim.

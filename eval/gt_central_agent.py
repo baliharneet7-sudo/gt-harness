@@ -459,6 +459,64 @@ def _is_provider_timeout(exc: BaseException) -> bool:
     return type(exc).__name__ == "Timeout" and type(exc).__module__.startswith("litellm")
 
 
+def _bootstrap_provider_call_kwargs(
+    model: Any,
+    *,
+    max_tokens: int,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    """Return the exact one-call bootstrap envelope for the configured route.
+
+    DeepSeek V4 enables thinking by default, but its native thinking-mode
+    compatibility contract rejects a forced ``tool_choice``.  Bootstrap is a
+    bounded selection over certified IDs rather than executor reasoning, so it
+    deliberately disables thinking for this call only.  Existing gateway
+    ``extra_body`` policy is retained instead of being overwritten.
+    """
+
+    kwargs: dict[str, Any] = {
+        "temperature": 0.0,
+        "max_tokens": int(max_tokens),
+        "num_retries": 0,
+        "timeout": float(timeout_sec),
+        "tool_choice": {"type": "function", "function": {"name": "bash"}},
+    }
+    configured = _model_kwargs(model)
+    model_name = str(
+        getattr(getattr(model, "config", None), "model_name", "")
+        or getattr(model, "model_name", "")
+    ).lower()
+    api_base = str(configured.get("api_base") or "").lower()
+    if "deepseek-v4" in model_name and (
+        "deepseek.com" in api_base or "tokenrouter.com" in api_base
+    ):
+        extra_body = dict(configured.get("extra_body") or {})
+        extra_body["thinking"] = {"type": "disabled"}
+        kwargs["extra_body"] = extra_body
+    return kwargs
+
+
+def _provider_error_receipt(exc: BaseException) -> dict[str, Any]:
+    """Return non-secret provider failure evidence suitable for run receipts."""
+
+    response = getattr(exc, "response", None)
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    code = str(getattr(exc, "code", "") or "")
+    message = str(getattr(exc, "message", "") or str(exc) or "")
+    return {
+        "type": type(exc).__name__,
+        "status_code": int(status_code) if isinstance(status_code, int) else None,
+        "code": code,
+        "retryable": bool(
+            _is_provider_timeout(exc)
+            or (isinstance(status_code, int) and status_code >= 500)
+        ),
+        "message_sha256": hashlib.sha256(message.encode("utf-8", "replace")).hexdigest(),
+    }
+
+
 class _InitialRetrievalUnavailable(RuntimeError):
     """Internal fail-closed control flow: graph-first retrieval did not complete."""
 
@@ -1470,6 +1528,7 @@ class MiniSweCentralAgent(BaseAgent):
         instruction: str,
         catalog: BootstrapCatalog,
         timeout_sec: float,
+        executor_calls_started: int = 0,
     ) -> tuple[BootstrapSelection, dict[str, Any]]:
         """Make the single bounded bootstrap call; its Bash envelope is data only."""
 
@@ -1479,13 +1538,11 @@ class MiniSweCentralAgent(BaseAgent):
             max_input_tokens=self.persistent_state_bootstrap_input_tokens,
         )
         visible_item_ids = bootstrap_visible_item_ids(bootstrap_messages)
-        bootstrap_call_kwargs = {
-            "temperature": 0.0,
-            "max_tokens": self.persistent_state_bootstrap_output_tokens,
-            "num_retries": 0,
-            "timeout": float(timeout_sec),
-            "tool_choice": {"type": "function", "function": {"name": "bash"}},
-        }
+        bootstrap_call_kwargs = _bootstrap_provider_call_kwargs(
+            model,
+            max_tokens=self.persistent_state_bootstrap_output_tokens,
+            timeout_sec=timeout_sec,
+        )
         (
             provider_messages,
             request_payload_sha256,
@@ -1517,6 +1574,18 @@ class MiniSweCentralAgent(BaseAgent):
             "provider_request_chars": provider_request_chars,
             "temperature": 0.0,
             "max_output_tokens": self.persistent_state_bootstrap_output_tokens,
+            "call_contract": {
+                "thinking_mode": str(
+                    (
+                        (bootstrap_call_kwargs.get("extra_body") or {}).get("thinking")
+                        or {}
+                    ).get("type")
+                    or ""
+                ),
+                "forced_tool": "bash",
+                "tool_choice": "named_function",
+                "num_retries": int(bootstrap_call_kwargs.get("num_retries") or 0),
+            },
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_tokens": 0,
@@ -1560,10 +1629,10 @@ class MiniSweCentralAgent(BaseAgent):
         started = time.perf_counter()
         try:
             marker_error = self._write_provider_query_marker(
-                calls_started=1,
+                calls_started=max(0, int(executor_calls_started)) + 1,
                 bootstrap_calls_started=1,
-                executor_calls_started=0,
-                last_call=0,
+                executor_calls_started=max(0, int(executor_calls_started)),
+                last_call=max(0, int(executor_calls_started)),
                 last_call_kind="persistent_bootstrap",
                 request_payload_sha256=request_payload_sha256,
             )
@@ -1620,6 +1689,7 @@ class MiniSweCentralAgent(BaseAgent):
             receipt["reason_codes"] = list(selection.reason_codes)
             return selection, receipt
         except Exception as exc:  # noqa: BLE001 - bootstrap degrades deterministically
+            receipt["provider_error"] = _provider_error_receipt(exc)
             if _is_provider_timeout(exc):
                 selection = BootstrapSelection(
                     valid=False, reason_codes=("bootstrap_timeout",)
@@ -2564,10 +2634,10 @@ class MiniSweCentralAgent(BaseAgent):
         solver_exhausted_reason = ""
         repository_applicability = classify_repository_applicability(repository_evidence)
         source_less_task = repository_applicability == "not_applicable_no_supported_source"
-        # Applicability is a property of the task substrate at transfer time,
-        # not of arbitrary helper files the model may create later.  Persist it
-        # so a source-less binary/data task cannot become a graph failure merely
-        # because the trajectory writes an unsupported-language scratch helper.
+        repository_ever_applicable = not source_less_task
+        # Preserve transfer-time applicability for audit, while tracking the
+        # live lifecycle separately. Unsupported scratch files cannot activate
+        # the graph; a captured model-authored supported source can.
         source_less_task_at_start = source_less_task
         graph_gate_reasons = (
             graph_gate_failures(repository_evidence)
@@ -2674,6 +2744,21 @@ class MiniSweCentralAgent(BaseAgent):
             "enabled": self.enable_persistent_execution_state,
             "status": "disabled",
             "reason_codes": ["persistent_execution_state_disabled"],
+        }
+        persistent_state_activation: dict[str, Any] = {
+            "initial_applicability": repository_applicability,
+            "current_applicability": repository_applicability,
+            "ever_applicable": repository_ever_applicable,
+            "activation_action": 0 if repository_ever_applicable else None,
+            "activation_call": 0 if repository_ever_applicable else None,
+            "activation_source_revision": source_revision if repository_ever_applicable else "",
+            "activation_graph_revision": (
+                repository_evidence.graph_revision if repository_ever_applicable else ""
+            ),
+            "correctly_abstained": False,
+            "reason_codes": (
+                [] if repository_ever_applicable else ["not_applicable_at_transfer"]
+            ),
         }
         if self.enable_persistent_execution_state:
             if source_less_task_at_start:
@@ -3218,7 +3303,7 @@ class MiniSweCentralAgent(BaseAgent):
                     integration_active=(self.integration_mode is GTIntegrationMode.ACTIVE),
                     policy_active=self.policy_active,
                     treatment=self.runtime_mode == "treatment",
-                    source_less_task_at_start=source_less_task_at_start,
+                    source_less_task_at_start=(not repository_ever_applicable),
                     evidence_action=retrieval_evidence_action,
                     persistent_bootstrap_selected=bool(
                         persistent_state_engine is not None
@@ -4141,18 +4226,22 @@ class MiniSweCentralAgent(BaseAgent):
                     and prepared_progress_fact is not None
                 ):
                     prepared_progress_delivery = {
-                            "fact_id": prepared_progress_fact.fact_id,
-                            "evidence_action": prepared_progress_fact.evidence_action,
-                            "first_eligible_call": prepared_progress_fact.eligible_call,
-                            "delivered_before_call": calls,
-                            "message_index": runtime_message_index,
-                            "request_payload_sha256": request_payload_sha256,
-                            "chars": len(progress_payload),
-                            "not_predictive": (
-                                prepared_progress_fact.evidence_action <= actions_count
-                            ),
-                            "one_step_late": (calls != prepared_progress_fact.eligible_call),
-                        }
+                        "fact_id": prepared_progress_fact.fact_id,
+                        "fact_ids": [prepared_progress_fact.fact_id],
+                        "evidence_action": prepared_progress_fact.evidence_action,
+                        "first_eligible_call": prepared_progress_fact.eligible_call,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "message_index": runtime_message_index,
+                        "provider_message_indices": [runtime_message_index],
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "chars": len(progress_payload),
+                        "not_predictive": (
+                            prepared_progress_fact.evidence_action <= actions_count
+                        ),
+                        "one_step_late": (calls != prepared_progress_fact.eligible_call),
+                    }
                 else:
                     prepared_progress_delivery = None
                 context_parts = {
@@ -4194,6 +4283,12 @@ class MiniSweCentralAgent(BaseAgent):
                     reason
                     for reason, applies in (
                         ("provider_budget_compaction", provider_view_metrics.compacted),
+                        (
+                            "retained_compaction_epoch",
+                            bool(provider_view_session.epoch)
+                            and bool(provider_changed_message_indices)
+                            and not provider_view_metrics.compacted,
+                        ),
                         ("preemptive_retrieval", bool(preemptive_payload)),
                         ("persistent_execution_state", bool(persistent_state_payload)),
                         ("certified_evidence", bool(legacy_runtime_payload)),
@@ -4794,6 +4889,7 @@ class MiniSweCentralAgent(BaseAgent):
                     zip(actions, proposed_actions, action_classifications, strict=True)
                 ):
                     actions_count += 1
+                    persistent_activated_this_action = False
                     command = proposed.raw_command
                     persistent_projection = (
                         persistent_state_engine.project_preflight(
@@ -5602,9 +5698,261 @@ class MiniSweCentralAgent(BaseAgent):
                     retrieval_validation_state = classification.status.value
                     retrieval_evidence_action = actions_count
                     retrieval_eligible_call = calls + 1
+                    if (
+                        persistent_state_engine is None
+                        and self.enable_persistent_execution_state
+                        and source_less_task_at_start
+                        and model_authored_source_paths
+                        and repository_session is not None
+                        and repository_evidence.index is not None
+                        and bool(repository_evidence.index.graph_db)
+                        and repository_evidence.substrate_ready
+                        and repository_session.indexed_source_revision
+                        == graph_source_revision
+                    ):
+                        # Some Terminal-Bench tasks transfer only data/binaries
+                        # and ask the agent to author the implementation.  Once
+                        # that supported source has been captured and indexed,
+                        # the repository-intelligence lifecycle becomes
+                        # applicable.  Activate exactly once at this current
+                        # graph boundary; do not keep the transfer-time
+                        # abstention sticky for the rest of the trajectory.
+                        try:
+                            activation_repository = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    build_hybrid_repository,
+                                    repository_session.root,
+                                    repository_evidence.index.graph_db,
+                                    source_revision=graph_source_revision,
+                                ),
+                                timeout=self.preemptive_retrieval_cold_start_timeout_sec,
+                            )
+                            if not activation_repository.complete:
+                                raise RuntimeError("DynamicRepositoryCorpusIncomplete")
+                            activation_retriever = HybridRetriever(
+                                activation_repository.documents,
+                                structural_links=activation_repository.structural_links,
+                                dense_backend=self._snowflake_dense_backend(),
+                                dense_candidate_limit=self.preemptive_retrieval_dense_candidate_limit,
+                            )
+                            activation_state = RetrievalState(
+                                task_text=instruction,
+                                intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+                                source_revision=graph_source_revision,
+                                action=retrieval_last_action,
+                                active_paths=retrieval_active_paths,
+                                active_symbols=retrieval_active_symbols,
+                                changed_paths=retrieval_changed_paths,
+                                diagnostics=retrieval_diagnostics,
+                                validation_state=retrieval_validation_state,
+                            )
+                            activation_lifecycle_budget, activation_selection_limit = (
+                                _preemptive_lifecycle_budget(
+                                    "post_mutation",
+                                    task_budget_chars=self.preemptive_retrieval_task_budget_chars,
+                                )
+                            )
+                            activation_character_budget = min(
+                                activation_lifecycle_budget,
+                                _preemptive_opportunity_budget_limit(
+                                    "post_mutation",
+                                    task_budget_chars=self.preemptive_retrieval_task_budget_chars,
+                                    priority_reserve_chars=(
+                                        self.preemptive_retrieval_priority_reserve_chars
+                                    ),
+                                ),
+                            )
+                            activation_result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    activation_retriever.retrieve,
+                                    activation_state,
+                                    channel_limit=self.preemptive_retrieval_channel_limit,
+                                    top_k=self.preemptive_retrieval_top_k,
+                                    selection_limit=min(
+                                        self.preemptive_retrieval_selection_limit,
+                                        activation_selection_limit,
+                                    ),
+                                    token_budget=self.preemptive_retrieval_token_budget,
+                                    character_budget=activation_character_budget,
+                                ),
+                                timeout=self.preemptive_retrieval_cold_start_timeout_sec,
+                            )
+                            persistent_state_initial_retrieval = (
+                                _initial_persistent_retrieval_receipt(
+                                    activation_result,
+                                    source_revision=graph_source_revision,
+                                )
+                            )
+                            activation_cache_key = hashlib.sha256(
+                                _canonical_json(
+                                    {
+                                        "query_hash": activation_state.query_hash,
+                                        "visible_claims": [],
+                                        "channel_limit": self.preemptive_retrieval_channel_limit,
+                                        "top_k": self.preemptive_retrieval_top_k,
+                                        "selection_limit": min(
+                                            self.preemptive_retrieval_selection_limit,
+                                            activation_selection_limit,
+                                        ),
+                                        "token_budget": self.preemptive_retrieval_token_budget,
+                                        "remaining_chars": activation_character_budget,
+                                    }
+                                )
+                            ).hexdigest()
+                            preemptive_retrieval_cache[activation_cache_key] = activation_result
+                            persistent_state_initial_retrieval.update(
+                                {
+                                    "runtime_cache_seeded": True,
+                                    "runtime_cache_key": activation_cache_key,
+                                    "activation_action": actions_count,
+                                    "task_start_character_budget": activation_character_budget,
+                                    "task_start_selection_limit": min(
+                                        self.preemptive_retrieval_selection_limit,
+                                        activation_selection_limit,
+                                    ),
+                                }
+                            )
+                            catalog = build_bootstrap_catalog(
+                                instruction=instruction,
+                                evidence=repository_evidence,
+                                documents=activation_repository.documents,
+                                structural_links=activation_repository.structural_links,
+                                explicit_checks=tuple(explicit_checks),
+                                task_deliverables=tuple(sorted(task_deliverables)),
+                                source_revision=source_revision,
+                                graph_source_revision=graph_source_revision,
+                                graph_revision=repository_evidence.graph_revision,
+                                repository_complete=True,
+                                initial_retrieval=activation_result,
+                            )
+                            persistent_state_initialization = {
+                                "enabled": True,
+                                "status": (
+                                    "initialized" if catalog.complete else "catalog_incomplete"
+                                ),
+                                "reason_codes": list(catalog.reason_codes),
+                                "catalog": catalog.as_dict(),
+                                "initial_retrieval_status": (
+                                    persistent_state_initial_retrieval.get("status")
+                                ),
+                                "activation_action": actions_count,
+                            }
+                            if catalog.complete:
+                                persistent_state_engine = (
+                                    PersistentExecutionStateEngine.initialize_from_graph(
+                                        task=instruction,
+                                        catalog=catalog,
+                                        structural_links=activation_repository.structural_links,
+                                        present_paths=tuple(
+                                            document.path
+                                            for document in activation_repository.documents
+                                        ),
+                                        workspace_root=self.cwd or "/app",
+                                    )
+                                )
+                                remaining_for_bootstrap = (
+                                    self.persistent_state_bootstrap_timeout_sec
+                                    if deadline is None
+                                    else max(
+                                        0.001,
+                                        min(
+                                            self.persistent_state_bootstrap_timeout_sec,
+                                            deadline
+                                            - time.monotonic()
+                                            - self.deadline_reserve_sec,
+                                        ),
+                                    )
+                                )
+                                (
+                                    selection,
+                                    persistent_state_bootstrap,
+                                ) = await self._run_persistent_state_bootstrap(
+                                    model,
+                                    instruction=instruction,
+                                    catalog=catalog,
+                                    timeout_sec=remaining_for_bootstrap,
+                                    executor_calls_started=model_query_invocations,
+                                )
+                                persistent_state_engine.apply_bootstrap(
+                                    selection,
+                                    current_source_revision=source_revision,
+                                    error=(
+                                        persistent_state_bootstrap.get("status")
+                                        == BootstrapStatus.ERROR_FALLBACK.value
+                                    ),
+                                )
+                                input_tokens += int(
+                                    persistent_state_bootstrap.get("input_tokens") or 0
+                                )
+                                output_tokens += int(
+                                    persistent_state_bootstrap.get("output_tokens") or 0
+                                )
+                                cache_tokens += int(
+                                    persistent_state_bootstrap.get("cached_tokens") or 0
+                                )
+                                cost += float(persistent_state_bootstrap.get("cost") or 0.0)
+                                preemptive_repository = activation_repository
+                                preemptive_repository_revision = graph_source_revision
+                                preemptive_retriever = activation_retriever
+                                repository_ever_applicable = True
+                                source_less_task = False
+                                persistent_state_activation = {
+                                    "initial_applicability": (
+                                        "not_applicable_no_supported_source"
+                                    ),
+                                    "current_applicability": "source_backed",
+                                    "ever_applicable": True,
+                                    "activation_action": actions_count,
+                                    "activation_call": calls + 1,
+                                    "activation_source_revision": source_revision,
+                                    "activation_graph_revision": (
+                                        repository_evidence.graph_revision
+                                    ),
+                                    "correctly_abstained": False,
+                                    "reason_codes": [
+                                        "supported_source_created",
+                                        "activation_action_postflight_revision_rebound",
+                                    ],
+                                }
+                                persistent_activated_this_action = True
+                        except Exception as exc:  # noqa: BLE001 - fail open, release fails closed
+                            persistent_state_initialization = {
+                                "enabled": True,
+                                "status": "dynamic_activation_error",
+                                "reason_codes": [
+                                    f"persistent_state_dynamic_activation_error:{type(exc).__name__}"
+                                ],
+                                "activation_action": actions_count,
+                            }
+                            persistent_state_activation = {
+                                **persistent_state_activation,
+                                "current_applicability": "source_backed",
+                                "ever_applicable": True,
+                                "activation_action": actions_count,
+                                "activation_call": calls + 1,
+                                "activation_source_revision": source_revision,
+                                "activation_graph_revision": (
+                                    repository_evidence.graph_revision
+                                ),
+                                "correctly_abstained": False,
+                                "reason_codes": [
+                                    f"dynamic_activation_error:{type(exc).__name__}"
+                                ],
+                            }
+                            repository_ever_applicable = True
+                            source_less_task = False
                     if persistent_state_engine is not None:
+                        postflight_proposed = (
+                            replace(
+                                proposed,
+                                source_revision=source_revision,
+                                workspace_revision=snapshot.revision,
+                            )
+                            if persistent_activated_this_action
+                            else proposed
+                        )
                         persistent_state_engine.commit_postflight(
-                            proposed,
+                            postflight_proposed,
                             returncode=result.return_code,
                             output=output["output"],
                             changed_paths=tuple(
@@ -6341,15 +6689,13 @@ class MiniSweCentralAgent(BaseAgent):
                 repository_session,
             )
             repository_applicability = classify_repository_applicability(repository_evidence)
-            # Keep task-start substrate applicability authoritative.  A task
-            # that transferred no structurally supported source remains outside
-            # the graph denominator even if the model later creates helper
-            # files in languages the vendored index cannot parse.
-            source_less_task = bool(source_less_task_at_start) or (
-                repository_applicability == "not_applicable_no_supported_source"
+            source_less_task = bool(
+                not repository_ever_applicable
+                and repository_applicability == "not_applicable_no_supported_source"
             )
-            if source_less_task_at_start:
-                repository_applicability = "not_applicable_no_supported_source"
+            persistent_state_activation["current_applicability"] = repository_applicability
+            persistent_state_activation["ever_applicable"] = repository_ever_applicable
+            persistent_state_activation["correctly_abstained"] = bool(source_less_task)
             frontier_required = bool(
                 repository_required and self.enable_context_frontier and not source_less_task
             )
@@ -6357,6 +6703,31 @@ class MiniSweCentralAgent(BaseAgent):
             transient_intelligence_failures: list[str] = []
             persistent_state_failures: list[str] = []
             if self.enable_persistent_execution_state and not source_less_task:
+                persistent_activation_action = int(
+                    persistent_state_activation.get("activation_action") or 0
+                )
+                persistent_activation_call = int(
+                    persistent_state_activation.get("activation_call") or 0
+                )
+                expected_persistent_contexts = sum(
+                    int(row.get("call") or 0) >= max(1, persistent_activation_call)
+                    for row in model_call_contexts
+                )
+                expected_persistent_preflights = (
+                    actions_count
+                    if persistent_activation_action == 0
+                    else max(0, actions_count - persistent_activation_action)
+                )
+                expected_persistent_postflights = (
+                    int(host_execution["decision_actions"])
+                    if persistent_activation_action == 0
+                    else max(
+                        0,
+                        int(host_execution["decision_actions"])
+                        - persistent_activation_action
+                        + 1,
+                    )
+                )
                 initial_retrieval_channels = {
                     str(row.get("channel") or ""): row
                     for row in persistent_state_initial_retrieval.get("channel_receipts", ())
@@ -6396,12 +6767,19 @@ class MiniSweCentralAgent(BaseAgent):
                         persistent_state_failures.append("persistent_bootstrap_call_count")
                     if int(persistent_state_bootstrap.get("action_executions") or 0) != 0:
                         persistent_state_failures.append("persistent_bootstrap_action_executed")
-                    if int(persistent_metrics["context_compilations"]) != len(model_call_contexts):
+                    if (
+                        int(persistent_metrics["context_compilations"])
+                        != expected_persistent_contexts
+                    ):
                         persistent_state_failures.append("persistent_context_compilation_count")
-                    if int(persistent_metrics["preflight_projections"]) != actions_count:
+                    if (
+                        int(persistent_metrics["preflight_projections"])
+                        != expected_persistent_preflights
+                    ):
                         persistent_state_failures.append("persistent_preflight_projection_count")
-                    if int(persistent_metrics["postflight_commits"]) != int(
-                        host_execution["decision_actions"]
+                    if (
+                        int(persistent_metrics["postflight_commits"])
+                        != expected_persistent_postflights
                     ):
                         persistent_state_failures.append("persistent_postflight_commit_count")
                     if not persistent_state_engine.snapshot.graph_current:
@@ -7617,11 +7995,11 @@ class MiniSweCentralAgent(BaseAgent):
                 and int(host_execution["decision_actions"]) > 0
                 and int(persistent_state_bootstrap.get("provider_calls") or 0) == 1
                 and int(persistent_state_engine.metrics["context_compilations"])
-                == len(model_call_contexts)
+                == expected_persistent_contexts
                 and int(persistent_state_engine.metrics["preflight_projections"])
-                == actions_count
+                == expected_persistent_preflights
                 and int(persistent_state_engine.metrics["postflight_commits"])
-                == int(host_execution["decision_actions"])
+                == expected_persistent_postflights
             )
             persistent_lifecycle_use_count = (
                 bootstrap_provider_calls
@@ -7661,6 +8039,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "persistent_execution_state": {
                     "configured": self.enable_persistent_execution_state,
                     "applicable": not source_less_task,
+                    "correctly_abstained": bool(source_less_task),
                     "exercised": persistent_exercised,
                     "repeated_deterministic_use": persistent_lifecycle_use_count > 1,
                     "lifecycle_use_count": persistent_lifecycle_use_count,
@@ -7813,6 +8192,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "repository_work_receipts": list(self._repository_work_receipts),
                         "checkpoint_ledger": self._checkpoints.summary(),
                         "persistent_execution_state": {
+                            "activation": persistent_state_activation,
                             "initialization": persistent_state_initialization,
                             "initial_retrieval": persistent_state_initial_retrieval,
                             "bootstrap": persistent_state_bootstrap,

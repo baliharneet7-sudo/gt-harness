@@ -152,6 +152,7 @@ jobs:
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             scripts/central_release_gate.py \
+            scripts/central_bootstrap_canary.py \
             scripts/deepswe_release_gate.py \
             scripts/central_feature_census.py \
             scripts/central_replay.py scripts/central_run_diff.py \

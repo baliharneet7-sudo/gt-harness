@@ -69,6 +69,14 @@ def _treatment() -> dict:
         "actions": 0,
         "host_execution": {"decision_actions": 0},
         "persistent_execution_state": {
+            "activation": {
+                "initial_applicability": "source_backed",
+                "current_applicability": "source_backed",
+                "ever_applicable": True,
+                "activation_action": 0,
+                "activation_call": 0,
+                "correctly_abstained": False,
+            },
             "initialization": {
                 "status": "initialized",
                 "catalog": {
@@ -366,6 +374,14 @@ def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
     receipt["metrics"]["repository_intelligence_valid"] = 0
     receipt["preemptive_retrieval"]["dense_backend"] = None
     receipt["persistent_execution_state"] = {
+        "activation": {
+            "initial_applicability": "not_applicable_no_supported_source",
+            "current_applicability": "not_applicable_no_supported_source",
+            "ever_applicable": False,
+            "activation_action": None,
+            "activation_call": None,
+            "correctly_abstained": True,
+        },
         "initialization": {"status": "not_applicable"},
         "initial_retrieval": {"calls": 0},
         "bootstrap": {"provider_calls": 0},
@@ -380,10 +396,81 @@ def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
     receipt["metrics"]["persistent_state_bootstrap_calls"] = 0
     receipt["metrics"]["persistent_state_initial_retrieval_calls"] = 0
     receipt["metrics"]["bootstrap_api_calls"] = 0
+    receipt["product_mechanism_census"]["persistent_execution_state"] = {
+        "configured": True,
+        "applicable": False,
+        "exercised": False,
+        "repeated_deterministic_use": False,
+        "lifecycle_use_count": 0,
+        "bootstrap_calls": 0,
+        "correctly_abstained": True,
+    }
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
     assert report.passed is True
+
+
+def test_release_gate_rejects_missing_persistent_activation_boundary():
+    receipt = _treatment()
+    receipt["persistent_execution_state"].pop("activation")
+
+    persistent = next(
+        check
+        for check in audit_treatment_runtime(receipt, label="task")
+        if check.name == "persistent_execution_state"
+    )
+
+    assert persistent.passed is False
+    assert "task:persistent_activation_missing" in persistent.failures
+
+
+def test_release_gate_counts_only_post_activation_persistent_lifecycle():
+    receipt = _treatment()
+    receipt["calls"] = 3
+    receipt["executor_calls"] = 2
+    receipt["actions"] = 2
+    receipt["host_execution"]["decision_actions"] = 2
+    receipt["persistent_execution_state"]["activation"] = {
+        "initial_applicability": "not_applicable_no_supported_source",
+        "current_applicability": "source_backed",
+        "ever_applicable": True,
+        "activation_action": 1,
+        "activation_call": 2,
+        "correctly_abstained": False,
+    }
+    receipt["persistent_execution_state"]["metrics"].update(
+        {
+            "context_compilations": 1,
+            "preflight_projections": 1,
+            "postflight_commits": 2,
+        }
+    )
+    receipt["model_call_contexts"][0].update(
+        {
+            "call": 2,
+            "persistent_execution_state": {
+                "kind": "initial",
+                "provider_call": 2,
+                "state_version": 2,
+                "claim_ids": ["state-claim-1"],
+                "reason_codes": [],
+            },
+        }
+    )
+    receipt["persistent_execution_state"]["deliveries"][0].update(
+        {
+            "first_eligible_call": 2,
+            "delivered_before_call": 2,
+        }
+    )
+    persistent = next(
+        check
+        for check in audit_treatment_runtime(receipt, label="dynamic-task")
+        if check.name == "persistent_execution_state"
+    )
+
+    assert persistent.passed is True
 
 
 def test_release_gate_rejects_bootstrap_only_or_silently_missing_living_state():

@@ -115,6 +115,56 @@ not authorize a paid run. It predates the current marker/timeout, stable-core,
 semantic-no-op, and final A/B gate repairs; those require a new exact-commit
 source-built provider-free proof.
 
+### Native-provider and dynamic-applicability repair (2026-08-13)
+
+Archived 15-task workflow `31734290105` is rejected treatment evidence. Its
+outcome arithmetic was 12/15 versus 13/15 in the historical local GT-off
+cohort, but the arms did not have comparable token accounting and the intended
+persistent mechanism did not run correctly. On all 11 initially source-backed
+tasks, the one bootstrap call failed before selection because DeepSeek V4
+thinking mode is incompatible with the forced Bash `tool_choice`. On the four
+transfer-time source-less tasks, the graph could become healthy after the model
+authored source, but the transfer-time abstention incorrectly remained sticky
+and persistent state never activated. The run therefore proves neither benefit
+nor harm from the living state.
+
+The bootstrap now uses an explicit call-only provider envelope. For native
+DeepSeek V4 and the separately supported TokenRouter route it sets
+`thinking.type=disabled`, preserves the forced Bash selection, performs one
+physical provider call, and records a sanitized typed provider error on
+failure. This override is bootstrap-only; it does not alter executor sampling
+or reasoning mode. The paid workflow's generic text preflight is forbidden.
+It must freeze one exact commit, pass the reusable source-built provider-free
+workflow for that SHA, then run `scripts.central_bootstrap_canary` through the
+exact production bootstrap function and retain its receipt before task jobs can
+exist.
+
+Repository applicability is lifecycle state, not an immutable task-start
+label. A task with no supported source correctly abstains and spends no
+bootstrap call while it remains source-less. If an executed model action later
+creates a captured, indexable source and the incremental graph becomes complete
+and current, the host builds the shared hybrid corpus, performs the one
+bootstrap, activates persistent state, commits the creating action against the
+new certified revision, and includes a bounded state frame in the first next
+executor request. If activation fails, Mini-SWE continues but the treatment
+fails closed. A task is denominator-excluded only if it never becomes
+applicable. Release accounting starts context/preflight/postflight expectations
+at the recorded activation action/call; a true never-applicable task must record
+`correctly_abstained=true`, zero bootstrap calls, and zero exercised state.
+
+Progress is a first-class provider-visible delivery surface. Its receipt must
+carry plural claim IDs, the exact provider-view hash, changed message indices,
+and `delivered_before_model_query=true`; otherwise the authoritative delivery
+audit rejects it. A provider view retained by an existing compaction epoch must
+record that transformation reason instead of reporting an unexplained change.
+
+Local Python tests prove these boundaries, including a biting witness where
+the source-creating activation action was previously dropped as stale. They do
+not certify the shipped Windows index binary, live provider behavior, solve
+uplift, or efficiency. The next authorized evidence is a new exact-commit Linux
+provider-free pass; only after it succeeds may the exact bootstrap canary run.
+No task smoke or benchmark is authorized from this working tree.
+
 
 Minimal coding agent harness. Score >30% on Terminal-bench and SWE-bench Verified with the smallest, most readable harness possible. Karpathy nano-aesthetic applied to agent harnesses.
 

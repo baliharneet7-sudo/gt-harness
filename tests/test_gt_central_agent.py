@@ -27,6 +27,7 @@ from eval.gt_central_agent import (
     _message_context_chars,
     _partition_recovered_repository_failures,
     _preemptive_lifecycle_budget,
+    _provider_error_receipt,
     _provider_request_receipt,
     _provider_response_identity,
     _provider_response_summary,
@@ -70,6 +71,8 @@ from gt_engine.replay_bundle import load_replay_bundle
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
+from scripts.central_bootstrap_canary import validate_canary
+from scripts.central_release_gate import audit_treatment_runtime
 
 
 def test_preemptive_lifecycle_budget_preserves_late_failure_capacity():
@@ -396,6 +399,22 @@ def test_provider_response_identity_records_actual_model_route_without_secrets()
         "system_fingerprint": "fp-current",
     }
     assert "must-not-escape" not in json.dumps(row)
+
+
+def test_provider_error_receipt_is_diagnostic_without_exposing_message():
+    class ProviderFailure(Exception):
+        status_code = 400
+        code = "invalid_request"
+        message = "request rejected with secret-token"
+
+    row = _provider_error_receipt(ProviderFailure(ProviderFailure.message))
+
+    assert row["type"] == "ProviderFailure"
+    assert row["status_code"] == 400
+    assert row["code"] == "invalid_request"
+    assert row["retryable"] is False
+    assert len(row["message_sha256"]) == 64
+    assert "secret-token" not in json.dumps(row)
 
 
 def test_provider_request_hash_covers_effective_call_arguments_not_only_messages():
@@ -1365,7 +1384,10 @@ async def test_bootstrap_raw_transport_marks_call_and_uses_provider_timeout_with
     )
 
     class RawModel:
-        config = SimpleNamespace(model_name="test", model_kwargs={})
+        config = SimpleNamespace(
+            model_name="openai/deepseek-v4-flash",
+            model_kwargs={"api_base": "https://api.deepseek.com"},
+        )
 
         def __init__(self):
             self.calls = 0
@@ -1387,6 +1409,7 @@ async def test_bootstrap_raw_transport_marks_call_and_uses_provider_timeout_with
             assert kwargs["num_retries"] == 0
             assert kwargs["timeout"] == 5
             assert kwargs["tool_choice"]["function"]["name"] == "bash"
+            assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
             message = SimpleNamespace(
                 model_dump=lambda: {"role": "assistant", "content": "plain JSON, no tool"}
             )
@@ -1653,6 +1676,133 @@ class _ObservedMutationEnvironment(_Environment):
         if command == self.mutation_command:
             self.changed = True
         return ExecResult(return_code=0)
+
+
+@pytest.mark.asyncio
+async def test_supported_source_creation_activates_persistent_state_once(
+    tmp_path, monkeypatch
+):
+    class TransferMutationEnvironment(_ObservedMutationEnvironment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            Path(target_dir).mkdir(parents=True, exist_ok=True)
+
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            if command.startswith("python3 -c"):
+                self.commands.append((command, env))
+                return ExecResult(
+                    stdout='{"app.py":"ZGVmIG1haW4oKToKICAgIHJldHVybiAxCg=="}\n',
+                    return_code=0,
+                )
+            return await super().exec(command, cwd, env, timeout_sec, user)
+
+    class DynamicBootstrapModel(_ScriptedModel):
+        def __init__(self):
+            super().__init__([])
+            self.query_count = 0
+            self.bootstrap_calls = 0
+
+        def query(self, messages, **kwargs):
+            self.query_count += 1
+            self.observed = [str(item.get("content") or "") for item in messages]
+            self.observed_history.append(self.observed)
+            if kwargs.get("tool_choice"):
+                self.bootstrap_calls += 1
+                catalog_blob = (
+                    self.observed[-1]
+                    .split("CERTIFIED CATALOG\n", 1)[1]
+                    .split("\n\nSelect only", 1)[0]
+                )
+                catalog = json.loads(catalog_blob)
+                focus = next(item["id"] for item in catalog if item["kind"] == "focus")
+                command = json.dumps(
+                    {
+                        "primary_focus_id": focus,
+                        "ordered_item_ids": [focus],
+                        "risk_item_ids": [],
+                        "validation_item_ids": [],
+                    }
+                )
+            elif self.query_count == 1:
+                command = "printf 'def main():\\n    return 1\\n' > app.py"
+            else:
+                command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+            return {
+                "role": "assistant",
+                "content": "act",
+                "extra": {
+                    "actions": [{"command": command, "tool_call_id": f"call-{self.query_count}"}],
+                    "response": {"usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+                    "cost": 0.0,
+                },
+            }
+
+    repository = HybridRepository(
+        documents=(
+            RepositoryDocument(
+                path="app.py",
+                start_line=1,
+                end_line=1,
+                symbol="app",
+                text="def main():\n    return 1",
+                provenance=("graph_node",),
+            ),
+        ),
+        structural_links=(),
+        source_revision="dynamic-source",
+        complete=True,
+        reason_codes=(),
+        source_file_count=1,
+        document_chars=5,
+    )
+    monkeypatch.setattr(
+        "eval.gt_central_agent.build_hybrid_repository",
+        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+    )
+    model = DynamicBootstrapModel()
+    environment = TransferMutationEnvironment(
+        "printf 'def main():\\n    return 1\\n' > app.py",
+        "f\t25\t2.0\t2.0\tapp.py\t\n",
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_persistent_execution_state=True,
+        enable_preemptive_retrieval=True,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Create app.py containing the implementation.", environment, AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    persistent = receipt["persistent_execution_state"]
+    activation = persistent["activation"]
+    assert model.bootstrap_calls == 1
+    assert activation["initial_applicability"] == "not_applicable_no_supported_source"
+    assert activation["ever_applicable"] is True
+    assert activation["activation_action"] == 1
+    assert persistent["bootstrap"]["status"] == "selected"
+    assert persistent["metrics"]["postflight_commits"] == 2
+    assert persistent["state"]["files_modified"] == ["app.py"]
+    assert len(persistent["deliveries"]) == 1
+    assert any("GroundTruth execution state" in text for text in model.observed_history[-1])
+    assert all(
+        "not_applicable_no_supported_source" not in row.get("reason_codes", ())
+        for row in receipt["preemptive_retrieval"]["decisions"]
+        if int(row.get("call") or 0) >= int(activation["activation_call"])
+    )
+    assert receipt["repository_intelligence"]["denominator_excluded"] is False
+    assert receipt["product_mechanism_census"]["persistent_execution_state"]["exercised"] is True
+    release_checks = {
+        check.name: check
+        for check in audit_treatment_runtime(receipt, label="dynamic-source")
+    }
+    assert release_checks["persistent_execution_state"].failures == (
+        "dynamic-source:persistent_bootstrap_transport_not_single_call",
+    )
+    assert release_checks["product_mechanism_census"].passed is True
 
 
 @pytest.mark.asyncio
@@ -2253,6 +2403,88 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
     assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
+    persistent_census = receipt["product_mechanism_census"]["persistent_execution_state"]
+    assert persistent_census["applicable"] is False
+    assert persistent_census["correctly_abstained"] is True
+    assert persistent_census["exercised"] is False
+
+
+def test_tb2_workflow_gates_matrix_with_exact_runtime_bootstrap_canary():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "tb2_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "python -m scripts.central_bootstrap_canary" in workflow
+    assert "Reply with the single word: ok" not in workflow
+    assert "--output bootstrap-canary.json" in workflow
+    assert "uses: ./.github/workflows/central_provider_free.yml" in workflow
+    assert "needs: [resolve, provider_free]" in workflow
+    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 3
+    assert "name: bootstrap-canary-${{ github.run_id }}" in workflow
+    provider_free = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "central_provider_free.yml"
+    ).read_text(encoding="utf-8")
+    assert "scripts/central_bootstrap_canary.py" in provider_free
+
+
+def test_exact_bootstrap_canary_fails_closed_on_missing_provider_identity():
+    result = {
+        "model_effective": "openai/deepseek-v4-flash",
+        "selection_valid": True,
+        "receipt": {
+            "status": "selected",
+            "logical_calls": 1,
+            "provider_calls": 1,
+            "action_executions": 0,
+            "response_received": True,
+            "transport": "direct_single_provider_call",
+            "provider_query_marker_error": "",
+            "request_payload_sha256": "a" * 64,
+            "provider_messages_sha256": "b" * 64,
+            "visible_catalog_count": 1,
+            "visible_catalog_ids_sha256": "c" * 64,
+            "call_contract": {
+                "thinking_mode": "disabled",
+                "forced_tool": "bash",
+                "tool_choice": "named_function",
+                "num_retries": 0,
+            },
+            "response_identity": {"model": "deepseek-v4-flash", "provider": ""},
+        },
+    }
+
+    assert validate_canary(result) == ("provider_identity_missing",)
+
+
+@pytest.mark.asyncio
+async def test_progress_delivery_uses_authoritative_provider_receipt_schema(tmp_path):
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _ScriptedModel([*("true" for _ in range(12)), submit])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        enable_progress_control=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the environment and finish.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    progress = receipt["progress"]["fact_deliveries"]
+    assert len(progress) == 1
+    assert progress[0]["fact_ids"]
+    assert progress[0]["provider_messages_sha256"]
+    assert progress[0]["delivered_before_model_query"] is True
+    rows, failures, _ = audit_provider_deliveries(receipt, task="progress")
+    assert [row["surface"] for row in rows] == ["progress"]
+    assert failures == []
 
 
 @pytest.mark.asyncio
@@ -2637,6 +2869,11 @@ async def test_context_soft_character_limit_starts_one_safe_compaction_epoch(tmp
     )
     assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
     assert receipt["metrics"]["context_chars_elided"] > 0
+    assert all(
+        row["provider_change_reason"] != "none"
+        for row in receipt["model_call_contexts"]
+        if row["provider_view_changed"]
+    )
 
 
 @pytest.mark.asyncio

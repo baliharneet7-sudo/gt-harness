@@ -76,7 +76,27 @@ on:
         default: "600"
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.freeze.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+      - id: freeze
+        name: Freeze exact treatment commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  provider_free:
+    needs: resolve
+    uses: ./.github/workflows/central_provider_free.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
   plan:
+    needs: [resolve, provider_free]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -170,49 +190,28 @@ jobs:
               print(f"::warning::{n}")
           EOF
 
-      - name: Preflight provider (gates all jobs)
+      - name: Prove exact persistent bootstrap provider contract (gates all jobs)
         env:
           MODEL: ${{ inputs.model }}
-          PROVIDER: ${{ inputs.provider }}
           PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
         run: |
-          # Keep provider stalls from consuming the full 20-minute plan job.
-          # Coreutils timeout terminates the Python process; a thread timeout
-          # would leave the underlying HTTP request alive.
-          timeout --signal=TERM "${PROVIDER_PREFLIGHT_TIMEOUT_SEC}s" python - <<'EOF'
-          import os, sys
-          import litellm
+          set -euo pipefail
+          # This is the exact runtime bootstrap path: one forced Bash tool
+          # selection, the production parser, request hashes, provider identity,
+          # and no executor action. A generic text completion cannot certify it.
+          timeout --signal=TERM "${PROVIDER_PREFLIGHT_TIMEOUT_SEC}s" \
+            python -m scripts.central_bootstrap_canary \
+              --model "$MODEL" \
+              --timeout-sec "$PROVIDER_PREFLIGHT_TIMEOUT_SEC" \
+              --output bootstrap-canary.json
 
-          model = os.environ["MODEL"]
-          provider = os.environ.get("PROVIDER") or "configured"
-          base = os.environ.get("OPENAI_BASE_URL") or ""
-          mname, kwargs = model, {"temperature": 1.0}
-          if provider == "deepseek":
-              if model != "deepseek-v4-flash":
-                  raise SystemExit("DeepSeek native route requires exact model deepseek-v4-flash")
-              kwargs["api_key"] = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-          if base and not model.startswith("openai/"):
-              mname = f"openai/{model}"
-              kwargs["api_base"] = base
-          print(f"model={model!r} -> litellm model={mname!r} "
-                f"OPENAI_BASE_URL={base or '(unset)'}")
-          try:
-              resp = litellm.completion(
-                  model=mname,
-                  messages=[{"role": "user",
-                             "content": "Reply with the single word: ok"}],
-                  **kwargs,
-              )
-          except Exception as e:
-              print(f"::error::preflight failed: {type(e).__name__}: {e}")
-              print("No task jobs were spawned and no task images were pulled.")
-              sys.exit(1)
-          d = resp.model_dump()
-          text = (d.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-          print(f"preflight ok: served_model={d.get('model')} "
-                f"system_fingerprint={d.get('system_fingerprint')} "
-                f"usage={d.get('usage')} text={text[:80]!r}")
-          EOF
+      - name: Upload exact bootstrap proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-canary-${{ github.run_id }}
+          path: bootstrap-canary.json
+          if-no-files-found: error
 
       - name: Enumerate dataset tasks
         id: enum
@@ -255,7 +254,7 @@ jobs:
           EOF
 
   run:
-    needs: plan
+    needs: [resolve, plan]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -281,7 +280,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -603,14 +602,14 @@ jobs:
           if-no-files-found: warn
 
   merge:
-    needs: [plan, run]
+    needs: [resolve, plan, run]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
