@@ -1438,10 +1438,12 @@ class MiniSweCentralAgent(BaseAgent):
             elif "deepseek.com" in api_base.lower():
                 # The native DeepSeek endpoint exposes bare model IDs.  Do
                 # not translate this into the qualified TokenRouter catalog
-                # ID: that produces a deterministic 400 before the first
-                # agent action.
+                # ID. LiteLLM still needs its openai-compatible provider
+                # prefix when a custom api_base is supplied.
                 if model == "deepseek-v4-flash-0731":
                     model = "deepseek-v4-flash"
+                if not model.startswith("openai/"):
+                    model = f"openai/{model}"
             else:
                 # OpenAI-compatible gateways still require the gateway's exact
                 # catalog identifier.  Preserve the same DeepSeek checkpoint
