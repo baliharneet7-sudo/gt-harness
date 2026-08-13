@@ -1428,12 +1428,13 @@ uplift or non-regression; a paid matched smoke still requires authorization.
 
 ## Final no-regression hardening contract (2026-08-12)
 
-This section supersedes earlier DeepSWE statements that the final workflow must
-remain in preflight `SHADOW`. The final workflow is now
-`ACTIVE + ASSISTIVE_SAFE`, but no paid task is eligible until the exact pushed
-provider-free workflow rebuilds the current Go indexer and passes the complete
-census, readiness, and pre-smoke gates. This is an implementation state, not an
-outcome claim.
+This section supersedes earlier wording that the final workflow had already
+switched to `ASSISTIVE_SAFE`. The executable DeepSWE workflow defaults to
+`ACTIVE + SHADOW` through the `persistent_state_only` profile; `certified_full`
+is an explicit opt-in `ASSISTIVE_SAFE` profile. No paid task is eligible until
+the exact pushed provider-free workflow rebuilds the current Go indexer and
+passes the complete census, readiness, and pre-smoke gates. This is an
+implementation state, not an outcome claim.
 
 The final hardening is top-down:
 
