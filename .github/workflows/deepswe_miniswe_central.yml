@@ -46,7 +46,7 @@ on:
         description: "Frozen provider route for this final comparison"
         type: choice
         required: true
-        options: [openrouter]
+        options: [openrouter, tokenrouter]
         default: "openrouter"
       baseline_run_id:
         description: "GitHub run ID containing the frozen contemporaneous GT-off result"
@@ -134,6 +134,9 @@ jobs:
           fi
           if [[ "${{ inputs.arm }}" == "gt_on" && "${{ inputs.diagnostic_only }}" != "true" && "${{ inputs.comparison_profile }}" != "certified_full" ]]; then
             echo "::error::release runs require certified_full"; exit 1
+          fi
+          if [[ "${{ inputs.provider }}" == "tokenrouter" && "${{ inputs.diagnostic_only }}" != "true" ]]; then
+            echo "::error::TokenRouter is authorized only for bounded diagnostics; frozen comparisons remain OpenRouter"; exit 1
           fi
       - name: Resolve exact GT revision
         id: gt
@@ -359,6 +362,7 @@ jobs:
     timeout-minutes: 10
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -378,7 +382,7 @@ jobs:
       - name: One-call provider route and bootstrap-shape canary
         run: |
           set -euo pipefail
-          test -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}" || {
+          test -n "${OPENROUTER_API_KEY:-}${TOKENROUTER_API_KEY:-}${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}" || {
             echo "::error::no provider credential configured"; exit 1;
           }
           python - <<'PY'
@@ -420,6 +424,33 @@ jobs:
                       "data_collection": "allow",
                   }
               }
+          elif os.environ.get("PROVIDER") == "tokenrouter":
+              if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+                  model = "deepseek/deepseek-v4-flash-0731"
+              if not model.startswith("openai/"):
+                  model = f"openai/{model}"
+              tokenrouter_key = os.environ["TOKENROUTER_API_KEY"].strip()
+              tokenrouter_base = "https://api.tokenrouter.com/v1"
+              # The catalog query is unbilled mechanism identity proof.  A
+              # missing exact checkpoint aborts before the completion call.
+              import urllib.request
+              request = urllib.request.Request(
+                  tokenrouter_base + "/models",
+                  headers={"Authorization": "Bearer " + tokenrouter_key},
+              )
+              with urllib.request.urlopen(request, timeout=30) as catalog_response:
+                  catalog = json.loads(catalog_response.read().decode("utf-8"))
+              exact_model_id = model.removeprefix("openai/")
+              catalog_ids = {
+                  str(item.get("id") or "") for item in (catalog.get("data") or [])
+              }
+              if exact_model_id not in catalog_ids:
+                  raise SystemExit(
+                      "TokenRouter does not expose the exact requested model: "
+                      + exact_model_id
+                  )
+              kwargs["api_key"] = tokenrouter_key
+              kwargs["api_base"] = tokenrouter_base
           elif base:
               if "/" not in model:
                   model = f"openai/{model}"
@@ -487,7 +518,14 @@ jobs:
                   or ""
               ),
               "requested_provider": (
-                  "deepseek" if os.environ.get("PROVIDER") == "openrouter" else "configured"
+                  "deepseek"
+                  if os.environ.get("PROVIDER") == "openrouter"
+                  else "tokenrouter"
+                  if os.environ.get("PROVIDER") == "tokenrouter"
+                  else "configured"
+              ),
+              "catalog_model_confirmed": (
+                  True if os.environ.get("PROVIDER") == "tokenrouter" else None
               ),
               "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
               "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
@@ -528,6 +566,7 @@ jobs:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -614,7 +653,12 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import os, sys
-          names = ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+          names = (
+              "OPENROUTER_API_KEY",
+              "TOKENROUTER_API_KEY",
+              "OPENAI_API_KEY",
+              "ANTHROPIC_API_KEY",
+          )
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
               for name in names:
                   raw = os.environ.get(name) or ""
@@ -633,6 +677,9 @@ jobs:
             # DeepSeek provider and bypasses OpenRouter.
             echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${OPENROUTER_API_KEY}" >> "$GITHUB_ENV"
+          elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
+            echo "OPENAI_BASE_URL=https://api.tokenrouter.com/v1" >> "$GITHUB_ENV"
+            echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
           fi
       - name: Resolve exact DeepSWE task budget
         run: |
@@ -857,23 +904,36 @@ jobs:
                   provider_proofs[0].read_text(encoding="utf-8")
               )
               setup_overheads.append(provider_proof.get("benchmark_setup_overhead") or {})
-              provider_route_valid = bool(
+              provider_route = receipt.get("provider_route") or {}
+              route_common = bool(
                   provider_proof.get("requested_model")
                   == "openai/deepseek/deepseek-v4-flash-0731"
-                  and provider_proof.get("requested_provider") == "deepseek"
-                  and provider_proof.get("allow_fallbacks") is False
-                  and provider_proof.get("require_parameters") is True
-                  and (receipt.get("provider_route") or {}).get("model")
+                  and provider_route.get("model")
                   == "openai/deepseek/deepseek-v4-flash-0731"
-                  and (receipt.get("provider_route") or {}).get("api_base")
-                  == "https://openrouter.ai/api/v1"
-                  and ((receipt.get("provider_route") or {}).get("provider_policy") or {}).get("only")
-                  == ["deepseek"]
-                  and (receipt.get("provider_route") or {}).get("credential_in_receipt")
-                  is False
-                  and (receipt.get("provider_route") or {}).get("retry_policy")
+                  and provider_route.get("credential_in_receipt") is False
+                  and provider_route.get("retry_policy")
                   == "provider_once_no_retry"
               )
+              if os.environ.get("PROVIDER") == "tokenrouter":
+                  provider_route_valid = bool(
+                      route_common
+                      and provider_proof.get("requested_provider") == "tokenrouter"
+                      and provider_proof.get("catalog_model_confirmed") is True
+                      and provider_route.get("api_base")
+                      == "https://api.tokenrouter.com/v1"
+                      and not (provider_route.get("provider_policy") or {})
+                  )
+              else:
+                  provider_route_valid = bool(
+                      route_common
+                      and provider_proof.get("requested_provider") == "deepseek"
+                      and provider_proof.get("allow_fallbacks") is False
+                      and provider_proof.get("require_parameters") is True
+                      and provider_route.get("api_base")
+                      == "https://openrouter.ai/api/v1"
+                      and (provider_route.get("provider_policy") or {}).get("only")
+                      == ["deepseek"]
+                  )
               response_identity = receipt.get("provider_response_identity") or {}
               prompt_identity = receipt.get("provider_prompt_identity") or {}
               workspace_prompt_contract = str(
@@ -964,10 +1024,15 @@ jobs:
           provider_identity = (
               "openrouter:deepseek:only:no-fallback"
               if os.environ.get("PROVIDER") == "openrouter"
+              else "tokenrouter:exact-catalog:openai-compatible"
+              if os.environ.get("PROVIDER") == "tokenrouter"
               else "configured"
           )
           model_identity = os.environ.get("MODEL") or ""
-          if provider_identity.startswith("openrouter") and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+          if (
+              provider_identity.startswith(("openrouter", "tokenrouter"))
+              and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}
+          ):
               model_identity = "deepseek/deepseek-v4-flash-0731"
           response_models = sorted({
               model

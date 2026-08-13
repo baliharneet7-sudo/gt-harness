@@ -68,6 +68,11 @@ request, exact provider-view/request hashes, and postflight/rebase receipts.
 Neither 17/17 feature proof alone nor persistent-state initialization alone is a
 complete GT-on treatment proof.
 
+The TokenRouter route in the DeepSWE workflow is diagnostic-only. It must
+authenticate, confirm the exact `deepseek/deepseek-v4-flash-0731` catalog ID,
+and retain its distinct provider identity. It is never a substitute for the
+frozen OpenRouter comparison provider and cannot be merged into an A/B claim.
+
 Provider-free workflow `31647174958` passed runtime commit
 `e0c63ae15be6eeff9eae67ffe873f3b44e2da31f`:
 current-source indexer build, pinned Snowflake ONNX asset, full central tests,

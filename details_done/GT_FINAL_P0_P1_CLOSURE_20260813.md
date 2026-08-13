@@ -103,3 +103,20 @@ census, readiness, pre-smoke, static, and zero-provider receipt gates to pass.
 If it passes, inspect the existing DeepSWE-off artifact with the strict baseline
 precheck. Produce a new GT-off control only if that precheck rejects it. Do not
 start GT-on or any paid smoke before both conditions are green.
+
+## Live diagnostic provider boundary (2026-08-13)
+
+Exact-SHA provider-free run `31668867798` passed at `c9b6831`, including the
+source-built Objective-C-capable indexer, pinned Snowflake ONNX asset, 17/17
+feature-path proof, persistent-state structural proof, `READY`,
+`SMOKE_APPROVED`, and `provider_calls: 0`. The first bounded live attempt was
+then stopped by its canary because the configured OpenRouter credential returned
+HTTP 401; no DeepSWE task ran. This is external route failure, not live GT
+evidence.
+
+TokenRouter is permitted only for the bounded diagnostic continuation. Its
+authenticated catalog was checked for the exact
+`deepseek/deepseek-v4-flash-0731` identifier before adding the route. The
+workflow must fail before completion if that exact ID disappears. TokenRouter
+results cannot be compared with, merged into, or relabeled as the frozen
+OpenRouter A/B contract.

@@ -276,6 +276,12 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
     assert 'model = f"openai/{model}"' in workflow
     assert 'kwargs["api_base"] = base' in workflow
+    assert "options: [openrouter, tokenrouter]" in workflow
+    assert "TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}" in workflow
+    assert 'tokenrouter_base = "https://api.tokenrouter.com/v1"' in workflow
+    assert '"catalog_model_confirmed": (' in workflow
+    assert "TokenRouter does not expose the exact requested model" in workflow
+    assert "TokenRouter is authorized only for bounded diagnostics" in workflow
 
 
 def test_openrouter_model_builder_pins_exact_model_and_provider(monkeypatch, tmp_path):
@@ -320,6 +326,20 @@ def test_openrouter_model_builder_does_not_override_unset_data_policy(monkeypatc
     )._build_model()
 
     assert "data_collection" not in model.config.model_kwargs["extra_body"]["provider"]
+
+
+def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.tokenrouter.com/v1")
+    monkeypatch.delenv("GT_OPENROUTER_PROVIDER_ONLY", raising=False)
+
+    model = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="deepseek-v4-flash-0731",
+    )._build_model()
+
+    assert model.config.model_name == "openai/deepseek/deepseek-v4-flash-0731"
+    assert model.config.model_kwargs["api_base"] == "https://api.tokenrouter.com/v1"
+    assert "extra_body" not in model.config.model_kwargs
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():

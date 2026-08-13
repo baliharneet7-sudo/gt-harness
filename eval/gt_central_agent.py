@@ -1425,8 +1425,15 @@ class MiniSweCentralAgent(BaseAgent):
                     if data_collection in {"allow", "deny"}:
                         provider_policy["data_collection"] = data_collection
                     kwargs["extra_body"] = {"provider": provider_policy}
-            elif "/" not in model:
-                model = f"openai/{model}"
+            else:
+                # OpenAI-compatible gateways still require the gateway's exact
+                # catalog identifier.  Preserve the same DeepSeek checkpoint
+                # used by the frozen OpenRouter route; never silently fall back
+                # to another V4 family model.
+                if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+                    model = "deepseek/deepseek-v4-flash-0731"
+                if not model.startswith("openai/"):
+                    model = f"openai/{model}"
             kwargs["api_base"] = api_base
         return LitellmModel(
             model_name=model,
