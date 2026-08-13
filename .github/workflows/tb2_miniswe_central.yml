@@ -16,9 +16,14 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id for harbor -m, passed through verbatim when base_url is set (api.deepseek.com wants bare 'deepseek-v4-flash')"
+        description: "Model id for harbor -m; TokenRouter requires deepseek-v4-flash-0731"
         type: string
-        default: "deepseek-v4-flash"
+        default: "deepseek-v4-flash-0731"
+      provider:
+        description: "OpenAI-compatible provider route"
+        type: choice
+        options: [configured, tokenrouter]
+        default: configured
       base_url:
         description: "OpenAI-compatible gateway URL; exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
@@ -74,8 +79,9 @@ jobs:
       tasks: ${{ steps.enum.outputs.tasks }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.provider == 'tokenrouter' && secrets.TOKENROUTER_API_KEY || secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider == 'tokenrouter' && 'https://api.tokenrouter.com/v1' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
@@ -138,7 +144,7 @@ jobs:
           import os, sys
 
           cleaned, notes = [], []
-          for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+          for name in ("OPENAI_API_KEY", "TOKENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
               raw = os.environ.get(name) or ""
               if not raw:
                   continue
@@ -162,6 +168,7 @@ jobs:
       - name: Preflight provider (gates all jobs)
         env:
           MODEL: ${{ inputs.model }}
+          PROVIDER: ${{ inputs.provider }}
         run: |
           # Keep provider stalls from consuming the full 20-minute plan job.
           # Coreutils timeout terminates the Python process; a thread timeout
@@ -171,8 +178,14 @@ jobs:
           import litellm
 
           model = os.environ["MODEL"]
+          provider = os.environ.get("PROVIDER") or "configured"
           base = os.environ.get("OPENAI_BASE_URL") or ""
           mname, kwargs = model, {"temperature": 1.0}
+          if provider == "tokenrouter":
+              if model != "deepseek-v4-flash-0731":
+                  raise SystemExit("TokenRouter requires exact model deepseek-v4-flash-0731")
+              kwargs["api_key"] = os.environ.get("TOKENROUTER_API_KEY", "").strip()
+              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
           if base and "/" not in model:
               mname = f"openai/{model}"
               kwargs["api_base"] = base
@@ -247,8 +260,9 @@ jobs:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
+      TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.provider == 'tokenrouter' && secrets.TOKENROUTER_API_KEY || secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.provider == 'tokenrouter' && 'https://api.tokenrouter.com/v1' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
@@ -372,7 +386,7 @@ jobs:
           import os, sys
 
           cleaned = []
-          for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+          for name in ("OPENAI_API_KEY", "TOKENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
               raw = os.environ.get(name) or ""
               if not raw:
                   continue
