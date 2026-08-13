@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.runtime_gate import audit_runtime_receipt
 
@@ -483,6 +484,55 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     )
 
 
+def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Require the integrated product to account for 17 feature paths plus PES."""
+
+    census = receipt.get("product_mechanism_census") or {}
+    mechanism_ids = tuple(str(item) for item in census.get("mechanism_ids") or ())
+    configured_ids = tuple(
+        str(item) for item in census.get("configured_mechanism_ids") or ()
+    )
+    persistent = census.get("persistent_execution_state") or {}
+    failures: list[str] = []
+    if str(census.get("accounting_contract") or "") != (
+        "17_legacy_features_plus_1_persistent_state"
+    ):
+        failures.append(f"{label}:product_mechanism_contract_missing")
+    if int(census.get("legacy_feature_count") or 0) != 17:
+        failures.append(f"{label}:legacy_feature_count_not_17")
+    if int(census.get("product_mechanism_count") or 0) != 18 or len(mechanism_ids) != 18:
+        failures.append(f"{label}:product_mechanism_count_not_18")
+    expected_ids = (*CENTRAL_FEATURE_IDS, "persistent_execution_state")
+    if mechanism_ids != expected_ids or len(set(mechanism_ids)) != 18:
+        failures.append(f"{label}:product_mechanism_identity_invalid")
+    if int(census.get("configured_mechanism_count") or 0) != 18 or configured_ids != mechanism_ids:
+        failures.append(f"{label}:not_all_product_mechanisms_configured")
+    if persistent.get("configured") is not True or persistent.get("exercised") is not True:
+        failures.append(f"{label}:persistent_product_mechanism_not_exercised")
+    if (
+        persistent.get("repeated_deterministic_use") is not True
+        or int(persistent.get("lifecycle_use_count") or 0) <= 1
+    ):
+        failures.append(f"{label}:persistent_product_mechanism_not_repeated")
+    # Natural trigger absence is evidence about the trajectory, not a failed
+    # feature implementation. Preserve its separate count and never inflate it
+    # to manufacture an 18/18 live-fire claim.
+    naturally_fired = int(census.get("naturally_fired_legacy_feature_count") or 0)
+    if not 0 <= naturally_fired <= 17:
+        failures.append(f"{label}:natural_feature_fire_count_invalid")
+    return ReleaseGateCheck(
+        "product_mechanism_census",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "configured": len(configured_ids),
+            "naturally_fired_legacy": naturally_fired,
+            "persistent_exercised": persistent.get("exercised") is True,
+        },
+    )
+
+
 def _delivery(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     runtime_failures, runtime_summary = audit_runtime_receipt(receipt, task=label)
     _rows, delivery_failures, delivery_summary = audit_provider_deliveries(receipt, task=label)
@@ -713,6 +763,7 @@ def audit_treatment_runtime(
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _persistent_execution_state(receipt, label),
+        _product_mechanism_census(receipt, label),
         profile_check,
         _project_validation(receipt, label),
         _retrieval_efficiency(receipt, label),

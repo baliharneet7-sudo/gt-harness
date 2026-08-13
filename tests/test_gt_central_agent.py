@@ -279,6 +279,17 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert "options: [openrouter, tokenrouter]" in workflow
     assert "TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}" in workflow
     assert 'tokenrouter_base = "https://api.tokenrouter.com/v1"' in workflow
+    assert 'kwargs["extra_body"] = {"thinking": {"type": "disabled"}}' in workflow
+    assert '"thinking_mode": "disabled"' in workflow
+    assert '"cost_observed": cost_observed' in workflow
+    assert 'provider != "tokenrouter" and not proof["system_fingerprint"]' in workflow
+    readiness = (
+        Path(__file__).resolve().parents[1] / "scripts" / "central_readiness_audit.py"
+    ).read_text(encoding="utf-8")
+    assert '"product_mechanism_contract_is_17_plus_1"' in readiness
+    assert 'print("PRODUCT_MECHANISM_COUNT=18")' in readiness
+    assert 'print("ALL_18_PRODUCT_MECHANISMS_PROVEN")' in readiness
+    assert "| product mechanisms | legacy fired | PES lifecycle uses |" in workflow
     assert '"catalog_model_confirmed": (' in workflow
     assert "TokenRouter does not expose the exact requested model" in workflow
     assert "TokenRouter is authorized only for bounded diagnostics" in workflow
@@ -339,7 +350,11 @@ def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch
 
     assert model.config.model_name == "openai/deepseek/deepseek-v4-flash-0731"
     assert model.config.model_kwargs["api_base"] == "https://api.tokenrouter.com/v1"
-    assert "extra_body" not in model.config.model_kwargs
+    assert model.config.model_kwargs["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
+    route = _provider_route_configuration(model)
+    assert route["thinking_mode"] == "disabled"
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():
@@ -1112,6 +1127,7 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     persistent = receipt["persistent_execution_state"]
+    product_census = receipt["product_mechanism_census"]
     assert model.query_count == 3
     assert model.bootstrap_kwargs == {
         "temperature": 0.0,
@@ -1194,6 +1210,15 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
         }
     ]
     assert persistent["valid"] is True
+    assert product_census["legacy_feature_count"] == 17
+    assert product_census["product_mechanism_count"] == 18
+    assert product_census["configured_mechanism_count"] == 18
+    assert product_census["persistent_execution_state"]["exercised"] is True
+    assert product_census["persistent_execution_state"][
+        "repeated_deterministic_use"
+    ] is True
+    assert product_census["persistent_execution_state"]["lifecycle_use_count"] > 1
+    assert product_census["mechanism_ids"][-1] == "persistent_execution_state"
     assert not any("bootstrap-selection" in item for item in model.observed_history[1])
     executed = [command for command, _ in environment.commands]
     assert not any("primary_focus_id" in command for command in executed)

@@ -73,10 +73,30 @@ request, exact provider-view/request hashes, and postflight/rebase receipts.
 Neither 17/17 feature proof alone nor persistent-state initialization alone is a
 complete GT-on treatment proof.
 
+Every active live receipt now carries `product_mechanism_census`. The integrated
+product count is **18 mechanisms**: the exact 17 IDs in `CENTRAL_FEATURE_IDS`
+plus `persistent_execution_state`. A treatment release fails unless all 18 are
+configured and the persistent mechanism is exercised repeatedly across its
+real lifecycle, not merely initialized. Repeated use is counted from the one
+bootstrap plus deterministic context compilations, preflight projections,
+postflight commits, and graph rebases. The receipt reports natural legacy
+feature fires separately. A stochastic task need not contain every exact
+trigger, so `N/17 fired naturally` must never be rewritten as `18/18 fired`.
+The correct live statement is: 18/18 product mechanisms configured, persistent
+state repeatedly exercised, and N/17 legacy features naturally fired with every
+produced effect explicitly consumed/accounted.
+
 The TokenRouter route in the DeepSWE workflow is diagnostic-only. It must
 authenticate, confirm the exact `deepseek/deepseek-v4-flash-0731` catalog ID,
-and retain its distinct provider identity. It is never a substitute for the
-frozen OpenRouter comparison provider and cannot be merged into an A/B claim.
+retain its distinct provider identity, and run that checkpoint with
+`thinking.type=disabled` because DeepSeek thinking mode mechanically rejects
+Mini-SWE's required Bash tool choice. The observed exact TokenRouter route did
+not return a system fingerprint; the diagnostic therefore requires the
+authenticated exact catalog ID plus stable response model/provider identity and records fingerprint
+absence explicitly. A monetary cost may be zero only when the provider/LiteLLM
+explicitly reports it; missing cost remains missing rather than fabricated.
+It is never a substitute for the frozen OpenRouter comparison provider and
+cannot be merged into an A/B claim.
 
 Provider-free workflow `31647174958` passed runtime commit
 `e0c63ae15be6eeff9eae67ffe873f3b44e2da31f`:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import audit_release, audit_treatment_runtime
 
 STATIC = {
@@ -148,6 +149,28 @@ def _treatment() -> dict:
             "failures": [],
             "valid": True,
         },
+        "product_mechanism_census": {
+            "accounting_contract": "17_legacy_features_plus_1_persistent_state",
+            "legacy_feature_count": 17,
+            "product_mechanism_count": 18,
+            "mechanism_ids": [
+                *CENTRAL_FEATURE_IDS,
+                "persistent_execution_state",
+            ],
+            "configured_mechanism_count": 18,
+            "configured_mechanism_ids": [
+                *CENTRAL_FEATURE_IDS,
+                "persistent_execution_state",
+            ],
+            "naturally_fired_legacy_feature_count": 0,
+            "naturally_fired_legacy_feature_ids": [],
+            "persistent_execution_state": {
+                "configured": True,
+                "exercised": True,
+                "repeated_deterministic_use": True,
+                "lifecycle_use_count": 4,
+            },
+        },
         "features": {"effect_trace": [], "preflight_receipts": []},
         "contribution_compiler": {
             "calls": [
@@ -237,6 +260,44 @@ def test_release_gate_accepts_complete_evidence_contract():
     assert report.status == "READY"
     assert report.schema == "gt.release_gate.v1"
     assert report.summary["checks_passed"] == report.summary["checks_total"]
+
+
+def test_release_gate_rejects_legacy_17_only_product_accounting():
+    receipt = _treatment()
+    receipt["product_mechanism_census"]["product_mechanism_count"] = 17
+    receipt["product_mechanism_census"]["mechanism_ids"] = receipt[
+        "product_mechanism_census"
+    ]["mechanism_ids"][:-1]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:product_mechanism_count_not_18" in report.failures
+    assert "treatment-1:product_mechanism_identity_invalid" in report.failures
+
+
+def test_release_gate_rejects_configured_but_unexercised_persistent_state():
+    receipt = _treatment()
+    receipt["product_mechanism_census"]["persistent_execution_state"][
+        "exercised"
+    ] = False
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_product_mechanism_not_exercised" in report.failures
+
+
+def test_release_gate_rejects_one_time_persistent_state_initialization():
+    receipt = _treatment()
+    persistent = receipt["product_mechanism_census"]["persistent_execution_state"]
+    persistent["repeated_deterministic_use"] = False
+    persistent["lifecycle_use_count"] = 1
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_product_mechanism_not_repeated" in report.failures
 
 
 def test_release_gate_accepts_content_hashed_runtime_dense_identity():

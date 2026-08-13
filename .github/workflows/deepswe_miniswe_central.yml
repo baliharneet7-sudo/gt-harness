@@ -400,6 +400,7 @@ jobs:
           )
 
           model = os.environ["MODEL"]
+          provider = os.environ.get("PROVIDER") or "configured"
           base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
           kwargs = {
               "temperature": 0.0,
@@ -408,7 +409,7 @@ jobs:
               "tools": [BASH_TOOL],
               "tool_choice": {"type": "function", "function": {"name": "bash"}},
           }
-          if os.environ.get("PROVIDER") == "openrouter":
+          if provider == "openrouter":
               if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
                   model = "deepseek/deepseek-v4-flash-0731"
               if not model.startswith("openai/"):
@@ -424,7 +425,7 @@ jobs:
                       "data_collection": "allow",
                   }
               }
-          elif os.environ.get("PROVIDER") == "tokenrouter":
+          elif provider == "tokenrouter":
               if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
                   model = "deepseek/deepseek-v4-flash-0731"
               if not model.startswith("openai/"):
@@ -451,6 +452,7 @@ jobs:
                   )
               kwargs["api_key"] = tokenrouter_key
               kwargs["api_base"] = tokenrouter_base
+              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
           elif base:
               if "/" not in model:
                   model = f"openai/{model}"
@@ -502,6 +504,8 @@ jobs:
           raw = response.model_dump()
           usage = raw.get("usage") or {}
           hidden = getattr(response, "_hidden_params", {}) or {}
+          raw_cost = hidden.get("response_cost")
+          cost_observed = raw_cost is not None
           proof = {
               "schema": "gt.provider_bootstrap_canary.v1",
               "provider_calls": 1,
@@ -512,6 +516,7 @@ jobs:
               "requested_model": model,
               "response_model": str(raw.get("model") or ""),
               "system_fingerprint": str(raw.get("system_fingerprint") or ""),
+              "fingerprint_available": bool(raw.get("system_fingerprint")),
               "response_provider": str(
                   raw.get("provider")
                   or hidden.get("custom_llm_provider")
@@ -525,8 +530,9 @@ jobs:
                   else "configured"
               ),
               "catalog_model_confirmed": (
-                  True if os.environ.get("PROVIDER") == "tokenrouter" else None
+                  True if provider == "tokenrouter" else None
               ),
+              "thinking_mode": "disabled" if provider == "tokenrouter" else "provider_default",
               "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
               "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
               "data_collection": "allow" if os.environ.get("PROVIDER") == "openrouter" else None,
@@ -534,15 +540,24 @@ jobs:
                   "provider_calls": 1,
                   "input_tokens": int(usage.get("prompt_tokens") or 0),
                   "output_tokens": int(usage.get("completion_tokens") or 0),
-                  "cost_usd": float(hidden.get("response_cost") or 0.0),
+                  "cost_usd": float(raw_cost) if cost_observed else None,
+                  "cost_observed": cost_observed,
                   "latency_ms": round(latency_ms, 6),
               },
           }
           setup = proof["benchmark_setup_overhead"]
-          if not proof["response_model"] or not proof["response_provider"] or not proof["system_fingerprint"]:
+          if not proof["response_model"] or not proof["response_provider"]:
               raise SystemExit("bootstrap canary response identity is incomplete")
-          if any(float(setup[field]) <= 0 for field in ("input_tokens", "output_tokens", "cost_usd", "latency_ms")):
+          if provider != "tokenrouter" and not proof["system_fingerprint"]:
+              raise SystemExit("bootstrap canary response fingerprint is incomplete")
+          if any(float(setup[field]) <= 0 for field in ("input_tokens", "output_tokens", "latency_ms")):
               raise SystemExit("bootstrap canary resource accounting is incomplete")
+          if provider != "tokenrouter" and (
+              not setup["cost_observed"] or float(setup["cost_usd"]) <= 0
+          ):
+              raise SystemExit("bootstrap canary monetary cost accounting is incomplete")
+          if setup["cost_observed"] and float(setup["cost_usd"]) < 0:
+              raise SystemExit("bootstrap canary monetary cost is invalid")
           Path("provider-route-proof.json").write_text(
               json.dumps(proof, indent=2) + "\n", encoding="utf-8"
           )
@@ -921,6 +936,8 @@ jobs:
                       and provider_proof.get("catalog_model_confirmed") is True
                       and provider_route.get("api_base")
                       == "https://api.tokenrouter.com/v1"
+                      and provider_route.get("thinking_mode") == "disabled"
+                      and provider_proof.get("thinking_mode") == "disabled"
                       and not (provider_route.get("provider_policy") or {})
                   )
               else:
@@ -935,6 +952,7 @@ jobs:
                       == ["deepseek"]
                   )
               response_identity = receipt.get("provider_response_identity") or {}
+              product_census = receipt.get("product_mechanism_census") or {}
               prompt_identity = receipt.get("provider_prompt_identity") or {}
               workspace_prompt_contract = str(
                   (receipt.get("workspace_prompt") or {}).get("contract") or ""
@@ -984,6 +1002,7 @@ jobs:
                            "provider_route_valid": provider_route_valid,
                            "provider_response_identity_valid": response_identity_valid,
                            "provider_response_identity": response_identity,
+                           "product_mechanism_census": product_census,
                            "system_prompt_sha256": prompt_identity.get("system_prompt_sha256"),
                            "task_prompt_sha256": prompt_identity.get("task_prompt_sha256"),
                            "tool_schema_sha256": prompt_identity.get("tool_schema_sha256"),
@@ -1097,9 +1116,11 @@ jobs:
                   "tasks": expected, "rows": rows, "missing": missing,
                  "solved": sum(r["solved"] for r in rows), "planned": len(expected)}
           Path("DEEPSWE_EVALUATION_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
-          md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- profile: **{out['manifest']['comparison_profile']}**", f"- diagnostic-only: **{out['manifest']['diagnostic_only']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | deliveries | graph | dense | calls | steps | actions | tokens | bootstrap calls | state frames |", "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
+          md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- profile: **{out['manifest']['comparison_profile']}**", f"- diagnostic-only: **{out['manifest']['diagnostic_only']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | product mechanisms | legacy fired | PES lifecycle uses | deliveries | graph | dense | calls | steps | actions | tokens | bootstrap calls | state frames |", "|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
           for r in rows:
-              md.append(f"| {r['task']} | {int(r['solved'])} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} | {r['persistent_state_bootstrap_calls']} | {r['persistent_state_context_compilations']} |")
+              census = r.get("product_mechanism_census") or {}
+              persistent = census.get("persistent_execution_state") or {}
+              md.append(f"| {r['task']} | {int(r['solved'])} | {census.get('configured_mechanism_count', 0)}/18 | {census.get('naturally_fired_legacy_feature_count', 0)}/17 | {persistent.get('lifecycle_use_count', 0)} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} | {r['persistent_state_bootstrap_calls']} | {r['persistent_state_context_compilations']} |")
           Path("DEEPSWE_EVALUATION_RESULTS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
           print("\n".join(md))
           if missing:
@@ -1114,6 +1135,18 @@ jobs:
               raise SystemExit("exact provider route gate failed")
           if any(not r["provider_response_identity_valid"] for r in rows):
               raise SystemExit("actual provider response identity gate failed")
+          if (os.environ.get("ARM") or "gt_on") == "gt_on" and any(
+              int((r.get("product_mechanism_census") or {}).get("legacy_feature_count") or 0) != 17
+              or int((r.get("product_mechanism_census") or {}).get("product_mechanism_count") or 0) != 18
+              or int((r.get("product_mechanism_census") or {}).get("configured_mechanism_count") or 0) != 18
+              or (r.get("product_mechanism_census") or {}).get("mechanism_ids", [])[-1:]
+              != ["persistent_execution_state"]
+              or (r.get("product_mechanism_census") or {}).get(
+                  "persistent_execution_state", {}
+              ).get("exercised") is not True
+              for r in rows
+          ):
+              raise SystemExit("17+1 GT product mechanism census failed")
           if any(r["workspace_prompt_contract"] != "resolved_workspace_v1" for r in rows):
               raise SystemExit("workspace prompt contract gate failed")
           PY

@@ -120,3 +120,19 @@ authenticated catalog was checked for the exact
 workflow must fail before completion if that exact ID disappears. TokenRouter
 results cannot be compared with, merged into, or relabeled as the frozen
 OpenRouter A/B contract.
+
+The first TokenRouter canary, workflow `31669920913` at `3b3002a`, proved the
+credential and exact catalog route but failed before any DeepSWE task with the
+provider's typed 400 error: a required/specific `tool_choice` is unsupported in
+DeepSeek thinking mode. This was not a GT outcome. The repaired diagnostic route
+sets `thinking.type=disabled` in both the standalone canary and the live
+`MiniSweCentralAgent` model configuration, preserving the forced Bash contract.
+The canary records that mode and the task merge rejects any route that does not.
+
+The live accounting unit is now executable rather than documentation-only.
+`central_receipt.json.product_mechanism_census` records the exact 17 historical
+feature IDs plus the persistent-state mechanism for a product count of 18. The
+central release gate and DeepSWE merge reject a treatment unless all 18 are
+configured and persistent state has repeated lifecycle use. Natural feature
+fires remain a separate N/17 trajectory observation; absent events cannot be
+fabricated to inflate that number.

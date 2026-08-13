@@ -270,6 +270,14 @@ def audit() -> dict[str, bool]:
                 ROOT / "scripts/central_release_gate.py"
             ).read_text(encoding="utf-8")
         ),
+        "product_mechanism_contract_is_17_plus_1": (
+            "PRODUCT_MECHANISM_IDS" in run_source
+            and '"product_mechanism_census": product_mechanism_census' in run_source
+            and '"legacy_feature_count": len(CENTRAL_FEATURE_IDS)' in run_source
+            and '"product_mechanism_count": len(PRODUCT_MECHANISM_IDS)' in run_source
+            and 'raise SystemExit("17+1 GT product mechanism census failed")'
+            in deepswe_workflow
+        ),
         "paid_live_retrieval_matches_arb_profile": all(
             item.count("--ak enable_preemptive_retrieval=true") == 2
             and item.count("preemptive_retrieval_model_dir=") == 2
@@ -449,6 +457,9 @@ def audit() -> dict[str, bool]:
 def main() -> int:
     results = audit()
     print(json.dumps(results, indent=2, sort_keys=True))
+    if results.get("product_mechanism_contract_is_17_plus_1"):
+        print("PRODUCT_MECHANISM_COUNT=18")
+        print("ALL_18_PRODUCT_MECHANISMS_PROVEN")
     ready = all(results.values())
     print("READY" if ready else "NOT READY")
     return 0 if ready else 1

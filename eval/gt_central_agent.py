@@ -48,6 +48,7 @@ from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from gt_engine.central_runtime import (
+    CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     ChangeOrigin,
     EvidenceLedger,
@@ -185,6 +186,11 @@ from gt_engine.uplift_policy import (
 # optional advisory. It must be packed before every other model-visible GT
 # surface; otherwise a large retrieval can make the living state disappear.
 PERSISTENT_STATE_CONTRIBUTION_PRIORITY = 0
+PERSISTENT_EXECUTION_STATE_MECHANISM_ID = "persistent_execution_state"
+PRODUCT_MECHANISM_IDS = (
+    *CENTRAL_FEATURE_IDS,
+    PERSISTENT_EXECUTION_STATE_MECHANISM_ID,
+)
 
 
 def _message_context_chars(message: dict[str, Any]) -> int:
@@ -349,11 +355,14 @@ def _provider_route_configuration(model: Any) -> dict[str, Any]:
         or getattr(model, "model_name", "")
     )
     kwargs = _model_kwargs(model)
-    provider_policy = dict((kwargs.get("extra_body") or {}).get("provider") or {})
+    extra_body = dict(kwargs.get("extra_body") or {})
+    provider_policy = dict(extra_body.get("provider") or {})
+    thinking_mode = str((extra_body.get("thinking") or {}).get("type") or "")
     return {
         "model": model_name,
         "api_base": str(kwargs.get("api_base") or ""),
         "provider_policy": provider_policy,
+        "thinking_mode": thinking_mode,
         "litellm_retry_policy": (
             "no_internal_retry" if kwargs.get("num_retries") == 0 else "unverified"
         ),
@@ -1403,6 +1412,7 @@ class MiniSweCentralAgent(BaseAgent):
         api_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
         if api_base:
             openrouter = "openrouter.ai" in api_base.lower()
+            tokenrouter = "tokenrouter.com" in api_base.lower()
             if openrouter:
                 if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
                     model = "deepseek/deepseek-v4-flash-0731"
@@ -1434,6 +1444,12 @@ class MiniSweCentralAgent(BaseAgent):
                     model = "deepseek/deepseek-v4-flash-0731"
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
+                if tokenrouter:
+                    # DeepSeek V4 thinking mode rejects a required/specific
+                    # tool choice. Mini-SWE requires exactly one Bash tool
+                    # call, so the diagnostic route must select the documented
+                    # non-thinking mode rather than weakening tool selection.
+                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             kwargs["api_base"] = api_base
         return LitellmModel(
             model_name=model,
@@ -7571,6 +7587,98 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 **action_metrics,
             }
+            legacy_fired_ids = tuple(
+                feature_id
+                for feature_id in CENTRAL_FEATURE_IDS
+                if int((feature_summary.get("produced_counts") or {}).get(feature_id) or 0) > 0
+            )
+            legacy_consumed_ids = tuple(
+                sorted(
+                    {
+                        str(row.get("feature_id") or "")
+                        for row in feature_summary.get("effect_applications") or ()
+                        if row.get("state_fields_changed")
+                    }
+                    & set(CENTRAL_FEATURE_IDS)
+                )
+            )
+            persistent_exercised = bool(
+                self.enable_persistent_execution_state
+                and not source_less_task
+                and persistent_state_engine is not None
+                and not persistent_state_failures
+                and actions_count > 0
+                and int(host_execution["decision_actions"]) > 0
+                and int(persistent_state_bootstrap.get("provider_calls") or 0) == 1
+                and int(persistent_state_engine.metrics["context_compilations"])
+                == len(model_call_contexts)
+                and int(persistent_state_engine.metrics["preflight_projections"])
+                == actions_count
+                and int(persistent_state_engine.metrics["postflight_commits"])
+                == int(host_execution["decision_actions"])
+            )
+            persistent_lifecycle_use_count = (
+                bootstrap_provider_calls
+                + (
+                    int(persistent_state_engine.metrics["context_compilations"])
+                    + int(persistent_state_engine.metrics["preflight_projections"])
+                    + int(persistent_state_engine.metrics["postflight_commits"])
+                    + int(persistent_state_engine.metrics["graph_rebases"])
+                    if persistent_state_engine is not None
+                    else 0
+                )
+            )
+            configured_mechanism_ids = (
+                *(
+                    CENTRAL_FEATURE_IDS
+                    if self.enable_all_features
+                    else ()
+                ),
+                *(
+                    (PERSISTENT_EXECUTION_STATE_MECHANISM_ID,)
+                    if self.enable_persistent_execution_state
+                    else ()
+                ),
+            )
+            product_mechanism_census = {
+                "schema": "gt.product_mechanism_census.v1",
+                "accounting_contract": "17_legacy_features_plus_1_persistent_state",
+                "legacy_feature_count": len(CENTRAL_FEATURE_IDS),
+                "product_mechanism_count": len(PRODUCT_MECHANISM_IDS),
+                "mechanism_ids": list(PRODUCT_MECHANISM_IDS),
+                "configured_mechanism_count": len(configured_mechanism_ids),
+                "configured_mechanism_ids": list(configured_mechanism_ids),
+                "naturally_fired_legacy_feature_count": len(legacy_fired_ids),
+                "naturally_fired_legacy_feature_ids": list(legacy_fired_ids),
+                "consumed_legacy_feature_count": len(legacy_consumed_ids),
+                "consumed_legacy_feature_ids": list(legacy_consumed_ids),
+                "persistent_execution_state": {
+                    "configured": self.enable_persistent_execution_state,
+                    "applicable": not source_less_task,
+                    "exercised": persistent_exercised,
+                    "repeated_deterministic_use": persistent_lifecycle_use_count > 1,
+                    "lifecycle_use_count": persistent_lifecycle_use_count,
+                    "bootstrap_calls": bootstrap_provider_calls,
+                    "context_compilations": (
+                        int(persistent_state_engine.metrics["context_compilations"])
+                        if persistent_state_engine is not None
+                        else 0
+                    ),
+                    "preflight_projections": len(persistent_state_preflights),
+                    "postflight_commits": (
+                        int(persistent_state_engine.metrics["postflight_commits"])
+                        if persistent_state_engine is not None
+                        else 0
+                    ),
+                    "graph_rebases": (
+                        int(persistent_state_engine.metrics["graph_rebases"])
+                        if persistent_state_engine is not None
+                        else 0
+                    ),
+                    "deliveries": len(persistent_state_deliveries),
+                    "failures": list(persistent_state_failures),
+                },
+            }
             trajectory = {
                 "info": {
                     "model_stats": {
@@ -7606,6 +7714,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 persistent_state_bootstrap.get("response_identity") or {}
                             ),
                         },
+                        "product_mechanism_census": product_mechanism_census,
                         "component_configuration": {
                             "feature_guidance": self.enable_feature_guidance,
                             "context_frontier": self.enable_context_frontier,
