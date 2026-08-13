@@ -16,9 +16,9 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Model id for harbor -m; TokenRouter requires deepseek-v4-flash-0731"
+        description: "Model id for harbor -m; TokenRouter requires deepseek/deepseek-v4-flash-0731"
         type: string
-        default: "deepseek-v4-flash-0731"
+        default: "deepseek/deepseek-v4-flash-0731"
       provider:
         description: "OpenAI-compatible provider route"
         type: choice
@@ -187,11 +187,11 @@ jobs:
           base = os.environ.get("OPENAI_BASE_URL") or ""
           mname, kwargs = model, {"temperature": 1.0}
           if provider == "tokenrouter":
-              if model != "deepseek-v4-flash-0731":
-                  raise SystemExit("TokenRouter requires exact model deepseek-v4-flash-0731")
+              if model != "deepseek/deepseek-v4-flash-0731":
+                  raise SystemExit("TokenRouter requires exact model deepseek/deepseek-v4-flash-0731")
               kwargs["api_key"] = os.environ.get("TOKENROUTER_API_KEY", "").strip()
               kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-          if base and "/" not in model:
+          if base and not model.startswith("openai/"):
               mname = f"openai/{model}"
               kwargs["api_base"] = base
           print(f"model={model!r} -> litellm model={mname!r} "
