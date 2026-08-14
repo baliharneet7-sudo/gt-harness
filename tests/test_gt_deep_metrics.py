@@ -631,6 +631,10 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
                     "context_bounded_observation_chars_removed": 2784946,
                     "context_duplicate_turns_represented": 2,
                     "context_old_tool_results_cleared": 12,
+                    "context_stale_reads_elided": 2,
+                    "context_recap_receipts": 3,
+                    "context_recap_chars_added": 41,
+                    "context_recap_fallbacks": 1,
                     "task_progress_changes": 3,
                     "repository_mirror_transfer_ms": 12.5,
                     "repository_index_refresh_ms": 4.25,
@@ -706,6 +710,10 @@ def test_extract_trajectory_reports_receipt_context_attribution(tmp_path):
     assert metrics["context_bounded_observation_chars_removed"] == 2784946
     assert metrics["context_duplicate_turns_represented"] == 2
     assert metrics["context_old_tool_results_cleared"] == 12
+    assert metrics["context_stale_reads_elided"] == 2
+    assert metrics["context_recap_receipts"] == 3
+    assert metrics["context_recap_chars_added"] == 41
+    assert metrics["context_recap_fallbacks"] == 1
     assert metrics["task_progress_changes"] == 3
     assert metrics["repository_mirror_transfer_ms"] == 12.5
     assert metrics["repository_index_refresh_ms"] == 4.25

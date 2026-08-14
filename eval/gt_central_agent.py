@@ -8329,6 +8329,22 @@ class MiniSweCentralAgent(BaseAgent):
                     int((row.get("context_compiler") or {}).get("old_tool_results_cleared") or 0)
                     for row in model_call_contexts
                 ),
+                "context_stale_reads_elided": sum(
+                    int((row.get("context_compiler") or {}).get("stale_reads_elided") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_recap_receipts": sum(
+                    int((row.get("context_compiler") or {}).get("recap_receipts") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_recap_chars_added": sum(
+                    int((row.get("context_compiler") or {}).get("recap_chars_added") or 0)
+                    for row in model_call_contexts
+                ),
+                "context_recap_fallbacks": sum(
+                    int((row.get("context_compiler") or {}).get("recap_fallbacks") or 0)
+                    for row in model_call_contexts
+                ),
                 "context_state_frame_calls": sum(
                     bool((row.get("context_compiler") or {}).get("active_state_chars"))
                     for row in model_call_contexts

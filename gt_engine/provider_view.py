@@ -94,6 +94,10 @@ class ProviderViewMetrics:
     duplicate_turns_represented: int = 0
     old_tool_results_cleared: int = 0
     state_frame_message_index: int | None = None
+    stale_reads_elided: int = 0
+    recap_receipts: int = 0
+    recap_chars_added: int = 0
+    recap_fallbacks: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +132,10 @@ class ProviderViewMetrics:
             "duplicate_turns_represented": self.duplicate_turns_represented,
             "old_tool_results_cleared": self.old_tool_results_cleared,
             "state_frame_message_index": self.state_frame_message_index,
+            "stale_reads_elided": self.stale_reads_elided,
+            "recap_receipts": self.recap_receipts,
+            "recap_chars_added": self.recap_chars_added,
+            "recap_fallbacks": self.recap_fallbacks,
         }
 
 
@@ -163,6 +171,9 @@ class CompactionEpochReceipt:
     tool_chars_elided: int
     duplicate_turns_removed: int
     reasoning_messages_removed: int
+    stale_reads_elided: int = 0
+    recap_receipts: int = 0
+    recap_fallbacks: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -353,6 +364,9 @@ class ProviderViewSession:
                 reasoning_messages_removed=(
                     0 if metrics.unique_assistant_reasoning_chars_removed == 0 else 1
                 ),
+                stale_reads_elided=metrics.stale_reads_elided,
+                recap_receipts=metrics.recap_receipts,
+                recap_fallbacks=metrics.recap_fallbacks,
             )
         )
         projected, projected_metrics = self.project(messages, active_state=active_state)
@@ -388,6 +402,10 @@ class ProviderViewSession:
                 projected_metrics.duplicate_turns_represented,
             ),
             old_tool_results_cleared=metrics.old_tool_results_cleared,
+            stale_reads_elided=metrics.stale_reads_elided,
+            recap_receipts=metrics.recap_receipts,
+            recap_chars_added=metrics.recap_chars_added,
+            recap_fallbacks=metrics.recap_fallbacks,
         )
 
 
@@ -903,31 +921,315 @@ def _clear_old_tool_results(
     *,
     target_chars: int,
     keep_recent_turns: int,
-) -> tuple[list[dict[str, Any]], int]:
-    """Clear only old tool bodies; preserve every assistant message exactly."""
+    active_state: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int, int, int, int, int]:
+    """Clear only old tool bodies; preserve every assistant message exactly.
+
+    Phase A elides tool bodies that the typed state ledger proves superseded:
+    an older read of a path that was re-read at the current source revision, or
+    a failed run of a validation command that has since passed at the current
+    revision.  Phase B clears remaining old bodies under budget pressure,
+    preferring a bounded typed recap receipt assembled only from typed ledger
+    fields; a recap is emitted whole or not at all (atomic), otherwise the
+    historical bare hash receipt is kept byte-for-byte.
+    """
 
     cleared = copy.deepcopy(view)
     turns = _turn_bounds(cleared)
     protected = max(1, int(keep_recent_turns))
     clearable = turns[: max(0, len(turns) - protected)]
+    current_revision = str((active_state or {}).get("source_revision") or "")
+    recent_reads = _recent_read_observations(active_state or {})
+    latest_validation = (active_state or {}).get("latest_validation")
+    unresolved_failure = (active_state or {}).get("unresolved_failure")
+    stale_reads_elided = 0
+    recap_receipts = 0
+    recap_chars_added = 0
+    recap_fallbacks = 0
     count = 0
     for start, end in clearable:
-        if _chars(cleared) <= target_chars:
-            break
+        commands = _action_commands(cleared[start]) if start < len(cleared) else ()
         for index in range(start + 1, end):
             tool = cleared[index]
             original = str(tool.get("content") or "")
-            if original.startswith("[Earlier tool result cleared:"):
+            if original.startswith(_COMPACTION_RECEIPT_PREFIXES):
+                continue
+            stale = _stale_read_elidable(tool, commands, recent_reads, current_revision)
+            if stale is not None:
+                path, old_revision, reread_revision = stale
+                digest = hashlib.sha256(
+                    original.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+                tool["content"] = (
+                    f"[Superseded read result cleared: path={_bounded_text(path, 160)} "
+                    f"revision={old_revision} reread_revision={reread_revision} "
+                    f"chars={len(original)} sha256={digest}.]"
+                )
+                stale_reads_elided += 1
+                continue
+            stale_validation = _stale_validation_elidable(
+                tool,
+                commands,
+                latest_validation,
+                unresolved_failure,
+                current_revision,
+            )
+            if stale_validation is not None:
+                command_hash, returncode, passed_revision = stale_validation
+                digest = hashlib.sha256(
+                    original.encode("utf-8", "surrogatepass")
+                ).hexdigest()
+                tool["content"] = (
+                    f"[Superseded validation result cleared: "
+                    f"command_sha256={command_hash} returncode={returncode} "
+                    f"passed_revision={passed_revision} chars={len(original)} "
+                    f"sha256={digest}.]"
+                )
+                stale_reads_elided += 1
+                continue
+    for start, end in clearable:
+        if _chars(cleared) <= target_chars:
+            break
+        commands = _action_commands(cleared[start]) if start < len(cleared) else ()
+        for index in range(start + 1, end):
+            tool = cleared[index]
+            original = str(tool.get("content") or "")
+            if original.startswith(_COMPACTION_RECEIPT_PREFIXES):
                 continue
             digest = hashlib.sha256(
                 original.encode("utf-8", "surrogatepass")
             ).hexdigest()
-            tool["content"] = (
+            bare = (
                 f"[Earlier tool result cleared: chars={len(original)} "
                 f"sha256={digest} returncode={_tool_return_code(tool)}.]"
             )
+            semantic = _turn_semantic_parts(
+                tool,
+                commands,
+                recent_reads,
+                latest_validation,
+                current_revision,
+            )
+            if semantic:
+                recap = _assemble_recap_text(
+                    commands,
+                    tool,
+                    semantic,
+                    original,
+                    digest,
+                    bare,
+                    cap=_RECAP_MAX_CHARS,
+                )
+                if recap is None:
+                    tool["content"] = bare
+                    recap_fallbacks += 1
+                else:
+                    tool["content"] = recap
+                    recap_receipts += 1
+                    recap_chars_added += max(0, len(recap) - len(bare))
+            else:
+                tool["content"] = bare
             count += 1
-    return cleared, count
+    return (
+        cleared,
+        count,
+        stale_reads_elided,
+        recap_receipts,
+        recap_chars_added,
+        recap_fallbacks,
+    )
+
+
+_RECAP_MAX_CHARS = 200
+_COMPACTION_RECEIPT_PREFIXES = (
+    "[Earlier tool result cleared:",
+    "[Superseded read result cleared:",
+    "[Superseded validation result cleared:",
+)
+
+
+def _command_hash_short(command: str) -> str:
+    return hashlib.sha256(
+        (command or "").encode("utf-8", "replace")
+    ).hexdigest()[:16]
+
+
+def _raw_output_hash(tool: dict[str, Any]) -> str:
+    extra = tool.get("extra")
+    raw = extra.get("raw_output") if isinstance(extra, dict) else None
+    if not isinstance(raw, str):
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _recent_read_observations(active_state: dict[str, Any]) -> list[dict[str, Any]]:
+    value = active_state.get("recent_reads") if isinstance(active_state, dict) else None
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict) and item.get("path")]
+
+
+def _match_turn_commands(commands: tuple[str, ...], needle: str) -> bool:
+    if not commands or not needle:
+        return False
+    normalized = " ".join(str(needle).strip().split())
+    return any(
+        " ".join(str(command).strip().split()) == normalized for command in commands
+    )
+
+
+def _turn_read_identity(
+    tool: dict[str, Any], recent_reads: list[dict[str, Any]]
+) -> tuple[str, str] | None:
+    """Return (path, source_revision) when this tool body is a typed read."""
+    raw_hash = _raw_output_hash(tool)
+    if not raw_hash:
+        return None
+    for item in recent_reads:
+        if (
+            str(item.get("output_hash") or "") == raw_hash
+            and str(item.get("path") or "")
+        ):
+            return (
+                str(item["path"]),
+                str(item.get("source_revision") or ""),
+            )
+    return None
+
+
+def _stale_read_elidable(
+    tool: dict[str, Any],
+    commands: tuple[str, ...],
+    recent_reads: list[dict[str, Any]],
+    current_revision: str,
+) -> tuple[str, str, str] | None:
+    """Return (path, old_revision, reread_revision) when a body is superseded.
+
+    The body must hash-identify exactly one typed read observation at an
+    earlier revision while the typed ledger also records a different read of
+    the same path at the current source revision.  The path mention guard
+    prevents byte-identical non-read outputs from being misclassified.
+    """
+    raw_hash = _raw_output_hash(tool)
+    if not raw_hash or not current_revision:
+        return None
+    matched_index: int | None = None
+    matched_path = ""
+    matched_revision = ""
+    for index, item in enumerate(recent_reads):
+        if str(item.get("output_hash") or "") != raw_hash:
+            continue
+        if matched_index is None:
+            matched_index = index
+            matched_path = str(item.get("path") or "")
+            matched_revision = str(item.get("source_revision") or "")
+        else:
+            break
+    if matched_index is None or not matched_path:
+        return None
+    if not any(_command_mentions_path(command, matched_path) for command in commands):
+        return None
+    for index, item in enumerate(recent_reads):
+        if index == matched_index:
+            continue
+        if (
+            str(item.get("path") or "") == matched_path
+            and str(item.get("source_revision") or "") == current_revision
+        ):
+            return (matched_path, matched_revision, current_revision)
+    return None
+
+
+def _stale_validation_elidable(
+    tool: dict[str, Any],
+    commands: tuple[str, ...],
+    latest_validation: Any,
+    unresolved_failure: Any,
+    current_revision: str,
+) -> tuple[str, int, str] | None:
+    """Return (command_hash, returncode, passed_revision) for a superseded run.
+
+    Only a failed run of the exact validation command that has since passed at
+    the current source revision is elidable; passing evidence, un-attributed
+    pipelines, and failures still under investigation stay intact.
+    """
+    if not current_revision or not isinstance(latest_validation, dict):
+        return None
+    v_command = str(latest_validation.get("command") or "")
+    v_revision = str(latest_validation.get("source_revision") or "")
+    v_returncode = latest_validation.get("returncode")
+    returncode = _tool_return_code(tool)
+    if (
+        not v_command
+        or not v_revision
+        or v_revision != current_revision
+        or v_returncode != 0
+        or returncode is None
+        or returncode == 0
+        or not _match_turn_commands(commands, v_command)
+    ):
+        return None
+    if isinstance(unresolved_failure, dict):
+        u_command = str(unresolved_failure.get("command") or "")
+        u_revision = str(unresolved_failure.get("source_revision") or "")
+        if (
+            u_command
+            and u_revision == current_revision
+            and _match_turn_commands(commands, u_command)
+        ):
+            return None
+    return (_command_hash_short(v_command), int(returncode), current_revision)
+
+
+def _turn_semantic_parts(
+    tool: dict[str, Any],
+    commands: tuple[str, ...],
+    recent_reads: list[dict[str, Any]],
+    latest_validation: Any,
+    current_revision: str,
+) -> list[str]:
+    """Typed semantic residue for one cleared tool body; empty when none."""
+    parts: list[str] = []
+    read_identity = _turn_read_identity(tool, recent_reads)
+    if read_identity is not None:
+        path, revision = read_identity
+        parts.append(f"read {_bounded_text(path, 80)}@" + (revision or "?"))
+    if isinstance(latest_validation, dict):
+        v_command = str(latest_validation.get("command") or "")
+        if v_command and _match_turn_commands(commands, v_command):
+            revision = str(
+                latest_validation.get("source_revision") or current_revision
+            )
+            parts.append(
+                f"validation rc={latest_validation.get('returncode')}@"
+                + (revision or "?")
+            )
+    return parts
+
+
+def _assemble_recap_text(
+    commands: tuple[str, ...],
+    tool: dict[str, Any],
+    semantic: list[str],
+    original: str,
+    digest: str,
+    bare: str,
+    *,
+    cap: int,
+) -> str | None:
+    """Assemble one whole recap receipt, or None on any budget overflow."""
+    parts = list(semantic)
+    if commands:
+        parts.insert(0, f"command_sha256={_command_hash_short(commands[0])}")
+    returncode = _tool_return_code(tool)
+    if returncode is not None:
+        parts.append(f"returncode={returncode}")
+    parts.append(f"chars={len(original)}")
+    parts.append(f"sha256={digest}")
+    text = "[Earlier tool result cleared: " + "; ".join(parts) + ".]"
+    if len(text) > max(1, int(cap)) or len(text) <= len(bare):
+        return None
+    return text
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -1340,6 +1642,10 @@ def _provider_metrics(
     duplicate_turns_represented: int = 0,
     old_tool_results_cleared: int = 0,
     state_frame_message_index: int | None = None,
+    stale_reads_elided: int = 0,
+    recap_receipts: int = 0,
+    recap_chars_added: int = 0,
+    recap_fallbacks: int = 0,
 ) -> ProviderViewMetrics:
     output_chars = _chars(view)
     dispositions = [str(row["disposition"]) for row in accounting]
@@ -1390,6 +1696,10 @@ def _provider_metrics(
         duplicate_turns_represented=duplicate_turns_represented,
         old_tool_results_cleared=old_tool_results_cleared,
         state_frame_message_index=state_frame_message_index,
+        stale_reads_elided=stale_reads_elided,
+        recap_receipts=recap_receipts,
+        recap_chars_added=recap_chars_added,
+        recap_fallbacks=recap_fallbacks,
     )
 
 
@@ -1481,11 +1791,23 @@ def build_provider_view(
     facts, duplicate_fact_count = _context_facts(active_state)
     view = prepared
     cleared = 0
+    stale_reads_elided = 0
+    recap_receipts = 0
+    recap_chars_added = 0
+    recap_fallbacks = 0
     if input_chars > max(1, int(trigger_chars)):
-        view, cleared = _clear_old_tool_results(
+        (
+            view,
+            cleared,
+            stale_reads_elided,
+            recap_receipts,
+            recap_chars_added,
+            recap_fallbacks,
+        ) = _clear_old_tool_results(
             view,
             target_chars=max(1, int(target_chars)),
             keep_recent_turns=keep_recent_turns,
+            active_state=active_state,
         )
     state_text, selected_fact_ids, compiled_rows = _compile_fact_frame(
         facts,
@@ -1569,4 +1891,8 @@ def build_provider_view(
         duplicate_turns_represented=preparation["duplicate_count"],
         old_tool_results_cleared=cleared,
         state_frame_message_index=state_frame_message_index,
+        stale_reads_elided=stale_reads_elided,
+        recap_receipts=recap_receipts,
+        recap_chars_added=recap_chars_added,
+        recap_fallbacks=recap_fallbacks,
     )
