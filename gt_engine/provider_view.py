@@ -1059,14 +1059,24 @@ def _raw_output_hash(tool: dict[str, Any]) -> str:
     raw = extra.get("raw_output") if isinstance(extra, dict) else None
     if not isinstance(raw, str):
         return ""
-    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
 
 
 def _recent_read_observations(active_state: dict[str, Any]) -> list[dict[str, Any]]:
-    value = active_state.get("recent_reads") if isinstance(active_state, dict) else None
+    if not isinstance(active_state, dict):
+        return []
+    value = active_state.get("read_history")
+    if not isinstance(value, list):
+        value = active_state.get("recent_reads")
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, dict) and item.get("path")]
+    return [
+        item
+        for item in value
+        if isinstance(item, dict)
+        and item.get("path")
+        and item.get("observation_kind") in (None, "", "read")
+    ]
 
 
 def _match_turn_commands(commands: tuple[str, ...], needle: str) -> bool:

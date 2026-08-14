@@ -12,9 +12,11 @@ from __future__ import annotations
 import copy
 import hashlib
 
+from gt_engine.central_runtime import CentralFeatureRuntime, WorkspaceTransition
 from gt_engine.provider_view import (
     ProviderViewSession,
     _assemble_recap_text,
+    _recent_read_observations,
     _turn_semantic_parts,
     build_provider_view,
 )
@@ -358,3 +360,259 @@ def test_compaction_epoch_receipt_records_elision_and_recap():
     assert receipt.recap_receipts == metrics.recap_receipts
     assert receipt.recap_fallbacks == metrics.recap_fallbacks
     assert metrics.unique_assistant_reasoning_chars_removed == 0
+
+
+def _ledger_read(
+    path: str, output: str, *, source_revision: str, kind: str = "read"
+) -> dict:
+    return {
+        "path": path,
+        "start_line": 1,
+        "end_line": None,
+        "whole_file": True,
+        "source_revision": source_revision,
+        "workspace_revision": "w",
+        "action_id": 1,
+        "returncode": 0,
+        "output_hash": hashlib.sha256(
+            (output or "").encode("utf-8", "replace")
+        ).hexdigest(),
+        "content_mapped": False,
+        "observation_kind": kind,
+    }
+
+
+def test_live_ledger_shape_fires_elision_via_read_history():
+    """progress_ledger exposes current reads filtered AND full read_history.
+
+    Elision must succeed when recent_reads holds only the current revision
+    (the provider-visible frame contract) while read_history retains the
+    old-revision read needed for hash identity.  Without read_history this
+    would be the live-path dead-code defect the audit caught.
+    """
+    old_body = "J" * 40_000
+    new_body = "K" * 100
+    messages = _history(
+        ("cat /app/src/app.py", old_body, 0),
+        ("sed -i s/old/new/ /app/src/app.py", "edited", 0),
+        ("cat /app/src/app.py", new_body, 0),
+    )
+    active_state = {
+        "source_revision": "s2",
+        "recent_reads": [
+            _ledger_read("/app/src/app.py", new_body, source_revision="s2"),
+        ],
+        "read_history": [
+            _ledger_read("/app/src/app.py", old_body, source_revision="s1"),
+            _ledger_read("/app/src/app.py", new_body, source_revision="s2"),
+        ],
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=active_state,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=2,
+    )
+
+    joined = " ".join(str(m.get("content") or "") for m in view)
+    assert metrics.stale_reads_elided == 1
+    assert "[Superseded read result cleared:" in joined
+    assert "revision=s1 reread_revision=s2" in joined
+
+
+def test_search_anchor_observations_never_authorize_elision():
+    """Search-anchor ledger rows hash search output, not file bytes.
+
+    A read body must never be elided using a search-anchor observation, even
+    if their output hashes happen to collide.  The anchor row is filtered out
+    of the elision corpus, so the stale read has no current-revision reread
+    to authorize supersession.
+    """
+    body = "L" * 40_000
+    messages = _history(
+        ("cat /app/src/app.py", body, 0),
+        ("grep -n def /app/src/app.py", "1: def main():", 0),
+    )
+    active_state = {
+        "source_revision": "s2",
+        "recent_reads": [],
+        "read_history": [
+            _ledger_read("/app/src/app.py", body, source_revision="s1"),
+            _ledger_read(
+                "/app/src/app.py", "1: def main():", source_revision="s2", kind="search_anchor"
+            ),
+        ],
+    }
+
+    _, metrics = build_provider_view(
+        messages,
+        active_state=active_state,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=1,
+    )
+
+    assert metrics.stale_reads_elided == 0
+
+
+def test_recap_read_identity_works_with_live_filtered_ledger():
+    """Cleared old read bodies gain typed recap identity from read_history.
+
+    The recap receipt must name the read path@old-revision even when the
+    provider-visible recent_reads frame is filtered to the current revision
+    and no current reread exists (so the body is not superseded-elided but is
+    still cleared under budget pressure in Phase B).
+    """
+    body = "M" * 40_000
+    messages = _history(
+        ("cat /app/src/app.py", body, 0),
+        ("pytest -q", "ok", 0),
+    )
+    active_state = {
+        "source_revision": "s2",
+        "recent_reads": [],
+        "read_history": [
+            _ledger_read("/app/src/app.py", body, source_revision="s1"),
+        ],
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=active_state,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=1,
+    )
+
+    recap = next(
+        m["content"]
+        for m in view
+        if str(m.get("content") or "").startswith("[Earlier tool result cleared:")
+    )
+    assert metrics.recap_receipts == 1
+    assert "read /app/src/app.py@s1" in recap
+    assert "cat /app/src/app.py" not in recap
+
+
+def _runtime_ledger(old_body: str, new_body: str) -> dict:
+    runtime = CentralFeatureRuntime(enabled=True, model_visible=True)
+
+    def transition(action_id: int, command: str, rev: str) -> WorkspaceTransition:
+        return WorkspaceTransition(
+            action_id=action_id,
+            command=command,
+            before_revision=rev,
+            after_revision=rev,
+        )
+
+    runtime.observe_action(
+        action_id=1,
+        command="cat /app/src/app.py",
+        output=old_body,
+        returncode=0,
+        transition=transition(1, "cat /app/src/app.py", "s1"),
+        revision="w",
+        source_revision="s1",
+        snapshot=None,
+    )
+    runtime.observe_action(
+        action_id=2,
+        command="sed -i s/old/new/ /app/src/app.py",
+        output="edited",
+        returncode=0,
+        transition=transition(2, "sed -i s/old/new/ /app/src/app.py", "s2"),
+        revision="w",
+        source_revision="s2",
+        snapshot=None,
+    )
+    runtime.observe_action(
+        action_id=3,
+        command="cat /app/src/app.py",
+        output=new_body,
+        returncode=0,
+        transition=transition(3, "cat /app/src/app.py", "s2"),
+        revision="w",
+        source_revision="s2",
+        snapshot=None,
+    )
+    return runtime.progress_ledger()
+
+
+def test_real_runtime_ledger_enables_elision_end_to_end():
+    """The real CentralFeatureRuntime ledger (not a hand-built fixture) must
+    expose read_history so stale-read elision can fire through the actual
+    observe_action -> progress_ledger -> build_provider_view chain."""
+    old_body = "N" * 40_000
+    new_body = "O" * 100
+    messages = _history(
+        ("cat /app/src/app.py", old_body, 0),
+        ("sed -i s/old/new/ /app/src/app.py", "edited", 0),
+        ("cat /app/src/app.py", new_body, 0),
+    )
+    ledger = _runtime_ledger(old_body, new_body)
+
+    assert [i["source_revision"] for i in ledger["recent_reads"]] == ["s2"]
+    assert sorted(i["source_revision"] for i in ledger["read_history"]) == ["s1", "s2"]
+    assert len(_recent_read_observations(ledger)) == 2
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=ledger,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=2,
+    )
+
+    joined = " ".join(str(m.get("content") or "") for m in view)
+    assert metrics.stale_reads_elided == 1
+    assert (
+        "[Superseded read result cleared: path=/app/src/app.py revision=s1 reread_revision=s2"
+        in joined
+    )
+    assert old_body not in joined
+    assert new_body in joined
+
+
+def test_real_runtime_ledger_recap_read_identity():
+    """A cleared real read body gains its typed read@revision recap identity
+    from the runtime ledger's read_history even when recent_reads is filtered
+    to the current revision."""
+    body = "P" * 40_000
+    messages = _history(
+        ("cat /app/src/app.py", body, 0),
+        ("pytest -q", "ok", 0),
+    )
+    runtime = CentralFeatureRuntime(enabled=True, model_visible=True)
+    transition = WorkspaceTransition(
+        action_id=1, command="cat /app/src/app.py", before_revision="s1", after_revision="s1"
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="cat /app/src/app.py",
+        output=body,
+        returncode=0,
+        transition=transition,
+        revision="w",
+        source_revision="s1",
+        snapshot=None,
+    )
+    ledger = runtime.progress_ledger()
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=ledger,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=1,
+    )
+
+    recap = next(
+        m["content"]
+        for m in view
+        if str(m.get("content") or "").startswith("[Earlier tool result cleared:")
+    )
+    assert metrics.recap_receipts == 1
+    assert "read /app/src/app.py@s1" in recap
+    assert "cat /app/src/app.py" not in recap

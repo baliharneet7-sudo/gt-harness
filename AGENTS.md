@@ -1859,3 +1859,46 @@ passes the source-built Linux provider-free workflow with the pinned dense
 asset. No paid smoke or benchmark is authorized by this repair alone; the next
 comparison must use a contemporaneous Mini-SWE GT-off control with identical
 provider, model settings, tools, task revision, budgets, and runner.
+
+## Stale-read/validation elision and typed recap receipts (2026-08-14)
+
+Compaction is deterministic and reasoning-preserving: it clears only old tool
+bodies, never assistant content or reasoning. Inside a compaction epoch it now
+additionally applies two typed mechanisms, both driven by the shared
+`progress_ledger` and never by raw command parsing:
+
+1. **Stale-read elision (Phase A).** A tool body is superseded and replaced by
+   the typed marker `[Superseded read result cleared: path=… revision=<old>
+   reread_revision=<current> chars=… sha256=….]` only when the body's
+   `extra.raw_output` hash-identifies exactly one typed read observation at an
+   earlier source revision AND the ledger records a different read of the same
+   path at the current source revision AND the executing command mentions the
+   path. Stale failed validations are elided only when the same command passed
+   (returncode 0) at the current revision with no matching unresolved failure at
+   the current revision. Search-anchor observations can never authorize read
+   elision.
+2. **Typed recap receipts (Phase B).** A cleared body that carries typed ledger
+   identity becomes one atomic bounded receipt
+   `[Earlier tool result cleared: command_sha256=…; read path@rev; returncode=…;
+   chars=…; sha256=….]` capped at 200 characters, never containing command text.
+   Any overflow falls back to the historical bare hash receipt byte-for-byte.
+
+The identity ledger is authoritative and all-revision. `progress_ledger()`
+exposes `recent_reads` (current-revision only, consumed by the provider-visible
+state frame) AND `read_history` (the full bounded read ledger, consumed only by
+elision/recap identity and never a context fact). Stale-read elision and recap
+read-identity must read `read_history`; a `recent_reads`-only implementation is
+dead code in the live path. `output_hash` and `_raw_output_hash` both use
+UTF-8 `replace` encoding so identity can never diverge. Every marker's
+`chars`/`sha256` must verify against the cleared body, and every elision/recap
+fires only inside an epoch: below-trigger views remain byte-identical.
+
+The deep audit is recorded in
+`details_done/GT_COMPACTION_ELISION_RECAP_DEEP_AUDIT_20260814.md`, including
+real-trajectory replay (run `31557391617`, real `go.mod` read elided), 60/60
+property cases, 5 adversarial cases, wiring proof through
+`DIAGNOSTIC_METRICS`/`compare_arms`, and end-to-end `CentralFeatureRuntime`
+ledger tests. This is deterministic implementation/integration proof only; it
+does not waive the stale Windows `gt-index.exe` blocker, does not authorize a
+paid smoke, and does not claim solve/efficiency uplift. Only the source-built
+Linux provider-free workflow certifies readiness.

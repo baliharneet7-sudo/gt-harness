@@ -4479,6 +4479,11 @@ class CentralFeatureRuntime:
             "last_edit": self._last_edit,
             "latest_validation": self._latest_validation,
             "unresolved_failure": self._latest_failure,
+            "read_history": [
+                dict(item)
+                for item in self._recent_reads
+                if item.get("source_revision")
+            ],
             "recent_reads": [
                 dict(item)
                 for item in self._recent_reads
