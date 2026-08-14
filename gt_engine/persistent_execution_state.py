@@ -2051,6 +2051,7 @@ class PersistentExecutionStateEngine:
                 item is not None
                 and item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
                 and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+                and bool(_provider_material_relation(item.relation))
             ):
                 return item
             return None
@@ -2096,6 +2097,7 @@ class PersistentExecutionStateEngine:
                         materiality_reason="newly_certified_related_file",
                         origin_revision=focus.origin_revision,
                         relation_endpoint=focus.path,
+                        relation=_provider_material_relation(focus.relation),
                     ),
                 )
             )
@@ -2123,6 +2125,7 @@ class PersistentExecutionStateEngine:
                             origin_revision=focus.origin_revision,
                             relation_endpoint=focus.path,
                             known_texts=(focus.source_excerpt,),
+                            relation=_provider_material_relation(focus.relation),
                         ),
                     )
                 )
@@ -2130,16 +2133,13 @@ class PersistentExecutionStateEngine:
             item
             for item in snapshot.obligations
             if item.status is ObligationStatus.OPEN
-            and (
-                item.blocking
-                or bool(_provider_material_relation(item.relation))
-            )
+            and bool(_provider_material_relation(item.relation))
         ]
         for obligation in open_obligations[:4]:
             obligation_target = obligation.path or obligation.source_path
-            relation = _provider_material_relation(obligation.relation) or str(
-                obligation.relation or ""
-            ).strip().lower()
+            relation = _provider_material_relation(obligation.relation)
+            if not relation:
+                continue
             lines.append(
                 (
                     _stable_id(
@@ -2150,7 +2150,7 @@ class PersistentExecutionStateEngine:
                     (
                         f"{'Required' if obligation.blocking else 'Related'} "
                         f"{obligation.kind}: {obligation_target} "
-                        f"({obligation.relation} from {obligation.source_path})."
+                        f"({relation} from {obligation.source_path})."
                     ),
                     metadata(
                         origin=(

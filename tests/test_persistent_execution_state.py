@@ -2268,3 +2268,83 @@ def test_implements_advisories_stay_private_while_calls_remain_provider_visible(
     assert "IMPLEMENTS" not in frame.rendered_text
     assert "implements from" not in frame.rendered_text.lower()
     assert "Related inspect_dependency: src/api.py" in frame.rendered_text
+
+
+def test_implements_only_neighbor_is_not_dumped_as_certified_related_file():
+    evidence = replace(
+        _evidence(),
+        callers=(),
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix save_user.",
+        evidence=evidence,
+        documents=(
+            _document("src/service.py", "save_user", 10),
+            _document("src/api.py", "create_user", 24),
+        ),
+        structural_links=(
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="src/api.py",
+                relation="IMPLEMENTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPLEMENTS",),
+                certified=True,
+                source_symbol="save_user",
+                target_symbol="UserAPI",
+            ),
+        ),
+        explicit_checks=(),
+        task_deliverables=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=(
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="src/api.py",
+                relation="IMPLEMENTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPLEMENTS",),
+                certified=True,
+                source_symbol="save_user",
+                target_symbol="UserAPI",
+            ),
+        ),
+        present_paths=("src/service.py", "src/api.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=1,
+        max_tokens=512,
+    )
+
+    assert any(
+        item.relation == "implements"
+        and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+        for item in catalog.items
+    )
+    assert "Certified related repository file:" not in frame.rendered_text
+    assert "implements" not in frame.rendered_text.lower()
+    assert "src/api.py" not in frame.rendered_text
+    assert frame.kind is ContextFrameKind.NONE
+    assert "no_material_certified_localization" in frame.reason_codes

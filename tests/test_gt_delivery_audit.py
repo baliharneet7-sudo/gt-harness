@@ -501,3 +501,46 @@ def test_persistent_implements_advisory_materiality_is_rejected():
     assert any(
         "persistent_delivery_semantic_authority_invalid" in item for item in failures
     )
+
+
+def test_persistent_certified_related_file_without_material_relation_is_rejected():
+    receipt = {
+        "model_call_contexts": [_context(1, request="req-1", provider="provider-1")],
+        "guidance_deliveries": [],
+        "repository_intelligence": {"frontier_deliveries": []},
+        "preemptive_retrieval": {"deliveries": []},
+        "progress": {},
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-empty-relation",
+                    "claim_ids": ["related-claim"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 40,
+                    "claim_metadata": [
+                        _claim_meta(
+                            "related-claim",
+                            authority="certified_relation",
+                            materiality_reason="newly_certified_related_file",
+                            relation="",
+                            relation_endpoint="src/api.py",
+                        )
+                    ],
+                }
+            ]
+        },
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(
+        "persistent_delivery_semantic_authority_invalid" in item for item in failures
+    )
