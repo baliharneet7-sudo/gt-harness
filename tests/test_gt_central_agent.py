@@ -287,7 +287,8 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert '"thinking_mode": (' in workflow
     assert 'if provider in {"tokenrouter", "deepseek"}' in workflow
     assert '"cost_observed": cost_observed' in workflow
-    assert 'provider not in {"tokenrouter", "deepseek"} and not proof["system_fingerprint"]' in workflow
+    assert 'provider not in {"tokenrouter", "deepseek"}' in workflow
+    assert 'and not proof["system_fingerprint"]' in workflow
     assert "https://api.deepseek.com" in workflow
     assert "openai/deepseek-v4-flash" in workflow
     assert "deepseek:native:api.deepseek.com" in workflow
