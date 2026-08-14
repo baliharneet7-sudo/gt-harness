@@ -1911,7 +1911,7 @@ async def test_supported_source_creation_activates_persistent_state_once(
 
 
 @pytest.mark.asyncio
-async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
+async def test_source_backed_localization_stays_off_first_provider_call(tmp_path):
     class TransferEnvironment(_Environment):
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
             root = Path(target_dir)
@@ -1938,26 +1938,23 @@ async def test_source_backed_localization_reaches_first_provider_call(tmp_path):
     )
 
     assert len(model.observed_history) == 1
-    assert any("src/greeter.py" in item for item in model.observed_history[0])
+    first_request = "\n".join(model.observed_history[0])
+    assert "Highest-ranked source anchors:" not in first_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     evidence = receipt["repository_evidence"]
     assert evidence["available"] is True
-    delivery = receipt["guidance_deliveries"][0]
-    assert delivery["evidence_action"] == 0
-    assert delivery["delivered_before_call"] == 1
-    assert delivery["one_step_late"] is False
-    assert delivery["not_predictive"] is True
-    assert receipt["metrics"]["semantic_utilization_deliveries"] == 1
-    assert receipt["metrics"]["semantic_utilization_no_match"] == 1
-    replay = load_replay_bundle(tmp_path / "gt_replay")
-    pair = replay["calls"][0]
-    assert pair["intervention"]["prior_visible_gt_count"] == 0
-    assert pair["intervention"]["payload"]
-    assert pair["control_provider_messages"] != pair["provider_messages"]
-    assert (
-        validate_decision_point_row(pair, task_id="localization").validity
-        is DecisionPointValidity.VALID
+    assert not any(
+        row.get("feature_id") == "GT_LOC_RESLOT"
+        for row in receipt.get("guidance_deliveries") or ()
     )
+    loc_receipts = [
+        row
+        for row in receipt["features"]["receipts"]
+        if row["feature_id"] == "GT_LOC_RESLOT"
+    ]
+    assert loc_receipts
+    assert all(row["model_visible"] is False for row in loc_receipts)
+    assert receipt["metrics"]["semantic_utilization_deliveries"] == 0
 
 
 @pytest.mark.asyncio
