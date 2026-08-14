@@ -27,6 +27,14 @@ from gt_engine.hybrid_retrieval import (
 from gt_engine.preflight import ActionOperation, ProposedAction
 from gt_engine.repository_intelligence import RepositoryEvidence
 
+SELECT_CATALOG_TOOL_NAME = "select_catalog"
+_BOOTSTRAP_SELECTION_KEYS = (
+    "primary_focus_id",
+    "ordered_item_ids",
+    "risk_item_ids",
+    "validation_item_ids",
+)
+_PES_ID_RE = re.compile(r"pes-[0-9a-f]{20}")
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|[^\s]", re.UNICODE)
 _PATH_RE = re.compile(r"(?<![\w.-])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
 _CERTIFIED_RELATIONS = frozenset(
@@ -65,6 +73,71 @@ def _certified_relation(link: StructuralLink) -> str:
 def _stable_id(prefix: str, *parts: str) -> str:
     payload = "\0".join(str(part) for part in parts)
     return f"{prefix}-" + hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()[:20]
+
+
+def build_select_catalog_tool(visible_item_ids: Iterable[str]) -> dict[str, Any]:
+    """OpenAI function schema constrained to the visible catalog ID surface."""
+
+    ids = [item for item in dict.fromkeys(visible_item_ids) if item]
+    id_enum = ids or ["__empty_catalog__"]
+    primary_enum = ["", *id_enum]
+    id_schema: dict[str, Any] = {"type": "string", "enum": id_enum}
+    return {
+        "type": "function",
+        "function": {
+            "name": SELECT_CATALOG_TOOL_NAME,
+            "description": (
+                "Select existing catalog item IDs for the next execution focus. "
+                "Do not invent paths, symbols, commands, or IDs."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": list(_BOOTSTRAP_SELECTION_KEYS),
+                "properties": {
+                    "primary_focus_id": {"type": "string", "enum": primary_enum},
+                    "ordered_item_ids": {"type": "array", "items": id_schema},
+                    "risk_item_ids": {"type": "array", "items": id_schema},
+                    "validation_item_ids": {"type": "array", "items": id_schema},
+                },
+            },
+        },
+    }
+
+
+def attempted_bootstrap_item_ids(raw: Any) -> tuple[str, ...]:
+    """Recover candidate IDs from valid JSON, a typed payload, or raw text."""
+
+    payload: Any = raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return tuple(dict.fromkeys(_PES_ID_RE.findall(raw)))
+    if not isinstance(payload, dict):
+        return ()
+    found: list[str] = []
+    primary = payload.get("primary_focus_id")
+    if isinstance(primary, str) and primary:
+        found.append(primary)
+    for key in ("ordered_item_ids", "risk_item_ids", "validation_item_ids"):
+        values = payload.get(key) or []
+        if isinstance(values, list):
+            found.extend(
+                item for item in values if isinstance(item, str) and item
+            )
+    found.extend(_PES_ID_RE.findall(json.dumps(payload, sort_keys=True)))
+    return tuple(dict.fromkeys(found))
+
+
+def bootstrap_args_preview(raw: Any, *, limit: int = 480) -> str:
+    """Bounded ID-only preview. Never persist secrets or source bytes."""
+
+    ids = attempted_bootstrap_item_ids(raw)
+    rendered = json.dumps({"attempted_item_ids": list(ids)}, separators=(",", ":"))
+    return rendered[: max(1, int(limit))]
 
 
 def _bounded(value: Any, limit: int) -> str:
@@ -558,6 +631,30 @@ def _catalog_item(
     )
 
 
+def _pack_catalog_items(
+    ordered: Sequence[tuple[int, BootstrapCatalogItem]],
+    max_items: int,
+) -> tuple[BootstrapCatalogItem, ...]:
+    """Keep required and certified-relation rows inside the catalog ceiling."""
+
+    limit = max(1, int(max_items))
+    selected: dict[str, BootstrapCatalogItem] = {}
+
+    def take(items: Iterable[BootstrapCatalogItem]) -> None:
+        for item in items:
+            if item.item_id not in selected and len(selected) < limit:
+                selected[item.item_id] = item
+
+    take(item for _, item in ordered if item.required)
+    take(
+        item
+        for _, item in ordered
+        if item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+    )
+    take(item for _, item in ordered)
+    return tuple(item for _, item in ordered if item.item_id in selected)
+
+
 def build_bootstrap_catalog(
     *,
     instruction: str,
@@ -867,7 +964,7 @@ def build_bootstrap_catalog(
             row[1].item_id,
         ),
     )
-    items = tuple(item for _, item in ordered[: max(1, int(max_items))])
+    items = _pack_catalog_items(ordered, max_items)
     return BootstrapCatalog(
         source_revision=source_revision,
         graph_source_revision=bound_graph_source_revision,
@@ -879,28 +976,32 @@ def build_bootstrap_catalog(
 
 
 def parse_bootstrap_selection(
-    raw: str,
+    raw: Any,
     catalog: BootstrapCatalog,
     *,
     visible_item_ids: frozenset[str] | None = None,
 ) -> BootstrapSelection:
-    """Accept only catalog identifiers from the model's JSON transport value."""
+    """Accept only catalog identifiers from a typed select_catalog payload."""
 
     if not catalog.complete:
         return BootstrapSelection(False, reason_codes=("catalog_incomplete",))
-    try:
-        value = json.loads(str(raw or ""))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return BootstrapSelection(False, reason_codes=("invalid_json",))
+    value: Any = raw
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+        value = raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return BootstrapSelection(False, reason_codes=("invalid_json",))
     if not isinstance(value, dict):
         return BootstrapSelection(False, reason_codes=("invalid_shape",))
-    allowed_keys = {
-        "primary_focus_id",
-        "ordered_item_ids",
-        "risk_item_ids",
-        "validation_item_ids",
-    }
-    if set(value) - allowed_keys:
+    # The retired Bash envelope stuffed JSON into ``command``. That shape is
+    # never a valid select_catalog payload.
+    if "command" in value and not any(key in value for key in _BOOTSTRAP_SELECTION_KEYS):
+        return BootstrapSelection(False, reason_codes=("unknown_tool",))
+    extra_keys = set(value) - set(_BOOTSTRAP_SELECTION_KEYS)
+    if extra_keys:
         return BootstrapSelection(False, reason_codes=("unknown_field",))
 
     def ids(key: str, limit: int) -> tuple[str, ...] | None:
@@ -926,16 +1027,19 @@ def parse_bootstrap_selection(
     ):
         return BootstrapSelection(False, reason_codes=("unshown_catalog_id",))
     item_by_id = {item.item_id: item for item in catalog.items}
-    if any(item_by_id[item].kind is not CatalogItemKind.VALIDATION for item in validations):
-        return BootstrapSelection(False, reason_codes=("invalid_validation_id",))
     if primary and item_by_id[primary].kind is CatalogItemKind.VALIDATION:
         return BootstrapSelection(False, reason_codes=("invalid_primary_focus",))
+    kept_validations = tuple(
+        item_id
+        for item_id in validations
+        if item_by_id[item_id].kind is CatalogItemKind.VALIDATION
+    )
     return BootstrapSelection(
         True,
         primary_focus_id=primary,
         ordered_item_ids=ordered or (),
         risk_item_ids=risks or (),
-        validation_item_ids=validations or (),
+        validation_item_ids=kept_validations,
     )
 
 
@@ -980,7 +1084,7 @@ def build_bootstrap_messages(
     catalog: BootstrapCatalog,
     max_input_tokens: int = 2_000,
 ) -> list[dict[str, str]]:
-    """Create a bounded one-call selection request using Mini-SWE's Bash envelope."""
+    """Create a bounded one-call selection request using select_catalog."""
 
     compact_items = [
         {
@@ -995,19 +1099,27 @@ def build_bootstrap_messages(
         "You select an execution focus from repository-certified entities and explicitly "
         "labeled hybrid-ranked candidates. Candidate relevance is not a requirement. "
         "You may order IDs but may not add facts, paths, symbols, or commands. "
-        "The bash tool is a JSON transport only and will not execute."
+        "Use the select_catalog tool only. It is not executed as a shell command."
     )
 
     def render_user(items: list[dict[str, Any]], task_excerpt: str) -> str:
+        has_validation = any(item.get("kind") == CatalogItemKind.VALIDATION.value for item in items)
+        validation_rule = (
+            "Leave validation_item_ids empty if no validation items are listed."
+            if not has_validation
+            else "validation_item_ids may contain only listed validation IDs."
+        )
         return (
             "TASK\n"
             + task_excerpt
             + "\n\nCERTIFIED CATALOG\n"
             + json.dumps(items, sort_keys=True, separators=(",", ":"))
-            + "\n\nSelect only catalog IDs. Return exactly one bash tool call. Its command "
-            "must be JSON with primary_focus_id, ordered_item_ids, risk_item_ids, "
-            "and validation_item_ids. An empty primary_focus_id is allowed when the "
-            "ranked candidates do not justify a focus. Do not emit shell code."
+            + "\n\nSelect only catalog IDs. Return exactly one select_catalog tool call with "
+            "primary_focus_id, ordered_item_ids, risk_item_ids, and validation_item_ids. "
+            "An empty primary_focus_id is allowed when the ranked candidates do not justify a "
+            "focus. "
+            + validation_rule
+            + " Do not invent IDs, paths, or symbols. Do not emit shell code or a bash command."
         )
 
     task_excerpt = _bounded(task, 1_200)
@@ -2315,7 +2427,16 @@ class PersistentExecutionStateEngine:
         elif provider_known_claims:
             reason_codes = ("provider_history_already_contains_evidence",)
         elif self._last_dispatched_version == 0 and not frame_rows:
-            reason_codes = ("no_material_certified_localization",)
+            has_certified_neighbor = any(
+                item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+                for item in self._catalog.items
+            )
+            reason_codes = (
+                ("no_material_certified_localization",)
+                if has_certified_neighbor
+                else ("no_certified_related_file",)
+            )
         else:
             reason_codes = ("state_change_already_represented_or_not_model_material",)
         focus_id = self._snapshot.current_focus_id or self._snapshot.primary_focus_id
@@ -2457,7 +2578,11 @@ __all__ = [
     "StateValidationStatus",
     "build_bootstrap_catalog",
     "build_bootstrap_messages",
+    "build_select_catalog_tool",
+    "bootstrap_args_preview",
     "bootstrap_visible_item_ids",
+    "attempted_bootstrap_item_ids",
     "deterministic_bootstrap_fallback",
     "parse_bootstrap_selection",
+    "SELECT_CATALOG_TOOL_NAME",
 ]

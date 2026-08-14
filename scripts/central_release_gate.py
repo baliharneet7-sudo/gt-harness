@@ -510,6 +510,7 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
                 {
                     "state_change_already_represented_or_not_model_material",
                     "no_material_certified_localization",
+                    "no_certified_related_file",
                     "provider_history_already_contains_evidence",
                     "context_budget_closed",
                     "stale_source_revision",
@@ -535,7 +536,13 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         and dispatched_contexts
         and dispatched_delivery_count == 0
     ):
-        failures.append(f"{label}:persistent_no_material_delivery")
+        legal_empty = all(
+            "no_certified_related_file"
+            in tuple((row.get("persistent_execution_state") or {}).get("reason_codes") or ())
+            for row in dispatched_contexts
+        )
+        if not legal_empty:
+            failures.append(f"{label}:persistent_no_material_delivery")
     if int(metrics.get("persistent_state_bootstrap_calls") or 0) != 1:
         failures.append(f"{label}:persistent_bootstrap_metric_mismatch")
     if int(metrics.get("persistent_state_initial_retrieval_calls") or 0) != 1:

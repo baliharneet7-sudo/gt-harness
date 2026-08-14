@@ -4,20 +4,100 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 
 from eval.gt_central_agent import MiniSweCentralAgent
+from gt_engine.hybrid_retrieval import EvidenceAuthority, EvidenceOrigin
 from gt_engine.persistent_execution_state import (
+    SELECT_CATALOG_TOOL_NAME,
     BootstrapCatalog,
     BootstrapCatalogItem,
     CatalogItemKind,
 )
 
 
-def _catalog() -> BootstrapCatalog:
+def _item(
+    *,
+    kind: CatalogItemKind,
+    index: int,
+    label: str,
+    required: bool = False,
+    evidence_authority: EvidenceAuthority = EvidenceAuthority.IDENTITY_ONLY,
+) -> BootstrapCatalogItem:
+    digest = hashlib.sha256(f"{kind.value}:{index}:{label}".encode()).hexdigest()[:20]
+    return BootstrapCatalogItem(
+        item_id=f"pes-{digest}",
+        kind=kind,
+        label=label,
+        path=f"src/module_{index:02d}.py",
+        symbol=f"symbol_{index:02d}",
+        relation="calls" if evidence_authority is EvidenceAuthority.CERTIFIED_RELATION else "",
+        required=required,
+        origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
+        evidence_authority=evidence_authority,
+    )
+
+
+def production_shaped_catalog() -> BootstrapCatalog:
+    """Live-shaped catalog: many hashed IDs, mixed kinds, larger than the 2k visible ceiling."""
+
+    items: list[BootstrapCatalogItem] = []
+    items.append(
+        _item(
+            kind=CatalogItemKind.VALIDATION,
+            index=0,
+            label="Required validation: pytest tests/test_service.py -q --tb=short",
+            required=True,
+            evidence_authority=EvidenceAuthority.EXECUTION_OBSERVATION,
+        )
+    )
+    for index in range(1, 12):
+        items.append(
+            _item(
+                kind=CatalogItemKind.FOCUS,
+                index=index,
+                label=(
+                    f"Hybrid-ranked repository candidate #{index}: "
+                    f"src/module_{index:02d}.py:1#symbol_{index:02d} implementation surface"
+                ),
+            )
+        )
+    for index in range(12, 24):
+        items.append(
+            _item(
+                kind=CatalogItemKind.DEPENDENCY,
+                index=index,
+                label=(
+                    f"Certified calls neighbor src/module_{index:02d}.py#symbol_{index:02d} "
+                    "connected to the active implementation candidate"
+                ),
+                evidence_authority=EvidenceAuthority.CERTIFIED_RELATION,
+            )
+        )
+    for index in range(24, 32):
+        items.append(
+            _item(
+                kind=CatalogItemKind.FOCUS,
+                index=index,
+                label=f"Task-named repository path filler src/module_{index:02d}.py",
+            )
+        )
+    return BootstrapCatalog(
+        source_revision="bootstrap-canary-source-v1",
+        graph_source_revision="bootstrap-canary-source-v1",
+        graph_revision="bootstrap-canary-graph-v1",
+        items=tuple(items),
+        complete=True,
+    )
+
+
+def legacy_one_item_catalog() -> BootstrapCatalog:
+    """Negative fixture only. Live canary must not use a 1-item FOCUS catalog."""
+
     return BootstrapCatalog(
         source_revision="bootstrap-canary-source-v1",
         graph_source_revision="bootstrap-canary-source-v1",
@@ -38,13 +118,14 @@ def _catalog() -> BootstrapCatalog:
 
 
 async def run_canary(*, model_name: str, timeout_sec: float) -> dict[str, object]:
+    catalog = production_shaped_catalog()
     with tempfile.TemporaryDirectory(prefix="gt-bootstrap-canary-") as logs_dir:
         agent = MiniSweCentralAgent(logs_dir=Path(logs_dir), model_name=model_name)
         model = agent._build_model()
         selection, receipt = await agent._run_persistent_state_bootstrap(
             model,
-            instruction="Select the certified implementation focus.",
-            catalog=_catalog(),
+            instruction="Select the certified implementation focus and related files.",
+            catalog=catalog,
             timeout_sec=timeout_sec,
         )
         effective_model = str(
@@ -58,6 +139,7 @@ async def run_canary(*, model_name: str, timeout_sec: float) -> dict[str, object
         "selection_valid": selection.valid,
         "selection": selection.as_dict(),
         "receipt": receipt,
+        "catalog_count": len(catalog.items),
     }
     return result
 
@@ -89,14 +171,23 @@ def validate_canary(result: dict[str, object]) -> tuple[str, ...]:
         failures.append("provider_query_marker_failed")
     if receipt.get("provider_error"):
         failures.append("provider_error")
-    if contract.get("thinking_mode") != "disabled":
-        failures.append("thinking_not_disabled")
-    if contract.get("forced_tool") != "bash" or contract.get("tool_choice") != (
-        "named_function"
-    ):
-        failures.append("forced_bash_contract_missing")
+    if contract.get("forced_tool") != SELECT_CATALOG_TOOL_NAME or contract.get(
+        "tool_choice"
+    ) != ("named_function"):
+        failures.append("forced_select_catalog_contract_missing")
     if contract.get("num_retries") != 0:
         failures.append("provider_retry_enabled")
+    effective_model = str(result.get("model_effective") or "").lower()
+    if "deepseek-v4" in effective_model and contract.get("thinking_mode") != "disabled":
+        failures.append("bootstrap_thinking_adapter_missing")
+    catalog_count = int(receipt.get("catalog_count") or result.get("catalog_count") or 0)
+    visible_count = int(receipt.get("visible_catalog_count") or 0)
+    if catalog_count < 16:
+        failures.append("catalog_not_production_shaped")
+    if visible_count <= 0:
+        failures.append("visible_catalog_missing")
+    elif visible_count >= catalog_count:
+        failures.append("catalog_not_truncated")
 
     def is_sha256(value: object) -> bool:
         text = str(value or "")
@@ -106,12 +197,11 @@ def validate_canary(result: dict[str, object]) -> tuple[str, ...]:
         receipt.get("provider_messages_sha256")
     ):
         failures.append("request_hash_missing")
-    if int(receipt.get("visible_catalog_count") or 0) <= 0 or not is_sha256(
-        receipt.get("visible_catalog_ids_sha256")
-    ):
+    if not is_sha256(receipt.get("visible_catalog_ids_sha256")):
         failures.append("visible_catalog_missing")
+    if not is_sha256(receipt.get("raw_tool_arguments_sha256")):
+        failures.append("raw_bootstrap_args_missing")
     response_model = str(identity.get("model") or "")
-    effective_model = str(result.get("model_effective") or "")
     if not response_model:
         failures.append("served_model_missing")
     elif not effective_model or response_model.lower().split("/")[-1] != (
@@ -123,11 +213,59 @@ def validate_canary(result: dict[str, object]) -> tuple[str, ...]:
     return tuple(failures)
 
 
+def provider_route_proof(result: dict[str, object], *, provider: str) -> dict[str, object]:
+    """Map the production canary receipt into the DeepSWE merge proof schema."""
+
+    receipt = result.get("receipt") if isinstance(result.get("receipt"), dict) else {}
+    identity = receipt.get("response_identity") or {}
+    contract = receipt.get("call_contract") or {}
+    requested = str(result.get("model_effective") or result.get("model_requested") or "")
+    cost = receipt.get("cost")
+    cost_observed = cost is not None
+    return {
+        "schema": "gt.provider_bootstrap_canary.v1",
+        "provider_calls": int(receipt.get("provider_calls") or 0),
+        "tool_choice_forced": True,
+        "action_count": 1,
+        "selection_valid": bool(result.get("selection_valid")),
+        "selection": result.get("selection") or {},
+        "requested_model": requested,
+        "response_model": str(identity.get("model") or ""),
+        "system_fingerprint": str(identity.get("system_fingerprint") or ""),
+        "fingerprint_available": bool(identity.get("system_fingerprint")),
+        "response_provider": str(identity.get("provider") or ""),
+        "requested_provider": (
+            "deepseek"
+            if provider == "openrouter"
+            else "tokenrouter"
+            if provider == "tokenrouter"
+            else "deepseek_native"
+            if provider == "deepseek"
+            else "configured"
+        ),
+        "catalog_model_confirmed": True if provider == "tokenrouter" else None,
+        "thinking_mode": str(contract.get("thinking_mode") or "provider_default"),
+        "forced_tool": str(contract.get("forced_tool") or ""),
+        "allow_fallbacks": False if provider == "openrouter" else None,
+        "require_parameters": True if provider == "openrouter" else None,
+        "data_collection": "allow" if provider == "openrouter" else None,
+        "benchmark_setup_overhead": {
+            "provider_calls": int(receipt.get("provider_calls") or 0),
+            "input_tokens": int(receipt.get("input_tokens") or 0),
+            "output_tokens": int(receipt.get("output_tokens") or 0),
+            "cost_usd": float(cost) if cost_observed else None,
+            "cost_observed": cost_observed,
+            "latency_ms": float(receipt.get("latency_ms") or 0.0),
+        },
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=os.environ.get("MODEL") or "")
     parser.add_argument("--timeout-sec", type=float, default=45.0)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--provider-proof", type=Path)
     args = parser.parse_args(argv)
     if not args.model:
         parser.error("--model or MODEL is required")
@@ -137,6 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(rendered + "\n", encoding="utf-8")
     print(rendered)
     failures = validate_canary(result)
+    if args.provider_proof is not None:
+        proof = provider_route_proof(
+            result, provider=os.environ.get("PROVIDER") or "configured"
+        )
+        args.provider_proof.write_text(
+            json.dumps(proof, indent=2) + "\n", encoding="utf-8"
+        )
     if failures:
         print(json.dumps({"canary_failures": failures}, indent=2))
         return 1

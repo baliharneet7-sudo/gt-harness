@@ -23,6 +23,7 @@ from eval.gt_central_agent import (
     GTIntegrationMode,
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
+    _bootstrap_provider_call_kwargs,
     _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
@@ -58,7 +59,11 @@ from gt_engine.hybrid_retrieval import (
     RetrievalIntent,
 )
 from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
-from gt_engine.persistent_execution_state import build_bootstrap_catalog
+from gt_engine.persistent_execution_state import (
+    bootstrap_visible_item_ids,
+    build_bootstrap_catalog,
+    build_bootstrap_messages,
+)
 from gt_engine.preflight import (
     ActionDisposition,
     ActionOperation,
@@ -71,7 +76,7 @@ from gt_engine.replay_bundle import load_replay_bundle
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
-from scripts.central_bootstrap_canary import validate_canary
+from scripts.central_bootstrap_canary import production_shaped_catalog, validate_canary
 from scripts.central_release_gate import audit_treatment_runtime
 
 
@@ -278,17 +283,17 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert "OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}" in workflow
     assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
     assert 'model = f"openai/{model}"' in workflow
-    assert 'kwargs["api_base"] = base' in workflow
     assert "options: [openrouter, tokenrouter, deepseek]" in workflow
     assert "TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}" in workflow
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert 'tokenrouter_base = "https://api.tokenrouter.com/v1"' in workflow
-    assert 'kwargs["extra_body"] = {"thinking": {"type": "disabled"}}' in workflow
-    assert '"thinking_mode": (' in workflow
-    assert 'if provider in {"tokenrouter", "deepseek"}' in workflow
-    assert '"cost_observed": cost_observed' in workflow
-    assert 'provider not in {"tokenrouter", "deepseek"}' in workflow
-    assert 'and not proof["system_fingerprint"]' in workflow
+    assert "python -m scripts.central_bootstrap_canary" in workflow
+    assert "--provider-proof provider-route-proof.json" in workflow
+    fingerprint_gate = (
+        'if provider not in {"tokenrouter", "deepseek"} and not '
+        'proof["system_fingerprint"]:'
+    )
+    assert fingerprint_gate in workflow
     assert "https://api.deepseek.com" in workflow
     assert "openai/deepseek-v4-flash" in workflow
     assert "deepseek:native:api.deepseek.com" in workflow
@@ -300,7 +305,7 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'print("PRODUCT_MECHANISM_COUNT=18")' in readiness
     assert 'print("ALL_18_PRODUCT_MECHANISMS_PROVEN")' in readiness
     assert "| product mechanisms | legacy fired | PES lifecycle uses |" in workflow
-    assert '"catalog_model_confirmed": (' in workflow
+    assert "catalog_model_confirmed" in workflow
     assert "TokenRouter does not expose the exact requested model" in workflow
     assert "TokenRouter is authorized only for bounded diagnostics" in workflow
 
@@ -363,11 +368,9 @@ def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch
 
     assert model.config.model_name == "openai/deepseek/deepseek-v4-flash-0731"
     assert model.config.model_kwargs["api_base"] == "https://api.tokenrouter.com/v1"
-    assert model.config.model_kwargs["extra_body"] == {
-        "thinking": {"type": "disabled"}
-    }
+    assert "extra_body" not in model.config.model_kwargs
     route = _provider_route_configuration(model)
-    assert route["thinking_mode"] == "disabled"
+    assert route["thinking_mode"] == ""
 
 
 def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path):
@@ -382,9 +385,7 @@ def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path
 
     assert model.config.model_name == "openai/deepseek-v4-flash"
     assert model.config.model_kwargs["api_base"] == "https://api.deepseek.com"
-    assert model.config.model_kwargs["extra_body"] == {
-        "thinking": {"type": "disabled"}
-    }
+    assert "extra_body" not in model.config.model_kwargs
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():
@@ -483,22 +484,21 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
     assert "GT_COMMIT: ${{ github.sha }}" not in workflow
     assert 'model = "deepseek/deepseek-v4-flash-0731"' in workflow
-    assert '"only": ["deepseek"]' in workflow
-    assert '"allow_fallbacks": False' in workflow
-    assert '"data_collection": "allow"' in workflow
+    assert "GT_OPENROUTER_PROVIDER_ONLY" in workflow
+    assert "allow_fallbacks" in workflow
+    assert "GT_OPENROUTER_DATA_COLLECTION" in workflow
     assert "provider-route-proof.json" in workflow
     assert "BOOTSTRAP_CANARY_APPROVED" in workflow
-    assert '"provider_calls": 1' in workflow
-    assert workflow.count("litellm.completion(") == 1
-    assert "parse_bootstrap_selection" in workflow
-    assert "BootstrapCatalogItem" in workflow
+    assert "python -m scripts.central_bootstrap_canary" in workflow
+    assert workflow.count("litellm.completion(") == 0
+    assert "BASH_TOOL" not in workflow
+    assert "select_catalog" in workflow
     assert "ids <= allowed" not in workflow
-    assert '"benchmark_setup_overhead": {' in workflow
     assert '"system_prompt_sha256": prompt_identity.get("system_prompt_sha256")' in workflow
     assert '"effective_actions": metrics.get("effective_task_actions")' in workflow
     assert "Download the single exact bootstrap canary proof" in workflow
     assert "exact provider route gate failed" in workflow
-    assert '"system_fingerprint": str(raw.get("system_fingerprint") or "")' in workflow
+    assert "not proof[\"system_fingerprint\"]" in workflow
     assert "actual provider response identity gate failed" in workflow
     assert 'executor_identity.get("models") == [expected_response_model]' in workflow
     assert 'executor_identity.get("stable_provider_identity") is True' in workflow
@@ -1066,14 +1066,12 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
                 catalog = json.loads(catalog_blob)
                 focus = next(item["id"] for item in catalog if item["kind"] == "focus")
                 validation = next(item["id"] for item in catalog if item["kind"] == "validation")
-                command = json.dumps(
-                    {
-                        "primary_focus_id": focus,
-                        "ordered_item_ids": [focus, validation],
-                        "risk_item_ids": [],
-                        "validation_item_ids": [validation],
-                    }
-                )
+                selection = {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus, validation],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [validation],
+                }
                 content = "bootstrap-selection"
             elif self.query_count == 2:
                 command = "sed -n '1,40p' src/service.py"
@@ -1081,20 +1079,28 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
             else:
                 command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
                 content = "submit"
+            extra = {
+                "response": {
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                    }
+                },
+                "cost": 0.0,
+            }
+            if self.query_count == 1:
+                extra["select_catalog_args"] = selection
+                extra["select_catalog_raw"] = json.dumps(selection)
+                extra["actions"] = []
+            else:
+                extra["actions"] = [
+                    {"command": command, "tool_call_id": f"call-{self.query_count}"}
+                ]
             return {
                 "role": "assistant",
                 "content": content,
-                "extra": {
-                    "actions": [{"command": command, "tool_call_id": f"call-{self.query_count}"}],
-                    "response": {
-                        "usage": {
-                            "prompt_tokens": 10,
-                            "completion_tokens": 2,
-                            "total_tokens": 12,
-                        }
-                    },
-                    "cost": 0.0,
-                },
+                "extra": extra,
             }
 
     model = BootstrapModel()
@@ -1192,7 +1198,7 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert model.bootstrap_kwargs == {
         "temperature": 0.0,
         "max_tokens": 512,
-        "tool_choice": {"type": "function", "function": {"name": "bash"}},
+        "tool_choice": {"type": "function", "function": {"name": "select_catalog"}},
     }
     assert receipt["bootstrap_calls"] == 1
     assert receipt["executor_calls"] == 2
@@ -1419,7 +1425,7 @@ async def test_bootstrap_raw_transport_marks_call_and_uses_provider_timeout_with
             assert marker["executor_calls_started"] == 0
             assert kwargs["num_retries"] == 0
             assert kwargs["timeout"] == 5
-            assert kwargs["tool_choice"]["function"]["name"] == "bash"
+            assert kwargs["tool_choice"]["function"]["name"] == "select_catalog"
             assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
             message = SimpleNamespace(
                 model_dump=lambda: {"role": "assistant", "content": "plain JSON, no tool"}
@@ -1456,12 +1462,15 @@ async def test_bootstrap_raw_transport_marks_call_and_uses_provider_timeout_with
     )
 
     assert selection.valid is False
-    assert selection.reason_codes == ("bootstrap_action_parse_error:FormatError",)
+    assert selection.reason_codes == ("bootstrap_action_parse_error:bootstrap_action_count",)
     assert model.calls == 1
     assert receipt["provider_calls"] == 1
     assert receipt["response_received"] is True
     assert receipt["transport"] == "direct_single_provider_call"
     assert receipt["provider_query_marker_error"] == ""
+    assert receipt["call_contract"]["forced_tool"] == "select_catalog"
+    assert receipt["raw_tool_arguments_sha256"] == ""
+    assert receipt["attempted_item_ids"] == []
     assert receipt["input_tokens"] == 41
     assert receipt["output_tokens"] == 7
     assert receipt["response_identity"] == {
@@ -1610,6 +1619,85 @@ async def test_bootstrap_empty_choices_retains_received_response_accounting(tmp_
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_persists_raw_args_and_attempted_ids_on_invalid_json(tmp_path):
+    catalog = build_bootstrap_catalog(
+        instruction="Fix `save_user()`.",
+        evidence=RepositoryEvidence(
+            available=True,
+            graph_revision="graph-1",
+            anchors=({"path": "src/service.py", "line": 1, "symbol": "save_user"},),
+            status="source_backed",
+            source_revision="source-1",
+            index_current=True,
+            intelligence_valid=True,
+            substrate_ready=True,
+        ),
+        documents=(
+            RepositoryDocument(
+                path="src/service.py",
+                start_line=1,
+                end_line=2,
+                symbol="save_user",
+                text="def save_user():\n    pass",
+            ),
+        ),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    raw_args = '{"primary_focus_id":"pes-0123456789abcdef0123","ordered_item_ids":['
+
+    class InvalidJsonModel:
+        config = SimpleNamespace(model_name="test", model_kwargs={})
+
+        def _prepare_messages_for_api(self, messages):
+            return messages
+
+        def _bootstrap_query(self, messages, **kwargs):
+            function = SimpleNamespace(name="select_catalog", arguments=raw_args)
+            tool_call = SimpleNamespace(function=function)
+            message = SimpleNamespace(
+                model_dump=lambda: {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"function": {"name": "select_catalog", "arguments": raw_args}}
+                    ],
+                },
+                tool_calls=[tool_call],
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=message)],
+                model_dump=lambda: {
+                    "model": "test-model",
+                    "provider": "test",
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+                },
+            )
+
+        def _calculate_cost(self, response):
+            return {"cost": 0.0}
+
+    selection, receipt = await MiniSweCentralAgent(
+        logs_dir=tmp_path, model_name="test"
+    )._run_persistent_state_bootstrap(
+        InvalidJsonModel(),
+        instruction="Fix `save_user()`.",
+        catalog=catalog,
+        timeout_sec=5,
+    )
+
+    assert selection.valid is False
+    assert "invalid_json" in selection.reason_codes[0]
+    assert receipt["raw_tool_arguments_sha256"] == hashlib.sha256(
+        raw_args.encode()
+    ).hexdigest()
+    assert receipt["attempted_item_ids"] == ["pes-0123456789abcdef0123"]
+    assert "pes-0123456789abcdef0123" in receipt["raw_tool_arguments_preview"]
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_marker_failure_prevents_provider_transport(tmp_path):
     document = RepositoryDocument(
         path="src/service.py",
@@ -1725,26 +1813,32 @@ async def test_supported_source_creation_activates_persistent_state_once(
                 )
                 catalog = json.loads(catalog_blob)
                 focus = next(item["id"] for item in catalog if item["kind"] == "focus")
-                command = json.dumps(
-                    {
-                        "primary_focus_id": focus,
-                        "ordered_item_ids": [focus],
-                        "risk_item_ids": [],
-                        "validation_item_ids": [],
-                    }
-                )
+                selection = {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
             elif self.query_count == 1:
                 command = "printf 'def main():\\n    return 1\\n' > app.py"
             else:
                 command = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+            extra = {
+                "response": {"usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+                "cost": 0.0,
+            }
+            if kwargs.get("tool_choice"):
+                extra["select_catalog_args"] = selection
+                extra["select_catalog_raw"] = json.dumps(selection)
+                extra["actions"] = []
+            else:
+                extra["actions"] = [
+                    {"command": command, "tool_call_id": f"call-{self.query_count}"}
+                ]
             return {
                 "role": "assistant",
                 "content": "act",
-                "extra": {
-                    "actions": [{"command": command, "tool_call_id": f"call-{self.query_count}"}],
-                    "response": {"usage": {"prompt_tokens": 10, "completion_tokens": 2}},
-                    "cost": 0.0,
-                },
+                "extra": extra,
             }
 
     repository = HybridRepository(
@@ -1812,7 +1906,6 @@ async def test_supported_source_creation_activates_persistent_state_once(
     }
     assert set(release_checks["persistent_execution_state"].failures) == {
         "dynamic-source:persistent_bootstrap_transport_not_single_call",
-        "dynamic-source:persistent_no_material_delivery",
     }
     assert release_checks["product_mechanism_census"].passed is True
 
@@ -2447,11 +2540,13 @@ def test_exact_bootstrap_canary_fails_closed_on_missing_provider_identity():
             "provider_query_marker_error": "",
             "request_payload_sha256": "a" * 64,
             "provider_messages_sha256": "b" * 64,
-            "visible_catalog_count": 1,
+            "visible_catalog_count": 8,
             "visible_catalog_ids_sha256": "c" * 64,
+            "catalog_count": 32,
+            "raw_tool_arguments_sha256": "d" * 64,
             "call_contract": {
                 "thinking_mode": "disabled",
-                "forced_tool": "bash",
+                "forced_tool": "select_catalog",
                 "tool_choice": "named_function",
                 "num_retries": 0,
             },
@@ -2460,6 +2555,35 @@ def test_exact_bootstrap_canary_fails_closed_on_missing_provider_identity():
     }
 
     assert validate_canary(result) == ("provider_identity_missing",)
+
+
+def test_production_shaped_canary_catalog_truncates_visible_ids():
+    catalog = production_shaped_catalog()
+    messages = build_bootstrap_messages(
+        task="Select the certified implementation focus and related files.",
+        catalog=catalog,
+        max_input_tokens=2_000,
+    )
+    visible = bootstrap_visible_item_ids(messages)
+
+    assert len(catalog.items) >= 16
+    assert 0 < len(visible) < len(catalog.items)
+    assert "select_catalog" in json.dumps(messages)
+
+
+def test_native_deepseek_bootstrap_thinking_adapter_is_call_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek-v4-flash")
+    monkeypatch.delenv("GT_OPENROUTER_PROVIDER_ONLY", raising=False)
+
+    agent = MiniSweCentralAgent(logs_dir=tmp_path, model_name="deepseek-v4-flash")
+    model = agent._build_model()
+    kwargs = _bootstrap_provider_call_kwargs(model, max_tokens=512, timeout_sec=5)
+
+    assert "extra_body" not in model.config.model_kwargs
+    assert kwargs["tool_choice"]["function"]["name"] == "select_catalog"
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert _provider_route_configuration(model)["thinking_mode"] == ""
 
 
 @pytest.mark.asyncio

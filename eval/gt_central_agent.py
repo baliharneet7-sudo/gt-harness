@@ -107,15 +107,19 @@ from gt_engine.hybrid_retrieval import (
     filter_provider_known_context,
 )
 from gt_engine.persistent_execution_state import (
+    SELECT_CATALOG_TOOL_NAME,
     BootstrapCatalog,
     BootstrapSelection,
     BootstrapStatus,
     ContextFrameKind,
     ObligationStatus,
     PersistentExecutionStateEngine,
+    attempted_bootstrap_item_ids,
+    bootstrap_args_preview,
     bootstrap_visible_item_ids,
     build_bootstrap_catalog,
     build_bootstrap_messages,
+    build_select_catalog_tool,
     parse_bootstrap_selection,
 )
 from gt_engine.preemptive_retrieval import (
@@ -300,6 +304,7 @@ def _provider_request_receipt(
     messages: list[dict[str, Any]],
     *,
     call_kwargs: dict[str, Any] | None = None,
+    provider_tools: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], str, str, int]:
     """Hash the exact messages produced by Mini-SWE's provider adapter.
 
@@ -323,7 +328,11 @@ def _provider_request_receipt(
     # litellm rather than exposing a ``model.tools`` attribute.  The hash must
     # include the actual provider tool schema; otherwise control/treatment
     # requests are not reproducible even when their messages match.
-    provider_tools = getattr(model, "tools", None) or [BASH_TOOL]
+    provider_tools = (
+        list(provider_tools)
+        if provider_tools is not None
+        else list(getattr(model, "tools", None) or [BASH_TOOL])
+    )
     effective_kwargs = _model_kwargs(model)
     effective_kwargs.update(call_kwargs or {})
     # Credentials do not define the semantic request and must never influence
@@ -460,6 +469,136 @@ def _is_provider_timeout(exc: BaseException) -> bool:
     return type(exc).__name__ == "Timeout" and type(exc).__module__.startswith("litellm")
 
 
+def _message_tool_calls(message: Any) -> list[Any]:
+    if message is None:
+        return []
+    if isinstance(message, dict):
+        return list(message.get("tool_calls") or [])
+    dump = getattr(message, "model_dump", None)
+    if callable(dump):
+        payload = dump()
+        if isinstance(payload, dict):
+            return list(payload.get("tool_calls") or [])
+    return list(getattr(message, "tool_calls", None) or [])
+
+
+def _tool_call_name_and_arguments(tool_call: Any) -> tuple[str, str]:
+    if isinstance(tool_call, dict):
+        function = tool_call.get("function") or {}
+        if isinstance(function, dict):
+            return str(function.get("name") or ""), str(function.get("arguments") or "")
+        return str(tool_call.get("name") or ""), str(tool_call.get("arguments") or "")
+    function = getattr(tool_call, "function", None)
+    if function is None:
+        return str(getattr(tool_call, "name", "") or ""), str(
+            getattr(tool_call, "arguments", "") or ""
+        )
+    if isinstance(function, dict):
+        return str(function.get("name") or ""), str(function.get("arguments") or "")
+    return str(getattr(function, "name", "") or ""), str(getattr(function, "arguments", "") or "")
+
+
+def _select_catalog_args_from_response(
+    raw_response: Any,
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Parse one select_catalog tool call. Never uses Mini-SWE's Bash parser."""
+
+    choices = tuple(getattr(raw_response, "choices", ()) or ())
+    if not choices or getattr(choices[0], "message", None) is None:
+        return None, "", "EmptyChoices"
+    tool_calls = _message_tool_calls(choices[0].message)
+    if len(tool_calls) != 1:
+        extra = getattr(raw_response, "extra", None)
+        if isinstance(extra, dict) and extra.get("select_catalog_args") is not None:
+            payload = extra.get("select_catalog_args")
+            raw = str(extra.get("select_catalog_raw") or json.dumps(payload))
+            if isinstance(payload, dict):
+                return payload, raw, ""
+        return None, "", "bootstrap_action_count"
+    name, raw_args = _tool_call_name_and_arguments(tool_calls[0])
+    if name != SELECT_CATALOG_TOOL_NAME:
+        return None, raw_args, "unknown_tool"
+    try:
+        payload = json.loads(raw_args) if raw_args else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, raw_args, "invalid_json"
+    if not isinstance(payload, dict):
+        return None, raw_args, "invalid_shape"
+    return payload, raw_args, ""
+
+
+def _bootstrap_completion(
+    model: Any,
+    prepared_messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]],
+    **kwargs: Any,
+) -> Any:
+    """One physical bootstrap call. Mini-SWE ``_query`` hardcodes Bash and cannot be used."""
+
+    bootstrap_query = getattr(model, "_bootstrap_query", None)
+    if callable(bootstrap_query):
+        return bootstrap_query(prepared_messages, tools=tools, **kwargs)
+    if isinstance(model, LitellmModel):
+        import litellm
+
+        configured = dict(_model_kwargs(model))
+        merged = configured | kwargs
+        merged.pop("tools", None)
+        return litellm.completion(
+            model=model.config.model_name,
+            messages=prepared_messages,
+            tools=tools,
+            **merged,
+        )
+    query = getattr(model, "_query", None)
+    if callable(query):
+        return query(prepared_messages, tools=tools, **kwargs)
+    raise TypeError("bootstrap requires LitellmModel, _bootstrap_query, or _query")
+
+
+def _bootstrap_provider_message(
+    model: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]],
+    call_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Perform exactly one bootstrap provider call and parse select_catalog args."""
+
+    prepare = getattr(model, "_prepare_messages_for_api", None)
+    prepared = prepare(messages) if callable(prepare) else [
+        {key: value for key, value in item.items() if key != "extra"} for item in messages
+    ]
+    raw_response = _bootstrap_completion(model, prepared, tools=tools, **call_kwargs)
+    response_dump = _raw_response_dump(raw_response)
+    try:
+        cost_row = model._calculate_cost(raw_response)
+    except Exception:  # noqa: BLE001 - cost is accounting, not delivery authority
+        cost_row = {"cost": 0.0}
+    GLOBAL_MODEL_STATS.add(float(cost_row.get("cost") or 0.0))
+    args, raw_args, parse_error = _select_catalog_args_from_response(raw_response)
+    choices = tuple(getattr(raw_response, "choices", ()) or ())
+    if not choices or getattr(choices[0], "message", None) is None:
+        message: dict[str, Any] = {"role": "assistant", "content": ""}
+        if not parse_error:
+            parse_error = "EmptyChoices"
+    else:
+        dump = getattr(choices[0].message, "model_dump", None)
+        message = dict(dump()) if callable(dump) else dict(choices[0].message)
+    message["extra"] = {
+        "actions": [],
+        "select_catalog_args": args,
+        "select_catalog_raw": raw_args,
+        "response": response_dump,
+        "cost": float(cost_row.get("cost") or 0.0),
+        "timestamp": time.time(),
+    }
+    if parse_error:
+        message["extra"]["bootstrap_parse_error"] = parse_error
+    return message
+
+
 def _bootstrap_provider_call_kwargs(
     model: Any,
     *,
@@ -472,7 +611,8 @@ def _bootstrap_provider_call_kwargs(
     compatibility contract rejects a forced ``tool_choice``.  Bootstrap is a
     bounded selection over certified IDs rather than executor reasoning, so it
     deliberately disables thinking for this call only.  Existing gateway
-    ``extra_body`` policy is retained instead of being overwritten.
+    ``extra_body`` policy is retained instead of being overwritten.  Executor
+    sampling stays stock Mini-SWE and must not inherit this adapter.
     """
 
     kwargs: dict[str, Any] = {
@@ -480,7 +620,10 @@ def _bootstrap_provider_call_kwargs(
         "max_tokens": int(max_tokens),
         "num_retries": 0,
         "timeout": float(timeout_sec),
-        "tool_choice": {"type": "function", "function": {"name": "bash"}},
+        "tool_choice": {
+            "type": "function",
+            "function": {"name": SELECT_CATALOG_TOOL_NAME},
+        },
     }
     configured = _model_kwargs(model)
     model_name = str(
@@ -1480,7 +1623,6 @@ class MiniSweCentralAgent(BaseAgent):
         api_base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
         if api_base:
             openrouter = "openrouter.ai" in api_base.lower()
-            tokenrouter = "tokenrouter.com" in api_base.lower()
             if openrouter:
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
@@ -1505,13 +1647,10 @@ class MiniSweCentralAgent(BaseAgent):
                 # The native DeepSeek endpoint exposes bare model IDs.  Do
                 # not translate this into the qualified TokenRouter catalog
                 # ID. LiteLLM still needs its openai-compatible provider
-                # prefix when a custom api_base is supplied. Mini-SWE's
-                # forced Bash tool_choice is incompatible with DeepSeek V4
-                # thinking mode, so disable thinking for every call on this
-                # route (bootstrap and executor).
+                # prefix when a custom api_base is supplied. Executor
+                # sampling is stock Mini-SWE: no host thinking override.
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
-                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             else:
                 # OpenAI-compatible gateways still require the gateway's exact
                 # catalog identifier.  Preserve the same DeepSeek checkpoint
@@ -1519,12 +1658,6 @@ class MiniSweCentralAgent(BaseAgent):
                 # to another V4 family model.
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
-                if tokenrouter:
-                    # DeepSeek V4 thinking mode rejects a required/specific
-                    # tool choice. Mini-SWE requires exactly one Bash tool
-                    # call, so the diagnostic route must select the documented
-                    # non-thinking mode rather than weakening tool selection.
-                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             kwargs["api_base"] = api_base
         return LitellmModel(
             model_name=model,
@@ -1541,7 +1674,7 @@ class MiniSweCentralAgent(BaseAgent):
         timeout_sec: float,
         executor_calls_started: int = 0,
     ) -> tuple[BootstrapSelection, dict[str, Any]]:
-        """Make the single bounded bootstrap call; its Bash envelope is data only."""
+        """Make the single bounded bootstrap call; select_catalog is data only."""
 
         bootstrap_messages = build_bootstrap_messages(
             task=instruction,
@@ -1549,6 +1682,7 @@ class MiniSweCentralAgent(BaseAgent):
             max_input_tokens=self.persistent_state_bootstrap_input_tokens,
         )
         visible_item_ids = bootstrap_visible_item_ids(bootstrap_messages)
+        catalog_tool = build_select_catalog_tool(visible_item_ids)
         bootstrap_call_kwargs = _bootstrap_provider_call_kwargs(
             model,
             max_tokens=self.persistent_state_bootstrap_output_tokens,
@@ -1563,6 +1697,7 @@ class MiniSweCentralAgent(BaseAgent):
             model,
             bootstrap_messages,
             call_kwargs=bootstrap_call_kwargs,
+            provider_tools=[catalog_tool],
         )
         receipt: dict[str, Any] = {
             "schema": "gt.persistent_bootstrap.v1",
@@ -1594,7 +1729,7 @@ class MiniSweCentralAgent(BaseAgent):
                     ).get("type")
                     or ""
                 ),
-                "forced_tool": "bash",
+                "forced_tool": SELECT_CATALOG_TOOL_NAME,
                 "tool_choice": "named_function",
                 "num_retries": int(bootstrap_call_kwargs.get("num_retries") or 0),
             },
@@ -1605,38 +1740,63 @@ class MiniSweCentralAgent(BaseAgent):
             "latency_ms": 0.0,
             "reason_codes": [],
             "response_received": False,
+            "raw_tool_arguments_sha256": "",
+            "raw_tool_arguments_preview": "",
+            "attempted_item_ids": [],
+            "dropped_validation_item_ids": [],
             "transport": (
                 "direct_single_provider_call"
-                if _supports_direct_provider_transport(model)
+                if (
+                    isinstance(model, LitellmModel)
+                    or callable(getattr(model, "_bootstrap_query", None))
+                    or _supports_direct_provider_transport(model)
+                )
                 else "public_query_fallback"
             ),
         }
 
         def query_bootstrap_once() -> dict[str, Any]:
-            """Use one direct provider call when Mini-SWE exposes its adapter.
+            """Use one direct select_catalog call. Mini-SWE Bash parse is forbidden."""
 
-            ``LitellmModel.query`` wraps transport retries and parses tool calls
-            before returning, which made a received no-tool response disappear
-            as a FormatError.  The bootstrap contract is exactly one call, so
-            use the same provider preparation and raw query once, then preserve
-            response accounting even when action parsing fails. Scripted/test
-            models retain the public query fallback.
-            """
-
-            if not _supports_direct_provider_transport(model):
-                public_kwargs = dict(bootstrap_call_kwargs)
-                public_kwargs.pop("num_retries", None)
-                public_kwargs.pop("timeout", None)
-                return model.query(
+            if (
+                isinstance(model, LitellmModel)
+                or callable(getattr(model, "_bootstrap_query", None))
+                or callable(getattr(model, "_query", None))
+            ):
+                return _bootstrap_provider_message(
+                    model,
                     bootstrap_messages,
-                    **public_kwargs,
+                    tools=[catalog_tool],
+                    call_kwargs=bootstrap_call_kwargs,
                 )
-            return _direct_provider_message(
-                model,
+            public_kwargs = dict(bootstrap_call_kwargs)
+            public_kwargs.pop("num_retries", None)
+            public_kwargs.pop("timeout", None)
+            response = model.query(
                 bootstrap_messages,
-                allow_parse_error=True,
-                **bootstrap_call_kwargs,
+                **public_kwargs,
             )
+            extra = dict(response.get("extra") or {})
+            args = extra.get("select_catalog_args")
+            raw_args = str(extra.get("select_catalog_raw") or "")
+            if args is None:
+                actions = tuple(extra.get("actions") or ())
+                if len(actions) == 1 and isinstance(actions[0], dict):
+                    command = actions[0].get("command")
+                    extra["bootstrap_parse_error"] = "unknown_tool"
+                    extra["select_catalog_raw"] = str(command or "")
+                    extra["select_catalog_args"] = None
+                elif extra.get("bootstrap_parse_error"):
+                    pass
+                else:
+                    extra["bootstrap_parse_error"] = extra.get(
+                        "bootstrap_parse_error"
+                    ) or "bootstrap_action_count"
+            elif not raw_args:
+                extra["select_catalog_raw"] = json.dumps(args, separators=(",", ":"))
+            extra.setdefault("actions", [])
+            response["extra"] = extra
+            return response
 
         started = time.perf_counter()
         try:
@@ -1662,6 +1822,8 @@ class MiniSweCentralAgent(BaseAgent):
             extra = response.get("extra") or {}
             actions = tuple(extra.get("actions") or ())
             parse_error = str(extra.get("bootstrap_parse_error") or "")
+            catalog_args = extra.get("select_catalog_args")
+            raw_args = str(extra.get("select_catalog_raw") or "")
             usage = (extra.get("response") or {}).get("usage") or {}
             receipt.update(
                 {
@@ -1675,6 +1837,19 @@ class MiniSweCentralAgent(BaseAgent):
                     "cost": float(extra.get("cost") or 0.0),
                     "response_action_count": len(actions),
                     "response_identity": _provider_response_identity(response),
+                    "raw_tool_arguments_sha256": hashlib.sha256(
+                        raw_args.encode("utf-8", "replace")
+                    ).hexdigest()
+                    if raw_args
+                    else "",
+                    "raw_tool_arguments_preview": bootstrap_args_preview(
+                        catalog_args if catalog_args is not None else raw_args
+                    ),
+                    "attempted_item_ids": list(
+                        attempted_bootstrap_item_ids(
+                            catalog_args if catalog_args is not None else raw_args
+                        )
+                    ),
                 }
             )
             if parse_error:
@@ -1682,16 +1857,27 @@ class MiniSweCentralAgent(BaseAgent):
                     valid=False,
                     reason_codes=(f"bootstrap_action_parse_error:{parse_error}",),
                 )
-            elif len(actions) != 1:
+            elif catalog_args is None:
                 selection = BootstrapSelection(
                     valid=False, reason_codes=("bootstrap_action_count",)
                 )
             else:
                 selection = parse_bootstrap_selection(
-                    str(actions[0].get("command") or ""),
+                    catalog_args,
                     catalog,
                     visible_item_ids=visible_item_ids,
                 )
+            requested_validations = catalog_args.get("validation_item_ids") if isinstance(
+                catalog_args, dict
+            ) else []
+            if isinstance(requested_validations, list):
+                receipt["dropped_validation_item_ids"] = [
+                    item_id
+                    for item_id in requested_validations
+                    if isinstance(item_id, str)
+                    and item_id
+                    and item_id not in selection.validation_item_ids
+                ]
             receipt["selection"] = selection.as_dict()
             receipt["status"] = (
                 BootstrapStatus.SELECTED.value

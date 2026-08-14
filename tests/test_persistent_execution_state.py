@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 
 from gt_engine.hybrid_retrieval import (
+    EvidenceAuthority,
     EvidenceOrigin,
     HybridRetriever,
     RepositoryDocument,
@@ -12,17 +13,22 @@ from gt_engine.hybrid_retrieval import (
     StructuralLink,
 )
 from gt_engine.persistent_execution_state import (
+    SELECT_CATALOG_TOOL_NAME,
     BootstrapCatalog,
+    BootstrapCatalogItem,
     BootstrapMode,
+    CatalogItemKind,
     CompletionReadiness,
     ContextFrameKind,
     CurrentFocusKind,
     PersistentExecutionStateEngine,
     StatePhase,
     StateValidationStatus,
+    attempted_bootstrap_item_ids,
     bootstrap_visible_item_ids,
     build_bootstrap_catalog,
     build_bootstrap_messages,
+    build_select_catalog_tool,
     parse_bootstrap_selection,
 )
 from gt_engine.preflight import adapt_proposed_action
@@ -450,7 +456,7 @@ def test_ranked_focus_is_never_rendered_as_certified_relevance():
 
     assert frame.rendered_text == ""
     assert frame.kind is ContextFrameKind.NONE
-    assert frame.reason_codes == ("no_material_certified_localization",)
+    assert frame.reason_codes == ("no_certified_related_file",)
     assert engine.snapshot.current_focus_path == ""
 
 
@@ -491,7 +497,7 @@ def test_bootstrap_selection_is_strictly_catalog_bounded():
     assert "unknown_catalog_id" in invalid.reason_codes
 
 
-def test_bootstrap_transport_uses_one_bash_json_envelope_without_repo_bytes():
+def test_bootstrap_transport_uses_select_catalog_without_repo_bytes():
     catalog = _catalog()
     messages = build_bootstrap_messages(
         task="Fix save_user and its tests.",
@@ -502,7 +508,8 @@ def test_bootstrap_transport_uses_one_bash_json_envelope_without_repo_bytes():
     serialized = json.dumps(messages, sort_keys=True)
     assert len(messages) == 2
     assert "primary_focus_id" in serialized
-    assert "bash" in serialized
+    assert "select_catalog" in serialized
+    assert "bash tool" not in serialized.lower()
     assert "def save_user" not in serialized
     assert sum(len(item["content"].encode("utf-8")) for item in messages) <= 2_000
     assert bootstrap_visible_item_ids(messages)
@@ -528,6 +535,144 @@ def test_bootstrap_cannot_select_a_catalog_item_omitted_by_the_request_budget():
 
     assert selection.valid is False
     assert selection.reason_codes == ("unshown_catalog_id",)
+
+
+def test_bootstrap_goldens_reject_shell_and_old_bash_envelope():
+    catalog = _catalog()
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    payload = {
+        "primary_focus_id": focus,
+        "ordered_item_ids": [focus],
+        "risk_item_ids": [],
+        "validation_item_ids": [],
+    }
+
+    heredoc = "cat <<'EOF'\n" + json.dumps(payload) + "\nEOF"
+    echo_wrapped = "echo '" + json.dumps(payload) + "'"
+    assert parse_bootstrap_selection(heredoc, catalog).reason_codes == ("invalid_json",)
+    assert parse_bootstrap_selection(echo_wrapped, catalog).reason_codes == ("invalid_json",)
+    assert parse_bootstrap_selection(json.dumps(payload)[:-8], catalog).reason_codes == (
+        "invalid_json",
+    )
+    extra_keys = dict(payload)
+    extra_keys["note"] = "extra"
+    assert parse_bootstrap_selection(extra_keys, catalog).reason_codes == ("unknown_field",)
+    assert parse_bootstrap_selection({"command": json.dumps(payload)}, catalog).reason_codes == (
+        "unknown_tool",
+    )
+
+
+def test_bootstrap_drops_wrong_kind_validation_ids_without_zeroing_selection():
+    catalog = _catalog()
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    check = next(item.item_id for item in catalog.items if item.kind.value == "validation")
+
+    selection = parse_bootstrap_selection(
+        {
+            "primary_focus_id": focus,
+            "ordered_item_ids": [focus],
+            "risk_item_ids": [],
+            "validation_item_ids": [focus, check],
+        },
+        catalog,
+    )
+
+    assert selection.valid is True
+    assert selection.primary_focus_id == focus
+    assert selection.validation_item_ids == (check,)
+
+
+def test_empty_validation_item_ids_are_valid_when_catalog_has_none():
+    catalog = BootstrapCatalog(
+        source_revision="source-1",
+        graph_source_revision="source-1",
+        graph_revision="graph-1",
+        items=(
+            BootstrapCatalogItem(
+                item_id="pes-aaaaaaaaaaaaaaaaaaaa",
+                kind=CatalogItemKind.FOCUS,
+                label="focus",
+                path="src/a.py",
+            ),
+        ),
+        complete=True,
+    )
+
+    selection = parse_bootstrap_selection(
+        {
+            "primary_focus_id": "pes-aaaaaaaaaaaaaaaaaaaa",
+            "ordered_item_ids": ["pes-aaaaaaaaaaaaaaaaaaaa"],
+            "risk_item_ids": [],
+            "validation_item_ids": [],
+        },
+        catalog,
+    )
+
+    assert selection.valid is True
+    assert selection.validation_item_ids == ()
+    tool = build_select_catalog_tool(catalog.item_ids)
+    assert tool["function"]["name"] == SELECT_CATALOG_TOOL_NAME
+    assert "pes-aaaaaaaaaaaaaaaaaaaa" in tool["function"]["parameters"]["properties"][
+        "primary_focus_id"
+    ]["enum"]
+
+
+def test_catalog_packing_keeps_certified_neighbors_inside_item_ceiling():
+    documents = tuple(_document(f"src/f{index:02d}.py", f"sym{index:02d}") for index in range(40))
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=tuple(
+            {"path": f"src/f{index:02d}.py", "line": 1, "symbol": f"sym{index:02d}"}
+            for index in range(40)
+        ),
+        callers=(
+            {
+                "path": "src/f39.py",
+                "line": 1,
+                "symbol": "sym39",
+                "target_path": "src/f00.py",
+                "target_symbol": "sym00",
+            },
+        ),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix src/f00.py",
+        evidence=evidence,
+        documents=documents,
+        structural_links=(
+            StructuralLink(
+                source_path="src/f39.py",
+                target_path="src/f00.py",
+                relation="CALLS",
+                confidence=1.0,
+                provenance=("graph_edge:CALLS",),
+                certified=True,
+                source_symbol="sym39",
+                target_symbol="sym00",
+            ),
+        ),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+        max_items=8,
+    )
+
+    assert len(catalog.items) <= 8
+    assert any(
+        item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+        for item in catalog.items
+    )
+
+
+def test_attempted_ids_survive_invalid_json_text():
+    raw = 'echo pes-0123456789abcdef0123 && cat <<EOF\n{"x":1}\nEOF'
+    assert attempted_bootstrap_item_ids(raw) == ("pes-0123456789abcdef0123",)
 
 
 def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries():

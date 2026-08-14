@@ -679,6 +679,22 @@ def test_release_gate_rejects_generative_bootstrap_with_zero_material_deliveries
     assert report.passed is False
     assert "treatment-1:persistent_no_material_delivery" in report.failures
 
+
+def test_release_gate_allows_explicit_no_certified_related_file_abstention():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["deliveries"] = []
+    receipt["model_call_contexts"][0]["persistent_execution_state_delivered"] = False
+    receipt["model_call_contexts"][0]["persistent_execution_state"] = {
+        "kind": "none",
+        "claim_ids": [],
+        "provider_call": 1,
+        "reason_codes": ["no_certified_related_file"],
+    }
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert "treatment-1:persistent_no_material_delivery" not in report.failures
+
 def test_release_gate_fails_closed_on_selected_pending_retrieval():
     receipt = _treatment()
     receipt["preemptive_retrieval"]["decisions"] = [{"status": "selected"}]

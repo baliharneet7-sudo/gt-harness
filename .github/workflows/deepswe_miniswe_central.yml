@@ -402,45 +402,26 @@ jobs:
             echo "::error::no provider credential configured"; exit 1;
           }
           python - <<'PY'
-          import json, os, time
-          from pathlib import Path
-          import litellm
-          from minisweagent.models.utils.actions_toolcall import BASH_TOOL
-          from gt_engine.persistent_execution_state import (
-              BootstrapCatalog,
-              BootstrapCatalogItem,
-              CatalogItemKind,
-              bootstrap_visible_item_ids,
-              build_bootstrap_messages,
-              parse_bootstrap_selection,
-          )
+          import json, os, urllib.request
 
           model = os.environ["MODEL"]
           provider = os.environ.get("PROVIDER") or "configured"
           base = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-          kwargs = {
-              "temperature": 0.0,
-              "max_tokens": 512,
-              "num_retries": 0,
-              "tools": [BASH_TOOL],
-              "tool_choice": {"type": "function", "function": {"name": "bash"}},
-          }
+          env_path = os.environ["GITHUB_ENV"]
+
+          def export(name, value):
+              with open(env_path, "a", encoding="utf-8") as handle:
+                  handle.write(f"{name}={value}\n")
+
           if provider == "openrouter":
               if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
                   model = "deepseek/deepseek-v4-flash-0731"
               if not model.startswith("openai/"):
                   model = f"openai/{model}"
-              kwargs["api_key"] = os.environ["OPENROUTER_API_KEY"].strip()
-              kwargs["api_base"] = base or "https://openrouter.ai/api/v1"
-              kwargs["extra_body"] = {
-                  "provider": {
-                      "only": ["deepseek"],
-                      "order": ["deepseek"],
-                      "allow_fallbacks": False,
-                      "require_parameters": True,
-                      "data_collection": "allow",
-                  }
-              }
+              export("GT_LITELLM_MODEL", model)
+              export("OPENAI_BASE_URL", base or "https://openrouter.ai/api/v1")
+              export("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
+              export("GT_OPENROUTER_DATA_COLLECTION", "allow")
           elif provider == "tokenrouter":
               if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
                   model = "deepseek/deepseek-v4-flash-0731"
@@ -450,7 +431,6 @@ jobs:
               tokenrouter_base = "https://api.tokenrouter.com/v1"
               # The catalog query is unbilled mechanism identity proof.  A
               # missing exact checkpoint aborts before the completion call.
-              import urllib.request
               request = urllib.request.Request(
                   tokenrouter_base + "/models",
                   headers={"Authorization": "Bearer " + tokenrouter_key},
@@ -466,12 +446,10 @@ jobs:
                       "TokenRouter does not expose the exact requested model: "
                       + exact_model_id
                   )
-              kwargs["api_key"] = tokenrouter_key
-              kwargs["api_base"] = tokenrouter_base
-              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+              export("GT_LITELLM_MODEL", model)
+              export("OPENAI_BASE_URL", tokenrouter_base)
+              export("OPENAI_API_KEY", tokenrouter_key)
           elif provider == "deepseek":
-              # Native DeepSeek API uses the bare V4 Flash id, not the
-              # OpenRouter/TokenRouter catalog checkpoint suffix.
               if model in {
                   "deepseek-v4-flash",
                   "deepseek-v4-flash-0731",
@@ -480,108 +458,33 @@ jobs:
                   model = "openai/deepseek-v4-flash"
               elif not model.startswith("openai/"):
                   model = f"openai/{model}"
-              kwargs["api_key"] = os.environ["DEEPSEEK_API_KEY"].strip()
-              kwargs["api_base"] = "https://api.deepseek.com"
-              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+              export("GT_LITELLM_MODEL", model)
+              export("OPENAI_BASE_URL", "https://api.deepseek.com")
+              export("OPENAI_API_KEY", os.environ["DEEPSEEK_API_KEY"].strip())
           elif base:
               if "/" not in model:
                   model = f"openai/{model}"
-              kwargs["api_base"] = base
+              export("GT_LITELLM_MODEL", model)
+              export("OPENAI_BASE_URL", base)
+          print(f"canary_route provider={provider} model={model}")
+          PY
+          python -m scripts.central_bootstrap_canary \
+            --model "${MODEL}" \
+            --timeout-sec 45 \
+            --output bootstrap-canary.json \
+            --provider-proof provider-route-proof.json
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
 
-          catalog = BootstrapCatalog(
-              source_revision="canary-source",
-              graph_source_revision="canary-source",
-              graph_revision="canary-graph",
-              items=(
-                  BootstrapCatalogItem(
-                      item_id="pes-canary-focus",
-                      kind=CatalogItemKind.FOCUS,
-                      label="Canary focus",
-                      path="src/canary.py",
-                  ),
-                  BootstrapCatalogItem(
-                      item_id="pes-canary-validation",
-                      kind=CatalogItemKind.VALIDATION,
-                      label="Canary validation",
-                      required=True,
-                  ),
-              ),
-              complete=True,
-          )
-          messages = build_bootstrap_messages(
-              task="Select a focus and validation only from the canary catalog.",
-              catalog=catalog,
-              max_input_tokens=2_000,
-          )
-          visible_item_ids = bootstrap_visible_item_ids(messages)
-          started = time.perf_counter()
-          response = litellm.completion(model=model, messages=messages, **kwargs)
-          latency_ms = (time.perf_counter() - started) * 1_000.0
-          calls = response.choices[0].message.tool_calls or []
-          if len(calls) != 1 or calls[0].function.name != "bash":
-              raise SystemExit("bootstrap canary did not return exactly one bash tool call")
-          outer = json.loads(calls[0].function.arguments)
-          selection = parse_bootstrap_selection(
-              str(outer.get("command") or ""),
-              catalog,
-              visible_item_ids=visible_item_ids,
-          )
-          if not selection.valid:
-              raise SystemExit(
-                  "bootstrap canary failed production parser: "
-                  + ",".join(selection.reason_codes)
-              )
-          raw = response.model_dump()
-          usage = raw.get("usage") or {}
-          hidden = getattr(response, "_hidden_params", {}) or {}
-          raw_cost = hidden.get("response_cost")
-          cost_observed = raw_cost is not None
-          proof = {
-              "schema": "gt.provider_bootstrap_canary.v1",
-              "provider_calls": 1,
-              "tool_choice_forced": True,
-              "action_count": 1,
-              "selection_valid": True,
-              "selection": selection.as_dict(),
-              "requested_model": model,
-              "response_model": str(raw.get("model") or ""),
-              "system_fingerprint": str(raw.get("system_fingerprint") or ""),
-              "fingerprint_available": bool(raw.get("system_fingerprint")),
-              "response_provider": str(
-                  raw.get("provider")
-                  or hidden.get("custom_llm_provider")
-                  or ""
-              ),
-              "requested_provider": (
-                  "deepseek"
-                  if os.environ.get("PROVIDER") == "openrouter"
-                  else "tokenrouter"
-                  if os.environ.get("PROVIDER") == "tokenrouter"
-                  else "deepseek_native"
-                  if os.environ.get("PROVIDER") == "deepseek"
-                  else "configured"
-              ),
-              "catalog_model_confirmed": (
-                  True if provider == "tokenrouter" else None
-              ),
-              "thinking_mode": (
-                  "disabled"
-                  if provider in {"tokenrouter", "deepseek"}
-                  else "provider_default"
-              ),
-              "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
-              "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
-              "data_collection": "allow" if os.environ.get("PROVIDER") == "openrouter" else None,
-              "benchmark_setup_overhead": {
-                  "provider_calls": 1,
-                  "input_tokens": int(usage.get("prompt_tokens") or 0),
-                  "output_tokens": int(usage.get("completion_tokens") or 0),
-                  "cost_usd": float(raw_cost) if cost_observed else None,
-                  "cost_observed": cost_observed,
-                  "latency_ms": round(latency_ms, 6),
-              },
-          }
-          setup = proof["benchmark_setup_overhead"]
+          provider = os.environ.get("PROVIDER") or "configured"
+          proof = json.loads(Path("provider-route-proof.json").read_text(encoding="utf-8"))
+          setup = proof.get("benchmark_setup_overhead") or {}
+          cost_observed = setup.get("cost_observed")
+          if proof.get("forced_tool") != "select_catalog":
+              raise SystemExit("bootstrap canary did not force select_catalog")
+          if not proof.get("selection_valid"):
+              raise SystemExit("bootstrap canary failed production parser")
           if not proof["response_model"] or not proof["response_provider"]:
               raise SystemExit("bootstrap canary response identity is incomplete")
           if provider not in {"tokenrouter", "deepseek"} and not proof["system_fingerprint"]:
@@ -589,14 +492,11 @@ jobs:
           if any(float(setup[field]) <= 0 for field in ("input_tokens", "output_tokens", "latency_ms")):
               raise SystemExit("bootstrap canary resource accounting is incomplete")
           if provider not in {"tokenrouter", "deepseek"} and (
-              not setup["cost_observed"] or float(setup["cost_usd"]) <= 0
+              not cost_observed or float(setup["cost_usd"]) <= 0
           ):
               raise SystemExit("bootstrap canary monetary cost accounting is incomplete")
-          if setup["cost_observed"] and float(setup["cost_usd"]) < 0:
+          if cost_observed and float(setup["cost_usd"]) < 0:
               raise SystemExit("bootstrap canary monetary cost is invalid")
-          Path("provider-route-proof.json").write_text(
-              json.dumps(proof, indent=2) + "\n", encoding="utf-8"
-          )
           print("BOOTSTRAP_CANARY_APPROVED")
           PY
       - uses: actions/upload-artifact@v4
@@ -978,8 +878,9 @@ jobs:
                       and provider_proof.get("catalog_model_confirmed") is True
                       and provider_route.get("api_base")
                       == "https://api.tokenrouter.com/v1"
-                      and provider_route.get("thinking_mode") == "disabled"
+                      and not (provider_route.get("thinking_mode") or "")
                       and provider_proof.get("thinking_mode") == "disabled"
+                      and provider_proof.get("forced_tool") == "select_catalog"
                       and not (provider_route.get("provider_policy") or {})
                   )
               elif os.environ.get("PROVIDER") == "deepseek":
@@ -997,8 +898,9 @@ jobs:
                       and provider_proof.get("requested_provider") == "deepseek_native"
                       and provider_route.get("api_base")
                       == "https://api.deepseek.com"
-                      and provider_route.get("thinking_mode") == "disabled"
+                      and not (provider_route.get("thinking_mode") or "")
                       and provider_proof.get("thinking_mode") == "disabled"
+                      and provider_proof.get("forced_tool") == "select_catalog"
                       and not (provider_route.get("provider_policy") or {})
                   )
               else:

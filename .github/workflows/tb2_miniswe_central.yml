@@ -196,8 +196,8 @@ jobs:
           PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
         run: |
           set -euo pipefail
-          # This is the exact runtime bootstrap path: one forced Bash tool
-          # selection, the production parser, request hashes, provider identity,
+          # This is the exact runtime bootstrap path: one forced select_catalog
+          # tool selection, the production parser, request hashes, provider identity,
           # and no executor action. A generic text completion cannot certify it.
           timeout --signal=TERM "${PROVIDER_PREFLIGHT_TIMEOUT_SEC}s" \
             python -m scripts.central_bootstrap_canary \
