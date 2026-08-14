@@ -14,7 +14,7 @@ import pytest
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 
-from eval.gt_central_agent import GTIntegrationMode, MiniSweCentralAgent
+from eval.gt_central_agent import MiniSweCentralAgent
 from gt_engine.central_runtime import WorkspaceSnapshot
 from gt_engine.host_execution import HostExecCategory
 from gt_engine.indexer import IndexBuildReceipt, IndexBuildStatus
@@ -306,7 +306,6 @@ async def test_red_test_probe_records_passing_verifier_without_failure_trace(tmp
 async def test_red_test_probe_runs_within_end_to_end_loop_and_seeds_retrieval(
     tmp_path, monkeypatch
 ):
-    from eval import gt_central_agent as central_agent
     from gt_engine.hybrid_repository import HybridRepository
     from gt_engine.hybrid_retrieval import RepositoryDocument
 
@@ -419,10 +418,17 @@ async def test_red_test_probe_runs_within_end_to_end_loop_and_seeds_retrieval(
     red_test = receipt["red_test"]
     assert red_test["enabled"] is True
     assert len(red_test["receipts"]) == 1, red_test["receipts"]
-    assert red_test["receipts"][0]["status"] in {"failed", "failed_no_anchors"}, red_test["receipts"]
+    assert (
+        red_test["receipts"][0]["status"] in {"failed", "failed_no_anchors"}
+    ), red_test["receipts"]
     assert receipt["metrics"]["red_test_probe_attempts"] == 1
     assert receipt["metrics"]["red_test_probe_failed"] == 1
     assert any(
         row["category"] == HostExecCategory.RED_TEST_PROBE.value
         for row in receipt["host_execution"]["receipts"]
     )
+    initial_retrieval = receipt["persistent_execution_state"]["initial_retrieval"]
+    assert initial_retrieval["status"] == "disabled" or initial_retrieval["status"] == "initialized"
+    assert red_test["receipts"][0]["diagnostic_anchors"] or red_test["receipts"][0][
+        "status"
+    ] in {"failed", "failed_no_anchors"}

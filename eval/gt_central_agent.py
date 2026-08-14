@@ -20,7 +20,7 @@ import shlex
 import tarfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -66,9 +66,9 @@ from gt_engine.central_runtime import (
     is_submit_command,
     lint_commands,
     normalize_command,
+    select_declared_check,
     source_revision_receipt,
     task_deliverable_paths,
-    select_declared_check,
 )
 from gt_engine.checkpoint_ledger import ShadowCheckpointLedger
 from gt_engine.completion import (
@@ -3378,7 +3378,15 @@ class MiniSweCentralAgent(BaseAgent):
                         initial_retrieval_result: HybridRetrievalResult | None = None
                         initial_retrieval_state = RetrievalState(
                             task_text=instruction,
-                            intent=RetrievalIntent.IMPLEMENTATION_CONTEXT,
+                            intent=(
+                                RetrievalIntent.DIAGNOSTIC_ROOT_CAUSE
+                                if retrieval_diagnostics
+                                else RetrievalIntent.IMPLEMENTATION_CONTEXT
+                            ),
+                            active_paths=retrieval_active_paths,
+                            active_symbols=retrieval_active_symbols,
+                            diagnostics=retrieval_diagnostics,
+                            validation_state=retrieval_validation_state,
                             source_revision=graph_source_revision,
                         )
                         initial_lifecycle_budget, initial_selection_limit = (
@@ -7827,7 +7835,8 @@ class MiniSweCentralAgent(BaseAgent):
                     for row in red_test_probe_receipts
                 ),
                 "red_test_probe_abstained": sum(
-                    row.get("status") in {"abstained", "failed_open"} for row in red_test_probe_receipts
+                    row.get("status") in {"abstained", "failed_open"}
+                    for row in red_test_probe_receipts
                 ),
                 "completion_certificates_complete": sum(
                     item.status is CompletionStatus.COMPLETE for item in completion_certificates

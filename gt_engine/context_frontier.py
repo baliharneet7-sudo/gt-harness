@@ -43,6 +43,7 @@ class FrontierDisposition(StrEnum):
     INVALID_RELEVANCE = "invalid_relevance"
     FRONTIER_BUDGET = "frontier_budget"
     NO_DECISION_ANCHOR = "no_decision_anchor"
+    LOW_MARGINAL = "low_marginal"
     NO_FRONTIER = "no_frontier"
     CONTROLLER_ONLY = "controller_only"
     EXPIRED_WINDOW = "expired_window"
@@ -189,6 +190,15 @@ def _mapping(evidence: RepositoryEvidence | Mapping[str, Any]) -> Mapping[str, A
     return evidence.as_dict() if isinstance(evidence, RepositoryEvidence) else evidence
 
 
+def _module_path(path: str) -> str:
+    normalized = str(path or "").replace("\\", "/")
+    if normalized.startswith("/app/"):
+        normalized = normalized[5:]
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
 def _provider_text(messages: Sequence[Mapping[str, Any]]) -> str:
     pieces: list[str] = []
     for message in messages:
@@ -196,6 +206,49 @@ def _provider_text(messages: Sequence[Mapping[str, Any]]) -> str:
         for action in (message.get("extra") or {}).get("actions") or ():
             pieces.append(str(action.get("command") or action.get("cmd") or ""))
     return "\n".join(pieces).replace("\\", "/")
+
+
+_READ_OPERATION_RE = re.compile(
+    r"(?i)^\s*(?:cat|sed|head|tail|less|more|view|vi|vim|nano|bat|awk)"
+    r"(?:\s+.*)?$"
+)
+
+
+def _already_read_paths(
+    messages: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return workspace paths already exposed by a model READ/SEARCH observation.
+
+    A successful read renders the file's content into the retained provider
+    view.  Re-delivering a definition or symbol from that exact path adds no
+    marginal value; the model already possesses the source bytes.  Only literal
+    single-file read invocations count; compound/opaque commands and tool
+    metadata never fabricate a read.
+    """
+    read_paths: set[str] = set()
+    for message in messages:
+        extra = message.get("extra") or {}
+        for action in extra.get("actions") or ():
+            command = str(action.get("command") or action.get("cmd") or "").strip()
+            if not command or not _READ_OPERATION_RE.match(command):
+                continue
+            parts = command.split()
+            for part in parts[1:]:
+                cleaned = part.strip("'\"`")
+                if cleaned in {"-n", "-e", "-r", "-l", "-f", "-q"}:
+                    continue
+                if (
+                    cleaned.startswith("-")
+                    or "=" in cleaned
+                    or "$(" in cleaned
+                    or "," in cleaned
+                    or cleaned.isdigit()
+                ):
+                    continue
+                normalized = _module_path(cleaned)
+                if normalized and not normalized.startswith("../"):
+                    read_paths.add(normalized)
+    return frozenset(read_paths)
 
 
 def _digest(*values: object) -> str:
@@ -575,6 +628,7 @@ def compile_incremental_frontier(
         unique_candidates.append(fact)
     candidates = unique_candidates
     provider_text = _provider_text(messages)
+    already_read_paths = _already_read_paths(messages)
     # A path-only task need may receive a file location, but it must not leak
     # the ranked symbol merely because the symbol happens to live in that
     # file.  Upgrade to SYMBOL only when the exact symbol is already part of
@@ -650,6 +704,22 @@ def compile_incremental_frontier(
             disposition = FrontierDisposition.LOW_PRECISION
         elif not _has_decision_anchor(fact, messages):
             disposition = FrontierDisposition.NO_DECISION_ANCHOR
+        elif (
+            already_read_paths
+            and fact.path
+            and _module_path(fact.path) in already_read_paths
+            and fact.kind
+            in {
+                ContextFrontierKind.FILE,
+                ContextFrontierKind.SYMBOL,
+                ContextFrontierKind.DEFINITION,
+                ContextFrontierKind.SIGNATURE,
+                ContextFrontierKind.CALLER,
+                ContextFrontierKind.REFERENCE,
+                ContextFrontierKind.TEST,
+            }
+        ):
+            disposition = FrontierDisposition.LOW_MARGINAL
         else:
             line = _render_fact(fact)
             if (
@@ -749,6 +819,13 @@ def compile_incremental_frontier(
         disposition = FrontierDisposition.FRONTIER_BUDGET
         rendered = ""
         reasons = ("certified_frontier_exceeds_current_budget",)
+    elif candidates and all(
+        item["disposition"] == FrontierDisposition.LOW_MARGINAL.value
+        for item in accounting
+    ):
+        disposition = FrontierDisposition.LOW_MARGINAL
+        rendered = ""
+        reasons = ("all_certified_facts_are_same_path_already_read",)
     elif candidates:
         disposition = FrontierDisposition.LOW_PRECISION
         rendered = ""

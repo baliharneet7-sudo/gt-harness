@@ -237,7 +237,12 @@ def test_compound_opaque_interpreter_is_never_claimed_read_only():
     assert proposal.parse_coverage < 1.0
 
 
-def test_frontier_advances_from_represented_file_to_definition():
+def test_frontier_abstains_on_same_path_definition_after_model_reads_the_file():
+    """After the model reads a file, a definition from that exact path is
+    low-marginal: the model already possesses the source bytes.  Re-delivering
+    it was the P1-005 waste observed in `largest-eigenval` and
+    `fix-code-vulnerability`."""
+
     evidence = {
         "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
         "available": True,
@@ -282,12 +287,119 @@ def test_frontier_advances_from_represented_file_to_definition():
 
     decision = compile_incremental_frontier(evidence, messages, source_revision="s1")
 
+    assert decision.disposition is FrontierDisposition.LOW_MARGINAL
+    assert decision.facts == ()
+    assert decision.accounting[0]["disposition"] == "low_marginal"
+    assert decision.rendered == ""
+
+
+def test_frontier_delivers_same_path_definition_before_any_model_read():
+    """Without a prior read observation, a certified definition remains
+    deliverable; only the exact read path is suppressed."""
+
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (
+            {
+                "path": "src/greeter.py",
+                "line": 7,
+                "symbol": "greet",
+                "retrieval_relevance": 1.0,
+                "semantic_certainty": 1.0,
+            },
+        ),
+        "definitions": (
+            {
+                "path": "src/greeter.py",
+                "line": 7,
+                "symbol": "greet",
+                "signature": "def greet(name: str) -> str",
+                "language": "python",
+                "semantics": "graph_definition",
+                "semantic_certainty": 1.0,
+            },
+        ),
+        "references": (),
+        "callers": (),
+        "project_checks": ("pytest -q",),
+    }
+    messages = [
+        {"role": "user", "content": "Change the greet function in src/greeter.py."},
+    ]
+
+    decision = compile_incremental_frontier(evidence, messages, source_revision="s1")
+
     assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
     assert decision.facts[0].kind is ContextFrontierKind.DEFINITION
     assert decision.facts[0].language == "python"
-    assert decision.accounting[0]["language"] == "python"
     assert "def greet(name: str) -> str" in decision.rendered
-    assert "Repository facts for the next decision" in decision.rendered
+    assert decision.accounting[0]["disposition"] == "selected_frontier"
+
+
+def test_frontier_still_delivers_cross_file_caller_after_model_reads_a_different_file():
+    """Reading one file must not suppress a caller in a different file; the
+    caller connects a distinct affected relation the model has not read."""
+
+    evidence = {
+        "status": RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
+        "available": True,
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "s1",
+        "graph_revision": "g1",
+        "anchors": (),
+        "definitions": (
+            {
+                "path": "src/greeter.py",
+                "line": 7,
+                "symbol": "greet",
+                "signature": "def greet(name: str) -> str",
+                "language": "python",
+                "semantics": "graph_definition",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+        "references": (),
+        "callers": (
+            {
+                "caller_path": "src/main.py",
+                "caller_line": 3,
+                "caller": "main",
+                "target": "greet",
+                "language": "python",
+                "semantics": "graph_caller",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+        "project_checks": ("pytest -q",),
+    }
+    messages = [
+        {"role": "user", "content": "Change the greeting."},
+        {
+            "role": "assistant",
+            "content": "",
+            "extra": {"actions": [{"command": "sed -n '1,120p' src/greeter.py"}]},
+        },
+        {"role": "tool", "content": "def greet(name): ..."},
+    ]
+
+    decision = compile_incremental_frontier(evidence, messages, source_revision="s1")
+
+    assert decision.disposition is FrontierDisposition.SELECTED_FRONTIER
+    assert decision.facts[0].kind is ContextFrontierKind.CALLER
+    assert decision.facts[0].path == "src/main.py"
+    assert any(
+        row["disposition"] == "low_marginal" for row in decision.accounting
+    )
 
 
 def test_frontier_delivers_path_only_anchor_without_leaking_unrequested_symbol():
@@ -839,3 +951,32 @@ def test_frontier_rejects_out_of_range_relevance_instead_of_delivering():
 
     assert decision.disposition is FrontierDisposition.LOW_PRECISION
     assert decision.accounting[0]["disposition"] == "invalid_relevance"
+
+
+def test_read_path_detection_is_literal_and_excludes_ranges_and_composites():
+    from gt_engine.context_frontier import _already_read_paths
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "extra": {"actions": [{"command": "sed -n '1,120p' src/greeter.py"}]},
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "extra": {"actions": [{"command": "cat /app/lib/util.py"}]},
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "extra": {"actions": [{"command": "pytest -q && echo done"}]},
+        },
+    ]
+
+    read_paths = _already_read_paths(messages)
+
+    assert "src/greeter.py" in read_paths
+    assert "lib/util.py" in read_paths
+    assert "1,120p" not in read_paths
+    assert "echo" not in read_paths
