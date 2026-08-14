@@ -279,13 +279,19 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert 'base = (os.environ.get("OPENAI_BASE_URL") or "").strip()' in workflow
     assert 'model = f"openai/{model}"' in workflow
     assert 'kwargs["api_base"] = base' in workflow
-    assert "options: [openrouter, tokenrouter]" in workflow
+    assert "options: [openrouter, tokenrouter, deepseek]" in workflow
     assert "TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}" in workflow
+    assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert 'tokenrouter_base = "https://api.tokenrouter.com/v1"' in workflow
     assert 'kwargs["extra_body"] = {"thinking": {"type": "disabled"}}' in workflow
-    assert '"thinking_mode": "disabled"' in workflow
+    assert '"thinking_mode": (' in workflow
+    assert 'if provider in {"tokenrouter", "deepseek"}' in workflow
     assert '"cost_observed": cost_observed' in workflow
-    assert 'provider != "tokenrouter" and not proof["system_fingerprint"]' in workflow
+    assert 'provider not in {"tokenrouter", "deepseek"} and not proof["system_fingerprint"]' in workflow
+    assert "https://api.deepseek.com" in workflow
+    assert "openai/deepseek-v4-flash" in workflow
+    assert "deepseek:native:api.deepseek.com" in workflow
+    assert "deepseek_native" in workflow
     readiness = (
         Path(__file__).resolve().parents[1] / "scripts" / "central_readiness_audit.py"
     ).read_text(encoding="utf-8")
@@ -375,7 +381,9 @@ def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path
 
     assert model.config.model_name == "openai/deepseek-v4-flash"
     assert model.config.model_kwargs["api_base"] == "https://api.deepseek.com"
-    assert "extra_body" not in model.config.model_kwargs
+    assert model.config.model_kwargs["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():

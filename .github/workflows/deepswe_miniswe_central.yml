@@ -46,7 +46,7 @@ on:
         description: "Frozen provider route for this final comparison"
         type: choice
         required: true
-        options: [openrouter, tokenrouter]
+        options: [openrouter, tokenrouter, deepseek]
         default: "openrouter"
       baseline_run_id:
         description: "GitHub run ID containing the frozen contemporaneous GT-off result"
@@ -136,7 +136,7 @@ jobs:
             echo "::error::release runs require certified_full"; exit 1
           fi
           if [[ "${{ inputs.provider }}" == "tokenrouter" && "${{ inputs.diagnostic_only }}" != "true" ]]; then
-            echo "::error::TokenRouter is authorized only for bounded diagnostics; frozen comparisons remain OpenRouter"; exit 1
+            echo "::error::TokenRouter is authorized only for bounded diagnostics; frozen comparisons remain OpenRouter or native DeepSeek"; exit 1
           fi
       - name: Resolve exact GT revision
         id: gt
@@ -253,6 +253,7 @@ jobs:
           EXPECTED: ${{ needs.plan.outputs.tasks }}
           BENCH_SHA: ${{ needs.plan.outputs.bench_sha }}
           MODEL: ${{ inputs.model }}
+          PROVIDER: ${{ inputs.provider }}
           STEP_LIMIT: ${{ inputs.step_limit }}
         run: |
           set -euo pipefail
@@ -267,13 +268,24 @@ jobs:
           if [row.get("task") for row in rows] != expected:
               raise SystemExit("baseline task order/set does not match treatment plan")
           manifest = payload.get("manifest") or {}
+          provider = os.environ.get("PROVIDER") or "openrouter"
           expected_model = os.environ["MODEL"]
-          if expected_model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-              expected_model = "deepseek/deepseek-v4-flash-0731"
+          if provider == "deepseek":
+              if expected_model in {
+                  "deepseek-v4-flash",
+                  "deepseek-v4-flash-0731",
+                  "deepseek/deepseek-v4-flash-0731",
+              }:
+                  expected_model = "deepseek-v4-flash"
+              expected_provider = "deepseek:native:api.deepseek.com"
+          else:
+              if expected_model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
+                  expected_model = "deepseek/deepseek-v4-flash-0731"
+              expected_provider = "openrouter:deepseek:only:no-fallback"
           required = {
               "benchmark_sha": os.environ["BENCH_SHA"],
               "model": expected_model,
-              "provider": "openrouter:deepseek:only:no-fallback",
+              "provider": expected_provider,
               "temperature": 1.0,
               "step_limit": int(os.environ["STEP_LIMIT"]),
               "execution_budget_sec": 5400,
@@ -306,7 +318,10 @@ jobs:
           if (
               not manifest["provider_response_models"]
               or not manifest["provider_response_providers"]
-              or not manifest["provider_system_fingerprints"]
+              or (
+                  provider != "deepseek"
+                  and not manifest["provider_system_fingerprints"]
+              )
           ):
               raise SystemExit("baseline observed model/provider/fingerprint identity is incomplete")
           required_metrics = {
@@ -339,7 +354,7 @@ jobs:
               reward = (row.get("rewards") or {}).get("reward")
               if reward not in (0, 1) or row.get("solved") != (reward == 1):
                   raise SystemExit(f"baseline row {row.get('task')} has invalid verifier outcome")
-              if not row.get("executor_system_fingerprints"):
+              if provider != "deepseek" and not row.get("executor_system_fingerprints"):
                   raise SystemExit(f"baseline row {row.get('task')} has no observed fingerprint")
           print("BASELINE_APPROVED")
           PY
@@ -363,6 +378,7 @@ jobs:
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -382,7 +398,7 @@ jobs:
       - name: One-call provider route and bootstrap-shape canary
         run: |
           set -euo pipefail
-          test -n "${OPENROUTER_API_KEY:-}${TOKENROUTER_API_KEY:-}${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}" || {
+          test -n "${OPENROUTER_API_KEY:-}${TOKENROUTER_API_KEY:-}${DEEPSEEK_API_KEY:-}${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}" || {
             echo "::error::no provider credential configured"; exit 1;
           }
           python - <<'PY'
@@ -452,6 +468,20 @@ jobs:
                   )
               kwargs["api_key"] = tokenrouter_key
               kwargs["api_base"] = tokenrouter_base
+              kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+          elif provider == "deepseek":
+              # Native DeepSeek API uses the bare V4 Flash id, not the
+              # OpenRouter/TokenRouter catalog checkpoint suffix.
+              if model in {
+                  "deepseek-v4-flash",
+                  "deepseek-v4-flash-0731",
+                  "deepseek/deepseek-v4-flash-0731",
+              }:
+                  model = "openai/deepseek-v4-flash"
+              elif not model.startswith("openai/"):
+                  model = f"openai/{model}"
+              kwargs["api_key"] = os.environ["DEEPSEEK_API_KEY"].strip()
+              kwargs["api_base"] = "https://api.deepseek.com"
               kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
           elif base:
               if "/" not in model:
@@ -527,12 +557,18 @@ jobs:
                   if os.environ.get("PROVIDER") == "openrouter"
                   else "tokenrouter"
                   if os.environ.get("PROVIDER") == "tokenrouter"
+                  else "deepseek_native"
+                  if os.environ.get("PROVIDER") == "deepseek"
                   else "configured"
               ),
               "catalog_model_confirmed": (
                   True if provider == "tokenrouter" else None
               ),
-              "thinking_mode": "disabled" if provider == "tokenrouter" else "provider_default",
+              "thinking_mode": (
+                  "disabled"
+                  if provider in {"tokenrouter", "deepseek"}
+                  else "provider_default"
+              ),
               "allow_fallbacks": False if os.environ.get("PROVIDER") == "openrouter" else None,
               "require_parameters": True if os.environ.get("PROVIDER") == "openrouter" else None,
               "data_collection": "allow" if os.environ.get("PROVIDER") == "openrouter" else None,
@@ -548,11 +584,11 @@ jobs:
           setup = proof["benchmark_setup_overhead"]
           if not proof["response_model"] or not proof["response_provider"]:
               raise SystemExit("bootstrap canary response identity is incomplete")
-          if provider != "tokenrouter" and not proof["system_fingerprint"]:
+          if provider not in {"tokenrouter", "deepseek"} and not proof["system_fingerprint"]:
               raise SystemExit("bootstrap canary response fingerprint is incomplete")
           if any(float(setup[field]) <= 0 for field in ("input_tokens", "output_tokens", "latency_ms")):
               raise SystemExit("bootstrap canary resource accounting is incomplete")
-          if provider != "tokenrouter" and (
+          if provider not in {"tokenrouter", "deepseek"} and (
               not setup["cost_observed"] or float(setup["cost_usd"]) <= 0
           ):
               raise SystemExit("bootstrap canary monetary cost accounting is incomplete")
@@ -582,6 +618,7 @@ jobs:
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -671,6 +708,7 @@ jobs:
           names = (
               "OPENROUTER_API_KEY",
               "TOKENROUTER_API_KEY",
+              "DEEPSEEK_API_KEY",
               "OPENAI_API_KEY",
               "ANTHROPIC_API_KEY",
           )
@@ -695,6 +733,10 @@ jobs:
           elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
             echo "OPENAI_BASE_URL=https://api.tokenrouter.com/v1" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
+          elif [ "${PROVIDER:-configured}" = "deepseek" ]; then
+            echo "OPENAI_BASE_URL=https://api.deepseek.com" >> "$GITHUB_ENV"
+            echo "OPENAI_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
+            echo "GT_LITELLM_MODEL=openai/deepseek-v4-flash" >> "$GITHUB_ENV"
           fi
       - name: Resolve exact DeepSWE task budget
         run: |
@@ -940,6 +982,25 @@ jobs:
                       and provider_proof.get("thinking_mode") == "disabled"
                       and not (provider_route.get("provider_policy") or {})
                   )
+              elif os.environ.get("PROVIDER") == "deepseek":
+                  route_common = bool(
+                      provider_proof.get("requested_model")
+                      == "openai/deepseek-v4-flash"
+                      and provider_route.get("model")
+                      == "openai/deepseek-v4-flash"
+                      and provider_route.get("credential_in_receipt") is False
+                      and provider_route.get("retry_policy")
+                      == "provider_once_no_retry"
+                  )
+                  provider_route_valid = bool(
+                      route_common
+                      and provider_proof.get("requested_provider") == "deepseek_native"
+                      and provider_route.get("api_base")
+                      == "https://api.deepseek.com"
+                      and provider_route.get("thinking_mode") == "disabled"
+                      and provider_proof.get("thinking_mode") == "disabled"
+                      and not (provider_route.get("provider_policy") or {})
+                  )
               else:
                   provider_route_valid = bool(
                       route_common
@@ -1045,10 +1106,19 @@ jobs:
               if os.environ.get("PROVIDER") == "openrouter"
               else "tokenrouter:exact-catalog:openai-compatible"
               if os.environ.get("PROVIDER") == "tokenrouter"
+              else "deepseek:native:api.deepseek.com"
+              if os.environ.get("PROVIDER") == "deepseek"
               else "configured"
           )
           model_identity = os.environ.get("MODEL") or ""
-          if (
+          if os.environ.get("PROVIDER") == "deepseek":
+              if model_identity in {
+                  "deepseek-v4-flash",
+                  "deepseek-v4-flash-0731",
+                  "deepseek/deepseek-v4-flash-0731",
+              }:
+                  model_identity = "deepseek-v4-flash"
+          elif (
               provider_identity.startswith(("openrouter", "tokenrouter"))
               and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}
           ):

@@ -1505,9 +1505,13 @@ class MiniSweCentralAgent(BaseAgent):
                 # The native DeepSeek endpoint exposes bare model IDs.  Do
                 # not translate this into the qualified TokenRouter catalog
                 # ID. LiteLLM still needs its openai-compatible provider
-                # prefix when a custom api_base is supplied.
+                # prefix when a custom api_base is supplied. Mini-SWE's
+                # forced Bash tool_choice is incompatible with DeepSeek V4
+                # thinking mode, so disable thinking for every call on this
+                # route (bootstrap and executor).
                 if not model.startswith("openai/"):
                     model = f"openai/{model}"
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             else:
                 # OpenAI-compatible gateways still require the gateway's exact
                 # catalog identifier.  Preserve the same DeepSeek checkpoint
