@@ -111,6 +111,8 @@ def test_central_merge_fails_closed_on_any_provider_delivery_integrity_error():
     assert "provider_delivery_failures" in merge_block
     assert "invalid_provider_deliveries" in merge_block
     assert "invalid_intelligence or invalid_dense or invalid_provider_deliveries" in merge_block
+    assert "INVALID TREATMENT RELEASE" in merge_block
+    assert "invalid_treatment_release" in merge_block
 
 
 def test_central_merge_requires_explicit_dense_backend_success():

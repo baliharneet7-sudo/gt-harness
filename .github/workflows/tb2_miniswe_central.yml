@@ -884,6 +884,12 @@ jobs:
                   f"for {len(invalid_provider_deliveries)} task(s): "
                   f"{', '.join(invalid_provider_deliveries)}."
               )
+          if invalid_treatment_release:
+              out.append(
+                  f"> **INVALID TREATMENT RELEASE**: persistent-state release gate failed "
+                  f"for {len(invalid_treatment_release)} task(s): "
+                  f"{', '.join(invalid_treatment_release)}."
+              )
           if call1_gt_changed_tasks:
               out.append(
                   f"> **GT CHANGED CALL 1**: final call-1 provider bytes differ from "

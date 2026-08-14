@@ -6,8 +6,12 @@ from dataclasses import replace
 from gt_engine.hybrid_retrieval import (
     EvidenceAuthority,
     EvidenceOrigin,
+    HybridRetrievalResult,
     HybridRetriever,
+    RankedFile,
     RepositoryDocument,
+    RetrievalCandidate,
+    RetrievalChannel,
     RetrievalIntent,
     RetrievalState,
     StructuralLink,
@@ -664,6 +668,87 @@ def test_catalog_packing_keeps_certified_neighbors_inside_item_ceiling():
     )
 
     assert len(catalog.items) <= 8
+    assert any(
+        item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+        for item in catalog.items
+    )
+
+
+def test_catalog_packing_keeps_hybrid_ranks_when_certified_imports_fill_ceiling():
+    ranked_path = "src/ranked_impl.py"
+    documents = (
+        _document(ranked_path, "ranked_impl"),
+        *(_document(f"src/dep{index:02d}.py", f"dep{index:02d}") for index in range(20)),
+    )
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    candidate = RetrievalCandidate(
+        path=ranked_path,
+        start_line=1,
+        end_line=3,
+        symbol="ranked_impl",
+        text="def ranked_impl():\n    return None",
+        channel=RetrievalChannel.LEXICAL,
+        channel_rank=1,
+        relation=None,
+        provenance=("hybrid",),
+        source_revision="source-1",
+    )
+    ranked = RankedFile(
+        path=ranked_path,
+        fused_score=1.0,
+        channel_ranks=((RetrievalChannel.LEXICAL, 1),),
+        representative=candidate,
+        provenance=("hybrid",),
+    )
+    result = HybridRetrievalResult(
+        ranked_files=(ranked,),
+        ranked_spans=(candidate,),
+        selected_context=(),
+        abstained=False,
+        reason_codes=(),
+        channel_receipts=(),
+        latency_ms=1.0,
+        query_hash="q-hybrid-1",
+        token_budget=400,
+        selected_token_count=0,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Fix ranked_impl.",
+        evidence=evidence,
+        documents=documents,
+        structural_links=tuple(
+            StructuralLink(
+                source_path=ranked_path,
+                target_path=f"src/dep{index:02d}.py",
+                relation="IMPORTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPORTS",),
+                certified=True,
+                source_symbol="ranked_impl",
+                target_symbol=f"dep{index:02d}",
+            )
+            for index in range(20)
+        ),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+        initial_retrieval=result,
+        max_items=8,
+    )
+
+    hybrid = [item for item in catalog.items if item.retrieval_rank]
+    assert len(catalog.items) <= 8
+    assert hybrid
+    assert hybrid[0].path == ranked_path
+    assert "hybrid_ranked_candidate" in hybrid[0].provenance
     assert any(
         item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
         for item in catalog.items

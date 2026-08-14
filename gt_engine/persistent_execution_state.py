@@ -637,11 +637,22 @@ def _catalog_item(
     )
 
 
+def _is_hybrid_ranked_catalog_item(item: BootstrapCatalogItem) -> bool:
+    return int(item.retrieval_rank) > 0 and "hybrid_ranked_candidate" in item.provenance
+
+
 def _pack_catalog_items(
     ordered: Sequence[tuple[int, BootstrapCatalogItem]],
     max_items: int,
 ) -> tuple[BootstrapCatalogItem, ...]:
-    """Keep required and certified-relation rows inside the catalog ceiling."""
+    """Keep required, hybrid-ranked, and certified-relation rows in the ceiling.
+
+    Certified imports/calls can exceed ``max_items`` on a large graph. Hybrid
+    ranks must still occupy catalog slots: they are the bootstrap selection
+    surface, and the release gate requires at least one when retrieval ranked
+    files exist. Required rows stay first; certified relations fill the
+    remainder after hybrid ranks.
+    """
 
     limit = max(1, int(max_items))
     selected: dict[str, BootstrapCatalogItem] = {}
@@ -652,6 +663,7 @@ def _pack_catalog_items(
                 selected[item.item_id] = item
 
     take(item for _, item in ordered if item.required)
+    take(item for _, item in ordered if _is_hybrid_ranked_catalog_item(item))
     take(
         item
         for _, item in ordered

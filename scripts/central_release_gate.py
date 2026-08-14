@@ -21,6 +21,23 @@ from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.runtime_gate import audit_runtime_receipt
 
+# Architecture D may send zero PES frames when every dispatched call already
+# recorded a legal non-material abstention.  The empty-trajectory gate must
+# use this same set; requiring only ``no_certified_related_file`` rejects
+# correct history-already-contains and not-model-material abstentions.
+_PERSISTENT_NONE_FRAME_REASONS = frozenset(
+    {
+        "state_change_already_represented_or_not_model_material",
+        "no_material_certified_localization",
+        "no_certified_related_file",
+        "provider_history_already_contains_evidence",
+        "context_budget_closed",
+        "stale_source_revision",
+        "graph_rebase_required",
+        "bootstrap_not_applied",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ReleaseGateCheck:
@@ -506,18 +523,7 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         elif dispatched and runtime.get("valid") is True and state.get("graph_current") is True:
             if kind != "none" or not reasons:
                 failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
-            elif not set(reasons).intersection(
-                {
-                    "state_change_already_represented_or_not_model_material",
-                    "no_material_certified_localization",
-                    "no_certified_related_file",
-                    "provider_history_already_contains_evidence",
-                    "context_budget_closed",
-                    "stale_source_revision",
-                    "graph_rebase_required",
-                    "bootstrap_not_applied",
-                }
-            ):
+            elif not set(reasons).intersection(_PERSISTENT_NONE_FRAME_REASONS):
                 failures.append(f"{label}:persistent_nonmaterial_abstention_invalid:{call}")
         elif kind == "none" and not reasons:
             failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
@@ -537,8 +543,9 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         and dispatched_delivery_count == 0
     ):
         legal_empty = all(
-            "no_certified_related_file"
-            in tuple((row.get("persistent_execution_state") or {}).get("reason_codes") or ())
+            set(
+                (row.get("persistent_execution_state") or {}).get("reason_codes") or ()
+            ).intersection(_PERSISTENT_NONE_FRAME_REASONS)
             for row in dispatched_contexts
         )
         if not legal_empty:
