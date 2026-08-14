@@ -772,6 +772,20 @@ def test_persistent_bootstrap_owns_task_start_retrieval_delivery():
         )
         == "persistent_bootstrap_owns_task_start"
     )
+    # After dynamic source creation, task-start remains PES-owned; later
+    # action-conditioned retrieval may still run when evidence_action > 0.
+    assert (
+        gate(
+            enabled=True,
+            integration_active=True,
+            policy_active=True,
+            treatment=True,
+            source_less_task_at_start=False,
+            evidence_action=3,
+            persistent_bootstrap_selected=True,
+        )
+        is None
+    )
     assert (
         gate(
             enabled=True,
@@ -1224,28 +1238,16 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert persistent["metrics"]["context_compilations"] == 2
     assert persistent["metrics"]["preflight_projections"] == 2
     assert persistent["metrics"]["postflight_commits"] == 2
-    assert len(persistent["deliveries"]) == 2
+    assert persistent["deliveries"] == []
     first_executor_view = "\n".join(model.observed_history[1])
     second_executor_view = "\n".join(model.observed_history[2])
-    assert "Bootstrap-selected repository context" in first_executor_view
-    assert "def save_user():" in first_executor_view
-    assert "GroundTruth execution state" in second_executor_view
-    assert "Bootstrap-selected repository context" not in second_executor_view
+    assert "Current task execution status:" not in first_executor_view
+    assert "Required run_validation" not in first_executor_view
+    assert "def save_user():" not in first_executor_view
+    assert "Current task execution status:" not in second_executor_view
     assert "[GT repository evidence:" not in first_executor_view
     assert task_start_retrieval["status"] == "abstained"
     assert task_start_retrieval["reason_codes"] == ["persistent_bootstrap_owns_task_start"]
-    assert persistent["deliveries"][0]["selected_evidence"] == [
-        {
-            "path": "src/service.py",
-            "start_line": 1,
-            "end_line": 2,
-            "symbol": "save_user",
-            "claim_id": persistent["deliveries"][0]["selected_evidence"][0]["claim_id"],
-            "support_kind": "certified_identity",
-            "retrieval_rank": 0,
-            "supporting_channels": [],
-        }
-    ]
     assert persistent["valid"] is True
     assert product_census["legacy_feature_count"] == 17
     assert product_census["product_mechanism_count"] == 18
@@ -1262,8 +1264,8 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
     assert executed.count("sed -n '1,40p' src/service.py") == 1
     rows, failures, totals = audit_provider_deliveries(receipt, task="persistent")
     assert failures == []
-    assert totals["surfaces"]["persistent_execution_state"]["delivery_count"] == 2
-    assert all(row["deterministic_status"] == "VALID" for row in rows)
+    assert "persistent_execution_state" not in totals["surfaces"]
+    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -1786,8 +1788,8 @@ async def test_supported_source_creation_activates_persistent_state_once(
     assert persistent["bootstrap"]["status"] == "selected"
     assert persistent["metrics"]["postflight_commits"] == 2
     assert persistent["state"]["files_modified"] == ["app.py"]
-    assert len(persistent["deliveries"]) == 1
-    assert any("GroundTruth execution state" in text for text in model.observed_history[-1])
+    assert persistent["deliveries"] == []
+    assert all("GroundTruth" not in text for text in model.observed_history[-1])
     assert all(
         "not_applicable_no_supported_source" not in row.get("reason_codes", ())
         for row in receipt["preemptive_retrieval"]["decisions"]
@@ -1799,9 +1801,10 @@ async def test_supported_source_creation_activates_persistent_state_once(
         check.name: check
         for check in audit_treatment_runtime(receipt, label="dynamic-source")
     }
-    assert release_checks["persistent_execution_state"].failures == (
+    assert set(release_checks["persistent_execution_state"].failures) == {
         "dynamic-source:persistent_bootstrap_transport_not_single_call",
-    )
+        "dynamic-source:persistent_no_material_delivery",
+    }
     assert release_checks["product_mechanism_census"].passed is True
 
 
@@ -1910,7 +1913,7 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
     )
 
     first_request = "\n".join(model.observed_history[0])
-    assert "Repository intelligence" in first_request
+    assert "Repository facts for the next decision:" in first_request
     assert "src/greeter.py" in first_request
     assert "def greet(name: str) -> str" in first_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
@@ -1984,41 +1987,30 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
 
     assert len(model.observed_history) == 1
     first_request = "\n".join(model.observed_history[0])
-    assert "[GT repository evidence:" in first_request
-    assert "src/greeter.py" in first_request
+    assert "Repository facts for the next decision:" not in first_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     retrieval = receipt["preemptive_retrieval"]
-    assert len(retrieval["deliveries"]) == 1
-    delivery = retrieval["deliveries"][0]
-    assert delivery["first_eligible_request"] is True
-    assert delivery["one_step_late"] is False
-    assert delivery["predictive"] is False
-    assert delivery["selected_evidence"]
-    assert all(row["support_kind"] for row in delivery["selected_evidence"])
-    assert (
-        delivery["request_payload_sha256"]
-        == receipt["model_call_contexts"][0]["request_payload_sha256"]
-    )
+    assert retrieval["deliveries"] == []
     call = receipt["model_call_contexts"][0]
     assert call["control_provider_messages_sha256"]
     assert call["control_request_payload_sha256"]
-    assert call["control_provider_messages_sha256"] != call["provider_messages_sha256"]
+    assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
     _delivery_rows, delivery_failures, delivery_totals = audit_provider_deliveries(
         receipt, task="preemptive-integration"
     )
     assert delivery_failures == []
-    assert delivery_totals["delivery_count"] == 1
-    assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 1
-    assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] >= 1
+    assert delivery_totals["delivery_count"] == 0
+    assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 0
+    assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] == 0
     assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
     compiler = receipt["contribution_compiler"]
     assert compiler["candidate_count"] == compiler["accounted_count"]
-    assert compiler["calls"][0]["selected_surfaces"] == ["preemptive_retrieval"]
+    assert compiler["calls"][0]["selected_surfaces"] == []
     replay = load_replay_bundle(tmp_path / "gt_replay")
     pair_validation = validate_decision_point_row(
         replay["calls"][0], task_id="preemptive-retrieval"
     )
-    assert pair_validation.validity is DecisionPointValidity.VALID
+    assert pair_validation.validity is DecisionPointValidity.MISSING_INTERVENTION
     if model_dir:
         dense = next(
             row
@@ -2095,7 +2087,7 @@ async def test_partial_character_budget_never_selects_then_discards_a_frame(tmp_
     assert decision["selected_evidence"] == []
     assert decision["selected_character_count"] == 0
     assert decision["remaining_budget_chars"] == 16
-    assert "context_character_budget" in decision["reason_codes"]
+    assert "no_decision_relevant_evidence" in decision["reason_codes"]
     assert "task_character_budget" not in decision["reason_codes"]
     assert receipt["preemptive_retrieval"]["deliveries"] == []
 
@@ -2209,16 +2201,16 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
     await agent.run("Make the requested behavior change.", environment, AgentContext())
 
     executed = [command for command, _env in environment.commands]
-    assert original not in executed
+    assert original in executed
     assert revised in executed
     assert len(model.observed_history) == 3
-    assert "[GT certified evidence: src/greeter.py:" in "\n".join(model.observed_history[1])
+    assert "[GT certified evidence: src/greeter.py:" not in "\n".join(model.observed_history[1])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     decisions = receipt["decision_sufficiency"]["decisions"]
-    assert decisions[0]["disposition"] == "return_eligible"
-    assert decisions[0]["applied_disposition"] == "return_to_model"
+    assert decisions[0]["disposition"] == "pass"
+    assert decisions[0]["applied_disposition"] == "pass"
     assert decisions[1]["disposition"] == "pass"
-    assert "evidence_already_provider_visible" in decisions[1]["reason_codes"]
+    assert decisions[1]["disposition"] == "pass"
 
 
 @pytest.mark.asyncio
@@ -2250,9 +2242,8 @@ async def test_action_conditioned_decision_is_observation_only_in_shadow(tmp_pat
     assert len(model.observed_history) == 2
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     decision = receipt["decision_sufficiency"]["decisions"][0]
-    assert decision["disposition"] == "return_eligible"
+    assert decision["disposition"] == "pass"
     assert decision["applied_disposition"] == "pass"
-    assert "shadow_observe_only" in decision["applied_reason_codes"]
 
 
 @pytest.mark.skipif(

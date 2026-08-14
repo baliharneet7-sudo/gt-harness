@@ -8,11 +8,13 @@ reported and returned fail-open rather than fabricated.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from gt_engine.graph_context import GraphProjection, build_graph_projection
 from gt_engine.hybrid_retrieval import (
+    EvidenceOrigin,
     RepositoryDocument,
     RetrievalIntent,
     RetrievalState,
@@ -168,10 +170,38 @@ def build_hybrid_repository(
     limits: RepositoryBuildLimits = _DEFAULT_BUILD_LIMITS,
     include_paths: tuple[str, ...] | None = None,
     include_node_ids: tuple[int, ...] | None = None,
+    document_origins: Mapping[str, EvidenceOrigin] | None = None,
+    origin_revisions: Mapping[str, str] | None = None,
+    model_authored_paths: Iterable[str] = (),
+    task_deliverables: Iterable[str] = (),
 ) -> HybridRepository:
     """Build deterministic retrieval documents and directed structural links."""
 
     root = Path(repo_root).resolve()
+    normalized_origins = {
+        str(path).replace("\\", "/"): (
+            origin if isinstance(origin, EvidenceOrigin) else EvidenceOrigin(str(origin))
+        )
+        for path, origin in (document_origins or {}).items()
+    }
+    normalized_origins.update(
+        {
+            str(path).replace("\\", "/"): EvidenceOrigin.MODEL_AUTHORED
+            for path in model_authored_paths
+        }
+    )
+    normalized_origins.update(
+        {
+            str(path).replace("\\", "/"): EvidenceOrigin.TASK_DELIVERABLE
+            for path in task_deliverables
+        }
+    )
+    normalized_origin_revisions = {
+        str(path).replace("\\", "/"): str(revision or "")
+        for path, revision in (origin_revisions or {}).items()
+    }
+    for path in normalized_origins:
+        normalized_origin_revisions.setdefault(path, source_revision)
     graph = Path(graph_db)
     if not graph.is_file():
         return HybridRepository(
@@ -367,6 +397,10 @@ def build_hybrid_repository(
                 end_line=bounded_end,
                 symbol=name,
                 provenance=tuple(provenance),
+                origin=normalized_origins.get(
+                    path, EvidenceOrigin.PREEXISTING_REPOSITORY
+                ),
+                origin_revision=normalized_origin_revisions.get(path, source_revision),
             )
             documents.append(document)
             loaded_node_documents[int(raw_id)] = document

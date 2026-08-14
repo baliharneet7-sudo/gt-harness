@@ -1801,3 +1801,61 @@ readiness, pre-smoke, static, workflow, and receipt gates at the exact pushed
 commit. Until then the status is implementation-verified locally but release-
 unverified; no paid smoke, solve uplift, non-regression, or efficiency claim is
 authorized.
+
+## Semantic-authority repair (2026-08-13)
+
+The earlier repeated-CORE and bootstrap-selection requirements above are
+superseded by this boundary. Persistent state remains updated at every eligible
+host transition, but provider delivery is selective: a frame is sent only when
+it contains a newly certified related file, a new unresolved task obligation,
+a current attributable failure, a declared validation-state change, a stale
+assumption invalidation, or a source-bound completion blocker. An unchanged
+phase, focus, or generic validation-pending state produces no provider payload.
+
+Repository evidence now carries explicit origin and authority. Exact path or
+symbol equality proves identity only and may rank a file; it cannot by itself
+authorize delivery. Model-authored source, task deliverables, generated
+artifacts, external runtime paths, and the active/changed file are never
+presented as novel repository context. A different pre-existing file connected
+to the active file by a current certified graph relation remains deliverable.
+Execution-derived failures and diagnostics retain their separate observation
+authority. Selected source text already represented in the retained provider
+view is filtered before dispatch.
+
+The one bounded bootstrap provider call remains accounted, but its generative
+selection is optional guidance. Invalid JSON, invalid catalog IDs, timeout, or
+a typed provider error selects a deterministic catalog fallback and does not
+silence the state engine. Receipts distinguish `generative_selected` from
+`deterministic_fallback`; a fallback must never be described as model-selected.
+Initially source-less tasks may activate state after source creation, but the
+first model-authored file does not become pre-existing repository evidence.
+
+Current focus is typed as repository source, task deliverable, external
+runtime, or artifact. Only canonical, workspace-contained, indexable current
+repository source may appear as repository focus. `/tmp`, `/root`, `/etc`,
+caches, binaries, data files, unsupported files, and generated outputs remain
+controller-only. Deleted or reclassified paths clear focus deterministically.
+
+Observed validation and completion authority are separate. A self-authored
+check may record an observed pass but cannot produce `READY_TO_SUBMIT`.
+Readiness requires all task-declared or host-certified checks to pass at the
+current source revision. Failed validation diagnostics skip misleading leading
+`PASS`, `OK`, or `SUCCESS` lines and prefer the actual assertion, exception,
+error, or final failure summary.
+
+Model-visible surfaces use neutral provenance labels such as `Repository facts
+for the next decision` and `Current task execution status`. They never claim
+that the controller is GroundTruth, a reference implementation, or a hidden
+evaluator. Delivery receipts record origin, authority, provider-view novelty,
+model knowledge, materiality reason, source and origin revisions, relation
+endpoint, and declared-validation ID. The authoritative audit rejects
+self-echoed source, model-authored content presented as prior repository fact,
+non-repository focus, self-test-only readiness, phase-only repetition, and
+evidence already present in provider history.
+
+Local Python proof of this boundary does not waive the stale Windows
+`gt-index.exe` failure. Release remains blocked until the exact pushed commit
+passes the source-built Linux provider-free workflow with the pinned dense
+asset. No paid smoke or benchmark is authorized by this repair alone; the next
+comparison must use a contemporaneous Mini-SWE GT-off control with identical
+provider, model settings, tools, task revision, budgets, and runner.

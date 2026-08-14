@@ -41,8 +41,17 @@ def _preemptive(*, request: str = "req-1", call: int = 1) -> dict:
                 "start_line": 1,
                 "end_line": 8,
                 "symbol": "calculateTotal",
-                "support_kind": "certified",
-                "supporting_channels": ["exact"],
+                "support_kind": "certified_relation",
+                "supporting_channels": ["structural"],
+                "origin": "preexisting_repository",
+                "authority": "certified_relation",
+                "novel_to_provider_view": True,
+                "known_to_model": False,
+                "materiality_reason": "implementation_direct_relation",
+                "source_revision": "source-1",
+                "origin_revision": "source-1",
+                "relation_endpoint": "src/worker.py",
+                "declared_validation_id": "",
             }
         ],
     }
@@ -64,6 +73,23 @@ def _legacy(*, request: str = "req-1", call: int = 1) -> dict:
         "message_index": 2,
         "chars": 17,
     }
+
+
+def _claim_meta(claim_id: str, **overrides: object) -> dict:
+    value = {
+        "claim_id": claim_id,
+        "origin": "preexisting_repository",
+        "authority": "identity_only",
+        "novel_to_provider_view": True,
+        "known_to_model": False,
+        "materiality_reason": "new_unresolved_task_obligation",
+        "source_revision": "source-1",
+        "origin_revision": "source-1",
+        "relation_endpoint": "",
+        "declared_validation_id": "",
+    }
+    value.update(overrides)
+    return value
 
 
 def _receipt(*, include_preemptive: bool = True) -> dict:
@@ -229,6 +255,7 @@ def test_persistent_state_refresh_is_repeated_context_not_duplicate_evidence():
                     "provider_messages_sha256": "provider-1",
                     "message_index": 1,
                     "chars": 30,
+                    "claim_metadata": [_claim_meta("phase-current")],
                 },
                 {
                     "delivery_id": "state-2",
@@ -243,6 +270,7 @@ def test_persistent_state_refresh_is_repeated_context_not_duplicate_evidence():
                     "provider_messages_sha256": "provider-2",
                     "message_index": 1,
                     "chars": 30,
+                    "claim_metadata": [_claim_meta("phase-current")],
                 },
             ]
         },
@@ -250,10 +278,56 @@ def test_persistent_state_refresh_is_repeated_context_not_duplicate_evidence():
 
     rows, failures, totals = audit_provider_deliveries(receipt)
 
-    assert failures == []
+    assert any("duplicate_provider_claim" in item for item in failures)
     assert totals["delivery_count"] == 2
-    assert totals["duplicate_count"] == 0
-    assert rows[1]["persistent_state_refresh"] is True
+    assert totals["duplicate_count"] == 1
+    assert rows[1]["persistent_state_refresh"] is False
+
+
+def test_model_authored_preemptive_evidence_is_rejected_even_when_hashes_are_valid():
+    receipt = _receipt()
+    evidence = receipt["preemptive_retrieval"]["deliveries"][0]["selected_evidence"][0]
+    evidence["origin"] = "model_authored"
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any("preemptive_delivery_semantic_support_missing" in item for item in failures)
+
+
+def test_persistent_phase_only_or_known_claim_is_rejected():
+    receipt = {
+        "model_call_contexts": [_context(1, request="req-1", provider="provider-1")],
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-1",
+                    "claim_ids": ["phase-only"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 20,
+                    "claim_metadata": [
+                        _claim_meta(
+                            "phase-only",
+                            novel_to_provider_view=False,
+                            known_to_model=True,
+                            materiality_reason="phase_only",
+                        )
+                    ],
+                }
+            ]
+        },
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any("persistent_delivery_semantic_authority_invalid" in item for item in failures)
 
 
 def test_trajectory_audit_exposes_all_provider_surface_totals(tmp_path):

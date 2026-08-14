@@ -619,7 +619,7 @@ def compile_incremental_frontier(
     # Revisions are controller identities, not useful model context.  Exposing
     # their hashes creates stochastic prompt differences between identical
     # workspaces restored with different filesystem timestamps.
-    rendered_lines = ["Repository intelligence for the current source state:"]
+    rendered_lines = ["Repository facts for the next decision:"]
     for fact in candidates:
         valid_relevance = 0.0 <= fact.retrieval_relevance <= 1.0
         valid_certainty = 0.0 <= fact.semantic_certainty <= 1.0

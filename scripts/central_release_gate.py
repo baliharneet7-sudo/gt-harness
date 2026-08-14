@@ -386,8 +386,13 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         if isinstance(item, dict)
     ):
         failures.append(f"{label}:persistent_initial_retrieval_not_in_catalog")
-    if str(bootstrap.get("status") or "") != "selected":
-        failures.append(f"{label}:persistent_bootstrap_not_selected")
+    bootstrap_status = str(bootstrap.get("status") or "")
+    # Fallback keeps Mini-SWE alive but is not a valid generative treatment.
+    if bootstrap_status != "selected":
+        failures.append(f"{label}:persistent_bootstrap_not_generative")
+    expected_bootstrap_mode = "generative_selected"
+    if str(bootstrap.get("bootstrap_mode") or "") != expected_bootstrap_mode:
+        failures.append(f"{label}:persistent_bootstrap_mode_invalid")
     if (
         int(bootstrap.get("logical_calls") or 0) != 1
         or int(bootstrap.get("provider_calls") or 0) != 1
@@ -395,7 +400,9 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         failures.append(f"{label}:persistent_bootstrap_not_exactly_one_call")
     if int(bootstrap.get("action_executions") or 0) != 0:
         failures.append(f"{label}:persistent_bootstrap_action_executed")
-    if bootstrap.get("response_received") is not True:
+    if bootstrap.get("response_received") is not True and not isinstance(
+        bootstrap.get("provider_error"), dict
+    ):
         failures.append(f"{label}:persistent_bootstrap_response_missing")
     if str(bootstrap.get("transport") or "") != "direct_single_provider_call":
         failures.append(f"{label}:persistent_bootstrap_transport_not_single_call")
@@ -415,11 +422,13 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         failures.append(f"{label}:persistent_state_graph_not_current")
     if str(state.get("bootstrap_status") or "") != "selected":
         failures.append(f"{label}:persistent_state_selection_not_applied")
+    if str(state.get("bootstrap_mode") or "") != expected_bootstrap_mode:
+        failures.append(f"{label}:persistent_state_bootstrap_mode_mismatch")
     authorities = state.get("field_authority") or {}
     if (
-        authorities.get("primary_focus_id") != "generative_bootstrap"
+        authorities.get("primary_focus_id") != "bootstrap_selected"
         or authorities.get("phase") != "deterministic_mutable"
-        or authorities.get("current_focus_path") != "executor_observed"
+        or authorities.get("current_focus") != "executor_observed"
     ):
         failures.append(f"{label}:persistent_state_authority_boundary_missing")
 
@@ -495,7 +504,20 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
             if kind == "none" or not frame.get("claim_ids"):
                 failures.append(f"{label}:persistent_delivered_frame_invalid:{call}")
         elif dispatched and runtime.get("valid") is True and state.get("graph_current") is True:
-            failures.append(f"{label}:persistent_stable_core_missing:{call}")
+            if kind != "none" or not reasons:
+                failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
+            elif not set(reasons).intersection(
+                {
+                    "state_change_already_represented_or_not_model_material",
+                    "no_material_certified_localization",
+                    "provider_history_already_contains_evidence",
+                    "context_budget_closed",
+                    "stale_source_revision",
+                    "graph_rebase_required",
+                    "bootstrap_not_applied",
+                }
+            ):
+                failures.append(f"{label}:persistent_nonmaterial_abstention_invalid:{call}")
         elif kind == "none" and not reasons:
             failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
     dispatched_delivery_count = sum(
@@ -506,6 +528,14 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         or delivered_contexts < dispatched_delivery_count
     ):
         failures.append(f"{label}:persistent_delivery_accounting_mismatch")
+    if (
+        bootstrap_status == "selected"
+        and runtime.get("valid") is True
+        and state.get("graph_current") is True
+        and dispatched_contexts
+        and dispatched_delivery_count == 0
+    ):
+        failures.append(f"{label}:persistent_no_material_delivery")
     if int(metrics.get("persistent_state_bootstrap_calls") or 0) != 1:
         failures.append(f"{label}:persistent_bootstrap_metric_mismatch")
     if int(metrics.get("persistent_state_initial_retrieval_calls") or 0) != 1:

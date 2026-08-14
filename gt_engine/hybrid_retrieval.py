@@ -132,6 +132,25 @@ class RetrievalChannel(StrEnum):
     STRUCTURAL = "structural"
 
 
+class EvidenceOrigin(StrEnum):
+    """Where evidence content entered the task trajectory."""
+
+    PREEXISTING_REPOSITORY = "preexisting_repository"
+    MODEL_AUTHORED = "model_authored"
+    TASK_DELIVERABLE = "task_deliverable"
+    GENERATED_ARTIFACT = "generated_artifact"
+    EXTERNAL_RUNTIME = "external_runtime"
+
+
+class EvidenceAuthority(StrEnum):
+    """What a candidate can mechanically establish for the next decision."""
+
+    IDENTITY_ONLY = "identity_only"
+    RANKING_SUPPORT = "ranking_support"
+    CERTIFIED_RELATION = "certified_relation"
+    EXECUTION_OBSERVATION = "execution_observation"
+
+
 _CHANNEL_ORDER = {
     RetrievalChannel.EXACT: 0,
     RetrievalChannel.LEXICAL: 1,
@@ -522,6 +541,8 @@ class RepositoryDocument:
     end_line: int | None = None
     symbol: str | None = None
     provenance: tuple[str, ...] = ()
+    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
+    origin_revision: str = ""
 
     def __post_init__(self) -> None:
         normalized = _normalize_path(self.path)
@@ -531,6 +552,8 @@ class RepositoryDocument:
         if self.end_line is None and self.start_line is not None:
             line_count = max(1, str(self.text or "").count("\n") + 1)
             object.__setattr__(self, "end_line", self.start_line + line_count - 1)
+        if not isinstance(self.origin, EvidenceOrigin):
+            object.__setattr__(self, "origin", EvidenceOrigin(str(self.origin)))
 
 
 @dataclass(frozen=True)
@@ -568,6 +591,9 @@ class RetrievalCandidate:
     provenance: tuple[str, ...]
     source_revision: str
     channel_score: float = 0.0
+    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
+    authority: EvidenceAuthority = EvidenceAuthority.RANKING_SUPPORT
+    origin_revision: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "path", _normalize_path(self.path))
@@ -575,6 +601,10 @@ class RetrievalCandidate:
             raise ValueError("candidate path must not be empty")
         if self.channel_rank < 1:
             raise ValueError("candidate rank must be one-based")
+        if not isinstance(self.origin, EvidenceOrigin):
+            object.__setattr__(self, "origin", EvidenceOrigin(str(self.origin)))
+        if not isinstance(self.authority, EvidenceAuthority):
+            object.__setattr__(self, "authority", EvidenceAuthority(str(self.authority)))
 
     @property
     def content_claim_id(self) -> str:
@@ -683,6 +713,19 @@ def _document_candidate(
     relation: str | None = None,
     provenance: tuple[str, ...] = (),
 ) -> RetrievalCandidate:
+    combined_provenance = tuple(
+        dict.fromkeys((*document.provenance, *provenance, channel.value))
+    )
+    authority = EvidenceAuthority.RANKING_SUPPORT
+    if channel is RetrievalChannel.EXACT and set(combined_provenance) & {
+        "exact_path",
+        "exact_symbol",
+    }:
+        authority = EvidenceAuthority.IDENTITY_ONLY
+    elif channel is RetrievalChannel.STRUCTURAL and "structural_certified" in set(
+        combined_provenance
+    ):
+        authority = EvidenceAuthority.CERTIFIED_RELATION
     return RetrievalCandidate(
         path=document.path,
         start_line=document.start_line,
@@ -692,9 +735,12 @@ def _document_candidate(
         channel=channel,
         channel_rank=rank,
         relation=relation,
-        provenance=tuple(dict.fromkeys((*document.provenance, *provenance, channel.value))),
+        provenance=combined_provenance,
         source_revision=state.source_revision,
         channel_score=float(score),
+        origin=document.origin,
+        authority=authority,
+        origin_revision=document.origin_revision,
     )
 
 
@@ -1257,9 +1303,9 @@ def _render_candidate(candidate: RetrievalCandidate) -> str:
     if candidate.relation:
         metadata.append(f"relation={candidate.relation}")
     label = (
-        "GT candidate repository context"
+        "Candidate repository context"
         if "validation_candidate" in candidate.provenance
-        else "GT repository evidence"
+        else "Repository facts for the next decision"
     )
     return f"[{label}: {'; '.join(metadata)}]\n{candidate.text.strip()}"
 
@@ -1296,11 +1342,11 @@ def _delivery_support(
         and structural_endpoint_aligned
         and "structural_certified" in structural_provenance
     ):
-        return "certified", structural
+        return "certified_relation", structural
     exact = candidates.get(RetrievalChannel.EXACT)
     exact_provenance = set(exact.provenance) if exact else set()
     if exact is not None and exact_provenance & {"exact_path", "exact_symbol"}:
-        return "certified", exact
+        return "identity_only", exact
     if (
         state.intent is RetrievalIntent.VALIDATION_CONTEXT
         and _is_test_path(ranked.path)
@@ -1344,10 +1390,9 @@ def _delivery_support(
         families.add("structural")
     if len(families) < 2:
         return None
-    candidate = structural or exact or candidates.get(RetrievalChannel.LEXICAL)
-    if candidate is None:
-        candidate = candidates.get(RetrievalChannel.BM25)
-    return ("corroborated", candidate) if candidate is not None else None
+    # Multi-channel rank support without a certified relation remains useful
+    # for ordering, but it cannot authorize model-visible source context.
+    return None
 
 
 def _intent_priority(ranked: RankedFile, state: RetrievalState) -> int:
@@ -1392,16 +1437,10 @@ def _decision_relevance(
 ) -> str | None:
     """Separate evidence truth from usefulness to the current decision."""
 
-    provenance = set(candidate.provenance)
-    active_paths = {
-        _normalize_path(path).lower() for path in state.active_paths if _normalize_path(path)
-    }
     if support_kind == "validation_candidate":
         return "validation_test_candidate" if _is_test_path(candidate.path) else None
-    if "exact_path" in provenance and candidate.path.lower() not in active_paths:
-        return "exact_path"
-    if "exact_symbol" in provenance:
-        return "exact_symbol"
+    if support_kind == "identity_only" or candidate.authority is EvidenceAuthority.IDENTITY_ONLY:
+        return None
     relation = str(candidate.relation or "").strip().lower()
     if not relation or "cochange" in relation:
         return None
@@ -1630,6 +1669,8 @@ class HybridRetriever:
         selected_characters = 0
         saw_supported = False
         saw_decision_irrelevant = False
+        saw_origin_rejected = False
+        saw_active_path_rejected = False
         skipped_budget = False
         skipped_character_budget = False
         skipped_duplicate = False
@@ -1641,6 +1682,25 @@ class HybridRetriever:
                 continue
             support_kind, candidate = supported
             saw_supported = True
+            if candidate.origin in {
+                EvidenceOrigin.MODEL_AUTHORED,
+                EvidenceOrigin.TASK_DELIVERABLE,
+                EvidenceOrigin.GENERATED_ARTIFACT,
+                EvidenceOrigin.EXTERNAL_RUNTIME,
+            }:
+                saw_origin_rejected = True
+                continue
+            active_or_changed = {
+                _normalize_path(path).lower()
+                for path in (*state.active_paths, *state.changed_paths)
+                if _normalize_path(path)
+            }
+            if (
+                candidate.path.lower() in active_or_changed
+                and candidate.authority is not EvidenceAuthority.EXECUTION_OBSERVATION
+            ):
+                saw_active_path_rejected = True
+                continue
             decision_relevance = _decision_relevance(
                 candidate,
                 support_kind=support_kind,
@@ -1704,6 +1764,10 @@ class HybridRetriever:
             reasons.append("insufficient_independent_support")
         if saw_decision_irrelevant and not selected:
             reasons.append("no_decision_relevant_evidence")
+        if saw_origin_rejected:
+            reasons.append("model_authored_context_rejected")
+        if saw_active_path_rejected:
+            reasons.append("active_path_context_rejected")
         if skipped_duplicate:
             reasons.append("already_visible_or_delivered")
         if skipped_budget:
@@ -1755,12 +1819,70 @@ def build_preemptive_frame(
     )
 
 
+def filter_provider_known_context(
+    result: HybridRetrievalResult,
+    provider_messages: Sequence[Mapping[str, object]],
+    *,
+    token_counter: Callable[[str], int] = _default_token_counter,
+) -> HybridRetrievalResult:
+    """Remove source spans already present in the retained provider view."""
+
+    visible_strings: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            visible_strings.append(" ".join(value.split()))
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for item in value:
+                collect(item)
+
+    collect(provider_messages)
+    compact_provider_text = "\n".join(visible_strings)
+    selected = tuple(
+        candidate
+        for candidate in result.selected_context
+        if not candidate.text.strip()
+        or " ".join(candidate.text.strip().split()) not in compact_provider_text
+    )
+    if len(selected) == len(result.selected_context):
+        return result
+    rendered = "\n\n".join(_render_candidate(candidate) for candidate in selected)
+    reasons = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    reason
+                    for reason in result.reason_codes
+                    if reason != "selected_bounded_context"
+                ),
+                "provider_history_already_contains_evidence",
+                *(("selected_bounded_context",) if selected else ()),
+            )
+        )
+    )
+    return replace(
+        result,
+        selected_context=selected,
+        abstained=not selected,
+        reason_codes=reasons,
+        selected_token_count=token_counter(rendered) if rendered else 0,
+        selected_character_count=len(rendered),
+    )
+
+
 __all__ = [
     "BM25RetrievalChannel",
     "ChannelReceipt",
     "DenseEmbeddingBackend",
     "DenseRetrievalChannel",
     "ExactRetrievalChannel",
+    "EvidenceAuthority",
+    "EvidenceOrigin",
     "HybridRetrievalResult",
     "HybridRetriever",
     "LexicalRetrievalChannel",
@@ -1777,6 +1899,7 @@ __all__ = [
     "StructuralLink",
     "StructuralRetrievalChannel",
     "build_preemptive_frame",
+    "filter_provider_known_context",
     "reciprocal_rank_fusion",
     "retrieval_query_terms",
 ]

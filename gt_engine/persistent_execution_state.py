@@ -12,12 +12,14 @@ import hashlib
 import json
 import posixpath
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from gt_engine.hybrid_retrieval import (
+    EvidenceAuthority,
+    EvidenceOrigin,
     HybridRetrievalResult,
     RepositoryDocument,
     StructuralLink,
@@ -106,6 +108,7 @@ class StateFieldAuthority(StrEnum):
     GENERATIVE_BOOTSTRAP = "generative_bootstrap"
     DETERMINISTIC_MUTABLE = "deterministic_mutable"
     EXECUTOR_OBSERVED = "executor_observed"
+    BOOTSTRAP_SELECTED = "bootstrap_selected"
 
 
 class CatalogItemKind(StrEnum):
@@ -121,6 +124,12 @@ class BootstrapStatus(StrEnum):
     INVALID_FALLBACK = "invalid_fallback"
     ERROR_FALLBACK = "error_fallback"
     NOT_APPLICABLE = "not_applicable"
+
+
+class BootstrapMode(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    GENERATIVE_SELECTED = "generative_selected"
+    DETERMINISTIC_FALLBACK = "deterministic_fallback"
 
 
 class StatePhase(StrEnum):
@@ -143,6 +152,18 @@ class StateValidationStatus(StrEnum):
     FAIL = "fail"
 
 
+class CompletionReadiness(StrEnum):
+    NOT_READY = "not_ready"
+    READY = "ready"
+
+
+class CurrentFocusKind(StrEnum):
+    REPOSITORY_SOURCE = "repository_source"
+    TASK_DELIVERABLE = "task_deliverable"
+    EXTERNAL_RUNTIME = "external_runtime"
+    ARTIFACT = "artifact"
+
+
 class ContextFrameKind(StrEnum):
     NONE = "none"
     INITIAL = "initial"
@@ -160,16 +181,19 @@ PERSISTENT_STATE_FIELD_AUTHORITIES: dict[str, StateFieldAuthority] = {
     "graph_current": StateFieldAuthority.DETERMINISTIC_MUTABLE,
     "phase": StateFieldAuthority.DETERMINISTIC_MUTABLE,
     "bootstrap_status": StateFieldAuthority.DETERMINISTIC_DERIVED,
-    "primary_focus_id": StateFieldAuthority.GENERATIVE_BOOTSTRAP,
-    "ordered_item_ids": StateFieldAuthority.GENERATIVE_BOOTSTRAP,
-    "risk_item_ids": StateFieldAuthority.GENERATIVE_BOOTSTRAP,
-    "validation_item_ids": StateFieldAuthority.GENERATIVE_BOOTSTRAP,
+    "bootstrap_mode": StateFieldAuthority.DETERMINISTIC_DERIVED,
+    "primary_focus_id": StateFieldAuthority.BOOTSTRAP_SELECTED,
+    "ordered_item_ids": StateFieldAuthority.BOOTSTRAP_SELECTED,
+    "risk_item_ids": StateFieldAuthority.BOOTSTRAP_SELECTED,
+    "validation_item_ids": StateFieldAuthority.BOOTSTRAP_SELECTED,
     "current_focus_id": StateFieldAuthority.DETERMINISTIC_MUTABLE,
-    "current_focus_path": StateFieldAuthority.EXECUTOR_OBSERVED,
+    "current_focus": StateFieldAuthority.EXECUTOR_OBSERVED,
     "files_inspected": StateFieldAuthority.EXECUTOR_OBSERVED,
     "files_modified": StateFieldAuthority.EXECUTOR_OBSERVED,
     "obligations": StateFieldAuthority.DETERMINISTIC_MUTABLE,
-    "validation": StateFieldAuthority.EXECUTOR_OBSERVED,
+    "observed_validation": StateFieldAuthority.EXECUTOR_OBSERVED,
+    "declared_validation": StateFieldAuthority.DETERMINISTIC_MUTABLE,
+    "completion_readiness": StateFieldAuthority.DETERMINISTIC_MUTABLE,
     "current_failure": StateFieldAuthority.EXECUTOR_OBSERVED,
 }
 
@@ -193,6 +217,9 @@ class BootstrapCatalogItem:
     source_end_line: int = 0
     source_claim_id: str = ""
     source_excerpt: str = ""
+    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
+    evidence_authority: EvidenceAuthority = EvidenceAuthority.IDENTITY_ONLY
+    origin_revision: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -212,6 +239,9 @@ class BootstrapCatalogItem:
             "source_start_line": self.source_start_line,
             "source_end_line": self.source_end_line,
             "source_claim_id": self.source_claim_id,
+            "origin": self.origin.value,
+            "evidence_authority": self.evidence_authority.value,
+            "origin_revision": self.origin_revision,
         }
 
 
@@ -294,6 +324,7 @@ class StateValidation:
     command: str = ""
     source_revision: str = ""
     action_id: str = ""
+    declared_check_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -301,6 +332,25 @@ class StateValidation:
             "command": self.command,
             "source_revision": self.source_revision,
             "action_id": self.action_id,
+            "declared_check_id": self.declared_check_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentFocus:
+    path: str
+    kind: CurrentFocusKind
+    origin: EvidenceOrigin
+    source_revision: str
+    origin_revision: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "kind": self.kind.value,
+            "origin": self.origin.value,
+            "source_revision": self.source_revision,
+            "origin_revision": self.origin_revision,
         }
 
 
@@ -331,18 +381,31 @@ class PersistentExecutionState:
     graph_current: bool
     phase: StatePhase
     bootstrap_status: BootstrapStatus
+    bootstrap_mode: BootstrapMode = BootstrapMode.DETERMINISTIC_FALLBACK
     primary_focus_id: str = ""
     current_focus_id: str = ""
-    current_focus_path: str = ""
+    current_focus: CurrentFocus | None = None
     ordered_item_ids: tuple[str, ...] = ()
     risk_item_ids: tuple[str, ...] = ()
     validation_item_ids: tuple[str, ...] = ()
     files_inspected: tuple[str, ...] = ()
     files_modified: tuple[str, ...] = ()
     obligations: tuple[StateObligation, ...] = ()
-    validation: StateValidation = StateValidation()
+    observed_validation: StateValidation = StateValidation()
+    declared_validation: StateValidation = StateValidation()
+    completion_readiness: CompletionReadiness = CompletionReadiness.NOT_READY
     current_failure: StateFailure | None = None
     last_transition: str = "initialized"
+
+    @property
+    def current_focus_path(self) -> str:
+        return self.current_focus.path if self.current_focus is not None else ""
+
+    @property
+    def validation(self) -> StateValidation:
+        """Compatibility view: execution observation, never completion authority."""
+
+        return self.observed_validation
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -356,16 +419,21 @@ class PersistentExecutionState:
             "graph_current": self.graph_current,
             "phase": self.phase.value,
             "bootstrap_status": self.bootstrap_status.value,
+            "bootstrap_mode": self.bootstrap_mode.value,
             "primary_focus_id": self.primary_focus_id,
             "current_focus_id": self.current_focus_id,
             "current_focus_path": self.current_focus_path,
+            "current_focus": self.current_focus.as_dict() if self.current_focus else None,
             "ordered_item_ids": list(self.ordered_item_ids),
             "risk_item_ids": list(self.risk_item_ids),
             "validation_item_ids": list(self.validation_item_ids),
             "files_inspected": list(self.files_inspected),
             "files_modified": list(self.files_modified),
             "obligations": [item.as_dict() for item in self.obligations],
-            "validation": self.validation.as_dict(),
+            "validation": self.observed_validation.as_dict(),
+            "observed_validation": self.observed_validation.as_dict(),
+            "declared_validation": self.declared_validation.as_dict(),
+            "completion_readiness": self.completion_readiness.value,
             "current_failure": (
                 self.current_failure.as_dict() if self.current_failure is not None else None
             ),
@@ -413,6 +481,7 @@ class PersistentContextFrame:
     token_count: int
     reason_codes: tuple[str, ...] = ()
     selected_evidence: tuple[dict[str, Any], ...] = ()
+    claim_metadata: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -425,6 +494,7 @@ class PersistentContextFrame:
             "token_count": self.token_count,
             "reason_codes": list(self.reason_codes),
             "selected_evidence": [dict(item) for item in self.selected_evidence],
+            "claim_metadata": [dict(item) for item in self.claim_metadata],
         }
 
 
@@ -445,6 +515,9 @@ def _catalog_item(
     source_end_line: int = 0,
     source_claim_id: str = "",
     source_excerpt: str = "",
+    origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY,
+    evidence_authority: EvidenceAuthority = EvidenceAuthority.IDENTITY_ONLY,
+    origin_revision: str = "",
 ) -> BootstrapCatalogItem:
     normalized_path = _path(path)
     normalized_anchors = tuple(
@@ -479,6 +552,9 @@ def _catalog_item(
         source_end_line=max(0, int(source_end_line)),
         source_claim_id=str(source_claim_id or ""),
         source_excerpt=_complete_excerpt(source_excerpt),
+        origin=origin,
+        evidence_authority=evidence_authority,
+        origin_revision=str(origin_revision or ""),
     )
 
 
@@ -536,6 +612,7 @@ def build_bootstrap_catalog(
                     f"Required validation: {clean}",
                     anchors=(clean,),
                     required=True,
+                    evidence_authority=EvidenceAuthority.EXECUTION_OBSERVATION,
                 ),
             )
     for command in evidence.project_checks:
@@ -548,6 +625,7 @@ def build_bootstrap_catalog(
                     f"Project validation candidate: {clean}",
                     anchors=(clean,),
                     required=False,
+                    evidence_authority=EvidenceAuthority.EXECUTION_OBSERVATION,
                 ),
             )
     for raw_path in task_deliverables:
@@ -561,6 +639,8 @@ def build_bootstrap_catalog(
                     path=normalized,
                     anchors=(normalized,),
                     required=True,
+                    origin=EvidenceOrigin.TASK_DELIVERABLE,
+                    evidence_authority=EvidenceAuthority.EXECUTION_OBSERVATION,
                 ),
             )
 
@@ -595,6 +675,7 @@ def build_bootstrap_catalog(
                     symbol=symbol,
                     relation="calls",
                     anchors=(path, symbol),
+                    evidence_authority=EvidenceAuthority.CERTIFIED_RELATION,
                 ),
             )
 
@@ -675,6 +756,9 @@ def build_bootstrap_catalog(
                             )
                         )
                     ),
+                    origin=candidate.origin,
+                    evidence_authority=EvidenceAuthority.RANKING_SUPPORT,
+                    origin_revision=candidate.origin_revision,
                 ),
             )
     focus_paths = {
@@ -705,6 +789,7 @@ def build_bootstrap_catalog(
                     symbol=_bounded(symbol, 160),
                     relation=normalized_relation,
                     anchors=(normalized, _bounded(symbol, 160)),
+                    evidence_authority=EvidenceAuthority.CERTIFIED_RELATION,
                 ),
             )
 
@@ -758,6 +843,15 @@ def build_bootstrap_catalog(
                 source_end_line=end_line,
                 source_claim_id=claim_id,
                 source_excerpt=excerpt,
+                origin=document.origin,
+                evidence_authority=(
+                    item.evidence_authority
+                    if item.kind is CatalogItemKind.DEPENDENCY
+                    else EvidenceAuthority.RANKING_SUPPORT
+                    if item.retrieval_rank
+                    else EvidenceAuthority.IDENTITY_ONLY
+                ),
+                origin_revision=document.origin_revision,
             ),
         )
     candidates = enriched
@@ -850,10 +944,18 @@ def deterministic_bootstrap_fallback(
     *,
     status: BootstrapStatus = BootstrapStatus.INVALID_FALLBACK,
 ) -> tuple[BootstrapSelection, BootstrapStatus]:
-    # A malformed/timed-out generative selection cannot authorize a ranked
-    # repository focus. Preserve only explicit task requirements internally;
-    # compile_context remains fail-open until a valid selection exists.
-    primary = ""
+    # Generative focus is optional. Deterministically retain task requirements
+    # and the highest-ranked safe repository identity so state remains live.
+    primary_item = next(
+        (
+            item
+            for item in catalog.items
+            if item.kind in {CatalogItemKind.FOCUS, CatalogItemKind.DEPENDENCY}
+            and item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+        ),
+        None,
+    )
+    primary = primary_item.item_id if primary_item is not None else ""
     ordered = tuple(
         item.item_id for item in catalog.items if item.required or item.item_id == primary
     )
@@ -969,6 +1071,8 @@ class PersistentExecutionStateEngine:
         structural_links: tuple[StructuralLink, ...],
         present_paths: tuple[str, ...],
         workspace_root: str = "/app",
+        path_origins: dict[str, EvidenceOrigin] | None = None,
+        path_origin_revisions: dict[str, str] | None = None,
     ) -> None:
         task_digest = hashlib.sha256(str(task or "").encode("utf-8")).hexdigest()
         self._catalog = catalog
@@ -976,6 +1080,29 @@ class PersistentExecutionStateEngine:
         self._links = self._certified_links(structural_links)
         self._present_paths = frozenset(
             self._state_path(item) for item in present_paths if self._state_path(item)
+        )
+        supplied_origins = path_origins or {}
+        supplied_revisions = path_origin_revisions or {}
+        self._path_origins = {
+            self._state_path(path): (
+                origin if isinstance(origin, EvidenceOrigin) else EvidenceOrigin(str(origin))
+            )
+            for path, origin in supplied_origins.items()
+            if self._state_path(path)
+        }
+        self._path_origin_revisions = {
+            self._state_path(path): str(revision or "")
+            for path, revision in supplied_revisions.items()
+            if self._state_path(path)
+        }
+        for item in catalog.items:
+            if item.path:
+                self._path_origins.setdefault(item.path, item.origin)
+                self._path_origin_revisions.setdefault(item.path, item.origin_revision)
+        self._deliverable_paths = frozenset(
+            item.path
+            for item in catalog.items
+            if item.kind is CatalogItemKind.DELIVERABLE and item.path
         )
         self._snapshot = PersistentExecutionState(
             state_id=_stable_id("state", task_digest, catalog.source_revision),
@@ -987,6 +1114,7 @@ class PersistentExecutionStateEngine:
             graph_current=True,
             phase=StatePhase.LOCALIZING,
             bootstrap_status=BootstrapStatus.NOT_REQUESTED,
+            bootstrap_mode=BootstrapMode.DETERMINISTIC_FALLBACK,
             obligations=tuple(
                 StateObligation(
                     obligation_id=_stable_id("obligation", item.kind.value, item.item_id),
@@ -1032,6 +1160,8 @@ class PersistentExecutionStateEngine:
         structural_links: tuple[StructuralLink, ...],
         present_paths: tuple[str, ...],
         workspace_root: str = "/app",
+        path_origins: dict[str, EvidenceOrigin] | None = None,
+        path_origin_revisions: dict[str, str] | None = None,
     ) -> PersistentExecutionStateEngine:
         if not catalog.complete:
             raise ValueError("persistent execution state requires a complete graph catalog")
@@ -1041,6 +1171,8 @@ class PersistentExecutionStateEngine:
             structural_links=structural_links,
             present_paths=present_paths,
             workspace_root=workspace_root,
+            path_origins=path_origins,
+            path_origin_revisions=path_origin_revisions,
         )
 
     @property
@@ -1093,6 +1225,43 @@ class PersistentExecutionStateEngine:
             raw = raw[len(self._workspace_root.rstrip("/")) + 1 :]
         return _path(raw)
 
+    def _focus_for_path(
+        self,
+        path: str,
+        *,
+        source_revision: str,
+        source_hint: bool = False,
+    ) -> CurrentFocus | None:
+        normalized = self._state_path(path)
+        if not normalized:
+            return None
+        if normalized in self._deliverable_paths:
+            kind = CurrentFocusKind.TASK_DELIVERABLE
+            origin = EvidenceOrigin.TASK_DELIVERABLE
+        elif normalized.startswith("/"):
+            kind = CurrentFocusKind.EXTERNAL_RUNTIME
+            origin = EvidenceOrigin.EXTERNAL_RUNTIME
+        elif normalized in self._present_paths or source_hint:
+            kind = CurrentFocusKind.REPOSITORY_SOURCE
+            origin = self._path_origins.get(
+                normalized,
+                (
+                    EvidenceOrigin.MODEL_AUTHORED
+                    if source_hint
+                    else EvidenceOrigin.PREEXISTING_REPOSITORY
+                ),
+            )
+        else:
+            kind = CurrentFocusKind.ARTIFACT
+            origin = EvidenceOrigin.GENERATED_ARTIFACT
+        return CurrentFocus(
+            path=normalized,
+            kind=kind,
+            origin=origin,
+            source_revision=source_revision,
+            origin_revision=self._path_origin_revisions.get(normalized, ""),
+        )
+
     def apply_bootstrap(
         self,
         selection: BootstrapSelection,
@@ -1106,14 +1275,17 @@ class PersistentExecutionStateEngine:
             self._record("bootstrap", disposition="stale_source_revision")
             return self._snapshot
         status = BootstrapStatus.SELECTED
+        mode = BootstrapMode.GENERATIVE_SELECTED
         applied = selection
         if not selection.valid:
             status = BootstrapStatus.ERROR_FALLBACK if error else BootstrapStatus.INVALID_FALLBACK
             applied, status = deterministic_bootstrap_fallback(self._catalog, status=status)
+            mode = BootstrapMode.DETERMINISTIC_FALLBACK
         next_snapshot = replace(
             self._snapshot,
             version=self._snapshot.version + 1,
             bootstrap_status=status,
+            bootstrap_mode=mode,
             primary_focus_id=applied.primary_focus_id,
             current_focus_id=applied.primary_focus_id,
             ordered_item_ids=applied.ordered_item_ids,
@@ -1126,6 +1298,7 @@ class PersistentExecutionStateEngine:
         self._record(
             "bootstrap",
             disposition=status.value,
+            bootstrap_mode=mode.value,
             selected_ids=list(
                 dict.fromkeys(
                     (
@@ -1196,10 +1369,20 @@ class PersistentExecutionStateEngine:
 
     @staticmethod
     def _diagnostic_summary(output: str) -> str:
-        for line in str(output or "").splitlines():
-            clean = _bounded(line, 280)
-            if clean:
-                return clean
+        lines = [
+            clean
+            for line in str(output or "").splitlines()
+            if (clean := _bounded(line, 280))
+            and not re.match(r"^(?:PASS|OK|SUCCESS)\b", clean, re.IGNORECASE)
+        ]
+        failure = re.compile(
+            r"(?:assert|exception|error|fail(?:ed|ure)?|traceback)", re.IGNORECASE
+        )
+        for line in reversed(lines):
+            if failure.search(line):
+                return line
+        if lines:
+            return lines[-1]
         return "validation failed without a diagnostic"
 
     def _open_adjacent_obligations(
@@ -1332,11 +1515,13 @@ class PersistentExecutionStateEngine:
         files_inspected = self._snapshot.files_inspected
         files_modified = self._snapshot.files_modified
         obligations = self._snapshot.obligations
-        validation = self._snapshot.validation
+        observed_validation = self._snapshot.observed_validation
+        declared_validation = self._snapshot.declared_validation
+        completion_readiness = self._snapshot.completion_readiness
         failure = self._snapshot.current_failure
         phase = self._snapshot.phase
         current_focus_id = self._snapshot.current_focus_id
-        current_focus_path = self._snapshot.current_focus_path
+        current_focus = self._snapshot.current_focus
         transition = "postflight_observed"
 
         focus_paths = tuple(normalized_changed) or tuple(sorted(targets))
@@ -1346,9 +1531,17 @@ class PersistentExecutionStateEngine:
             ActionOperation.CREATE,
             ActionOperation.DELETE,
         }:
-            current_focus_path = focus_paths[0]
+            current_focus = self._focus_for_path(
+                focus_paths[0],
+                source_revision=current_source_revision,
+                source_hint=focus_paths[0] in normalized_graph_changed,
+            )
             matched_focus = next(
-                (item.item_id for item in self._catalog.items if item.path == current_focus_path),
+                (
+                    item.item_id
+                    for item in self._catalog.items
+                    if current_focus is not None and item.path == current_focus.path
+                ),
                 "",
             )
             current_focus_id = matched_focus
@@ -1381,11 +1574,21 @@ class PersistentExecutionStateEngine:
             # The pre-edit graph is no longer authoritative.  Current graph
             # obligations are recomputed only after the incremental refresh
             # succeeds in ``rebase_graph``.
-            validation = StateValidation(
+            observed_validation = StateValidation(
                 status=StateValidationStatus.PENDING,
                 source_revision=current_source_revision,
                 action_id=proposed.action_id,
             )
+            declared_validation = StateValidation(
+                status=(
+                    StateValidationStatus.PENDING
+                    if any(item.kind is CatalogItemKind.VALIDATION for item in self._catalog.items)
+                    else StateValidationStatus.UNKNOWN
+                ),
+                source_revision=current_source_revision,
+                action_id=proposed.action_id,
+            )
+            completion_readiness = CompletionReadiness.NOT_READY
             failure = None
             phase = StatePhase.IMPLEMENTING
             transition = "source_changed"
@@ -1397,18 +1600,27 @@ class PersistentExecutionStateEngine:
             # canonical declared-check identity here instead of reparsing or
             # requiring byte-for-byte equality with a wrapper/redirection-rich
             # Bash command.
-            completed_check = _bounded(validation_check_id, 280) or command
+            completed_check = _bounded(validation_check_id, 280)
             if normalized_validation == StateValidationStatus.PASS.value and returncode == 0:
-                validation = StateValidation(
+                observed_validation = StateValidation(
                     status=StateValidationStatus.PASS,
                     command=command,
                     source_revision=current_source_revision,
                     action_id=proposed.action_id,
                 )
-                declared_scope = any(
-                    item.kind is CatalogItemKind.VALIDATION and completed_check in item.anchors
+                declared_scope = bool(completed_check) and any(
+                    item.kind is CatalogItemKind.VALIDATION
+                    and completed_check in item.anchors
                     for item in self._catalog.items
                 )
+                if declared_scope:
+                    declared_validation = StateValidation(
+                        status=StateValidationStatus.PASS,
+                        command=command,
+                        source_revision=current_source_revision,
+                        action_id=proposed.action_id,
+                        declared_check_id=completed_check,
+                    )
                 validation_targets = targets
                 if declared_scope:
                     validation_targets = validation_targets | frozenset(
@@ -1433,23 +1645,42 @@ class PersistentExecutionStateEngine:
                     for item in obligations
                 )
                 failure = None
-                phase = (
-                    StatePhase.READY_TO_SUBMIT
-                    if files_modified
+                ready = bool(
+                    declared_scope
+                    and files_modified
                     and not any(
                         item.status is ObligationStatus.OPEN and item.blocking
                         for item in obligations
                     )
+                )
+                completion_readiness = (
+                    CompletionReadiness.READY if ready else CompletionReadiness.NOT_READY
+                )
+                phase = (
+                    StatePhase.READY_TO_SUBMIT
+                    if ready
                     else StatePhase.VALIDATING
                 )
                 transition = "validation_passed"
             elif normalized_validation == StateValidationStatus.FAIL.value:
-                validation = StateValidation(
+                observed_validation = StateValidation(
                     status=StateValidationStatus.FAIL,
                     command=command,
                     source_revision=current_source_revision,
                     action_id=proposed.action_id,
                 )
+                if completed_check and any(
+                    item.kind is CatalogItemKind.VALIDATION and completed_check in item.anchors
+                    for item in self._catalog.items
+                ):
+                    declared_validation = StateValidation(
+                        status=StateValidationStatus.FAIL,
+                        command=command,
+                        source_revision=current_source_revision,
+                        action_id=proposed.action_id,
+                        declared_check_id=completed_check,
+                    )
+                completion_readiness = CompletionReadiness.NOT_READY
                 failure = StateFailure(
                     action_id=proposed.action_id,
                     operation=proposed.operation.value,
@@ -1462,12 +1693,13 @@ class PersistentExecutionStateEngine:
                 # A recognized validation-shaped action whose terminal result is
                 # not mechanically attributable remains pending.  Raw exit code
                 # is not enough to manufacture PASS/FAIL authority.
-                validation = StateValidation(
+                observed_validation = StateValidation(
                     status=StateValidationStatus.PENDING,
                     command=command,
                     source_revision=current_source_revision,
                     action_id=proposed.action_id,
                 )
+                completion_readiness = CompletionReadiness.NOT_READY
                 phase = StatePhase.VALIDATING
                 transition = "validation_outcome_unattributed"
 
@@ -1486,11 +1718,13 @@ class PersistentExecutionStateEngine:
             ),
             phase=phase,
             current_focus_id=current_focus_id,
-            current_focus_path=current_focus_path,
+            current_focus=current_focus,
             files_inspected=files_inspected,
             files_modified=files_modified,
             obligations=obligations,
-            validation=validation,
+            observed_validation=observed_validation,
+            declared_validation=declared_validation,
+            completion_readiness=completion_readiness,
             current_failure=failure,
             last_transition=transition,
         )
@@ -1566,6 +1800,10 @@ class PersistentExecutionStateEngine:
                 self._state_path(path) for path in changed_paths if self._state_path(path)
             )
         )
+        for path in normalized_changed:
+            if path not in self._deliverable_paths:
+                self._path_origins[path] = EvidenceOrigin.MODEL_AUTHORED
+                self._path_origin_revisions[path] = current_source_revision
         if normalized_changed:
             obligations = self._open_adjacent_obligations(
                 normalized_changed,
@@ -1582,9 +1820,22 @@ class PersistentExecutionStateEngine:
             if self._snapshot.current_focus_id in catalog_ids
             else ""
         )
-        current_focus_path = self._snapshot.current_focus_path
-        if current_focus_path and current_focus_path not in self._present_paths:
-            current_focus_path = ""
+        current_focus = self._snapshot.current_focus
+        if (
+            current_focus is not None
+            and current_focus.kind is CurrentFocusKind.REPOSITORY_SOURCE
+            and current_focus.path not in self._present_paths
+        ):
+            current_focus = None
+        elif current_focus is not None:
+            current_focus = replace(
+                current_focus,
+                origin=self._path_origins.get(current_focus.path, current_focus.origin),
+                source_revision=current_source_revision,
+                origin_revision=self._path_origin_revisions.get(
+                    current_focus.path, current_focus.origin_revision
+                ),
+            )
         candidate = replace(
             self._snapshot,
             source_revision=current_source_revision,
@@ -1592,7 +1843,7 @@ class PersistentExecutionStateEngine:
             graph_revision=current_graph_revision,
             graph_current=True,
             current_focus_id=current_focus_id,
-            current_focus_path=current_focus_path,
+            current_focus=current_focus,
             ordered_item_ids=tuple(
                 item_id for item_id in self._snapshot.ordered_item_ids if item_id in catalog_ids
             ),
@@ -1640,29 +1891,92 @@ class PersistentExecutionStateEngine:
     def _item(self, item_id: str) -> BootstrapCatalogItem | None:
         return next((item for item in self._catalog.items if item.item_id == item_id), None)
 
-    def _frame_lines(self, kind: ContextFrameKind) -> list[tuple[str, str]]:
+    def _frame_lines(self, kind: ContextFrameKind) -> list[tuple[str, str, dict[str, Any]]]:
         snapshot = self._snapshot
         focus_id = snapshot.current_focus_id
         if not focus_id and snapshot.graph_revision == self._catalog.graph_revision:
             focus_id = snapshot.primary_focus_id
         catalog_is_current = snapshot.graph_revision == self._catalog.graph_revision
         focus = self._item(focus_id) if catalog_is_current else None
-        lines: list[tuple[str, str]] = [
-            (
-                _stable_id("state-claim", "phase", snapshot.phase.value, snapshot.source_revision),
-                f"Phase: {snapshot.phase.value}.",
+        lines: list[tuple[str, str, dict[str, Any]]] = []
+
+        def metadata(
+            *,
+            origin: EvidenceOrigin,
+            authority: EvidenceAuthority,
+            materiality_reason: str,
+            origin_revision: str = "",
+            relation_endpoint: str = "",
+            declared_validation_id: str = "",
+            known_to_model: bool = False,
+            known_texts: tuple[str, ...] = (),
+        ) -> dict[str, Any]:
+            return {
+                "origin": origin.value,
+                "authority": authority.value,
+                "novel_to_provider_view": True,
+                "known_to_model": known_to_model,
+                "materiality_reason": materiality_reason,
+                "source_revision": snapshot.source_revision,
+                "origin_revision": origin_revision,
+                "relation_endpoint": relation_endpoint,
+                "declared_validation_id": declared_validation_id,
+                "_known_texts": known_texts,
+            }
+
+        def _certified_repository_item(
+            item: BootstrapCatalogItem | None,
+        ) -> BootstrapCatalogItem | None:
+            if (
+                item is not None
+                and item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+            ):
+                return item
+            return None
+
+        initial_focus = _certified_repository_item(focus)
+        if (
+            kind is ContextFrameKind.INITIAL
+            and initial_focus is None
+            and catalog_is_current
+            and (
+                focus is None
+                or (
+                    focus.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                    and focus.evidence_authority
+                    in {
+                        EvidenceAuthority.IDENTITY_ONLY,
+                        EvidenceAuthority.RANKING_SUPPORT,
+                    }
+                )
             )
-        ]
-        if focus is not None and kind is ContextFrameKind.INITIAL:
-            focus_prefix = (
-                "Current certified focus"
-                if focus.certified
-                else "Current bootstrap-selected ranked focus"
-            )
+        ):
+            for item_id in snapshot.ordered_item_ids:
+                candidate = _certified_repository_item(self._item(item_id))
+                if candidate is not None:
+                    initial_focus = candidate
+                    break
+            if initial_focus is None:
+                for item in self._catalog.items:
+                    candidate = _certified_repository_item(item)
+                    if candidate is not None:
+                        initial_focus = candidate
+                        break
+
+        if kind is ContextFrameKind.INITIAL and initial_focus is not None:
+            focus = initial_focus
             lines.append(
                 (
                     _stable_id("state-claim", "focus", focus.item_id),
-                    f"{focus_prefix}: {focus.label}.",
+                    f"Certified related repository file: {focus.label}.",
+                    metadata(
+                        origin=focus.origin,
+                        authority=focus.evidence_authority,
+                        materiality_reason="newly_certified_related_file",
+                        origin_revision=focus.origin_revision,
+                        relation_endpoint=focus.path,
+                    ),
                 )
             )
             if (
@@ -1670,38 +1984,26 @@ class PersistentExecutionStateEngine:
                 and focus.source_claim_id
                 and focus.path not in snapshot.files_inspected
             ):
-                support_label = (
-                    "certified path/symbol identity"
-                    if focus.certified
-                    else "ranked relevance; checkout source identity certified"
-                )
+                support_label = "certified graph relation"
                 lines.append(
                     (
                         focus.source_claim_id,
                         (
-                            "Bootstrap-selected repository context "
+                            "Repository relation context "
                             f"[{support_label}] {focus.path}:"
                             f"{focus.source_start_line}-{focus.source_end_line}\n"
                             "```\n"
                             f"{focus.source_excerpt}\n"
                             "```"
                         ),
-                    )
-                )
-        elif snapshot.current_focus_path and kind is ContextFrameKind.INITIAL:
-            lines.append(
-                (
-                    _stable_id("state-claim", "focus-path", snapshot.current_focus_path),
-                    f"Current observed repository focus: {snapshot.current_focus_path}.",
-                )
-            )
-        if kind is ContextFrameKind.CORE:
-            focus_path = snapshot.current_focus_path or (focus.path if focus else "")
-            if focus_path:
-                lines.append(
-                    (
-                        _stable_id("state-claim", "core-focus-path", focus_path),
-                        f"Current focus path: {focus_path}.",
+                        metadata(
+                            origin=focus.origin,
+                            authority=EvidenceAuthority.CERTIFIED_RELATION,
+                            materiality_reason="newly_certified_related_file",
+                            origin_revision=focus.origin_revision,
+                            relation_endpoint=focus.path,
+                            known_texts=(focus.source_excerpt,),
+                        ),
                     )
                 )
         open_obligations = [
@@ -1721,21 +2023,57 @@ class PersistentExecutionStateEngine:
                         f"{obligation.kind}: {obligation_target} "
                         f"({obligation.relation} from {obligation.source_path})."
                     ),
+                    metadata(
+                        origin=(
+                            EvidenceOrigin.TASK_DELIVERABLE
+                            if obligation.kind == "produce_deliverable"
+                            else EvidenceOrigin.PREEXISTING_REPOSITORY
+                        ),
+                        authority=(
+                            EvidenceAuthority.CERTIFIED_RELATION
+                            if obligation.relation != "task_requirement"
+                            else EvidenceAuthority.IDENTITY_ONLY
+                        ),
+                        materiality_reason=(
+                            "new_unresolved_task_obligation"
+                            if obligation.blocking
+                            else "related_advisory_obligation"
+                        ),
+                        origin_revision=obligation.opened_revision,
+                        relation_endpoint=obligation.path,
+                        known_texts=(
+                            (obligation_target,)
+                            if obligation.relation == "task_requirement"
+                            else ()
+                        ),
+                    ),
                 )
             )
-        if snapshot.validation.status is not StateValidationStatus.UNKNOWN:
-            validation_text = f"Validation: {snapshot.validation.status.value}"
-            if snapshot.validation.command:
-                validation_text += f" - {snapshot.validation.command}"
+        if snapshot.declared_validation.status in {
+            StateValidationStatus.PASS,
+            StateValidationStatus.FAIL,
+        }:
+            validation_text = f"Declared validation: {snapshot.declared_validation.status.value}"
+            if snapshot.declared_validation.command:
+                validation_text += f" - {snapshot.declared_validation.command}"
             lines.append(
                 (
                     _stable_id(
                         "state-claim",
                         "validation",
-                        snapshot.validation.status.value,
-                        snapshot.validation.source_revision,
+                        snapshot.declared_validation.status.value,
+                        snapshot.declared_validation.source_revision,
                     ),
                     validation_text + ".",
+                    metadata(
+                        origin=EvidenceOrigin.EXTERNAL_RUNTIME,
+                        authority=EvidenceAuthority.EXECUTION_OBSERVATION,
+                        materiality_reason="declared_validation_status_change",
+                        origin_revision=snapshot.declared_validation.source_revision,
+                        declared_validation_id=(
+                            snapshot.declared_validation.declared_check_id
+                        ),
+                    ),
                 )
             )
         if snapshot.current_failure is not None:
@@ -1748,6 +2086,13 @@ class PersistentExecutionStateEngine:
                         snapshot.current_failure.diagnostic,
                     ),
                     f"Current validation failure: {snapshot.current_failure.diagnostic}.",
+                    metadata(
+                        origin=EvidenceOrigin.EXTERNAL_RUNTIME,
+                        authority=EvidenceAuthority.EXECUTION_OBSERVATION,
+                        materiality_reason="current_attributable_failure",
+                        origin_revision=snapshot.current_failure.source_revision,
+                        known_texts=(snapshot.current_failure.diagnostic,),
+                    ),
                 )
             )
         if catalog_is_current and kind in {
@@ -1761,6 +2106,12 @@ class PersistentExecutionStateEngine:
                 if item_id != snapshot.primary_focus_id
             ]
             next_items = [item for item in next_items if item is not None]
+            next_items = [
+                item
+                for item in next_items
+                if item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+            ]
             if next_items:
                 lines.append(
                     (
@@ -1772,6 +2123,12 @@ class PersistentExecutionStateEngine:
                         "Bootstrap-selected next items: "
                         + "; ".join(item.label for item in next_items[:3])
                         + ".",
+                        metadata(
+                            origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
+                            authority=EvidenceAuthority.CERTIFIED_RELATION,
+                            materiality_reason="bootstrap_ordered_next_item",
+                            relation_endpoint=next_items[0].path,
+                        ),
                     )
                 )
         return lines
@@ -1783,6 +2140,7 @@ class PersistentExecutionStateEngine:
         provider_call: int,
         max_tokens: int,
         token_counter: Callable[[str], int] = _default_token_counter,
+        provider_messages: Sequence[Mapping[str, Any]] = (),
     ) -> PersistentContextFrame:
         self._metrics["context_compilations"] += 1
         if current_source_revision != self._snapshot.source_revision:
@@ -1799,7 +2157,10 @@ class PersistentExecutionStateEngine:
             )
             self._record("provider_context", **frame.as_dict())
             return frame
-        if self._snapshot.bootstrap_status is not BootstrapStatus.SELECTED:
+        if self._snapshot.bootstrap_status in {
+            BootstrapStatus.NOT_REQUESTED,
+            BootstrapStatus.NOT_APPLICABLE,
+        }:
             frame = PersistentContextFrame(
                 kind=ContextFrameKind.NONE,
                 rendered_text="",
@@ -1808,7 +2169,7 @@ class PersistentExecutionStateEngine:
                 source_revision=current_source_revision,
                 provider_call=provider_call,
                 token_count=0,
-                reason_codes=("bootstrap_selection_unavailable",),
+                reason_codes=("bootstrap_not_applied",),
             )
             self._record("provider_context", **frame.as_dict())
             return frame
@@ -1839,6 +2200,23 @@ class PersistentExecutionStateEngine:
             self._record("provider_context", **frame.as_dict())
             return frame
 
+        if (
+            self._last_dispatched_version == self._snapshot.version
+            and self._last_dispatched_version != 0
+        ):
+            frame = PersistentContextFrame(
+                kind=ContextFrameKind.NONE,
+                rendered_text="",
+                claim_ids=(),
+                state_version=self._snapshot.version,
+                source_revision=current_source_revision,
+                provider_call=provider_call,
+                token_count=0,
+                reason_codes=("state_change_already_represented_or_not_model_material",),
+            )
+            self._metrics["stable_context_abstentions"] += 1
+            self._record("provider_context", **frame.as_dict())
+            return frame
         if self._snapshot.current_failure is not None:
             kind = ContextFrameKind.CRITICAL
         elif self._last_dispatched_version == 0:
@@ -1846,18 +2224,61 @@ class PersistentExecutionStateEngine:
         elif self._last_dispatched_version != self._snapshot.version:
             kind = ContextFrameKind.DELTA
         else:
-            kind = ContextFrameKind.CORE
+            kind = ContextFrameKind.DELTA
         ceiling = min(
             max_tokens,
             512 if kind in {ContextFrameKind.INITIAL, ContextFrameKind.CRITICAL} else 256,
         )
-        if kind is ContextFrameKind.CORE:
-            ceiling = min(ceiling, 96)
-        header = "GroundTruth execution state (deterministic, repository-grounded):"
+        frame_rows = self._frame_lines(kind)
+        repository_fact = any(
+            row[2].get("authority") == EvidenceAuthority.CERTIFIED_RELATION.value
+            for row in frame_rows
+        )
+        header = (
+            "Repository facts for the next decision:"
+            if repository_fact
+            else "Current task execution status:"
+        )
         selected: list[str] = []
         claim_ids: list[str] = []
-        for claim_id, line in self._frame_lines(kind):
-            if kind is not ContextFrameKind.CORE and claim_id in self._exposed_claim_ids:
+        claim_metadata: list[dict[str, Any]] = []
+        visible_strings: list[str] = []
+
+        def collect_visible(value: Any) -> None:
+            if isinstance(value, str):
+                visible_strings.append(" ".join(value.split()))
+            elif isinstance(value, Mapping):
+                for key, item in value.items():
+                    if key != "extra":
+                        collect_visible(item)
+            elif isinstance(value, Sequence) and not isinstance(
+                value, (str, bytes, bytearray)
+            ):
+                for item in value:
+                    collect_visible(item)
+
+        for message in provider_messages:
+            collect_visible(message.get("content"))
+        provider_blob = "\n".join(visible_strings)
+        provider_known_claims = 0
+        for claim_id, line, metadata in frame_rows:
+            if claim_id in self._exposed_claim_ids:
+                continue
+            known_texts = tuple(
+                " ".join(str(item).split())
+                for item in metadata.get("_known_texts", ())
+                if str(item).strip()
+            )
+            line_normalized = " ".join(line.split())
+            already_in_provider = bool(
+                provider_blob
+                and (
+                    (line_normalized and line_normalized in provider_blob)
+                    or any(item in provider_blob for item in known_texts)
+                )
+            )
+            if already_in_provider:
+                provider_known_claims += 1
                 continue
             candidate = "\n".join((header, *selected, line))
             if token_counter(candidate) > ceiling:
@@ -1867,29 +2288,36 @@ class PersistentExecutionStateEngine:
                 continue
             selected.append(line)
             claim_ids.append(claim_id)
-        if not selected and kind is not ContextFrameKind.CORE:
-            # A real state transition can be executor-visible already (for
-            # example a file read). The external state must still persist in
-            # the next decision without restating one-shot source evidence.
-            kind = ContextFrameKind.CORE
-            ceiling = min(max_tokens, 96)
-            for claim_id, line in self._frame_lines(kind):
-                candidate = "\n".join((header, *selected, line))
-                if token_counter(candidate) > ceiling:
-                    continue
-                if len(candidate.encode("utf-8")) > 4_096:
-                    continue
-                selected.append(line)
-                claim_ids.append(claim_id)
+            claim_metadata.append(
+                {
+                    "claim_id": claim_id,
+                    **{
+                        key: value
+                        for key, value in metadata.items()
+                        if not key.startswith("_")
+                    },
+                    # Delivered claims were filtered against retained provider text.
+                    "known_to_model": False,
+                    "novel_to_provider_view": True,
+                }
+            )
         rendered = "\n".join((header, *selected)) if selected else ""
         token_count = token_counter(rendered) if rendered else 0
-        reason_codes = (
-            ()
-            if rendered
-            else (
-                "state_change_already_represented_or_not_model_material",
+        if rendered:
+            reason_codes = (
+                self._snapshot.bootstrap_mode.value,
+                *(
+                    ("provider_history_already_contains_evidence",)
+                    if provider_known_claims
+                    else ()
+                ),
             )
-        )
+        elif provider_known_claims:
+            reason_codes = ("provider_history_already_contains_evidence",)
+        elif self._last_dispatched_version == 0 and not frame_rows:
+            reason_codes = ("no_material_certified_localization",)
+        else:
+            reason_codes = ("state_change_already_represented_or_not_model_material",)
         focus_id = self._snapshot.current_focus_id or self._snapshot.primary_focus_id
         focus = self._item(focus_id)
         selected_evidence: tuple[dict[str, Any], ...] = ()
@@ -1902,10 +2330,19 @@ class PersistentExecutionStateEngine:
                     "symbol": focus.symbol,
                     "claim_id": focus.source_claim_id,
                     "support_kind": (
-                        "certified_identity" if focus.certified else "bootstrap_ranked_candidate"
+                        focus.evidence_authority.value
                     ),
                     "retrieval_rank": focus.retrieval_rank,
                     "supporting_channels": list(focus.support_channels),
+                    "origin": focus.origin.value,
+                    "authority": focus.evidence_authority.value,
+                    "novel_to_provider_view": True,
+                    "known_to_model": False,
+                    "materiality_reason": "newly_certified_related_file",
+                    "source_revision": current_source_revision,
+                    "origin_revision": focus.origin_revision,
+                    "relation_endpoint": focus.path,
+                    "declared_validation_id": "",
                 },
             )
         frame = PersistentContextFrame(
@@ -1918,6 +2355,7 @@ class PersistentExecutionStateEngine:
             token_count=token_count,
             reason_codes=reason_codes,
             selected_evidence=selected_evidence,
+            claim_metadata=tuple(claim_metadata),
         )
         self._record("provider_context", **frame.as_dict())
         return frame
@@ -1975,8 +2413,9 @@ class PersistentExecutionStateEngine:
         ready = bool(
             current_source_revision == self._snapshot.source_revision
             and self._snapshot.files_modified
-            and self._snapshot.validation.status is StateValidationStatus.PASS
-            and self._snapshot.validation.source_revision == current_source_revision
+            and self._snapshot.declared_validation.status is StateValidationStatus.PASS
+            and self._snapshot.declared_validation.source_revision == current_source_revision
+            and self._snapshot.completion_readiness is CompletionReadiness.READY
             and not open_ids
             and self._snapshot.current_failure is None
         )
@@ -1985,7 +2424,9 @@ class PersistentExecutionStateEngine:
             "source_revision": current_source_revision,
             "open_obligation_ids": list(open_ids),
             "open_advisory_ids": list(advisory_ids),
-            "validation_status": self._snapshot.validation.status.value,
+            "observed_validation_status": self._snapshot.observed_validation.status.value,
+            "declared_validation_status": self._snapshot.declared_validation.status.value,
+            "completion_readiness": self._snapshot.completion_readiness.value,
             "state_version": self._snapshot.version,
         }
         self._record("completion", **receipt)
@@ -1993,12 +2434,16 @@ class PersistentExecutionStateEngine:
 
 
 __all__ = [
+    "BootstrapMode",
     "BootstrapCatalog",
     "BootstrapCatalogItem",
     "BootstrapSelection",
     "BootstrapStatus",
     "CatalogItemKind",
     "ContextFrameKind",
+    "CompletionReadiness",
+    "CurrentFocus",
+    "CurrentFocusKind",
     "ObligationStatus",
     "PERSISTENT_STATE_FIELD_AUTHORITIES",
     "PersistentContextFrame",

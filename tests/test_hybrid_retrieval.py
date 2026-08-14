@@ -7,6 +7,8 @@ import gt_engine.hybrid_retrieval as hybrid_module
 from gt_engine.hybrid_retrieval import (
     BM25RetrievalChannel,
     DenseRetrievalChannel,
+    EvidenceAuthority,
+    EvidenceOrigin,
     ExactRetrievalChannel,
     HybridRetriever,
     LexicalRetrievalChannel,
@@ -19,6 +21,7 @@ from gt_engine.hybrid_retrieval import (
     StructuralLink,
     StructuralRetrievalChannel,
     build_preemptive_frame,
+    filter_provider_known_context,
     reciprocal_rank_fusion,
     retrieval_query_terms,
 )
@@ -259,8 +262,9 @@ def test_exact_symbol_certification_requires_unique_explicit_identifier():
     assert "exact_symbol" in unique[0].provenance
 
     selected = HybridRetriever(unique_documents, dense_backend=None).retrieve(state)
-    assert "delivery_support:certified" in selected.selected_context[0].provenance
-    assert "support_channel:exact" in selected.selected_context[0].provenance
+    assert selected.selected_context == ()
+    assert unique[0].authority is EvidenceAuthority.IDENTITY_ONLY
+    assert "no_decision_relevant_evidence" in selected.reason_codes
 
 
 def test_ordinary_task_prose_cannot_be_promoted_to_exact_symbol_authority():
@@ -682,8 +686,8 @@ def test_exact_certificate_delivers_exact_span_not_unaligned_structural_represen
         channels=(StaticChannel(exact), StaticChannel(unrelated)),
     ).retrieve(_state(task_text="repair src/errors.py"), selection_limit=1)
 
-    assert result.selected_context[0].text == "class ResolutionError: pass"
-    assert result.selected_context[0].channel is RetrievalChannel.EXACT
+    assert result.selected_context == ()
+    assert "no_decision_relevant_evidence" in result.reason_codes
 
 
 def test_rrf_is_equal_weight_k60_and_aggregates_unique_files_deterministically():
@@ -719,7 +723,18 @@ def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
         ),
         RepositoryDocument("tests/test_allocator.py", "cleanup allocator regression test"),
     )
-    first = HybridRetriever(documents, dense_backend=FakeDenseBackend()).retrieve(
+    links = (
+        StructuralLink(
+            source_path="src/allocator.py",
+            target_path="src/reclaimer.py",
+            relation="calls",
+            certified=True,
+            target_start_line=1,
+        ),
+    )
+    first = HybridRetriever(
+        documents, structural_links=links, dense_backend=FakeDenseBackend()
+    ).retrieve(
         _state(
             task_text="repair allocator cleanup in src/reclaimer.py",
             active_paths=("src/allocator.py",),
@@ -729,7 +744,9 @@ def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
     )
     exposed = first.selected_context[0].claim_hash
 
-    second = HybridRetriever(documents, dense_backend=FakeDenseBackend()).retrieve(
+    second = HybridRetriever(
+        documents, structural_links=links, dense_backend=FakeDenseBackend()
+    ).retrieve(
         _state(
             task_text="repair allocator cleanup in src/reclaimer.py",
             active_paths=("src/allocator.py",),
@@ -740,6 +757,7 @@ def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
     )
 
     assert "src/allocator.py" in {row.path for row in first.ranked_files}
+    assert "src/allocator.py" not in {row.path for row in first.selected_context}
     assert exposed not in {row.claim_hash for row in second.selected_context}
     dense_receipt = next(
         row for row in first.channel_receipts if row.channel is RetrievalChannel.DENSE
@@ -748,17 +766,150 @@ def test_hybrid_selection_keeps_active_path_spans_but_excludes_prior_claims():
     assert dense_receipt.backend_identity == "fake-dense-v1"
 
 
-def test_character_budget_is_applied_before_evidence_is_selected():
-    document = RepositoryDocument(
-        "src/allocator.py",
-        "def release_allocator(value):\n    return value\n",
-        start_line=1,
-        end_line=2,
-        symbol="release_allocator",
+def test_model_authored_active_file_can_rank_but_cannot_be_delivered_as_context():
+    documents = (
+        RepositoryDocument(
+            "src/allocator.py",
+            "def repair_allocator(): return 'model hypothesis'",
+            symbol="repair_allocator",
+            origin=EvidenceOrigin.MODEL_AUTHORED,
+            origin_revision="source-2",
+        ),
+        RepositoryDocument(
+            "src/preexisting.py",
+            "def unrelated(): return None",
+            symbol="unrelated",
+        ),
     )
-    state = _state(task_text="Change src/allocator.py release_allocator")
+    result = HybridRetriever(documents).retrieve(
+        _state(
+            task_text="Fix `repair_allocator` in src/allocator.py",
+            active_paths=("src/allocator.py",),
+            changed_paths=("src/allocator.py",),
+            source_revision="source-2",
+        ),
+        selection_limit=2,
+        token_budget=200,
+    )
 
-    result = HybridRetriever((document,), dense_backend=None).retrieve(
+    assert result.ranked_files[0].path == "src/allocator.py"
+    assert all(row.path != "src/allocator.py" for row in result.selected_context)
+    assert "model_authored_context_rejected" in result.reason_codes
+
+
+def test_certified_cross_file_relation_from_active_file_is_deliverable():
+    documents = (
+        RepositoryDocument(
+            "src/allocator.py",
+            "def repair_allocator(): pass",
+            symbol="repair_allocator",
+            origin=EvidenceOrigin.MODEL_AUTHORED,
+            origin_revision="source-2",
+        ),
+        RepositoryDocument(
+            "src/reclaimer.py",
+            "def release_reserved(): pass",
+            symbol="release_reserved",
+            origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
+            origin_revision="source-1",
+        ),
+    )
+    links = (
+        StructuralLink(
+            source_path="src/allocator.py",
+            target_path="src/reclaimer.py",
+            relation="calls",
+            certified=True,
+            source_symbol="repair_allocator",
+            target_symbol="release_reserved",
+            confidence=1.0,
+        ),
+    )
+    result = HybridRetriever(documents, structural_links=links).retrieve(
+        _state(
+            task_text="Fix allocator cleanup",
+            active_paths=("src/allocator.py",),
+            changed_paths=("src/allocator.py",),
+            source_revision="source-2",
+        ),
+        selection_limit=2,
+        token_budget=200,
+    )
+
+    assert [row.path for row in result.selected_context] == ["src/reclaimer.py"]
+    selected = result.selected_context[0]
+    assert selected.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+    assert selected.authority is EvidenceAuthority.CERTIFIED_RELATION
+
+
+def test_provider_history_source_text_is_not_redelivered():
+    documents = (
+        RepositoryDocument("src/seed.py", "def seed(): pass", symbol="seed"),
+        RepositoryDocument(
+            "src/related.py",
+            "def related_contract():\n    return 42",
+            symbol="related_contract",
+        ),
+    )
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                source_path="src/seed.py",
+                target_path="src/related.py",
+                relation="calls",
+                certified=True,
+                target_symbol="related_contract",
+                target_start_line=1,
+            ),
+        ),
+    ).retrieve(
+        _state(active_paths=("src/seed.py",)),
+        token_budget=200,
+    )
+
+    filtered = filter_provider_known_context(
+        result,
+        [
+            {
+                "role": "tool",
+                "content": "def related_contract():\n    return 42",
+            }
+        ],
+    )
+
+    assert result.selected_context
+    assert filtered.selected_context == ()
+    assert filtered.abstained is True
+    assert "provider_history_already_contains_evidence" in filtered.reason_codes
+
+
+def test_character_budget_is_applied_before_evidence_is_selected():
+    documents = (
+        RepositoryDocument("src/seed.py", "def seed(): pass", symbol="seed"),
+        RepositoryDocument(
+            "src/allocator.py",
+            "def release_allocator(value):\n    return value\n",
+            start_line=1,
+            end_line=2,
+            symbol="release_allocator",
+        ),
+    )
+    state = _state(task_text="Change allocator", active_paths=("src/seed.py",))
+    links = (
+        StructuralLink(
+            source_path="src/seed.py",
+            target_path="src/allocator.py",
+            relation="calls",
+            certified=True,
+            target_symbol="release_allocator",
+            target_start_line=1,
+        ),
+    )
+
+    result = HybridRetriever(
+        documents, structural_links=links, dense_backend=None
+    ).retrieve(
         state,
         token_budget=200,
         character_budget=16,
@@ -891,7 +1042,7 @@ def test_validation_dense_rerank_can_deliver_honest_test_candidate_context():
     assert [row.path for row in result.selected_context] == ["tests/test_candidate.py"]
     assert "validation_candidate" in result.selected_context[0].provenance
     assert frame is not None
-    assert "GT candidate repository context" in frame.rendered_text
+    assert "Candidate repository context" in frame.rendered_text
 
 
 def test_diagnostic_delivery_rejects_certified_but_unrelated_structural_relation():
@@ -1055,7 +1206,7 @@ def test_stale_revision_candidates_are_rejected_before_fusion():
 
 def test_selection_keeps_complete_evidence_and_never_truncates_to_fit_budget():
     class SupportedChannel:
-        channel = RetrievalChannel.EXACT
+        channel = RetrievalChannel.STRUCTURAL
 
         def retrieve(self, state: RetrievalState, *, limit: int) -> tuple[RetrievalCandidate, ...]:
             del state, limit
@@ -1068,8 +1219,8 @@ def test_selection_keeps_complete_evidence_and_never_truncates_to_fit_budget():
                     text=" ".join(f"token{i}" for i in range(80)),
                     channel=self.channel,
                     channel_rank=1,
-                    relation=None,
-                    provenance=("exact_path",),
+                    relation="calls",
+                    provenance=("structural_certified", "edge_endpoint_start:1"),
                     source_revision="source-1",
                     channel_score=1.0,
                 ),
@@ -1094,7 +1245,18 @@ def test_preemptive_frame_is_bounded_revision_bound_and_replayable():
         task_text="inspect tests/test_allocator.py for cleanup allocator",
         active_paths=("src/allocator.py",),
     )
-    result = HybridRetriever(documents).retrieve(state, token_budget=200)
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                source_path="src/allocator.py",
+                target_path="tests/test_allocator.py",
+                relation="calls",
+                certified=True,
+                target_start_line=1,
+            ),
+        ),
+    ).retrieve(state, token_budget=200)
 
     frame = build_preemptive_frame(result, state, trigger="diagnostic_changed")
 

@@ -104,6 +104,7 @@ from gt_engine.hybrid_retrieval import (
     RetrievalIntent,
     RetrievalState,
     build_preemptive_frame,
+    filter_provider_known_context,
 )
 from gt_engine.persistent_execution_state import (
     BootstrapCatalog,
@@ -806,6 +807,9 @@ def _initial_persistent_retrieval_receipt(
                     "symbol": row.representative.symbol,
                     "source_revision": row.representative.source_revision,
                     "claim_hash": row.representative.claim_hash,
+                    "origin": row.representative.origin.value,
+                    "authority": row.representative.authority.value,
+                    "origin_revision": row.representative.origin_revision,
                 },
                 "provenance": list(row.provenance),
             }
@@ -821,6 +825,9 @@ def _initial_persistent_retrieval_receipt(
                 "source_revision": row.source_revision,
                 "claim_hash": row.claim_hash,
                 "provenance": list(row.provenance),
+                "origin": row.origin.value,
+                "authority": row.authority.value,
+                "origin_revision": row.origin_revision,
             }
             for row in result.selected_context
         ],
@@ -1006,7 +1013,7 @@ def _render_decision_evidence(bundle: DecisionEvidenceBundle) -> tuple[str, ...]
 
     return tuple(
         (
-            f"[GT certified evidence: {claim.path}:{claim.start_line}-{claim.end_line}"
+            f"[Certified repository relation: {claim.path}:{claim.start_line}-{claim.end_line}"
             + (f"; symbol={claim.symbol}" if claim.symbol else "")
             + (f"; {claim.relation}" if claim.relation else "")
             + "]\n"
@@ -1556,6 +1563,7 @@ class MiniSweCentralAgent(BaseAgent):
         receipt: dict[str, Any] = {
             "schema": "gt.persistent_bootstrap.v1",
             "status": BootstrapStatus.ERROR_FALLBACK.value,
+            "bootstrap_mode": "deterministic_fallback",
             "logical_calls": 1,
             "provider_calls": 0,
             "action_executions": 0,
@@ -1685,6 +1693,9 @@ class MiniSweCentralAgent(BaseAgent):
                 BootstrapStatus.SELECTED.value
                 if selection.valid
                 else BootstrapStatus.INVALID_FALLBACK.value
+            )
+            receipt["bootstrap_mode"] = (
+                "generative_selected" if selection.valid else "deterministic_fallback"
             )
             receipt["reason_codes"] = list(selection.reason_codes)
             return selection, receipt
@@ -2807,6 +2818,10 @@ class MiniSweCentralAgent(BaseAgent):
                             repository_session.root,
                             repository_evidence.index.graph_db,
                             source_revision=graph_source_revision,
+                            model_authored_paths=tuple(
+                                repository_fact_tracker.model_authored_paths
+                            ),
+                            task_deliverables=tuple(task_deliverables),
                         ),
                         timeout=self.preemptive_retrieval_cold_start_timeout_sec,
                     )
@@ -2975,6 +2990,14 @@ class MiniSweCentralAgent(BaseAgent):
                                         document.path
                                         for document in preemptive_repository.documents
                                     ),
+                                    path_origins={
+                                        document.path: document.origin
+                                        for document in preemptive_repository.documents
+                                    },
+                                    path_origin_revisions={
+                                        document.path: document.origin_revision
+                                        for document in preemptive_repository.documents
+                                    },
                                     workspace_root=self.cwd or "/app",
                                 )
                             )
@@ -3244,6 +3267,7 @@ class MiniSweCentralAgent(BaseAgent):
                         current_source_revision=source_revision,
                         provider_call=calls,
                         max_tokens=self.persistent_state_context_tokens,
+                        provider_messages=query_messages,
                     )
                     if persistent_state_engine is not None
                     else None
@@ -3308,7 +3332,11 @@ class MiniSweCentralAgent(BaseAgent):
                     persistent_bootstrap_selected=bool(
                         persistent_state_engine is not None
                         and persistent_state_engine.snapshot.bootstrap_status
-                        is BootstrapStatus.SELECTED
+                        in {
+                            BootstrapStatus.SELECTED,
+                            BootstrapStatus.INVALID_FALLBACK,
+                            BootstrapStatus.ERROR_FALLBACK,
+                        }
                     ),
                     last_operation=retrieval_last_operation,
                     validation_state=retrieval_validation_state,
@@ -3380,6 +3408,10 @@ class MiniSweCentralAgent(BaseAgent):
                                         repository_session.root,
                                         repository_evidence.index.graph_db,
                                         source_revision=graph_source_revision,
+                                        model_authored_paths=tuple(
+                                            repository_fact_tracker.model_authored_paths
+                                        ),
+                                        task_deliverables=tuple(task_deliverables),
                                     ),
                                     timeout=retrieval_timeout_sec,
                                 )
@@ -3515,6 +3547,10 @@ class MiniSweCentralAgent(BaseAgent):
                                         retrieval_result
                                     )
                                 preemptive_decision["cache_key"] = retrieval_cache_key
+                                retrieval_result = filter_provider_known_context(
+                                    retrieval_result,
+                                    query_messages,
+                                )
                                 preemptive_decision.update(
                                     {
                                         "status": (
@@ -3561,6 +3597,24 @@ class MiniSweCentralAgent(BaseAgent):
                                                     for item in row.provenance
                                                     if item.startswith("support_channel:")
                                                 ],
+                                                "origin": row.origin.value,
+                                                "authority": row.authority.value,
+                                                "novel_to_provider_view": True,
+                                                "known_to_model": False,
+                                                "materiality_reason": next(
+                                                    (
+                                                        item.split(":", 1)[1]
+                                                        for item in row.provenance
+                                                        if item.startswith("decision_relevance:")
+                                                    ),
+                                                    "",
+                                                ),
+                                                "source_revision": row.source_revision,
+                                                "origin_revision": row.origin_revision,
+                                                "relation_endpoint": (
+                                                    row.path if row.relation else ""
+                                                ),
+                                                "declared_validation_id": "",
                                             }
                                             for row in retrieval_result.selected_context
                                         ],
@@ -3663,6 +3717,31 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                     ),
                 )
+                persistent_owns_task_start = bool(
+                    repository_evidence_action == 0
+                    and persistent_state_engine is not None
+                    and persistent_state_engine.snapshot.bootstrap_status
+                    in {
+                        BootstrapStatus.SELECTED,
+                        BootstrapStatus.INVALID_FALLBACK,
+                        BootstrapStatus.ERROR_FALLBACK,
+                    }
+                )
+                if persistent_owns_task_start:
+                    frontier_decision = replace(
+                        frontier_decision,
+                        disposition=FrontierDisposition.CONTROLLER_ONLY,
+                        rendered="",
+                        facts=(),
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    *frontier_decision.reason_codes,
+                                    "persistent_bootstrap_owns_task_start",
+                                )
+                            )
+                        ),
+                    )
                 frontier_payload = (
                     frontier_decision.rendered
                     if (
@@ -4154,6 +4233,9 @@ class MiniSweCentralAgent(BaseAgent):
                         "tokens": persistent_state_frame.token_count,
                         "selected_evidence": [
                             dict(item) for item in persistent_state_frame.selected_evidence
+                        ],
+                        "claim_metadata": [
+                            dict(item) for item in persistent_state_frame.claim_metadata
                         ],
                     }
                 if (
@@ -5724,6 +5806,10 @@ class MiniSweCentralAgent(BaseAgent):
                                     repository_session.root,
                                     repository_evidence.index.graph_db,
                                     source_revision=graph_source_revision,
+                                    model_authored_paths=tuple(
+                                        repository_fact_tracker.model_authored_paths
+                                    ),
+                                    task_deliverables=tuple(task_deliverables),
                                 ),
                                 timeout=self.preemptive_retrieval_cold_start_timeout_sec,
                             )
@@ -5847,6 +5933,14 @@ class MiniSweCentralAgent(BaseAgent):
                                             document.path
                                             for document in activation_repository.documents
                                         ),
+                                        path_origins={
+                                            document.path: document.origin
+                                            for document in activation_repository.documents
+                                        },
+                                        path_origin_revisions={
+                                            document.path: document.origin_revision
+                                            for document in activation_repository.documents
+                                        },
                                         workspace_root=self.cwd or "/app",
                                     )
                                 )
@@ -5990,6 +6084,10 @@ class MiniSweCentralAgent(BaseAgent):
                                             repository_session.root,
                                             repository_evidence.index.graph_db,
                                             source_revision=graph_source_revision,
+                                            model_authored_paths=tuple(
+                                                repository_fact_tracker.model_authored_paths
+                                            ),
+                                            task_deliverables=tuple(task_deliverables),
                                         ),
                                         timeout=self.preemptive_retrieval_cold_start_timeout_sec,
                                     )
@@ -6761,8 +6859,23 @@ class MiniSweCentralAgent(BaseAgent):
                     persistent_state_failures.append("persistent_state_not_initialized")
                 else:
                     persistent_metrics = persistent_state_engine.metrics
-                    if persistent_state_bootstrap.get("status") != BootstrapStatus.SELECTED.value:
-                        persistent_state_failures.append("persistent_bootstrap_not_selected")
+                    if persistent_state_bootstrap.get("status") not in {
+                        BootstrapStatus.SELECTED.value,
+                        BootstrapStatus.INVALID_FALLBACK.value,
+                        BootstrapStatus.ERROR_FALLBACK.value,
+                    }:
+                        persistent_state_failures.append("persistent_bootstrap_not_applied")
+                    expected_bootstrap_mode = (
+                        "generative_selected"
+                        if persistent_state_bootstrap.get("status")
+                        == BootstrapStatus.SELECTED.value
+                        else "deterministic_fallback"
+                    )
+                    if (
+                        persistent_state_engine.snapshot.bootstrap_mode.value
+                        != expected_bootstrap_mode
+                    ):
+                        persistent_state_failures.append("persistent_bootstrap_mode_mismatch")
                     if int(persistent_state_bootstrap.get("provider_calls") or 0) != 1:
                         persistent_state_failures.append("persistent_bootstrap_call_count")
                     if int(persistent_state_bootstrap.get("action_executions") or 0) != 0:

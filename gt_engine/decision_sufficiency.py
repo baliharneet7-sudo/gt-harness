@@ -12,7 +12,11 @@ import re
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 
-from gt_engine.hybrid_retrieval import HybridRetrievalResult, RetrievalCandidate
+from gt_engine.hybrid_retrieval import (
+    EvidenceAuthority,
+    HybridRetrievalResult,
+    RetrievalCandidate,
+)
 from gt_engine.preflight import ActionOperation, MutationCertainty, ProposedAction
 
 _MUTATION_OPERATIONS = frozenset(
@@ -164,19 +168,16 @@ def _support_kind(
     target_path: str,
 ) -> str | None:
     provenance = {str(item).strip().lower() for item in candidate.provenance}
-    if "delivery_support:certified" not in provenance:
+    if (
+        "delivery_support:certified_relation" not in provenance
+        or candidate.authority is not EvidenceAuthority.CERTIFIED_RELATION
+    ):
         return None
     relation_material = " ".join(
         (str(candidate.relation or ""), *sorted(provenance))
     ).lower()
     if any(marker in relation_material for marker in _COCHANGE_MARKERS):
         return None
-    if (
-        "support_channel:exact" in provenance
-        and bool(provenance & {"exact_path", "exact_symbol"})
-        and _canonical_path(candidate.path) == target_path
-    ):
-        return "mechanical_exact"
     if (
         "support_channel:structural" in provenance
         and "structural_certified" in provenance

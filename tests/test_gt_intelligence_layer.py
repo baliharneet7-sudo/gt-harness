@@ -287,7 +287,7 @@ def test_frontier_advances_from_represented_file_to_definition():
     assert decision.facts[0].language == "python"
     assert decision.accounting[0]["language"] == "python"
     assert "def greet(name: str) -> str" in decision.rendered
-    assert "Repository intelligence" in decision.rendered
+    assert "Repository facts for the next decision" in decision.rendered
 
 
 def test_frontier_delivers_path_only_anchor_without_leaking_unrequested_symbol():

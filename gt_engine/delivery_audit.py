@@ -138,6 +138,11 @@ def collect_provider_deliveries(receipt: dict[str, Any]) -> list[dict[str, Any]]
                 for item in (raw.get("selected_evidence") or ())
                 if isinstance(item, dict)
             )
+            claim_metadata = tuple(
+                item
+                for item in (raw.get("claim_metadata") or ())
+                if isinstance(item, dict)
+            )
             rows.append(
                 {
                     "surface": surface,
@@ -154,6 +159,7 @@ def collect_provider_deliveries(receipt: dict[str, Any]) -> list[dict[str, Any]]
                     "claim_ids": list(claims),
                     "claim_count": len(claims),
                     "selected_evidence": list(selected_evidence),
+                    "claim_metadata": list(claim_metadata),
                     "provider_message_indices": list(_message_indices(raw)),
                     "delivered_before_model_query": bool(
                         _first(raw, "delivered_before_model_query", "delivered_before_query")
@@ -184,9 +190,7 @@ def audit_provider_deliveries(
         identity = row["identity"]
         duplicate_identity = identity in identities
         claim_overlap = seen_claims.intersection(row["claim_ids"])
-        permitted_state_refresh = bool(
-            row["surface"] == "persistent_execution_state" and claim_overlap
-        )
+        permitted_state_refresh = False
         if duplicate_identity:
             failures.append(f"{task}:duplicate_provider_delivery:{identity}")
         if claim_overlap and not permitted_state_refresh:
@@ -258,13 +262,68 @@ def audit_provider_deliveries(
             semantic_support_valid = bool(selected_evidence) and all(
                 str(item.get("path") or "").strip()
                 and str(item.get("support_kind") or "")
-                in {"certified", "corroborated", "validation_candidate"}
+                in {"certified_relation", "validation_candidate"}
                 and bool(item.get("supporting_channels"))
+                and str(item.get("origin") or "") == "preexisting_repository"
+                and str(item.get("authority") or "")
+                in {"certified_relation", "ranking_support"}
+                and item.get("novel_to_provider_view") is True
+                and item.get("known_to_model") is False
+                and bool(str(item.get("materiality_reason") or ""))
+                and bool(str(item.get("source_revision") or ""))
                 for item in selected_evidence
             )
             if not semantic_support_valid:
                 failures.append(
                     f"{task}:preemptive_delivery_semantic_support_missing:{index}"
+                )
+        elif row["surface"] == "persistent_execution_state":
+            claim_metadata = row["claim_metadata"]
+            metadata_by_claim = {
+                str(item.get("claim_id") or ""): item for item in claim_metadata
+            }
+            allowed_materiality = {
+                "newly_certified_related_file",
+                "new_unresolved_task_obligation",
+                "related_advisory_obligation",
+                "bootstrap_ordered_next_item",
+                "current_attributable_failure",
+                "declared_validation_status_change",
+            }
+            semantic_support_valid = bool(row["claim_ids"]) and all(
+                claim_id in metadata_by_claim
+                and str(metadata_by_claim[claim_id].get("origin") or "")
+                in {
+                    "preexisting_repository",
+                    "task_deliverable",
+                    "external_runtime",
+                }
+                and str(metadata_by_claim[claim_id].get("authority") or "")
+                in {
+                    "identity_only",
+                    "certified_relation",
+                    "execution_observation",
+                }
+                and metadata_by_claim[claim_id].get("novel_to_provider_view") is True
+                and metadata_by_claim[claim_id].get("known_to_model") is False
+                and str(metadata_by_claim[claim_id].get("materiality_reason") or "")
+                in allowed_materiality
+                and bool(str(metadata_by_claim[claim_id].get("source_revision") or ""))
+                and (
+                    str(metadata_by_claim[claim_id].get("materiality_reason") or "")
+                    != "declared_validation_status_change"
+                    or bool(
+                        str(
+                            metadata_by_claim[claim_id].get("declared_validation_id")
+                            or ""
+                        )
+                    )
+                )
+                for claim_id in row["claim_ids"]
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:persistent_delivery_semantic_authority_invalid:{index}"
                 )
         row["timing_valid"] = timing_valid
         row["dispatch_valid"] = dispatch_valid

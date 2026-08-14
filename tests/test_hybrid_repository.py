@@ -9,7 +9,7 @@ from gt_engine.hybrid_repository import (
     build_hybrid_repository,
     build_query_hybrid_repository,
 )
-from gt_engine.hybrid_retrieval import RetrievalIntent, RetrievalState
+from gt_engine.hybrid_retrieval import EvidenceOrigin, RetrievalIntent, RetrievalState
 
 
 def _graph(path) -> None:
@@ -81,6 +81,8 @@ def test_builder_uses_exact_indexed_spans_and_directed_graph_links(tmp_path):
         tmp_path,
         graph,
         source_revision="source-1",
+        model_authored_paths=("src/allocator.py",),
+        task_deliverables=("tests/test_allocator.py",),
     )
 
     assert repository.complete is True
@@ -91,6 +93,8 @@ def test_builder_uses_exact_indexed_spans_and_directed_graph_links(tmp_path):
     assert repository.documents[0].text == "def allocate():\n    return 1"
     assert repository.documents[0].start_line == 1
     assert repository.documents[0].end_line == 2
+    assert repository.documents[0].origin is EvidenceOrigin.MODEL_AUTHORED
+    assert repository.documents[1].origin is EvidenceOrigin.TASK_DELIVERABLE
     assert repository.structural_links[0].source_path == "src/allocator.py"
     assert repository.structural_links[0].target_path == "tests/test_allocator.py"
     assert repository.structural_links[0].relation == "TESTED_BY"

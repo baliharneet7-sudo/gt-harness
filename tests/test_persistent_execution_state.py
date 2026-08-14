@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from gt_engine.hybrid_retrieval import (
+    EvidenceOrigin,
     HybridRetriever,
     RepositoryDocument,
     RetrievalIntent,
@@ -11,7 +13,10 @@ from gt_engine.hybrid_retrieval import (
 )
 from gt_engine.persistent_execution_state import (
     BootstrapCatalog,
+    BootstrapMode,
+    CompletionReadiness,
     ContextFrameKind,
+    CurrentFocusKind,
     PersistentExecutionStateEngine,
     StatePhase,
     StateValidationStatus,
@@ -335,7 +340,7 @@ def test_valid_bootstrap_may_abstain_from_ranked_focus_without_forced_anchor():
     assert selection.primary_focus_id == ""
 
 
-def test_invalid_bootstrap_fails_open_without_ranked_context_delivery():
+def test_invalid_bootstrap_uses_deterministic_fallback_without_silencing_state():
     catalog = _catalog()
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -353,9 +358,41 @@ def test_invalid_bootstrap_fails_open_without_ranked_context_delivery():
     )
 
     assert engine.snapshot.bootstrap_status.value == "invalid_fallback"
-    assert engine.snapshot.primary_focus_id == ""
-    assert frame.kind is ContextFrameKind.NONE
-    assert frame.reason_codes == ("bootstrap_selection_unavailable",)
+    assert engine.snapshot.bootstrap_mode is BootstrapMode.DETERMINISTIC_FALLBACK
+    assert engine.snapshot.primary_focus_id
+    assert frame.kind is not ContextFrameKind.NONE
+    assert "Required run_validation" in frame.rendered_text
+    assert "deterministic_fallback" in frame.reason_codes
+
+
+def test_invalid_bootstrap_ids_do_not_permanently_silence_context():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py",),
+    )
+    selection = parse_bootstrap_selection(
+        json.dumps(
+            {
+                "primary_focus_id": "unknown-id",
+                "ordered_item_ids": [],
+                "risk_item_ids": [],
+                "validation_item_ids": [],
+            }
+        ),
+        catalog,
+    )
+
+    engine.apply_bootstrap(selection, current_source_revision="source-1")
+    frame = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+
+    assert selection.reason_codes == ("unknown_catalog_id",)
+    assert frame.kind is ContextFrameKind.INITIAL
+    assert frame.rendered_text
 
 
 def test_ranked_focus_is_never_rendered_as_certified_relevance():
@@ -411,8 +448,9 @@ def test_ranked_focus_is_never_rendered_as_certified_relevance():
         current_source_revision="source-1", provider_call=1, max_tokens=512
     )
 
-    assert "bootstrap-selected ranked focus" in frame.rendered_text
-    assert "Current certified focus" not in frame.rendered_text
+    assert frame.rendered_text == ""
+    assert frame.kind is ContextFrameKind.NONE
+    assert frame.reason_codes == ("no_material_certified_localization",)
     assert engine.snapshot.current_focus_path == ""
 
 
@@ -539,7 +577,7 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         provider_call=2,
         max_tokens=256,
     )
-    assert engine.mark_context_dispatched(second) is True
+    assert engine.mark_context_dispatched(second) is False
     edit = _proposed("sed -i 's/pass/return 1/' src/service.py", call=2)
     engine.project_preflight(edit, current_source_revision="source-1")
     engine.commit_postflight(
@@ -582,14 +620,11 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         "src/api.py",
         "tests/test_service.py",
     }
-    assert second.kind is ContextFrameKind.CORE
-    assert second.rendered_text
-    assert second.token_count <= 96
-    assert "Bootstrap-selected repository context" not in second.rendered_text
+    assert second.kind is ContextFrameKind.NONE
+    assert second.rendered_text == ""
     assert stale_graph_frame.kind is ContextFrameKind.NONE
     assert "graph_rebase_required" in stale_graph_frame.reason_codes
     assert third.source_revision == "source-2"
-    assert "Phase: implementing" in third.rendered_text
     assert "Related inspect_dependency: src/api.py" in third.rendered_text
     assert "Candidate implementation src/service.py:10" not in third.rendered_text
     assert engine.metrics["context_compilations"] == 4
@@ -598,7 +633,7 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
     assert engine.metrics["graph_rebases"] == 1
 
 
-def test_nonmaterial_action_keeps_version_and_emits_bounded_stable_core():
+def test_nonmaterial_action_keeps_version_and_abstains_without_stable_core():
     catalog = _catalog()
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -644,11 +679,11 @@ def test_nonmaterial_action_keeps_version_and_emits_bounded_stable_core():
 
     assert initial.kind is ContextFrameKind.INITIAL
     assert engine.snapshot.version == version
-    assert unchanged.kind is ContextFrameKind.CORE
-    assert unchanged.rendered_text
-    assert "Phase:" in unchanged.rendered_text
-    assert "Bootstrap-selected repository context" not in unchanged.rendered_text
-    assert unchanged.token_count <= 96
+    assert unchanged.kind is ContextFrameKind.NONE
+    assert unchanged.rendered_text == ""
+    assert unchanged.reason_codes == (
+        "state_change_already_represented_or_not_model_material",
+    )
 
 
 def test_compiled_but_not_dispatched_claims_remain_eligible_until_dispatch():
@@ -692,9 +727,8 @@ def test_compiled_but_not_dispatched_claims_remain_eligible_until_dispatch():
         current_source_revision="source-1", provider_call=3, max_tokens=512
     )
 
-    assert stable.kind is ContextFrameKind.CORE
-    assert "Bootstrap-selected repository context" not in stable.rendered_text
-    assert stable.token_count <= 96
+    assert stable.kind is ContextFrameKind.NONE
+    assert stable.rendered_text == ""
 
 
 def test_same_revision_graph_rebase_is_a_semantic_noop():
@@ -720,7 +754,7 @@ def test_same_revision_graph_rebase_is_a_semantic_noop():
     assert engine.metrics["material_transitions"] == transitions
 
 
-def test_repeated_failure_keeps_a_bounded_current_core_after_critical_dispatch():
+def test_repeated_failure_abstains_after_critical_dispatch_without_repeating_core():
     catalog = _catalog()
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -763,13 +797,11 @@ def test_repeated_failure_keeps_a_bounded_current_core_after_critical_dispatch()
         current_source_revision="source-1", provider_call=2, max_tokens=512
     )
 
-    assert unchanged.kind is ContextFrameKind.CORE
-    assert unchanged.rendered_text
-    assert unchanged.token_count <= 96
-    assert "Phase:" in unchanged.rendered_text
+    assert unchanged.kind is ContextFrameKind.NONE
+    assert unchanged.rendered_text == ""
 
 
-def test_current_core_names_current_focus_path_without_repeating_source_excerpt():
+def test_unchanged_state_after_read_abstains_without_repeating_focus_excerpt():
     catalog = _catalog()
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -811,10 +843,8 @@ def test_current_core_names_current_focus_path_without_repeating_source_excerpt(
         current_source_revision="source-1", provider_call=2, max_tokens=512
     )
 
-    assert core.kind is ContextFrameKind.CORE
-    assert "Current focus path: src/service.py." in core.rendered_text
-    assert "Bootstrap-selected repository context" not in core.rendered_text
-    assert core.token_count <= 96
+    assert core.kind is ContextFrameKind.NONE
+    assert core.rendered_text == ""
 
 
 def test_graph_rebase_does_not_render_catalog_labels_from_an_old_graph_revision():
@@ -995,7 +1025,7 @@ def test_same_revision_rebase_preserves_bootstrap_selected_optional_focus():
     assert engine.snapshot.ordered_item_ids == (focus,)
 
 
-def test_initial_frame_contains_only_bootstrap_selected_checkout_span():
+def test_identity_only_bootstrap_focus_does_not_echo_checkout_span():
     catalog = _catalog()
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user and run its test.",
@@ -1025,22 +1055,15 @@ def test_initial_frame_contains_only_bootstrap_selected_checkout_span():
         max_tokens=512,
     )
 
+    # Identity-only focus may fall back to a certified related preexisting file,
+    # but must never echo the identity-only checkout span as repository novelty.
     assert frame.kind is ContextFrameKind.INITIAL
-    assert "src/service.py" in frame.rendered_text
-    assert "def save_user():" in frame.rendered_text
-    assert "def create_user():" not in frame.rendered_text
-    assert "Bootstrap-selected repository context" in frame.rendered_text
-    assert frame.selected_evidence == (
-        {
-            "path": "src/service.py",
-            "start_line": 10,
-            "end_line": 12,
-            "symbol": "save_user",
-            "claim_id": frame.selected_evidence[0]["claim_id"],
-            "support_kind": "certified_identity",
-            "retrieval_rank": 0,
-            "supporting_channels": [],
-        },
+    assert "Certified related repository file:" in frame.rendered_text
+    assert "Candidate implementation src/service.py:10#save_user" not in frame.rendered_text
+    assert "def save_user():" not in frame.rendered_text
+    assert all(
+        item.get("path") != "src/service.py" or item.get("authority") == "certified_relation"
+        for item in frame.selected_evidence
     )
 
     read = _proposed("sed -n '1,40p' src/service.py")
@@ -1398,6 +1421,44 @@ def test_failed_validation_is_current_and_visible_in_critical_frame():
     assert "pytest tests/test_service.py -q" in frame.rendered_text
 
 
+def test_failure_already_in_provider_history_is_not_repeated_in_state_frame():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py",),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection("not-json", catalog),
+        current_source_revision="source-1",
+    )
+    engine.commit_postflight(
+        _proposed("pytest tests/test_service.py -q"),
+        returncode=1,
+        output="tests/test_service.py:9: AssertionError: expected 2",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="fail",
+    )
+
+    frame = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=1,
+        max_tokens=512,
+        provider_messages=(
+            {
+                "role": "tool",
+                "content": "tests/test_service.py:9: AssertionError: expected 2",
+            },
+        ),
+    )
+
+    assert "Current validation failure" not in frame.rendered_text
+    assert "provider_history_already_contains_evidence" in frame.reason_codes
+
+
 def test_unattributed_validation_exit_does_not_manufacture_failure():
     engine = PersistentExecutionStateEngine.initialize_from_graph(
         task="Fix save_user.",
@@ -1572,7 +1633,322 @@ def test_state_receipt_exposes_the_determinism_boundary_field_by_field():
     ).snapshot.as_dict()
 
     authorities = snapshot["field_authority"]
-    assert authorities["primary_focus_id"] == "generative_bootstrap"
-    assert authorities["current_focus_path"] == "executor_observed"
+    assert authorities["primary_focus_id"] == "bootstrap_selected"
+    assert authorities["current_focus"] == "executor_observed"
     assert authorities["phase"] == "deterministic_mutable"
     assert authorities["task_digest"] == "immutable_input"
+
+
+def test_external_artifact_and_cache_paths_never_become_repository_focus():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py",),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": "",
+                    "ordered_item_ids": [],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            engine.catalog,
+        ),
+        current_source_revision="source-1",
+    )
+
+    for call, path in enumerate(
+        (
+            "/tmp/probe.py",
+            "/root/.bash_profile",
+            "/etc/bash.bashrc",
+            "__pycache__/service.pyc",
+            "build/service.bin",
+            "data/results.json",
+        ),
+        start=1,
+    ):
+        engine.commit_postflight(
+            _proposed(f"cat {path}", call=call),
+            returncode=0,
+            output="observed",
+            changed_paths=(),
+            current_source_revision="source-1",
+            current_graph_revision="graph-1",
+            validation_status="unknown",
+        )
+        assert engine.snapshot.current_focus is not None
+        assert engine.snapshot.current_focus.kind is not CurrentFocusKind.REPOSITORY_SOURCE
+        frame = engine.compile_context(
+            current_source_revision="source-1", provider_call=call, max_tokens=512
+        )
+        assert "repository focus" not in frame.rendered_text.lower()
+
+
+def test_task_deliverable_focus_is_labeled_as_task_status_not_repository_evidence():
+    catalog = build_bootstrap_catalog(
+        instruction="Write reports/final.json.",
+        evidence=_evidence(),
+        documents=(_document("src/service.py", "save_user"),),
+        structural_links=(),
+        task_deliverables=("reports/final.json",),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Write reports/final.json.",
+        catalog=catalog,
+        structural_links=(),
+        present_paths=("src/service.py",),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": "",
+                    "ordered_item_ids": [],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    engine.commit_postflight(
+        _proposed("cat reports/final.json"),
+        returncode=0,
+        output="{}",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="unknown",
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+
+    assert engine.snapshot.current_focus is not None
+    assert engine.snapshot.current_focus.kind is CurrentFocusKind.TASK_DELIVERABLE
+    assert "Current task execution status:" in frame.rendered_text
+    assert "deliverable" in frame.rendered_text.lower()
+    assert "repository focus" not in frame.rendered_text.lower()
+
+
+def test_passing_self_authored_smoke_test_cannot_authorize_readiness():
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Implement src/service.py",
+        evidence=evidence,
+        documents=(
+            RepositoryDocument(
+                "src/service.py",
+                "def service(): return 1",
+                symbol="service",
+                origin=EvidenceOrigin.MODEL_AUTHORED,
+                origin_revision="source-2",
+            ),
+        ),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Implement src/service.py",
+        catalog=catalog,
+        structural_links=(),
+        present_paths=("src/service.py",),
+    )
+    edit = _proposed("touch src/service.py")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=replace(evidence, source_revision="source-2", graph_revision="graph-2"),
+        structural_links=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        present_paths=("src/service.py",),
+    )
+    engine.commit_postflight(
+        _proposed("python smoke_test.py", source_revision="source-2", call=2),
+        returncode=0,
+        output="PASS: looks good",
+        changed_paths=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="pass",
+        validation_check_id=None,
+    )
+
+    assert engine.snapshot.observed_validation.status is StateValidationStatus.PASS
+    assert engine.snapshot.declared_validation.status is StateValidationStatus.UNKNOWN
+    assert engine.snapshot.completion_readiness is CompletionReadiness.NOT_READY
+    assert engine.snapshot.phase is not StatePhase.READY_TO_SUBMIT
+
+
+def test_model_authored_bootstrap_focus_never_renders_its_source_excerpt():
+    evidence = RepositoryEvidence(
+        available=True,
+        graph_revision="graph-1",
+        anchors=({"path": "app.py", "line": 1, "symbol": "main"},),
+        status="source_backed",
+        source_revision="source-1",
+        index_current=True,
+        intelligence_valid=True,
+        substrate_ready=True,
+    )
+    catalog = build_bootstrap_catalog(
+        instruction="Create app.py",
+        evidence=evidence,
+        documents=(
+            RepositoryDocument(
+                "app.py",
+                "def main(): return 1",
+                symbol="main",
+                origin=EvidenceOrigin.MODEL_AUTHORED,
+                origin_revision="source-1",
+            ),
+        ),
+        structural_links=(),
+        source_revision="source-1",
+        graph_revision="graph-1",
+        repository_complete=True,
+    )
+    focus = next(item for item in catalog.items if item.kind.value == "focus")
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Create app.py",
+        catalog=catalog,
+        structural_links=(),
+        present_paths=("app.py",),
+        path_origins={"app.py": EvidenceOrigin.MODEL_AUTHORED},
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus.item_id,
+                    "ordered_item_ids": [focus.item_id],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+
+    assert focus.origin is EvidenceOrigin.MODEL_AUTHORED
+    assert frame.selected_evidence == ()
+    assert "def main()" not in frame.rendered_text
+
+
+def test_declared_current_validation_can_authorize_readiness():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user and run its test.",
+        catalog=_catalog(),
+        structural_links=(),
+        present_paths=("src/service.py",),
+    )
+    engine.commit_postflight(
+        _proposed("touch src/service.py"),
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        present_paths=("src/service.py",),
+    )
+    engine.commit_postflight(
+        _proposed("pytest tests/test_service.py -q", source_revision="source-2", call=2),
+        returncode=0,
+        output="1 passed",
+        changed_paths=(),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="pass",
+        validation_check_id="pytest tests/test_service.py -q",
+    )
+
+    assert engine.snapshot.declared_validation.status is StateValidationStatus.PASS
+    assert engine.snapshot.completion_readiness is CompletionReadiness.READY
+    assert engine.snapshot.phase is StatePhase.READY_TO_SUBMIT
+
+
+def test_failure_diagnostic_skips_leading_success_banner():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=_catalog(),
+        structural_links=(),
+        present_paths=("src/service.py",),
+    )
+    engine.commit_postflight(
+        _proposed("pytest tests/test_service.py -q"),
+        returncode=1,
+        output="PASS: setup completed\ntrace detail\nAssertionError: expected 2, got 1\n1 failed",
+        changed_paths=(),
+        current_source_revision="source-1",
+        current_graph_revision="graph-1",
+        validation_status="fail",
+    )
+
+    assert engine.snapshot.current_failure is not None
+    assert engine.snapshot.current_failure.diagnostic == "1 failed"
+
+
+def test_visible_state_uses_neutral_headers_without_evaluator_branding():
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=_catalog(),
+        structural_links=_links(),
+        present_paths=("src/service.py", "src/api.py"),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection("not-json", engine.catalog),
+        current_source_revision="source-1",
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    lowered = frame.rendered_text.lower()
+
+    assert (
+        "current task execution status:" in lowered
+        or "repository facts for the next decision:" in lowered
+    )
+    assert "groundtruth" not in lowered
+    assert "hidden evaluator" not in lowered
+    assert "reference implementation" not in lowered
+    assert "repository-grounded" not in lowered

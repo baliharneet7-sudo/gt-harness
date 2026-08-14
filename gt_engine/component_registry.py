@@ -129,6 +129,13 @@ ACTIVE_GT_COMPONENTS: dict[str, ComponentContract] = {
             DefaultVisibility.PRIVATE,
             "bundle hash/completeness verifier",
         ),
+        ComponentContract(
+            "persistent_execution_state",
+            ComponentStage.PROVIDER_BOUNDARY,
+            "graph-first living state with one bootstrap and selective frames",
+            DefaultVisibility.CONDITIONAL_PROVIDER,
+            "graph-first bootstrap plus materiality and delivery audits",
+        ),
     )
 }
 

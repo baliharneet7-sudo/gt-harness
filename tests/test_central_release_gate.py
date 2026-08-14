@@ -113,6 +113,7 @@ def _treatment() -> dict:
             },
             "bootstrap": {
                 "status": "selected",
+                "bootstrap_mode": "generative_selected",
                 "logical_calls": 1,
                 "provider_calls": 1,
                 "action_executions": 0,
@@ -127,10 +128,11 @@ def _treatment() -> dict:
                 "version": 2,
                 "graph_current": True,
                 "bootstrap_status": "selected",
+                "bootstrap_mode": "generative_selected",
                 "field_authority": {
-                    "primary_focus_id": "generative_bootstrap",
+                    "primary_focus_id": "bootstrap_selected",
                     "phase": "deterministic_mutable",
-                    "current_focus_path": "executor_observed",
+                    "current_focus": "executor_observed",
                 },
             },
             "metrics": {
@@ -152,6 +154,20 @@ def _treatment() -> dict:
                     "provider_messages_sha256": "provider-1",
                     "message_index": 1,
                     "chars": 30,
+                    "claim_metadata": [
+                        {
+                            "claim_id": "state-claim-1",
+                            "origin": "preexisting_repository",
+                            "authority": "identity_only",
+                            "novel_to_provider_view": True,
+                            "known_to_model": False,
+                            "materiality_reason": "new_unresolved_task_obligation",
+                            "source_revision": "source-1",
+                            "origin_revision": "source-1",
+                            "relation_endpoint": "",
+                            "declared_validation_id": "",
+                        }
+                    ],
                 }
             ],
             "failures": [],
@@ -513,7 +529,7 @@ def test_release_gate_rejects_any_provider_query_marker_failure():
     assert "task:executor_provider_marker_failed" in persistent.failures
 
 
-def test_release_gate_rejects_missing_stable_core_on_dispatched_executor_call():
+def test_release_gate_accepts_materiality_accounted_persistent_abstention():
     receipt = _treatment()
     receipt["executor_calls"] = 2
     receipt["calls"] = 3
@@ -536,7 +552,9 @@ def test_release_gate_rejects_missing_stable_core_on_dispatched_executor_call():
                 "provider_call": 2,
                 "state_version": 2,
                 "claim_ids": [],
-                "reason_codes": ["state_unchanged_already_represented"],
+                "reason_codes": [
+                    "state_change_already_represented_or_not_model_material"
+                ],
             },
         }
     )
@@ -553,8 +571,7 @@ def test_release_gate_rejects_missing_stable_core_on_dispatched_executor_call():
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
-    assert report.passed is False
-    assert "treatment-1:persistent_stable_core_missing:2" in report.failures
+    assert report.passed is True
 
 
 def test_persistent_state_only_profile_gates_isolation_not_disabled_full_controls():
@@ -604,27 +621,63 @@ def test_graph_substrate_is_not_relabelled_invalid_by_bootstrap_failure():
     receipt["repository_intelligence"]["status"] = "failed"
     receipt["repository_intelligence"]["failures"] = ["persistent_bootstrap_not_selected"]
     receipt["persistent_execution_state"]["bootstrap"]["status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["bootstrap"][
+        "bootstrap_mode"
+    ] = "deterministic_fallback"
     receipt["persistent_execution_state"]["state"]["bootstrap_status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["state"][
+        "bootstrap_mode"
+    ] = "deterministic_fallback"
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
     substrate = next(check for check in report.checks if check.name == "repository_substrate")
 
     assert substrate.passed is True
-    assert "treatment-1:persistent_bootstrap_not_selected" in report.failures
+    assert "treatment-1:persistent_bootstrap_not_generative" in report.failures
 
 
-def test_release_gate_rejects_fallback_bootstrap_and_hidden_extra_calls():
+def test_release_gate_rejects_fallback_bootstrap_as_invalid_treatment():
     receipt = _treatment()
     receipt["persistent_execution_state"]["bootstrap"]["status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["bootstrap"][
+        "bootstrap_mode"
+    ] = "deterministic_fallback"
     receipt["persistent_execution_state"]["state"]["bootstrap_status"] = "invalid_fallback"
+    receipt["persistent_execution_state"]["state"][
+        "bootstrap_mode"
+    ] = "deterministic_fallback"
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_bootstrap_not_generative" in report.failures
+
+
+def test_release_gate_rejects_hidden_extra_calls_with_generative_bootstrap():
+    receipt = _treatment()
     receipt["calls"] = 3
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
     assert report.passed is False
-    assert "treatment-1:persistent_bootstrap_not_selected" in report.failures
     assert "treatment-1:persistent_provider_call_accounting_mismatch" in report.failures
 
+
+def test_release_gate_rejects_generative_bootstrap_with_zero_material_deliveries():
+    receipt = _treatment()
+    receipt["persistent_execution_state"]["deliveries"] = []
+    receipt["model_call_contexts"][0]["persistent_execution_state_delivered"] = False
+    receipt["model_call_contexts"][0]["persistent_execution_state"] = {
+        "kind": "none",
+        "claim_ids": [],
+        "provider_call": 1,
+        "reason_codes": ["no_material_certified_localization"],
+    }
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:persistent_no_material_delivery" in report.failures
 
 def test_release_gate_fails_closed_on_selected_pending_retrieval():
     receipt = _treatment()

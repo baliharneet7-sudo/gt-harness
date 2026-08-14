@@ -10,6 +10,7 @@ from gt_engine.decision_sufficiency import (
     compile_decision_sufficiency,
 )
 from gt_engine.hybrid_retrieval import (
+    EvidenceAuthority,
     HybridRetrievalResult,
     HybridRetriever,
     RepositoryDocument,
@@ -59,15 +60,21 @@ def _proposal(
 
 def _candidate(
     *,
-    path: str = "src/app.py",
+    path: str = "src/caller.py",
     source_revision: str = "source-1",
-    relation: str | None = None,
+    relation: str | None = "CALLS",
     provenance: tuple[str, ...] = (
-        "exact_path",
-        "delivery_support:certified",
-        "support_channel:exact",
+        "graph_edge:7",
+        "trust:CERTIFIED",
+        "structural_certified",
+        "edge_endpoint_symbol:update_contract",
+        "edge_endpoint_start:4",
+        "delivery_support:certified_relation",
+        "support_channel:structural",
+        "action_target:src/app.py",
     ),
     text: str = "def update_contract():\n    return 'mechanical fact'",
+    authority: EvidenceAuthority = EvidenceAuthority.CERTIFIED_RELATION,
 ) -> RetrievalCandidate:
     return RetrievalCandidate(
         path=path,
@@ -85,6 +92,7 @@ def _candidate(
         provenance=provenance,
         source_revision=source_revision,
         channel_score=1.0,
+        authority=authority,
     )
 
 
@@ -166,19 +174,24 @@ def test_other_non_workspace_mutations_pass(operation: ActionOperation) -> None:
     assert result.disposition is DecisionSufficiencyDisposition.PASS
 
 
-def test_certified_exact_target_absent_from_request_is_return_eligible() -> None:
-    result = _compile()
+def test_exact_target_identity_alone_is_not_return_eligible() -> None:
+    candidate = _candidate(
+        path="src/app.py",
+        relation=None,
+        provenance=(
+            "exact_path",
+            "delivery_support:identity_only",
+            "support_channel:exact",
+        ),
+        authority=EvidenceAuthority.IDENTITY_ONLY,
+    )
 
-    assert result.disposition is DecisionSufficiencyDisposition.RETURN_ELIGIBLE
-    assert result.return_eligible is True
-    assert result.bundle is not None
-    assert result.bundle.action_id == "action-1"
-    assert result.bundle.target_path == "src/app.py"
-    assert result.bundle.selecting_request_hash == "request-1"
-    assert result.bundle.claims[0].support_kind == "mechanical_exact"
-    assert result.bundle.claims[0].claim_id == _candidate().claim_hash
-    assert result.bundle.claims[0].decision_claim_id
-    assert result.bundle.claims[0].decision_claim_id != result.bundle.claims[0].claim_id
+    result = _compile(retrieval=_retrieval((candidate,)))
+
+    assert result.disposition is DecisionSufficiencyDisposition.PASS
+    assert result.return_eligible is False
+    assert result.bundle is None
+    assert result.reason_codes == ("no_certified_mechanical_evidence",)
 
 
 def test_decision_claim_identity_changes_with_operation_not_repository_content() -> None:
@@ -266,7 +279,13 @@ def test_multiple_or_missing_action_targets_fail_closed() -> None:
 
 
 def test_target_mismatch_is_not_material() -> None:
-    result = _compile(retrieval=_retrieval((_candidate(path="src/other.py"),)))
+    candidate = _candidate(
+        path="src/other.py",
+        relation=None,
+        provenance=("exact_path", "delivery_support:identity_only"),
+        authority=EvidenceAuthority.IDENTITY_ONLY,
+    )
+    result = _compile(retrieval=_retrieval((candidate,)))
 
     assert result.disposition is DecisionSufficiencyDisposition.PASS
     assert "no_exact_target_material" in result.reason_codes
@@ -279,7 +298,7 @@ def test_certified_structural_claim_requires_explicit_action_target_anchor() -> 
         "structural_certified",
         "edge_endpoint_symbol:caller",
         "edge_endpoint_start:4",
-        "delivery_support:certified",
+        "delivery_support:certified_relation",
         "support_channel:structural",
         "action_target:src/app.py",
     )
@@ -304,7 +323,7 @@ def test_structural_claim_without_edge_aligned_span_cannot_authorize_return() ->
             "graph_edge:7",
             "trust:CERTIFIED",
             "structural_certified",
-            "delivery_support:certified",
+            "delivery_support:certified_relation",
             "support_channel:structural",
             "action_target:src/app.py",
         ),
@@ -331,7 +350,7 @@ def test_generic_import_neighbor_cannot_authorize_model_return() -> None:
             "graph_edge:91",
             "trust:CERTIFIED",
             "structural_certified",
-            "delivery_support:certified",
+            "delivery_support:certified_relation",
             "support_channel:structural",
             "action_target:src/errors.ts",
         ),
@@ -474,7 +493,7 @@ def test_structural_claim_without_exact_target_anchor_passes() -> None:
         relation="CALLS",
         provenance=(
             "structural_certified",
-            "delivery_support:certified",
+            "delivery_support:certified_relation",
             "support_channel:structural",
         ),
     )
@@ -489,10 +508,16 @@ def test_structural_claim_without_exact_target_anchor_passes() -> None:
     "candidate",
     (
         _candidate(
+            path="src/app.py",
+            relation=None,
             provenance=("lexical", "bm25", "delivery_support:corroborated"),
+            authority=EvidenceAuthority.RANKING_SUPPORT,
         ),
         _candidate(
+            path="src/app.py",
+            relation=None,
             provenance=("dense_cosine", "delivery_support:validation_candidate"),
+            authority=EvidenceAuthority.RANKING_SUPPORT,
         ),
         _candidate(
             path="src/other.py",
@@ -500,7 +525,7 @@ def test_structural_claim_without_exact_target_anchor_passes() -> None:
             provenance=(
                 "graph_cochange:count=20",
                 "structural_certified",
-                "delivery_support:certified",
+                "delivery_support:certified_relation",
                 "support_channel:structural",
                 "action_target:src/app.py",
             ),
