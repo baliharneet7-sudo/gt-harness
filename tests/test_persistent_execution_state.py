@@ -705,6 +705,7 @@ def test_state_is_reused_at_provider_preflight_postflight_and_rebase_boundaries(
         provider_call=1,
         max_tokens=512,
     )
+    assert "Bootstrap-selected next items:" not in first.rendered_text
     assert engine.mark_context_dispatched(first) is True
     read = _proposed("sed -n '1,120p' src/service.py")
     projection = engine.project_preflight(read, current_source_revision="source-1")
@@ -2097,3 +2098,173 @@ def test_visible_state_uses_neutral_headers_without_evaluator_branding():
     assert "hidden evaluator" not in lowered
     assert "reference implementation" not in lowered
     assert "repository-grounded" not in lowered
+
+
+def test_import_advisories_stay_private_while_calls_remain_provider_visible():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=(
+            *_links(),
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="tests/test_service.py",
+                relation="IMPORTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPORTS",),
+                certified=True,
+            ),
+        ),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    first = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=1,
+        max_tokens=512,
+    )
+    assert engine.mark_context_dispatched(first) is True
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py", call=1)
+    engine.project_preflight(edit, current_source_revision="source-1")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(
+            *_links(),
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="tests/test_service.py",
+                relation="IMPORTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPORTS",),
+                certified=True,
+            ),
+        ),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-2",
+        provider_call=2,
+        max_tokens=256,
+    )
+
+    import_obligations = [
+        item
+        for item in engine.snapshot.obligations
+        if str(item.relation or "").lower() in {"imports", "imported_by"}
+    ]
+    assert import_obligations, "imports may remain private controller state"
+    assert "IMPORTS" not in frame.rendered_text
+    assert "imports from" not in frame.rendered_text.lower()
+    assert "Related inspect_dependency: src/api.py" in frame.rendered_text
+
+
+def test_implements_advisories_stay_private_while_calls_remain_provider_visible():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=(
+            *_links(),
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="src/api.py",
+                relation="IMPLEMENTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPLEMENTS",),
+                certified=True,
+            ),
+        ),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    focus = next(item.item_id for item in catalog.items if item.path == "src/service.py")
+    engine.apply_bootstrap(
+        parse_bootstrap_selection(
+            json.dumps(
+                {
+                    "primary_focus_id": focus,
+                    "ordered_item_ids": [focus],
+                    "risk_item_ids": [],
+                    "validation_item_ids": [],
+                }
+            ),
+            catalog,
+        ),
+        current_source_revision="source-1",
+    )
+    first = engine.compile_context(
+        current_source_revision="source-1",
+        provider_call=1,
+        max_tokens=512,
+    )
+    assert engine.mark_context_dispatched(first) is True
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py", call=1)
+    engine.project_preflight(edit, current_source_revision="source-1")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(
+            *_links(),
+            StructuralLink(
+                source_path="src/service.py",
+                target_path="src/api.py",
+                relation="IMPLEMENTS",
+                confidence=1.0,
+                provenance=("graph_edge:IMPLEMENTS",),
+                certified=True,
+            ),
+        ),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py", "tests/test_service.py"),
+    )
+    frame = engine.compile_context(
+        current_source_revision="source-2",
+        provider_call=2,
+        max_tokens=256,
+    )
+
+    assert any(
+        str(item.relation or "").lower() == "implements"
+        for item in engine.snapshot.obligations
+    )
+    assert "IMPLEMENTS" not in frame.rendered_text
+    assert "implements from" not in frame.rendered_text.lower()
+    assert "Related inspect_dependency: src/api.py" in frame.rendered_text

@@ -60,18 +60,19 @@ EXPECTED_TIMING = {
 
 def _expected_model_visible(row: dict) -> bool:
     feature_id = row["feature_id"]
-    return row["decision"] == "DELIVERED" and (
-        feature_id
-        in {
-            "covering_red",
-            "newfile_precedent",
-            "recovery",
-            "signature_delta",
-            "submit_refusal",
-            "syntax_result",
-        }
-        or (feature_id == "GT_LOC_RESLOT" and bool(row.get("payload", {}).get("graph_revision")))
-    )
+    payload = row.get("payload") or {}
+    if row["decision"] != "DELIVERED":
+        return False
+    if feature_id == "signature_delta":
+        return bool(payload.get("callers"))
+    if feature_id == "GT_EDIT_CHECK":
+        return payload.get("intervention") == "validation_debt"
+    return feature_id in {
+        "covering_red",
+        "recovery",
+        "submit_refusal",
+        "syntax_result",
+    }
 
 
 def audit_timing(summary: dict) -> dict:
@@ -103,7 +104,12 @@ def audit_timing(summary: dict) -> dict:
                 not row["model_visible"]
                 and row.get("delivery_status") == "suppressed"
                 and row.get("delivery_reason")
-                in {"semantic_duplicate", "not_selected_first_eligible_request"}
+                in {
+                    "semantic_duplicate",
+                    "not_selected_first_eligible_request",
+                    "change_surface_self_echo",
+                    "task_start_advisory_disabled",
+                }
             )
             for row in rows
         )
@@ -293,7 +299,12 @@ def census() -> dict:
                 not row["model_visible"]
                 and row.get("delivery_status") == "suppressed"
                 and row.get("delivery_reason")
-                in {"semantic_duplicate", "not_selected_first_eligible_request"}
+                in {
+                    "semantic_duplicate",
+                    "not_selected_first_eligible_request",
+                    "change_surface_self_echo",
+                    "task_start_advisory_disabled",
+                }
             )
             for row in summary["receipts"]
         )

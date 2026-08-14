@@ -228,6 +228,7 @@ def audit() -> dict[str, bool]:
         "provider_free_gate_covers_persistent_execution_state": (
             "tests/test_persistent_execution_state.py" in provider_free_workflow
             and "gt_engine/persistent_execution_state.py" in provider_free_workflow
+            and "gt_engine/thin_compiler.py" in provider_free_workflow
             and "test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary"
             in (ROOT / "tests/test_gt_central_agent.py").read_text(encoding="utf-8")
             and "_persistent_execution_state" in (

@@ -141,6 +141,7 @@ jobs:
             gt_engine/diagnostics.py \
             gt_engine/decision_sufficiency.py \
             gt_engine/persistent_execution_state.py \
+            gt_engine/thin_compiler.py \
             gt_engine/hybrid_repository.py gt_engine/preemptive_retrieval.py \
             gt_engine/component_registry.py gt_engine/contributions.py \
             gt_engine/retrieval_profile.py \

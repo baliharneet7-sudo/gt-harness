@@ -372,3 +372,132 @@ def test_deep_metrics_reports_surface_totals_not_just_guidance(tmp_path):
     assert metrics["provider_delivery_visible_chars"] == 61
     assert metrics["provider_delivery_surface_counts"]["preemptive_retrieval"] == 1
     assert metrics["provider_delivery_surface_chars"]["preemptive_retrieval"] == 31
+
+
+def test_persistent_import_advisory_materiality_is_rejected():
+    receipt = {
+        "model_call_contexts": [_context(1, request="req-1", provider="provider-1")],
+        "guidance_deliveries": [],
+        "repository_intelligence": {"frontier_deliveries": []},
+        "preemptive_retrieval": {"deliveries": []},
+        "progress": {},
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-import",
+                    "claim_ids": ["import-claim"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 40,
+                    "claim_metadata": [
+                        _claim_meta(
+                            "import-claim",
+                            authority="certified_relation",
+                            materiality_reason="related_advisory_obligation",
+                            relation="imports",
+                            relation_endpoint="tests/test_pipeline.py",
+                        )
+                    ],
+                }
+            ]
+        },
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(
+        "persistent_delivery_semantic_authority_invalid" in item for item in failures
+    )
+
+
+def test_persistent_bootstrap_ordered_materiality_is_rejected():
+    receipt = {
+        "model_call_contexts": [_context(1, request="req-1", provider="provider-1")],
+        "guidance_deliveries": [],
+        "repository_intelligence": {"frontier_deliveries": []},
+        "preemptive_retrieval": {"deliveries": []},
+        "progress": {},
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-ordered",
+                    "claim_ids": ["ordered-claim"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 40,
+                    "claim_metadata": [
+                        _claim_meta(
+                            "ordered-claim",
+                            authority="certified_relation",
+                            materiality_reason="bootstrap_ordered_next_item",
+                            relation="calls",
+                            relation_endpoint="src/api.py",
+                        )
+                    ],
+                }
+            ]
+        },
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(
+        "persistent_delivery_semantic_authority_invalid" in item for item in failures
+    )
+
+
+def test_persistent_implements_advisory_materiality_is_rejected():
+    receipt = {
+        "model_call_contexts": [_context(1, request="req-1", provider="provider-1")],
+        "guidance_deliveries": [],
+        "repository_intelligence": {"frontier_deliveries": []},
+        "preemptive_retrieval": {"deliveries": []},
+        "progress": {},
+        "persistent_execution_state": {
+            "deliveries": [
+                {
+                    "delivery_id": "state-implements",
+                    "claim_ids": ["implements-claim"],
+                    "evidence_action": 0,
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 40,
+                    "claim_metadata": [
+                        _claim_meta(
+                            "implements-claim",
+                            authority="certified_relation",
+                            materiality_reason="related_advisory_obligation",
+                            relation="implements",
+                            relation_endpoint="src/api.py",
+                        )
+                    ],
+                }
+            ]
+        },
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(
+        "persistent_delivery_semantic_authority_invalid" in item for item in failures
+    )

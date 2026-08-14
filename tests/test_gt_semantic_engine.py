@@ -84,7 +84,7 @@ def test_over_budget_fact_is_omitted_whole_instead_of_truncated():
     assert claim.claim_id not in engine._exposures
 
 
-def test_task_start_localization_is_available_before_the_first_model_call():
+def test_task_start_localization_stays_controller_only():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix greet output", revision="r0", source_revision="s0")
     runtime.register_structural_evidence(
@@ -125,13 +125,14 @@ def test_task_start_localization_is_available_before_the_first_model_call():
     feedback = runtime.model_feedback()
     prepared = runtime.prepared_guidance()
 
-    assert "src/app.py:4" in feedback
+    assert feedback == ""
     assert prepared is None
     receipt = next(
         row for row in runtime.summary()["receipts"] if row["feature_id"] == "GT_LOC_RESLOT"
     )
     assert receipt["action"] == 0
     assert receipt["source_revision"] == "s0"
+    assert receipt["model_visible"] is False
 
 
 def test_same_boundary_syntax_and_signature_claims_are_coalesced_not_destroyed():

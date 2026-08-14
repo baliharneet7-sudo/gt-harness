@@ -26,6 +26,7 @@ from gt_engine.hybrid_retrieval import (
 )
 from gt_engine.preflight import ActionOperation, ProposedAction
 from gt_engine.repository_intelligence import RepositoryEvidence
+from gt_engine.thin_compiler import provider_material_relation
 
 SELECT_CATALOG_TOOL_NAME = "select_catalog"
 _BOOTSTRAP_SELECTION_KEYS = (
@@ -68,6 +69,11 @@ def _certified_relation(link: StructuralLink) -> str:
     normalized = str(link.relation or "").strip().lower()
     normalized = _CERTIFIED_RELATION_ALIASES.get(normalized, normalized)
     return normalized if normalized in _CERTIFIED_RELATIONS else ""
+
+
+def _provider_material_relation(relation: str) -> str:
+    """Normalize a stored obligation relation for provider-materiality gating."""
+    return provider_material_relation(relation)
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -2022,6 +2028,7 @@ class PersistentExecutionStateEngine:
             declared_validation_id: str = "",
             known_to_model: bool = False,
             known_texts: tuple[str, ...] = (),
+            relation: str = "",
         ) -> dict[str, Any]:
             return {
                 "origin": origin.value,
@@ -2033,6 +2040,7 @@ class PersistentExecutionStateEngine:
                 "origin_revision": origin_revision,
                 "relation_endpoint": relation_endpoint,
                 "declared_validation_id": declared_validation_id,
+                "relation": relation,
                 "_known_texts": known_texts,
             }
 
@@ -2119,10 +2127,19 @@ class PersistentExecutionStateEngine:
                     )
                 )
         open_obligations = [
-            item for item in snapshot.obligations if item.status is ObligationStatus.OPEN
+            item
+            for item in snapshot.obligations
+            if item.status is ObligationStatus.OPEN
+            and (
+                item.blocking
+                or bool(_provider_material_relation(item.relation))
+            )
         ]
         for obligation in open_obligations[:4]:
             obligation_target = obligation.path or obligation.source_path
+            relation = _provider_material_relation(obligation.relation) or str(
+                obligation.relation or ""
+            ).strip().lower()
             lines.append(
                 (
                     _stable_id(
@@ -2158,6 +2175,7 @@ class PersistentExecutionStateEngine:
                             if obligation.relation == "task_requirement"
                             else ()
                         ),
+                        relation=relation,
                     ),
                 )
             )
@@ -2207,42 +2225,6 @@ class PersistentExecutionStateEngine:
                     ),
                 )
             )
-        if catalog_is_current and kind in {
-            ContextFrameKind.INITIAL,
-            ContextFrameKind.DELTA,
-            ContextFrameKind.CRITICAL,
-        }:
-            next_items = [
-                self._item(item_id)
-                for item_id in snapshot.ordered_item_ids
-                if item_id != snapshot.primary_focus_id
-            ]
-            next_items = [item for item in next_items if item is not None]
-            next_items = [
-                item
-                for item in next_items
-                if item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
-                and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
-            ]
-            if next_items:
-                lines.append(
-                    (
-                        _stable_id(
-                            "state-claim",
-                            "ordered",
-                            *(item.item_id for item in next_items[:3]),
-                        ),
-                        "Bootstrap-selected next items: "
-                        + "; ".join(item.label for item in next_items[:3])
-                        + ".",
-                        metadata(
-                            origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
-                            authority=EvidenceAuthority.CERTIFIED_RELATION,
-                            materiality_reason="bootstrap_ordered_next_item",
-                            relation_endpoint=next_items[0].path,
-                        ),
-                    )
-                )
         return lines
 
     def compile_context(

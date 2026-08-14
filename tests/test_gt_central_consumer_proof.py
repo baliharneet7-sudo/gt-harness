@@ -219,13 +219,12 @@ def test_disabled_task_start_reslot_closes_its_semantic_claim():
     _register_graph_contract(runtime)
 
     summary = runtime.summary()
-    counts = summary["effect_accountability_counts"]
-    assert counts.get("pending_decision_claim", 0) == 0
-    assert counts.get("controller_state_suppressed", 0) == 1
+    loc_rows = _feature_rows(summary, "GT_LOC_RESLOT")
+    assert loc_rows
+    assert all(not row["model_visible"] for row in loc_rows)
     claim_rows = summary["semantic_decisions"]["claims"]
-    assert any(
-        row["invalidated_reason"] == "task_start_advisory_disabled"
-        and row["active"] is False
+    assert not any(
+        row.get("feature_id") == "GT_LOC_RESLOT" and row.get("active")
         for row in claim_rows
     )
 
@@ -631,6 +630,66 @@ def test_signature_delta_is_suppressed_when_exact_edit_is_in_action_history():
     receipt = _feature_rows(runtime.summary(), "signature_delta")[0]
     assert receipt["delivery_status"] == "suppressed"
     assert receipt["delivery_reason"] == "represented_in_action_history"
+
+
+def test_newfile_precedent_self_echo_is_suppressed_from_provider_delivery():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Implement", revision=WR0, source_revision=SR0)
+    runtime.observe_action(
+        action_id=1,
+        command="write generate_re.py",
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            "write",
+            WR0,
+            SR1,
+            created=("generate_re.py",),
+            before_contents={"check.py": "def check():\n    return True\n"},
+            after_contents={
+                "check.py": "def check():\n    return True\n",
+                "generate_re.py": "def generate():\n    return 1\n",
+            },
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    assert runtime.model_feedback(deferred=True) == ""
+    receipt = _feature_rows(runtime.summary(), "newfile_precedent")[0]
+    assert receipt["delivery_status"] == "suppressed"
+    assert receipt["delivery_reason"] == "change_surface_self_echo"
+
+
+def test_signature_delta_without_callers_is_suppressed_as_self_echo():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Change the API", revision=WR0, source_revision=SR0)
+    command = "sed -i 's/def f(x)/def f(x, y=0)/' app.py"
+    runtime.observe_action(
+        action_id=1,
+        command=command,
+        output="",
+        returncode=0,
+        transition=_transition(
+            1,
+            command,
+            WR0,
+            SR1,
+            modified=("app.py",),
+            before_contents={"app.py": "def f(x):\n    return x\n"},
+            after_contents={"app.py": "def f(x, y=0):\n    return x + y\n"},
+        ),
+        revision=SR1,
+        source_revision=SR1,
+    )
+    _consume(runtime, 1, 1)
+
+    assert runtime.model_feedback(deferred=True) == ""
+    receipt = _feature_rows(runtime.summary(), "signature_delta")[0]
+    assert receipt["delivery_status"] == "suppressed"
+    assert receipt["delivery_reason"] == "change_surface_self_echo"
 
 
 def test_signature_payload_coalesces_caller_and_patch_consumers():

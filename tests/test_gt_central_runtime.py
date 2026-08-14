@@ -373,7 +373,6 @@ def test_all_seventeen_central_features_have_real_trigger_receipts():
     assert all(item["fresh"] for item in summary["receipts"])
     visible = {item["feature_id"] for item in summary["receipts"] if item["model_visible"]}
     assert visible == {
-        "GT_LOC_RESLOT",
         "covering_red",
         "newfile_precedent",
         "recovery",

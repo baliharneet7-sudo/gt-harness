@@ -52,6 +52,7 @@ from gt_engine.semantic_decisions import (
     SemanticDecisionEngine,
 )
 from gt_engine.task_contract import TaskResourceRole, extract_task_resources
+from gt_engine.thin_compiler import PROVIDER_MATERIAL_FEATURES
 from gt_engine.uplift_policy import (
     EvidenceAuthority,
     OpportunityKind,
@@ -75,16 +76,7 @@ _MISSING_EXECUTABLE = re.compile(
 )
 _FAILURE_LINE = re.compile(r"\b(?:fail(?:ed|ure)?|error|exception|traceback|red)\b", re.I)
 _SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-_MODEL_ACTIONABLE_FEATURES = frozenset(
-    {
-        "covering_red",
-        "newfile_precedent",
-        "recovery",
-        "signature_delta",
-        "submit_refusal",
-        "syntax_result",
-    }
-)
+_MODEL_ACTIONABLE_FEATURES = PROVIDER_MATERIAL_FEATURES
 _NON_MATERIAL_PATH_PARTS = frozenset(
     {"__pycache__", ".pytest_cache", ".mypy_cache", ".git", ".hg", ".svn"}
 )
@@ -2269,7 +2261,7 @@ class CentralFeatureRuntime:
             "newfile_precedent": "Follow the verified repository precedent for the new file.",
             "obligations": "Keep the requested task requirements in scope.",
             "recovery": (
-                "The same failure repeated; change the hypothesis before exploring further."
+                "The same validation failure repeated at an unchanged source revision."
             ),
             "signature_delta": "Inspect and repair callers affected by the signature edit.",
             "submit_refusal": "Resolve the fresh required failure before submitting again.",
@@ -3072,9 +3064,6 @@ class CentralFeatureRuntime:
         actionable = (
             feature_id in _MODEL_ACTIONABLE_FEATURES
             or (feature_id == "GT_EDIT_CHECK" and payload.get("intervention") == "validation_debt")
-            # Ordinary search/localization receipts are engine-private.  Only
-            # source-backed task-start graph evidence belongs in call one.
-            or (feature_id == "GT_LOC_RESLOT" and bool(payload.get("graph_revision")))
         )
         return actionable and feature_payload_grounded(feature_id, payload)
 
@@ -3616,7 +3605,14 @@ class CentralFeatureRuntime:
                     "owner_feature": "recovery",
                     "failure_fingerprint": failure_fingerprint,
                     "repeat_count": count,
-                    "message": "A deterministic validation failure state was recorded.",
+                    "declared_check_id": classification.declared_check_id,
+                    "diagnostic": bounded_diagnostic,
+                    "message": (
+                        "Repeated validation failure recorded at an unchanged "
+                        f"source revision ({count}x) for "
+                        f"{classification.declared_check_id or classification.command_class}"
+                        + (f": {bounded_diagnostic}" if bounded_diagnostic else ".")
+                    ),
                 },
             )
             if count >= 2:
@@ -3697,7 +3693,8 @@ class CentralFeatureRuntime:
                         },
                         "message": (
                             "The same validation failure repeated at an unchanged source "
-                            "revision; inspect and edit the anchored source before rerunning."
+                            "revision; recorded failure evidence is "
+                            f"{failure_fingerprint or classification.command_class}."
                         ),
                     },
                 )
@@ -4840,6 +4837,37 @@ class CentralFeatureRuntime:
             all(cls._anchor_in_text(anchor, text) for anchor in anchors) for text in texts
         )
 
+    @staticmethod
+    def _change_surface_self_echo(receipt: FeatureReceipt) -> bool:
+        """True when feature guidance would re-present the model's own edit surface.
+
+        materiality_shared_abstention_v1: newfile_precedent always has a
+        model-created subject; signature_delta without certified preexisting
+        callers is change-surface echo rather than a compatibility obligation.
+        """
+        if receipt.feature_id == "newfile_precedent":
+            created = [
+                str(path).strip()
+                for path in (receipt.payload.get("created_files") or ())
+                if str(path).strip()
+            ]
+            return bool(created)
+        if receipt.feature_id == "signature_delta":
+            callers = [
+                caller
+                for caller in (receipt.payload.get("callers") or ())
+                if caller
+            ]
+            if callers:
+                return False
+            changed = [
+                str(path).strip()
+                for path in (receipt.payload.get("changed_paths") or ())
+                if str(path).strip()
+            ]
+            return bool(changed)
+        return False
+
     def model_feedback(
         self,
         *,
@@ -4914,6 +4942,13 @@ class CentralFeatureRuntime:
             self._suppress_receipt_delivery(item, reason="represented_in_action_history")
         if represented_items:
             selected_items = [item for item in selected_items if item not in represented_items]
+        self_echo_items = [
+            item for item in selected_items if self._change_surface_self_echo(item)
+        ]
+        for item in self_echo_items:
+            self._suppress_receipt_delivery(item, reason="change_surface_self_echo")
+        if self_echo_items:
+            selected_items = [item for item in selected_items if item not in self_echo_items]
         if not selected_items:
             self._suppress_unselected_first_window(call=call)
             self._guidance_suppressed += 1

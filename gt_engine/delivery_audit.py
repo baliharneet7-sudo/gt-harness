@@ -13,6 +13,11 @@ import hashlib
 import json
 from typing import Any
 
+from gt_engine.thin_compiler import (
+    NON_MATERIAL_PROVIDER_RELATIONS,
+    PROVIDER_MATERIALITY_REASONS,
+)
+
 SURFACE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("preemptive_retrieval", ("preemptive_retrieval", "deliveries")),
     ("persistent_execution_state", ("persistent_execution_state", "deliveries")),
@@ -282,14 +287,8 @@ def audit_provider_deliveries(
             metadata_by_claim = {
                 str(item.get("claim_id") or ""): item for item in claim_metadata
             }
-            allowed_materiality = {
-                "newly_certified_related_file",
-                "new_unresolved_task_obligation",
-                "related_advisory_obligation",
-                "bootstrap_ordered_next_item",
-                "current_attributable_failure",
-                "declared_validation_status_change",
-            }
+            allowed_materiality = set(PROVIDER_MATERIALITY_REASONS)
+            non_material_relations = set(NON_MATERIAL_PROVIDER_RELATIONS)
             semantic_support_valid = bool(row["claim_ids"]) and all(
                 claim_id in metadata_by_claim
                 and str(metadata_by_claim[claim_id].get("origin") or "")
@@ -308,6 +307,8 @@ def audit_provider_deliveries(
                 and metadata_by_claim[claim_id].get("known_to_model") is False
                 and str(metadata_by_claim[claim_id].get("materiality_reason") or "")
                 in allowed_materiality
+                and str(metadata_by_claim[claim_id].get("relation") or "").strip().lower()
+                not in non_material_relations
                 and bool(str(metadata_by_claim[claim_id].get("source_revision") or ""))
                 and (
                     str(metadata_by_claim[claim_id].get("materiality_reason") or "")
