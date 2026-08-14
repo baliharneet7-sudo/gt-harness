@@ -16,6 +16,7 @@ class HostExecCategory(StrEnum):
     SYNTAX_PROBE = "syntax_probe"
     COMPLETION_PROBE = "completion_probe"
     PROJECT_VALIDATION_PROBE = "project_validation_probe"
+    RED_TEST_PROBE = "red_test_probe"
     AUTO_SUBMIT = "auto_submit"
     SYSTEM_INFORMATION = "system_information"
     REPOSITORY_TRANSFER = "repository_transfer"
@@ -36,6 +37,7 @@ _CONTROLLER_INTERVENTION_CATEGORIES = frozenset(
         HostExecCategory.SYNTAX_PROBE,
         HostExecCategory.COMPLETION_PROBE,
         HostExecCategory.PROJECT_VALIDATION_PROBE,
+        HostExecCategory.RED_TEST_PROBE,
         HostExecCategory.AUTO_SUBMIT,
     }
 )

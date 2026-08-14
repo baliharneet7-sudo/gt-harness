@@ -68,6 +68,7 @@ from gt_engine.central_runtime import (
     normalize_command,
     source_revision_receipt,
     task_deliverable_paths,
+    select_declared_check,
 )
 from gt_engine.checkpoint_ledger import ShadowCheckpointLedger
 from gt_engine.completion import (
@@ -141,6 +142,7 @@ from gt_engine.preflight import (
     adapt_proposed_action,
     classify_workspace_impact,
     pass_decision,
+    shell_structure,
 )
 from gt_engine.progress import (
     ActionResultKind,
@@ -216,6 +218,79 @@ def _workspace_target_path(path: str, *, cwd: str | None = None) -> str:
     if normalized.startswith("./"):
         return normalized[2:]
     return normalized
+
+
+_RED_TEST_TEST_ARTIFACT_RE = re.compile(
+    r"(?i)(?:^|[._/-])(?:test|tests|verify|check)[A-Za-z0-9_.-]*"
+    r"(?:\.(?:py|sh|rb|js|mjs|cjs|ts|go|c|cpp|rs|java|pl))?$"
+)
+
+_RED_TEST_VALIDATOR_EXECS = frozenset(
+    {
+        "pytest",
+        "py.test",
+        "ctest",
+        "jest",
+        "vitest",
+        "mocha",
+        "ava",
+        "tap",
+        "tsc",
+        "tsx",
+        "node",
+        "npm",
+        "pnpm",
+        "yarn",
+        "mvn",
+        "gradle",
+        "cargo",
+        "go",
+        "make",
+        "python",
+        "python3",
+        "python3.11",
+        "python3.12",
+    }
+)
+
+
+def _red_test_verifier_eligible(
+    command: str,
+    explicit_checks: Iterable[str],
+    snapshot_entries: dict[str, Any],
+    *,
+    cwd: str | None = None,
+) -> bool:
+    """Return whether the selected check is a mechanically recognized verifier.
+
+    A declared check alone is not enough: ``ls -la`` declared by task text is
+    not a verifier.  A recognized validator executable (pytest/npm/go test/...),
+    a ``test``/``verify``-named script artifact that exists in the workspace,
+    or an explicit declared-check match against a validator executable is a
+    verifier.  Everything else abstains.
+    """
+    classification = classify_validation_command(command, explicit_checks)
+    if not classification.is_validation:
+        return False
+    if classification.authority in {
+        ValidationAuthority.STANDARD_RUNNER,
+        ValidationAuthority.CUSTOM_PROBE,
+        ValidationAuthority.HOST_SYNTAX,
+    }:
+        return True
+    if (classification.executable or "").rsplit("/", 1)[-1].lower() in _RED_TEST_VALIDATOR_EXECS:
+        return True
+    segments, _connectors = shell_structure(command)
+    words = tuple(word for segment in segments for word in segment if word)
+    for word in words[1:]:
+        if _RED_TEST_TEST_ARTIFACT_RE.search(word.rsplit("/", 1)[-1]):
+            relative = _workspace_target_path(word, cwd=cwd)
+            if relative and any(
+                path == relative or path.endswith("/" + relative)
+                for path in snapshot_entries
+            ):
+                return True
+    return False
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -1303,6 +1378,9 @@ class MiniSweCentralAgent(BaseAgent):
         preemptive_retrieval_dense_candidate_limit: int | None = None,
         preemptive_retrieval_model_dir: str | None = None,
         enable_decision_sufficiency: bool = False,
+        enable_first_action_red_test: bool = False,
+        first_action_red_test_timeout_sec: float = 30.0,
+        first_action_red_test_output_chars: int = 8_000,
         enable_persistent_execution_state: bool = False,
         persistent_state_bootstrap_timeout_sec: float = 45.0,
         persistent_state_bootstrap_input_tokens: int = 2_000,
@@ -1384,6 +1462,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_context_frontier = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_first_action_red_test = False
             enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
@@ -1394,6 +1473,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_first_action_red_test = False
             enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
@@ -1404,6 +1484,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
             enable_decision_sufficiency = False
+            enable_first_action_red_test = False
             enable_persistent_execution_state = False
             enable_context_compaction = False
             enable_completion_controller = False
@@ -1502,6 +1583,11 @@ class MiniSweCentralAgent(BaseAgent):
         )
         self.preemptive_retrieval_model_dir = str(preemptive_retrieval_model_dir or "").strip()
         self.enable_decision_sufficiency = bool(enable_decision_sufficiency)
+        self.enable_first_action_red_test = bool(enable_first_action_red_test)
+        self.first_action_red_test_timeout_sec = max(1.0, float(first_action_red_test_timeout_sec))
+        self.first_action_red_test_output_chars = max(
+            1_000, int(first_action_red_test_output_chars)
+        )
         self.enable_persistent_execution_state = bool(enable_persistent_execution_state)
         self.persistent_state_bootstrap_timeout_sec = max(
             1.0, float(persistent_state_bootstrap_timeout_sec)
@@ -2381,6 +2467,226 @@ class MiniSweCentralAgent(BaseAgent):
             session.close()
             return RepositoryEvidence(status=f"error:{type(exc).__name__}"), None
 
+    async def _run_first_action_red_test(
+        self,
+        environment: BaseEnvironment,
+        *,
+        explicit_checks: Iterable[str],
+        snapshot: Any,
+        task_deliverables: Iterable[str],
+        source_revision: str,
+        graph_source_revision: str,
+        deadline: float | None,
+    ) -> dict[str, Any]:
+        """Deterministic first-action red-test probe (host-side, zero model calls).
+
+        Runs the highest-priority declared verifier once at task start so the
+        first provider call is conditioned on the actual failing surface.
+        Fail-open: no declared verifier, an unrecognized command, a timeout, or
+        an execution exception all record an abstention and continue the
+        ordinary Mini-SWE loop. The probe never emits a feature receipt and
+        never creates obligations.
+        """
+        receipt: dict[str, Any] = {
+            "schema": "gt.first_action_red_test.v1",
+            "enabled": bool(self.enable_first_action_red_test),
+            "status": "disabled",
+            "reason_codes": ["first_action_red_test_disabled"],
+            "command": "",
+            "command_class": "",
+            "declared_check_id": "",
+            "returncode": None,
+            "validation_status": "unknown",
+            "diagnostic": "",
+            "diagnostic_anchors": [],
+            "source_revision": source_revision,
+            "graph_source_revision": graph_source_revision,
+            "latency_ms": 0.0,
+            "timeout": False,
+        }
+        if not self.enable_first_action_red_test:
+            return receipt
+        if (
+            self.runtime_mode != "treatment"
+            or self.integration_mode is not GTIntegrationMode.ACTIVE
+            or not self.policy_active
+        ):
+            return {**receipt, "status": "abstained", "reason_codes": ["not_treatment_active"]}
+        checks = tuple(dict.fromkeys(item for item in explicit_checks if item))
+        if not checks:
+            return {**receipt, "status": "abstained", "reason_codes": ["no_declared_check"]}
+        selected = select_declared_check(checks, {})
+        if not selected:
+            return {**receipt, "status": "abstained", "reason_codes": ["no_declared_check"]}
+        classification = classify_validation_command(selected, checks)
+        if not classification.is_validation:
+            return {
+                **receipt,
+                "status": "abstained",
+                "reason_codes": ["not_validation_command"],
+            }
+        snapshot_entries = (
+            getattr(snapshot, "entries", {}) if snapshot is not None else {}
+        )
+        recognized_executable = (
+            classification.executable or ""
+        ).rsplit("/", 1)[-1].lower() in _RED_TEST_VALIDATOR_EXECS
+        if not _red_test_verifier_eligible(
+            selected,
+            checks,
+            snapshot_entries,
+            cwd=self.cwd,
+        ):
+            return {
+                **receipt,
+                "status": "abstained",
+                "reason_codes": ["verifier_identity_not_recognized"],
+            }
+        try:
+            segments, connectors = shell_structure(selected)
+        except Exception:  # noqa: BLE001 - fail open on a parser fault
+            return {**receipt, "status": "abstained", "reason_codes": ["shell_parse_error"]}
+        if len(segments) != 1 or any(
+            connector in {"|", ";", "&", "&&", "||"} for connector in connectors
+        ):
+            return {
+                **receipt,
+                "status": "abstained",
+                "reason_codes": ["composite_command_abstain"],
+            }
+        words = tuple(word for word in segments[0] if word)
+        if any(
+            word == "-c" or word.startswith("-c=") or "$(" in word or "`" in word
+            for word in words
+        ):
+            return {
+                **receipt,
+                "status": "abstained",
+                "reason_codes": ["dynamic_or_opaque_program_abstain"],
+            }
+        referenced = tuple(
+            dict.fromkeys(
+                _workspace_target_path(word, cwd=self.cwd)
+                for word in words[1:]
+                if "/" in word and word not in {"-q", "-x", "-f"}
+            )
+        )
+        if referenced and not recognized_executable:
+            entries = getattr(snapshot, "entries", {}) if snapshot is not None else {}
+            if not any(path in entries for path in referenced):
+                return {
+                    **receipt,
+                    "command": selected,
+                    "status": "abstained",
+                    "reason_codes": ["verifier_artifact_absent"],
+                }
+        timeout_sec = float(self.first_action_red_test_timeout_sec)
+        if deadline is not None:
+            timeout_sec = min(
+                timeout_sec,
+                max(0.05, (deadline - time.monotonic()) - self.deadline_reserve_sec),
+            )
+        started = time.perf_counter()
+        try:
+            probe_result = await self._host_executions.exec(
+                environment,
+                selected,
+                category=HostExecCategory.RED_TEST_PROBE,
+                action_id=0,
+                source_revision=graph_source_revision,
+                cwd=self.cwd,
+                env={},
+                timeout_sec=timeout_sec,
+            )
+        except TimeoutError:
+            return {
+                **receipt,
+                "command": selected,
+                "status": "failed_open",
+                "reason_codes": ["probe_timeout"],
+                "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+                "timeout": True,
+            }
+        except Exception as exc:  # noqa: BLE001 - fail open, never block the loop
+            return {
+                **receipt,
+                "command": selected,
+                "status": "failed_open",
+                "reason_codes": [f"probe_error:{type(exc).__name__}"],
+                "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        raw_output = (
+            (getattr(probe_result, "stdout", "") or "")
+            + "\n"
+            + (getattr(probe_result, "stderr", "") or "")
+        )
+        output = " ".join(raw_output.split())
+        diagnostic = output[: self.first_action_red_test_output_chars]
+        attributed = classification.with_result(
+            result_code=probe_result.return_code,
+            output=raw_output,
+            source_revision=graph_source_revision,
+            workspace_revision=(
+                getattr(snapshot, "revision", "") if snapshot is not None else ""
+            ),
+        )
+        base_receipt = {
+            **receipt,
+            "command": selected,
+            "command_class": attributed.command_class,
+            "declared_check_id": attributed.declared_check_id or "",
+            "returncode": probe_result.return_code,
+            "validation_status": attributed.status.value,
+            "diagnostic": diagnostic,
+            "source_revision": graph_source_revision,
+            "latency_ms": latency_ms,
+        }
+        if attributed.status is ValidationStatus.PASS:
+            return {**base_receipt, "status": "passed"}
+        if (
+            attributed.status is not ValidationStatus.FAIL
+            or not attributed.status_attributed
+        ):
+            return {
+                **base_receipt,
+                "status": "failed_open",
+                "reason_codes": ["status_not_attributed"],
+            }
+        repository_paths = tuple(
+            path
+            for path, entry in (
+                getattr(snapshot, "entries", {}) if snapshot is not None else {}
+            ).items()
+            if entry.kind == "f"
+            and classify_change(
+                path,
+                kind="f",
+                task_deliverables=tuple(task_deliverables),
+                content=entry.content,
+            ).graph_indexable
+        )
+        anchors = extract_diagnostic_anchors(
+            raw_output,
+            repository_paths=repository_paths,
+            cwd=self.cwd,
+        )
+        return {
+            **base_receipt,
+            "status": "failed" if anchors else "failed_no_anchors",
+            "reason_codes": [] if anchors else ["no_repository_diagnostic_anchor"],
+            "diagnostic_anchors": [
+                {
+                    "path": anchor.path,
+                    "line": anchor.line,
+                    "column": anchor.column,
+                    "symbol": anchor.symbol,
+                    "kind": anchor.kind,
+                }
+                for anchor in anchors
+            ],
+        }
+
     @staticmethod
     def _render(template: str, variables: dict[str, Any]) -> str:
         return Template(template, undefined=StrictUndefined).render(**variables)
@@ -2922,6 +3228,49 @@ class MiniSweCentralAgent(BaseAgent):
         retrieval_validation_state = "unknown"
         retrieval_evidence_action = 0
         retrieval_eligible_call = 1
+        red_test_probe_receipts: list[dict[str, Any]] = []
+        if (
+            self.enable_first_action_red_test
+            and self.runtime_mode == "treatment"
+            and self.integration_mode is GTIntegrationMode.ACTIVE
+            and self.policy_active
+            and repository_evidence.substrate_ready
+            and repository_session is not None
+            and repository_session.evidence.substrate_ready
+            and graph_receipt.complete
+        ):
+            red_test_probe_receipt = await self._run_first_action_red_test(
+                environment,
+                explicit_checks=explicit_checks,
+                snapshot=snapshot,
+                task_deliverables=task_deliverables,
+                source_revision=source_revision,
+                graph_source_revision=graph_source_revision,
+                deadline=deadline,
+            )
+            red_test_probe_receipts.append(red_test_probe_receipt)
+            if red_test_probe_receipt.get("status") in {"failed", "failed_no_anchors"}:
+                diagnostic_text = str(red_test_probe_receipt.get("diagnostic") or "").strip()
+                if diagnostic_text:
+                    retrieval_diagnostics = (diagnostic_text,)
+                retrieval_active_paths = tuple(
+                    dict.fromkeys(
+                        str(anchor.get("path") or "")
+                        for anchor in red_test_probe_receipt.get("diagnostic_anchors") or ()
+                        if anchor.get("path")
+                    )
+                )
+                retrieval_active_symbols = tuple(
+                    dict.fromkeys(
+                        str(anchor.get("symbol") or "")
+                        for anchor in red_test_probe_receipt.get("diagnostic_anchors") or ()
+                        if anchor.get("symbol")
+                    )
+                )
+                retrieval_validation_state = "fail"
+                retrieval_last_operation = ActionOperation.VALIDATE.value
+                retrieval_evidence_action = 0
+                retrieval_eligible_call = 1
         persistent_state_engine: PersistentExecutionStateEngine | None = None
         persistent_state_deliveries: list[dict[str, Any]] = []
         persistent_state_preflights: list[dict[str, Any]] = []
@@ -7472,6 +7821,14 @@ class MiniSweCentralAgent(BaseAgent):
                 "project_validation_probe_execs": sum(
                     row.get("status") != "failed_open" for row in project_validation_probes
                 ),
+                "red_test_probe_attempts": len(red_test_probe_receipts),
+                "red_test_probe_failed": sum(
+                    row.get("status") in {"failed", "failed_no_anchors"}
+                    for row in red_test_probe_receipts
+                ),
+                "red_test_probe_abstained": sum(
+                    row.get("status") in {"abstained", "failed_open"} for row in red_test_probe_receipts
+                ),
                 "completion_certificates_complete": sum(
                     item.status is CompletionStatus.COMPLETE for item in completion_certificates
                 ),
@@ -8534,6 +8891,10 @@ class MiniSweCentralAgent(BaseAgent):
                         "project_validation": {
                             "discovered_checks": list(repository_evidence.project_checks),
                             "probes": project_validation_probes,
+                        },
+                        "red_test": {
+                            "enabled": bool(self.enable_first_action_red_test),
+                            "receipts": red_test_probe_receipts,
                         },
                         "progress": {
                             "state": self._progress.state,
