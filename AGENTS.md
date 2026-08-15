@@ -1,5 +1,38 @@
 # GT central-runtime behavioral contract
 
+## GT goal and benchmark-integrity boundary (2026-08-15)
+
+GroundTruth exists to make the model's action deterministic with respect to the
+task's true contract, so that a correct solve does not depend on temperature-1
+sampling luck. It does this by supplying grounded context drawn exclusively
+from three legitimate sources available during the benchmark:
+
+1. the task instruction as provided to the agent;
+2. the repository source actually present in the task workspace; and
+3. the agent's own observed execution results.
+
+GT must never read, infer, or depend on grader-only artifacts that are not
+present during the benchmark (hidden verifier tests, the reference solution,
+held-out test files, or any host verifier output such as `tests/`, `solution/`,
+`REF`, `test_outputs.py`, `reward.txt`, `ctrf.json`). Doing so is benchmark
+contamination and is forbidden in every mode.
+
+Consequence: GT guarantees temperature-invariant determinism only on tasks whose
+ground truth is derivable from sources (1)-(3). A task whose decisive convention
+lives only in the grader — an instruction example that contradicts the reference,
+or an ambiguous output-format spec — is outside GT's determinism guarantee. On
+such tasks GT abstains rather than fabricate or cheat; the outcome remains
+temperature-dependent. This is an honest coverage boundary, never an excuse to
+read the grader.
+
+GT never changes the benchmark denominator, the verifier, or how any task is
+scored. Every task in the run is counted against the full task set with the
+same post-hoc verifier. No task is excluded from the solve-rate denominator for
+any reason, including integrity. The integrity audit
+(`scripts/central_integrity_audit.py`) proves statically and per-receipt that
+GT reads only the three legal sources and never grader-only artifacts; it is a
+compliance demonstration, not an accounting change.
+
 The active GT-on implementation is `eval.gt_central_agent:MiniSweCentralAgent`.
 It is a host-owned engine, not a task-container package, prompt add-on, or
 model-invoked sidecar. It owns the model loop and observes every model-selected
@@ -2015,3 +2048,47 @@ fix and the gate now correctly fails-closed on it (C/C++ edges are SPECULATIVE
 0.2 and elm/ocaml produce no definitions in the old binary); only the
 source-built Linux provider-free workflow certifies readiness for this repair,
 and no paid smoke or solve/efficiency claim is authorized.
+
+## Canonical evaluation workflow registry (2026-08-15)
+
+These are the correct, dispatchable workflows. The registry was verified
+identical (26/26 workflow names, byte-equal) on both
+`harneet2512/gt-harness` (branch `baseline-swe-live-lite-v4flash0731`, HEAD
+`c5073c4`) and `hbali-stack/gt-harness` (main, merge HEAD `b478d15`) via the
+GitHub API on 2026-08-15. Verification only; no live run dispatched.
+
+**DeepSWE (1):** `deepswe_miniswe_central.yml` — the single DeepSWE v1.1
+Mini-SWE central path. Preflight stays `SHADOW`; `certified_full` is the
+labeled integrated product. Outcome authority: `scripts/deepswe_release_gate.py`.
+The official GT-off reference is the live leaderboard (see the frozen
+baseline rule above), never a local run.
+
+**Terminal-Bench 2.0 (10):** `tb2_miniswe_central.yml` (GT-on matrix, the
+active TB2 entry), `tb2_miniswe_engine.yml`, `tb2_miniswe_gt_single.yml`,
+`tb2_miniswe_baseline.yml`, `tb2_miniswe_baseline_matrix.yml`,
+`tb2_miniswe_baseline_sharded.yml`, `tb2_gt.yml`, `tb2_baseline.yml`,
+`tb2_baseline_sharded.yml`, `tokenrouter_tb2_monitor.yml` (diagnostic-only
+route monitor; never a solve/efficiency claim). Frozen 89-task GT-off
+baseline: `D:\gt_runs\miniswe_tb2_gtoff_20260731\merged_local.json`.
+
+**SWE-bench Live Lite (7):** `live_lite_full.yml` (coordinator: inference +
+per-shard eval + bundle; smoke=5/pilot20/pilot100/full300; default model
+`deepseek/deepseek-v4-flash`; `GT_BASELINE=1` for the baseline arm),
+`live_lite_eval.yml`, `live_lite_inference.yml`, `live_lite_bundle.yml`,
+`live_lite_cache_images.yml`, `swebench_live_lite_full.yml` (300-task
+mini-swe-agent/pier path), `gt_v4flash_30.yml` (30-task no-think diagnostic).
+
+Port provenance: the Live Lite family was ported byte-faithfully from
+`hbali-stack/gt-harness-swe-live-lite` ref
+`origin/baseline-swe-live-lite-v4flash0731` (commit `04c3da7`) into
+`harneet2512/gt-harness` as commit `8dcdad3` (40 files: 7 workflows +
+`setup-eval` action + 20 `scripts/swebench/*` + 4 `scripts/verify/*` +
+3 `scripts/ci/*` + `scripts/setup_models.py` + `src/groundtruth/mcp/tools.py`
++ 3 datasets). 39/40 blobs byte-identical to the fork; the exception
+`benchmarks/data/swebench_pro_public_tags.jsonl` is Git-LFS in the fork and
+ships its real content, whose sha256 matches the fork's LFS oid
+`0c9a294f...`. Known fork-inherited gaps (present in the fork, not a port
+defect): `patches/oh054/apply_gt_tools.py` and `models/e5-small-v2` are
+referenced by the `setup-eval` action but absent from the fork itself, so the
+cache-miss install branch invoking `apply_gt_tools.py` is broken in the source
+fork too; verify those before any paid Live Lite dispatch.

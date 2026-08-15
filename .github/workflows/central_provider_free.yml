@@ -105,6 +105,7 @@ jobs:
             tests/test_central_replay.py \
             tests/test_central_run_diff.py \
             tests/test_central_trajectory_audit.py \
+            tests/test_central_integrity_audit.py \
             tests/test_gt_delivery_audit.py \
             tests/test_gt_runtime_gate.py \
             tests/test_gt_contributions.py \
@@ -134,6 +135,9 @@ jobs:
 
       - name: Structural readiness audit
         run: python scripts/central_readiness_audit.py
+
+      - name: Benchmark-integrity audit (legal evidence sources only)
+        run: python scripts/central_integrity_audit.py
 
       - name: Exact pre-smoke release gate
         run: python scripts/central_pre_smoke_gate.py
@@ -169,6 +173,7 @@ jobs:
             scripts/central_feature_census.py \
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_trajectory_audit.py \
+            scripts/central_integrity_audit.py \
             gt_engine/replay_bundle.py \
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \
@@ -191,6 +196,7 @@ jobs:
             tests/test_central_readiness.py \
             tests/test_central_replay.py tests/test_central_run_diff.py \
             tests/test_central_trajectory_audit.py \
+            tests/test_central_integrity_audit.py \
             tests/test_gt_delivery_audit.py \
             tests/test_replay_bundle.py \
             tests/test_gt_deep_metrics.py \

@@ -24,6 +24,34 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gt_engine.delivery_audit import audit_provider_deliveries  # noqa: E402
 
+# Grader-only artifact path markers that must never appear in a model-visible
+# delivery's evidence.  Mirrors scripts/central_integrity_audit.py so the
+# per-receipt provenance check and the standalone static audit agree.
+GRADER_ONLY_MARKERS: tuple[str, ...] = (
+    "/solution/",
+    "solution/",
+    "test_outputs.py",
+    "reward.txt",
+    "ctrf.json",
+    "/verifier/",
+    "verifier/report.json",
+    "REF =",
+)
+
+# Legal evidence origins on deliveries (task instruction / checkout source /
+# observed execution).
+LEGAL_EVIDENCE_ORIGINS: frozenset[str] = frozenset(
+    {
+        "task_start",
+        "checkout_source",
+        "preexisting_repository",
+        "model_authored",
+        "observed_external",
+        "external_runtime",
+        "task_deliverable",
+    }
+)
+
 KNOWN_DISPOSITIONS = {
     "provider_payload",
     "existing_engine_actuation",
@@ -191,6 +219,35 @@ def _delivery_report(receipt: dict[str, Any], task: str) -> tuple[list[dict[str,
             failures.append(
                 f"{task}:delivery_without_concrete_anchor:{row['surface_index']}:{feature}"
             )
+        # Benchmark-integrity boundary: delivery evidence must not reference
+        # grader-only artifacts, and any recorded origin must be a legal source.
+        for evidence in (row.get("selected_evidence") or []) + (row.get("claim_metadata") or []):
+            if not isinstance(evidence, dict):
+                continue
+            origin = str(evidence.get("origin") or "")
+            if origin and origin not in LEGAL_EVIDENCE_ORIGINS:
+                failures.append(
+                    f"{task}:delivery_illegal_evidence_origin:{row['surface_index']}:{origin}"
+                )
+        for key in ("claim_anchors", "anchors", "fact_paths", "paths"):
+            for item in (raw.get(key) or ()):
+                text = str(item)
+                for marker in GRADER_ONLY_MARKERS:
+                    if marker in text:
+                        failures.append(
+                            f"{task}:delivery_grader_path:{row['surface_index']}:"
+                            f"{marker}:{text[:60]}"
+                        )
+        for fact in (raw.get("facts") or ()):
+            if not isinstance(fact, dict):
+                continue
+            path = str(fact.get("path") or "")
+            for marker in GRADER_ONLY_MARKERS:
+                if marker in path:
+                    failures.append(
+                        f"{task}:delivery_grader_fact_path:{row['surface_index']}:"
+                        f"{marker}:{path[:60]}"
+                    )
         rows.append(
             {
                 "surface": row["surface"],
