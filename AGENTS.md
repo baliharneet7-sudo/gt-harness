@@ -2,10 +2,18 @@
 
 ## GT goal and benchmark-integrity boundary (2026-08-15)
 
-GroundTruth exists to make the model's action deterministic with respect to the
-task's true contract, so that a correct solve does not depend on temperature-1
-sampling luck. It does this by supplying grounded context drawn exclusively
-from three legitimate sources available during the benchmark:
+GroundTruth's determinism is about **context gathering**, not outcome
+enforcement: GT gathers the model's context locally and grounded —
+deterministically, host-side — so the model receives **less but better**
+context.  The model does not have to reason over to an LLM call for each step
+to discover where to look; GT computes the bounded, certified, decision-relevant
+evidence itself and updates it deterministically (a one-time persistent plan,
+then deterministic state transitions at provider/preflight/postflight/graph
+boundaries).  Token-budget and efficiency are the *outcome* of this deterministic
+context gathering, not its definition.
+
+GT's grounded context comes exclusively from three legitimate sources available
+during the benchmark:
 
 1. the task instruction as provided to the agent;
 2. the repository source actually present in the task workspace; and

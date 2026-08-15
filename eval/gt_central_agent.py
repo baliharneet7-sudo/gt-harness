@@ -6887,6 +6887,7 @@ class MiniSweCentralAgent(BaseAgent):
                             diagnostic_fingerprint=(classification.diagnostic_fingerprint or ""),
                             project_checks=repository_evidence.project_checks,
                             validation_debt=source_validation_debt,
+                            command_sha256=progress_observation.command_sha256,
                         )
                         progress_transition = self._progress.observe(
                             progress_signature,

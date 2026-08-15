@@ -187,6 +187,15 @@ _OUTPUT_CUE_RE = re.compile(
 _INPUT_CUE_RE = re.compile(
     r"(?i)\b(?:read|input|incoming|source|provided|existing|unchanged)\b"
 )
+# Executable tokens whose following path is a shell operand (INPUT), not the
+# deliverable named by a prose output verb earlier in the same clause.
+_SHELL_OPERAND_EXEC_RE = re.compile(
+    r"(?i)\b(?:node|npm|npx|python|python3|gcc|g\+\+|cc|clang|ruby|bash|sh|"
+    r"perl|php|java|go|rustc)\b"
+)
+# A path that is the target of a ``>`` redirection is the OUTPUT of a shell
+# command, distinct from an operand that precedes the redirection.
+_REDIRECT_TARGET_RE = re.compile(r">\s*(?:/app/)?(?:[\w.-]+/)*[\w.+-]+")
 
 
 def _resource_path(raw: str) -> str:
@@ -256,6 +265,44 @@ def _direct_output_score(prefix: str, path: str) -> int:
     if cue and not re.search(r"[.!?]\s", tail[cue[-1].end() :]):
         return 90
     return 0
+
+
+def _strong_direct_output(prefix: str, path: str) -> bool:
+    """True when an output verb directly names ``path`` within a few words.
+
+    This is the strong signal (``Write me a program extract.js``).  A shell
+    operand must not override it, because the operand (``a.out``) is distinct
+    from the deliverable the verb names (``extract.js``).
+    """
+
+    escaped = re.escape(path.rsplit("/", 1)[-1])
+    return bool(
+        re.search(
+            rf"(?is)\b(?:write|create|produce|generate|save|emit|deliver)\b"
+            rf"(?:\s+\S+){{0,8}}\s+(?:/app/)?(?:[\w.-]+/)*{escaped}\b",
+            prefix[-220:],
+        )
+    )
+
+
+def _shell_position_role(clause: str, offset: int, path: str) -> TaskResourceRole | None:
+    """Return a role from the shell command position of one path occurrence.
+
+    A path that is the target of ``>`` is the command's OUTPUT.  A path that is
+    an operand of an executable token (``node extract.js /app/a.out``) is the
+    command's INPUT, and the prose output verb earlier in the clause binds to
+    the program being written, not to this operand.
+    """
+
+    head = clause[:offset]
+    tail = clause[offset + len(path) :]
+    if _REDIRECT_TARGET_RE.match(tail):
+        return TaskResourceRole.OUTPUT
+    # The operand appears after the most recent redirection or command start.
+    head_segment = head.rsplit(">", 1)[-1]
+    if _SHELL_OPERAND_EXEC_RE.search(head_segment):
+        return TaskResourceRole.INPUT
+    return None
 
 
 def _resource_clause(line: str, offset: int) -> tuple[str, int]:
@@ -346,6 +393,15 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
             direct_output = _direct_output_score(prefix, path)
             if direct_output:
                 add(TaskResourceRole.OUTPUT, direct_output)
+            shell_role = _shell_position_role(clause, clause_offset, path)
+            if shell_role is not None and not _strong_direct_output(prefix, path):
+                # Shell position is mechanically stronger than a prose output
+                # verb *earlier in the same clause* that only bleeds onto this
+                # path.  For example in ``Write extract.js ... node extract.js
+                # /app/a.out > out.json`` the operand ``a.out`` is INPUT and the
+                # redirection target ``out.json`` is OUTPUT; only ``extract.js``
+                # (named directly by ``Write``) is the deliverable.
+                add(shell_role, 100)
             if re.search(
                 rf"(?i)\b(?:read|have|provided|existing)\b(?:\s+\S+){{0,8}}\s+"
                 rf"(?:/app/)?(?:[\w.-]+/)*{basename}\b",

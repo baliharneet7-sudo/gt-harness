@@ -670,6 +670,14 @@ jobs:
                       if dense_proofs
                       else {}
                   )
+                  provider_identity = receipt.get("provider_response_identity") or {}
+                  executor_identity = provider_identity.get("executor") or {}
+                  system_fingerprints = list(
+                      executor_identity.get("system_fingerprints") or ()
+                  ) or [
+                      (provider_identity.get("bootstrap") or {}).get("system_fingerprint")
+                      or ""
+                  ]
                   (
                       _provider_delivery_rows,
                       provider_delivery_failures,
@@ -755,6 +763,7 @@ jobs:
                       ),
                       "control_provider_messages_sha256": control_provider_hash,
                       "provider_messages_sha256": provider_hash,
+                      "system_fingerprints": system_fingerprints,
                       "call1_gt_view_changed": bool(
                           control_provider_hash
                           and provider_hash
@@ -847,6 +856,25 @@ jobs:
               for row in receipt_metrics
               if row["call1_gt_view_changed"]
           ]
+          # Known frozen GT-off baseline serving fingerprint (2026-07-31). A
+          # different serving deployment is a confound for any solve/efficiency
+          # comparison against that baseline; surface it as a warning rather
+          # than silently reading a deployment change as a regression.
+          known_baseline_fingerprints = {
+              "fp_a18b46594c_prod0820_fp8_kvcache_20260402",
+          }
+          observed_fingerprints = {
+              fp
+              for row in receipt_metrics
+              for fp in (row.get("system_fingerprints") or ())
+              if fp
+          }
+          fingerprint_drift = (
+              sorted(observed_fingerprints)
+              if observed_fingerprints
+              and not observed_fingerprints.intersection(known_baseline_fingerprints)
+              else []
+          )
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
           out.append("- arm: **${{ inputs.arm }}**")
@@ -897,6 +925,14 @@ jobs:
                   f"task(s): {', '.join(call1_gt_changed_tasks)}. This is intervention "
                   "accounting, not a baseline-parity failure."
               )
+          if fingerprint_drift:
+              out.append(
+                  f"> **FINGERPRINT DRIFT (CONFOUND)**: this run's serving fingerprints "
+                  f"{fingerprint_drift} do not match the frozen GT-off baseline "
+                  f"(fp_a18b46594c_prod0820_fp8_kvcache_20260402). Any solve/efficiency "
+                  "delta vs that baseline is confounded by a serving-deployment change "
+                  "and must not be read as a GT regression."
+              )
           out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
           for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
               name = (t.get("task_name") or t.get("trial_name", "?")).split("__")[0]
@@ -943,6 +979,7 @@ jobs:
               "invalid_treatment_release_tasks": invalid_treatment_release,
               "dense_backend_required": dense_required,
               "call1_gt_changed_tasks": call1_gt_changed_tasks,
+              "fingerprint_drift_tasks": fingerprint_drift,
               "trial_results": trials,
               "receipt_metrics": receipt_metrics,
           }, indent=2), encoding="utf-8")

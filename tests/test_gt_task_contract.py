@@ -49,6 +49,27 @@ def test_task_resources_recognize_greenfield_source_and_large_inputs():
     assert resources["vocab.bpe"].role is TaskResourceRole.INPUT
 
 
+def test_task_resources_do_not_mistake_shell_operand_for_output():
+    # Regression: in ``Write extract.js ... node extract.js /app/a.out > out.json``
+    # the prose ``Write`` verb binds to extract.js (the deliverable); a.out is a
+    # shell INPUT operand and out.json is the redirection OUTPUT.  The old
+    # trailing-cue bleed wrongly classified the provided binary a.out as OUTPUT.
+    resources = {
+        item.path: item
+        for item in extract_task_resources(
+            "I have provided a file a.out that's a compiled C binary. Write me a "
+            "program extract.js that, when run with `node extract.js /app/a.out "
+            "> out.json` will extract memory values from the binary and output "
+            "them as a JSON object."
+        )
+    }
+
+    assert resources["a.out"].role is TaskResourceRole.INPUT
+    assert resources["a.out"].mutable is False
+    assert resources["extract.js"].role is TaskResourceRole.OUTPUT
+    assert resources["out.json"].role is TaskResourceRole.OUTPUT
+
+
 SANITIZE_TASK = """\
 Please help sanitize my github repository "dclm" of all API keys.
 

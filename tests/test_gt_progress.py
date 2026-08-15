@@ -43,6 +43,25 @@ def test_semantic_progress_fingerprint_ignores_novel_commands_but_tracks_task_st
     assert validated != first
 
 
+def test_semantic_progress_fingerprint_distinguishes_distinct_commands():
+    """A different selected command must not collapse into a false repeated
+    action, while a genuinely repeated command stays identical."""
+    base = dict(
+        source_revision="s1",
+        changed_paths=(),
+        validation_state="unknown",
+        diagnostic_fingerprint="",
+        project_checks=(),
+        validation_debt=False,
+    )
+    cmd_a = semantic_progress_fingerprint(**base, command_sha256="hash-cmd-a")
+    cmd_b = semantic_progress_fingerprint(**base, command_sha256="hash-cmd-b")
+    cmd_a_again = semantic_progress_fingerprint(**base, command_sha256="hash-cmd-a")
+
+    assert cmd_a != cmd_b
+    assert cmd_a == cmd_a_again
+
+
 def test_stall_aggregate_is_bounded_declarative_and_source_bound():
     fact = StallAggregateFact.create(
         state="STALLED",

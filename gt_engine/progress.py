@@ -37,8 +37,15 @@ def semantic_progress_fingerprint(
     diagnostic_fingerprint: str,
     project_checks: tuple[str, ...],
     validation_debt: bool,
+    command_sha256: str = "",
 ) -> str:
-    """Hash decision state, never command novelty or raw model output."""
+    """Hash decision state plus the exact command identity.
+
+    Command identity is included so that a *different* selected command never
+    collapses into a false repeated-action classification (the documented
+    progress boundary), while task-progress still keys on semantic state, not
+    command novelty.
+    """
 
     material = json.dumps(
         [
@@ -48,6 +55,7 @@ def semantic_progress_fingerprint(
             str(diagnostic_fingerprint or ""),
             tuple(sorted({" ".join(str(check).split()) for check in project_checks if check})),
             bool(validation_debt),
+            str(command_sha256 or ""),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
