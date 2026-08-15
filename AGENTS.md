@@ -1665,6 +1665,30 @@ The current contract is:
    so task directories without `-task-` no longer collapse into a false
    one-task audit.
 
+## Frozen local baseline downloads — check before any comparison
+
+GT-off baselines are already downloaded locally; do not re-download,
+re-derive, or treat a GitHub artifact as the only copy:
+
+- **Terminal-Bench 2.0 GT-off (frozen, 89-task):**
+  `D:\gt_runs\miniswe_tb2_gtoff_20260731\merged_local.json`
+  (+ `SUMMARY.md`, `SUMMARY_local.md`, `per_task_tokens.json`; raw matrix at
+  `matrix_cache\`). Model `deepseek-v4-flash` via `eval.miniswe_agent:MiniSweAgent`,
+  89/89 graded, **66 solved**, 4 infra timeouts (AgentTimeoutError). Sharded
+  TB2 baselines also at `D:\gt_runs\full89_2026-07-29\` (runs 30500795038..).
+- **DeepSWE GT-off (frozen, 10-task matched control):**
+  `D:\tmp\opencode\gt-off-31824834187\DEEPSWE_EVALUATION_RESULTS.json`
+  (identical copy at `D:\tmp\opencode\smoke-baseline-check\`). GitHub run
+  31824834187 at GT commit `67b7ef50`, arm=gt_off, integration_mode=off,
+  comparison_profile=baseline, model `deepseek-v4-flash`,
+  provider `deepseek:native:api.deepseek.com`, step_limit 300, budget 5400s,
+  runner `datacurve-pier==0.3.1`, `resolved_workspace_v1`, **4/10 solved**,
+  no censoring. SHA-256:
+  `707d7eb7c36d1ea147b6b337eb855022acd74d6ac33ce7c39134f3590a6fac63`.
+- DeepSWE/TB2 benchmark sources are also retrievable from datacurve.io and the
+  `datacurve-ai/deep-swe` GitHub repo (pinned snapshot
+  `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`). Prefer the local copies.
+
 The archived 1/10 artifacts now audit as ten tasks with 71 timely, hash-valid
 visible deliveries and 121,201 visible characters. That proves the old engine
 delivered what it selected; it does not make the selection useful. Local
