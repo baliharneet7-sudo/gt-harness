@@ -2948,7 +2948,7 @@ async def test_context_transform_preserves_oversized_read_before_budget_pressure
 
 
 @pytest.mark.asyncio
-async def test_context_soft_character_limit_starts_one_safe_compaction_epoch(tmp_path):
+async def test_context_soft_character_limit_starts_repeated_bounded_compaction_epochs(tmp_path):
     class LargeReadEnvironment(_Environment):
         async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
             self.commands.append((command, env))
@@ -2983,10 +2983,11 @@ async def test_context_soft_character_limit_starts_one_safe_compaction_epoch(tmp
     await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert receipt["metrics"]["context_compactions"] == 1
-    assert len(receipt["metrics"]["context_compaction_epochs"]) == 1
-    assert receipt["metrics"]["context_compaction_epochs"][0]["trigger_kind"] == (
-        "character_pressure"
+    assert receipt["metrics"]["context_compactions"] >= 2
+    assert len(receipt["metrics"]["context_compaction_epochs"]) >= 2
+    assert all(
+        row["trigger_kind"] == "character_pressure"
+        for row in receipt["metrics"]["context_compaction_epochs"]
     )
     assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
     assert receipt["metrics"]["context_chars_elided"] > 0
@@ -2995,6 +2996,15 @@ async def test_context_soft_character_limit_starts_one_safe_compaction_epoch(tmp
         for row in receipt["model_call_contexts"]
         if row["provider_view_changed"]
     )
+    view_chars = [
+        int(row["final_provider_chars"])
+        for row in receipt["model_call_contexts"]
+        if row["call"] >= 4
+    ]
+    assert view_chars and max(view_chars) < 40_000
+    assert int(
+        receipt["metrics"]["context_compaction_epochs"][-1]["epoch"]
+    ) == receipt["metrics"]["context_compactions"]
 
 
 @pytest.mark.asyncio

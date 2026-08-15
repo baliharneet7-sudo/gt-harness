@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import inspect
 import json
@@ -3742,12 +3743,30 @@ class MiniSweCentralAgent(BaseAgent):
                 compaction_epoch_started = False
                 if self.enable_context_compaction:
                     raw_context_chars = sum(_message_context_chars(message) for message in messages)
-                    if (
-                        not provider_view_session.checkpoint_messages
-                        and raw_context_chars >= self.context_trigger_chars
-                    ):
+                    checkpoint_exists = bool(provider_view_session.checkpoint_messages)
+                    if checkpoint_exists:
+                        prefix_valid = (
+                            len(messages) >= provider_view_session.source_message_count
+                            and provider_view_session._hash(
+                                messages[: provider_view_session.source_message_count]
+                            )
+                            == provider_view_session.source_prefix_hash
+                        )
+                    else:
+                        prefix_valid = True
+                    if checkpoint_exists and prefix_valid:
+                        view = [
+                            *copy.deepcopy(provider_view_session.checkpoint_messages),
+                            *copy.deepcopy(messages[provider_view_session.source_message_count :]),
+                        ]
+                        view_chars = sum(_message_context_chars(message) for message in view)
+                        candidate_source = view
+                    else:
+                        view_chars = raw_context_chars
+                        candidate_source = messages
+                    if view_chars >= self.context_trigger_chars:
                         _candidate_view, candidate_metrics = build_provider_view(
-                            messages,
+                            candidate_source,
                             active_state=active_state,
                             trigger_chars=self.context_trigger_chars,
                             target_chars=self.context_target_chars,
@@ -3755,7 +3774,7 @@ class MiniSweCentralAgent(BaseAgent):
                             transform=True,
                         )
                         savings = max(0, candidate_metrics.elided_chars)
-                        savings_ratio = savings / max(1, raw_context_chars)
+                        savings_ratio = savings / max(1, view_chars)
                         if (
                             savings >= self.context_min_compaction_savings_chars
                             and savings_ratio >= self.context_min_compaction_savings_ratio
@@ -3768,7 +3787,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 keep_recent_turns=2,
                                 trigger_tokens=0,
                                 trigger_kind="character_pressure",
-                                trigger_chars=raw_context_chars,
+                                trigger_chars=view_chars,
                             )
                             context_compactions += 1
                             context_chars_elided += provider_view_metrics.elided_chars
@@ -3783,6 +3802,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     "call": calls,
                                     "trigger_kind": "character_pressure",
                                     "raw_chars": raw_context_chars,
+                                    "view_chars": view_chars,
                                     "projected_savings_chars": savings,
                                     "projected_savings_ratio": savings_ratio,
                                     "reason": "minimum_safe_savings_not_met",
