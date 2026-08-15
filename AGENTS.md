@@ -1689,6 +1689,29 @@ re-derive, or treat a GitHub artifact as the only copy:
   `datacurve-ai/deep-swe` GitHub repo (pinned snapshot
   `435ee89ec2f2e2289f33b0da4f992f0b7b7266b9`). Prefer the local copies.
 
+## NEVER run GT-off yourself — fetch the online baseline instead
+
+NEVER run a GT-off evaluation ourselves, and never put GT-off in a plan —
+**not even in the plan** — unless the user explicitly types the override
+("run GT-off" / "not even in the plan and get the results of GT off" is the
+rule: fetch results online, never run them). Use the official public
+leaderboard for the comparison baseline:
+
+- **DeepSWE v1.1 official leaderboard (GT-off reference, live):**
+  `curl -s https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json`
+  (local copy: `D:\tmp\opencode\deepswe_v11_leaderboard.json`). Also
+  `/artifacts/v1/tasks.json` (task list) and
+  `/artifacts/v1/distribution.json` at the same host. Generated
+  `2026-08-13T16:11:55Z`.
+- **deepseek-v4-flash GT-off baseline (mini-swe-agent, v1.1, 113-task set,
+  n_runs=4):** pass@1 **0.5332** (241/452), 95% CI [0.4975, 0.5689],
+  pass@4 0.8053, mean cost $0.100/task, mean duration 1,439s,
+  mean agent steps 152.9. Use this `deepseek-v4-flash` row ONLY. The
+  `deepseek-v4-pro` row (pass@1 0.6283) is a different model — never use
+  pro as our baseline.
+- For Terminal-Bench 2.0 use the frozen local 89-task GT-off baseline above
+  (66/89, `deepseek-v4-flash`); do not run a fresh TB2 GT-off either.
+
 The archived 1/10 artifacts now audit as ten tasks with 71 timely, hash-valid
 visible deliveries and 121,201 visible characters. That proves the old engine
 delivered what it selected; it does not make the selection useful. Local
