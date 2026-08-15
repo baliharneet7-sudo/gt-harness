@@ -29,7 +29,7 @@ RELEASE_TESTS = (
     "tests/test_gt_central_agent.py::test_partial_completion_plan_executes_no_private_predicates",
     "tests/test_gt_central_agent.py::test_custom_probe_failure_is_not_reframed_as_model_guidance",
     "tests/test_gt_central_agent.py::test_context_transform_preserves_oversized_read_before_budget_pressure",
-    "tests/test_gt_central_agent.py::test_context_soft_character_limit_starts_one_safe_compaction_epoch",
+    "tests/test_gt_central_agent.py::test_context_soft_character_limit_starts_repeated_bounded_compaction_epochs",
     "tests/test_gt_central_agent.py::test_execution_budget_reserve_exits_before_outer_timeout",
     "tests/test_gt_central_agent.py::test_provider_budget_failure_stops_before_model_query_and_is_receipted",
     "tests/test_gt_central_agent.py::test_over_budget_next_request_does_not_confirm_pending_guidance",
