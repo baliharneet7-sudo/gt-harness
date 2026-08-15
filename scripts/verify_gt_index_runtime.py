@@ -387,6 +387,18 @@ def verify() -> dict[str, object]:
                     "e.trust_tier,e.candidate_count ORDER BY src.language"
                 ).fetchall()
             ]
+            # Captured inside the try so the connection is still open; the
+            # checks themselves run after the connection is closed.
+            poisoned_names = connection.execute(
+                "SELECT DISTINCT language,name FROM nodes "
+                "WHERE name LIKE '%(%' OR name LIKE '%)%' ORDER BY language LIMIT 20"
+            ).fetchall()
+            bash_external_edges = connection.execute(
+                "SELECT COUNT(*) FROM edges e JOIN nodes src ON src.id=e.source_id "
+                "JOIN nodes tgt ON tgt.id=e.target_id "
+                "WHERE e.type='CALLS' AND src.language='bash' AND "
+                "tgt.name IN ('return','echo','cat')"
+            ).fetchone()[0]
         finally:
             connection.close()
         if quick_check.lower() != "ok":
@@ -409,10 +421,6 @@ def verify() -> dict[str, object]:
         # signature text (the C/C++ declarator regression stored names like
         # `target(int value)`, silently killing every CALLS edge). Fail closed
         # if ANY fixture language emits a poisoned name.
-        poisoned_names = connection.execute(
-            "SELECT DISTINCT language,name FROM nodes "
-            "WHERE name LIKE '%(%' OR name LIKE '%)%' ORDER BY language LIMIT 20"
-        ).fetchall()
         if poisoned_names:
             raise RuntimeError(
                 "definition node names contain signature text (declarator "
@@ -421,11 +429,6 @@ def verify() -> dict[str, object]:
         # Negative control: the bash fixture must NOT certify a builtin/external
         # command (`return`) as a call to a defined function. Only `caller->target`
         # is certified for bash.
-        bash_external_edges = connection.execute(
-            "SELECT COUNT(*) FROM edges e JOIN nodes src ON src.id=e.source_id "
-            "JOIN nodes tgt ON tgt.id=e.target_id "
-            "WHERE e.type='CALLS' AND src.language='bash' AND tgt.name IN ('return','echo','cat')"
-        ).fetchone()[0]
         if bash_external_edges:
             raise RuntimeError(
                 f"bash fixture certified an external/builtin command edge: {bash_external_edges}"
