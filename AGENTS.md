@@ -1949,3 +1949,69 @@ ledger tests. This is deterministic implementation/integration proof only; it
 does not waive the stale Windows `gt-index.exe` blocker, does not authorize a
 paid smoke, and does not claim solve/efficiency uplift. Only the source-built
 Linux provider-free workflow certifies readiness.
+
+## Python-depth language parity and graph-bound frontier revisions (2026-08-14)
+
+Every registered caller-capable structural language must be proven at the same
+depth as Python, and the frontier staleness comparison must key on the graph's
+own revision — not the full semantic revision.
+
+1. **C/C++ declarator-name fix.** tree-sitter-c/cpp expose the function name
+   only through the NameField `declarator` wrapper
+   (`function_declarator -> identifier`), so the naive extractor stored names
+   like `get_bit(int ctx)`. The resolver binds bare call callees to node names,
+   so a signature-laden name silently produced **zero CALLS edges on every C/C++
+   task** (write-compressor: 18 C nodes, 0 edges despite real intra-file calls).
+   `functionNodeName` now unwraps the declarator chain to the bare identifier,
+   grammar-scoped like the Verilog fallback. C++ overloads
+   (`foo(int)` vs `foo(long)`) fall to the existing multi-def CANDIDATE branch
+   and are never mis-certified. A poisoned name (contains `(`) is dropped rather
+   than emitted. Verified by replication: write-compressor's decomp.c now yields
+   clean names and 8 certified same-file edges.
+2. **Name-sanity invariant.** A definition node name must never carry signature
+   text. Enforced in the parser (poisoned names are dropped) and as a
+   registry-wide audit in `scripts/verify_gt_index_runtime.py` (any fixture
+   language emitting `(`/`)` in a node name fails the gate). This invariant
+   would have caught the C regression at parse time.
+3. **Fixture-gate depth parity.** `verify_gt_index_runtime.py` certifies
+   directed SQLite CALLS edges for 30 caller-capable languages: the prior 14
+   plus C, C++, JavaScript, Rust, bash, Go, Java, C#, PHP, Swift, Kotlin,
+   Scala, Ruby, TypeScript, Elm, and OCaml. C's comment-only fixture is
+   replaced by a real multi-function file; bash adds a negative control
+   (`return`/`echo`/`cat` must never certify an external-command edge). A
+   fail-closed cross-check requires every caller-capable structural registry
+   language that ships a real fixture to be edge-certified, so a future
+   regression cannot go silent at file-hash coverage. Go parser tests assert
+   bare names and zero-based `CallerNodeIdx` for C/C++/bash/elm/ocaml.
+4. **Registry over-claim fixes.** The vendored-spec-vs-grammar audit found
+   specs referencing node types their grammars do not emit, so `caller_support`
+   is now `False` for every language that cannot be proven at Python depth:
+   `css`/`html`/`protobuf`/`sql` (grammars expose no call nodes), `cue`/`hcl`
+   (grammars emit calls but no definition nodes), `lua` (spec
+   `function_declaration`/`function_definition_statement` absent; grammar emits
+   `function_statement` with no named fields), `groovy` (spec
+   `method_declaration`/`method_invocation` absent; grammar uses `func` for both
+   defs and calls), `svelte` (`<script>` content is `raw_text`), and `elixir`
+   (spec BodyField `body` absent; the `def` keyword is the first call child).
+   Reaching Python depth for those requires grammar-aware spec/parser work
+   verified on the source-built Linux indexer. `ocaml`'s CallNodes were fixed
+   (`application` -> `application_expression`) and elm/ocaml name extraction
+   now descends `function_declaration_left`/`value_name` wrappers.
+5. **Frontier staleness keys on the graph-bound revision.** The frontier
+   compared evidence (graph-bound) against the full semantic source revision,
+   which includes non-indexable authored files (a model-written `.pl` helper in
+   write-compressor; 389 `exp_data/*.json` data files in sanitize-git-repo).
+   Those tasks could never converge, so post-edit delivery was permanently
+   stale-rejected (write-compressor 7/11, sanitize-git-repo 28 total).
+   `compile_incremental_frontier` is now called with
+   `graph_source_revision or source_revision`, which only advances on completed
+   graph refreshes; genuine staleness is still caught because the graph revision
+   is the evidence's own currency. Replayed write-compressor evidence through the
+   real frontier compiler: before-fix `stale_source_revision`, after-fix
+   `selected_frontier` with three certified caller facts rendered to the model.
+
+This is implementation proof only. The local Windows `gt-index.exe` predates the
+fix and the gate now correctly fails-closed on it (C/C++ edges are SPECULATIVE
+0.2 and elm/ocaml produce no definitions in the old binary); only the
+source-built Linux provider-free workflow certifies readiness for this repair,
+and no paid smoke or solve/efficiency claim is authorized.

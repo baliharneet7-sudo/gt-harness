@@ -12,7 +12,7 @@ func init() {
 
 		FunctionNodes: []string{"method", "singleton_method"},
 		ClassNodes:    []string{"class", "module"},
-		CallNodes:     []string{"call", "method_call"},
+		CallNodes:     []string{"call"},
 		ImportNodes:   []string{"call"},
 
 		TestFuncPattern: `^test_`,

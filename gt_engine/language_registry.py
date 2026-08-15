@@ -63,19 +63,41 @@ LANGUAGE_CAPABILITIES: tuple[LanguageCapability, ...] = (
     LanguageCapability("scala", (".scala", ".sc")),
     LanguageCapability("c", (".c", ".h")),
     LanguageCapability("cpp", (".cc", ".cpp", ".cxx", ".hpp", ".hxx")),
-    LanguageCapability("lua", (".lua",)),
-    LanguageCapability("elixir", (".ex", ".exs")),
+    # lua/elixir/groovy/svelte/cue/hcl are symbol-structural but their VENDORED
+    # grammars cannot produce certified CALLS edges under the current specs:
+    #   - lua: vendored grammar emits `function_statement`/`function_name`
+    #     (no named fields); the spec's FunctionNodes (`function_declaration`/
+    #     `function_definition_statement`) are absent.
+    #   - elixir: spec BodyField "body" is absent (grammar `do_block`); the
+    #     def keyword (`identifier "def"`) is the first call child, so names
+    #     extract as "def".
+    #   - groovy: spec FunctionNodes/CallNodes (`method_declaration`/
+    #     `method_invocation`) are absent; the grammar uses `func` for both
+    #     definitions and call sites, which is ambiguous.
+    #   - svelte: `<script>` content is `raw_text`; `function_declaration`/
+    #     `call_expression` never appear.
+    #   - cue/hcl: grammars emit `call_expression`/`function_call` but NO
+    #     definition nodes, so no edge target can exist.
+    # caller_support=False keeps the claim honest; reaching Python depth for
+    # these requires grammar-aware spec/parser work verified on the Linux
+    # source-built indexer.
+    LanguageCapability("lua", (".lua",), caller_support=False),
+    LanguageCapability("elixir", (".ex", ".exs"), caller_support=False),
     LanguageCapability("ocaml", (".ml", ".mli")),
     LanguageCapability("shell", (".sh", ".bash"), syntax_probe="bash"),
-    LanguageCapability("css", (".css",)),
-    LanguageCapability("cue", (".cue",)),
+    # css/html/protobuf/sql are structural (symbol extraction) but their
+    # vendored grammars expose NO call nodes (specs/css.go CallNodes=[] etc.).
+    # caller_support=False keeps the registry claim honest and the fixture
+    # gate's caller-capable set machine-verifiable against the specs.
+    LanguageCapability("css", (".css",), caller_support=False),
+    LanguageCapability("cue", (".cue",), caller_support=False),
     LanguageCapability("elm", (".elm",)),
-    LanguageCapability("groovy", (".groovy", ".gradle")),
-    LanguageCapability("hcl", (".tf", ".hcl")),
-    LanguageCapability("html", (".html", ".htm")),
-    LanguageCapability("protobuf", (".proto",)),
-    LanguageCapability("sql", (".sql",)),
-    LanguageCapability("svelte", (".svelte",)),
+    LanguageCapability("groovy", (".groovy", ".gradle"), caller_support=False),
+    LanguageCapability("hcl", (".tf", ".hcl"), caller_support=False),
+    LanguageCapability("html", (".html", ".htm"), caller_support=False),
+    LanguageCapability("protobuf", (".proto",), caller_support=False),
+    LanguageCapability("sql", (".sql",), caller_support=False),
+    LanguageCapability("svelte", (".svelte",), caller_support=False),
     LanguageCapability(
         "markdown",
         (".md",),

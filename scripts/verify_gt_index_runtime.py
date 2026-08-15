@@ -70,7 +70,134 @@ _STRUCTURAL_FIXTURES = {
         "#macro Helper()\nsphere { <0,0,0>, 1 }\n#end\n"
         "#macro Thing()\nHelper()\n#end\nThing()\n"
     ),
+    # C/C++: real functions + a same-file literal call. These certify the
+    # declarator-name fix (the old NameField "declarator" text was
+    # `target(int value)` so the resolver's bare-callee lookup could never
+    # match, silently producing zero CALLS edges on every C/C++ task). The
+    # fixture MUST assert clean node names AND a directed CERTIFIED edge.
+    "c": (
+        "int target(int value) { return value + 1; }\n"
+        "int caller() { return target(1); }\n"
+    ),
+    "cpp": (
+        "int target(int value) { return value + 1; }\n"
+        "int caller() { return target(1); }\n"
+    ),
+    "javascript": (
+        "function target(value) { return value + 1; }\n"
+        "function caller() { return target(1); }\n"
+    ),
+    "rust": (
+        "fn target(value: i64) -> i64 { value + 1 }\n"
+        "fn caller() -> i64 { target(1) }\n"
+    ),
+    # Bash/shell: a bare command that names an in-file function resolves to
+    # that function (bash function lookup precedes PATH lookup). `return` and
+    # other builtin/external commands resolve to nothing and must NOT create a
+    # certified edge — the negative-control assertion below enforces this.
+    "shell": (
+        "target() { return 0; }\n"
+        "caller() { target; }\n"
+    ),
+    # Python-depth parity for the remaining caller-capable grammars. Each is a
+    # plain `target`/`caller` pair with a same-file literal call so the fixture
+    # gate certifies a directed CALLS edge exactly like Python. elm/ocaml names
+    # require the grammar-scoped parser fixes (function_declaration_left /
+    # value_name descent) — without them the fixture gate fails closed.
+    "go": (
+        "package fixture\n"
+        "func target(value int) int { return value + 1 }\n"
+        "func caller() int { return target(1) }\n"
+    ),
+    "java": (
+        "class Fixture {\n"
+        "  int target(int value) { return value + 1; }\n"
+        "  int caller() { return target(1); }\n"
+        "}\n"
+    ),
+    "csharp": (
+        "class Fixture {\n"
+        "  int target(int value) { return value + 1; }\n"
+        "  int caller() { return target(1); }\n"
+        "}\n"
+    ),
+    "php": (
+        "<?php\n"
+        "function target($value) { return $value + 1; }\n"
+        "function caller() { return target(1); }\n"
+    ),
+    "swift": (
+        "func target(value: Int) -> Int { return value + 1 }\n"
+        "func caller() -> Int { return target(value: 1) }\n"
+    ),
+    "kotlin": (
+        "fun target(value: Int): Int { return value + 1 }\n"
+        "fun caller(): Int { return target(1) }\n"
+    ),
+    "scala": (
+        "def target(value: Int): Int = value + 1\n"
+        "def caller(): Int = target(1)\n"
+    ),
+    "ruby": (
+        "def target(value)\n  value + 1\nend\n"
+        "def caller\n  target(1)\nend\n"
+    ),
+    "typescript": (
+        "function target(value: number): number { return value + 1; }\n"
+        "function caller(): number { return target(1); }\n"
+    ),
+    "elm": (
+        "target value =\n    value + 1\n\n"
+        "caller =\n    target 1\n"
+    ),
+    "ocaml": (
+        "let target value = value + 1\n"
+        "let caller () = target 1\n"
+    ),
 }
+
+# The certified caller-capable set. Every entry must produce a directed
+# CERTIFIED CALLS edge from the fixture graph. Module-level so the language
+# depth audit can cross-check it against the registry caller-capable set.
+EXPECTED_CALL_LANGUAGES = frozenset(
+    {
+        "python",
+        "scheme",
+        "cobol",
+        "r",
+        "verilog",
+        "red",
+        "povray",
+        "coq",
+        "stan",
+        "latex",
+        "vim",
+        "gcode",
+        "make",
+        "cmake",
+        # TB2.0-relevant: C/C++ are the regression proof for the declarator-name
+        # fix; bash proves same-file literal command->function resolution.
+        "c",
+        "cpp",
+        "javascript",
+        "rust",
+        "bash",
+        # Python-depth parity: every remaining caller-capable structural registry
+        # grammar. elm/ocaml depend on the grammar-scoped name-extraction fixes;
+        # a regression fails the gate.
+        "go",
+        "java",
+        "csharp",
+        "php",
+        "swift",
+        "kotlin",
+        "scala",
+        "ruby",
+        "typescript",
+        "elm",
+        "ocaml",
+    }
+)
 
 
 def verify() -> dict[str, object]:
@@ -268,22 +395,7 @@ def verify() -> dict[str, object]:
             raise RuntimeError(f"fixture definitions missing: {definition_count}")
         if call_count < 1:
             raise RuntimeError(f"directed CALLS edge missing: {call_count}")
-        expected_call_languages = {
-            "python",
-            "scheme",
-            "cobol",
-            "r",
-            "verilog",
-            "red",
-            "povray",
-            "coq",
-            "stan",
-            "latex",
-            "vim",
-            "gcode",
-            "make",
-            "cmake",
-        }
+        expected_call_languages = EXPECTED_CALL_LANGUAGES
         missing_call_languages = sorted(
             expected_call_languages - set(call_language_counts)
         )
@@ -292,6 +404,31 @@ def verify() -> dict[str, object]:
                 "certified caller languages missing directed edges: "
                 + ", ".join(missing_call_languages)
                 + f" quality={call_edge_quality}"
+            )
+        # Name-sanity invariant: a definition node name must never carry
+        # signature text (the C/C++ declarator regression stored names like
+        # `target(int value)`, silently killing every CALLS edge). Fail closed
+        # if ANY fixture language emits a poisoned name.
+        poisoned_names = connection.execute(
+            "SELECT DISTINCT language,name FROM nodes "
+            "WHERE name LIKE '%(%' OR name LIKE '%)%' ORDER BY language LIMIT 20"
+        ).fetchall()
+        if poisoned_names:
+            raise RuntimeError(
+                "definition node names contain signature text (declarator "
+                "regression): " + repr(poisoned_names)
+            )
+        # Negative control: the bash fixture must NOT certify a builtin/external
+        # command (`return`) as a call to a defined function. Only `caller->target`
+        # is certified for bash.
+        bash_external_edges = connection.execute(
+            "SELECT COUNT(*) FROM edges e JOIN nodes src ON src.id=e.source_id "
+            "JOIN nodes tgt ON tgt.id=e.target_id "
+            "WHERE e.type='CALLS' AND src.language='bash' AND tgt.name IN ('return','echo','cat')"
+        ).fetchone()[0]
+        if bash_external_edges:
+            raise RuntimeError(
+                f"bash fixture certified an external/builtin command edge: {bash_external_edges}"
             )
         if not receipt.schema_valid or receipt.node_count < 2:
             raise RuntimeError("index receipt did not certify the graph schema/nodes")
@@ -342,6 +479,31 @@ def verify() -> dict[str, object]:
                 "registered parser languages missing from binary: "
                 + ", ".join(missing_languages)
             )
+        # Fail-closed depth parity: every caller-capable structural registry
+        # language that ships a REAL fixture (not the comment-only placeholder)
+        # must be edge-certified in expected_call_languages. This is the seam
+        # through which the C/C++ declarator regression escaped: C had file-level
+        # coverage but no directed-edge proof. Adding a real fixture now REQUIRES
+        # certifying its CALLS edge, so a future regression cannot go silent.
+        fixture_spec_names = {
+            "bash" if name == "shell" else name for name in _STRUCTURAL_FIXTURES
+        }
+        registry_caller_capable = {
+            "bash" if capability.name == "shell" else capability.name
+            for capability in LANGUAGE_CAPABILITIES
+            if capability.structural_index and capability.caller_support
+        }
+        unverified_real_fixtures = sorted(
+            (fixture_spec_names & registry_caller_capable) - expected_call_languages
+        )
+        if unverified_real_fixtures:
+            raise RuntimeError(
+                "caller-capable fixture languages not edge-certified: "
+                + ", ".join(unverified_real_fixtures)
+            )
+        unverified_caller_languages = sorted(
+            registry_caller_capable - expected_call_languages - fixture_spec_names
+        )
         return {
             "status": receipt.status.value,
             "graph_revision": receipt.graph_revision,
@@ -364,6 +526,7 @@ def verify() -> dict[str, object]:
             "resolution_reason_counts": dict(receipt.resolution_reason_counts),
             "parser_failures": receipt.parser_failures,
             "frontier_anchors": len(evidence.anchors),
+            "unverified_caller_languages": unverified_caller_languages,
         }
 
 

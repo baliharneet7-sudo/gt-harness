@@ -578,6 +578,25 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 		}
 	}
 	name := extractFieldText(node, spec.NameField, src)
+	// C/C++: the grammar's NameField "declarator" is a WRAPPER node
+	// (function_declarator / pointer_declarator / array_declarator /
+	// parenthesized_declarator ...) whose raw text is `get_bit(int ctx)` —
+	// the full declarator INCLUDING the parameter list. The resolver binds
+	// call callee names (bare identifiers) to node names, so a signature-laden
+	// node name can never match and every CALLS edge silently dies
+	// (write-compressor: 18 C nodes, 0 edges). Unwrap the chain to the
+	// terminal identifier, grammar-scoped like the Verilog fallback below.
+	if name != "" && (sf.Language == "c" || sf.Language == "cpp") {
+		if unwrapped := cDeclaratorIdentifier(node, src); unwrapped != "" {
+			name = unwrapped
+		} else if strings.ContainsAny(name, "()") {
+			// Declarator could not be unwrapped and the raw text is
+			// signature-laden: never emit a poisoned node name. Drop the
+			// definition (walkNode creates no node) rather than guarantee a
+			// resolver miss. The fixture gate asserts clean names per language.
+			name = ""
+		}
+	}
 	if name == "" {
 		name = extractFirstIdentifier(node, src)
 	}
@@ -587,6 +606,32 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 	// speculative recursive name search.
 	if name == "" && sf.Language == "verilog" {
 		name = verilogDeclarationName(node, src)
+	}
+	// Elm: `target value = ...` parses as value_declaration ->
+	// function_declaration_left -> lower_case_identifier. The spec has no
+	// NameField and extractFirstIdentifier only scans direct children, so the
+	// name was silently dropped (0 definitions -> 0 CALLS edges). Descend the
+	// declaration-left wrapper to the identifier, grammar-scoped.
+	if name == "" && sf.Language == "elm" && nodeType == "value_declaration" {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil && child.Type() == "function_declaration_left" {
+				if ident := firstIdentifierDescendant(child, src); ident != "" {
+					name = ident
+				}
+				break
+			}
+		}
+	}
+	// OCaml: `let target value = ...` parses as value_definition ->
+	// let_binding -> value_name. No NameField, and value_name is not an
+	// identifier node type, so extractFirstIdentifier dropped every name.
+	// Descend to the first value_name, grammar-scoped.
+	if name == "" && sf.Language == "ocaml" &&
+		(nodeType == "value_definition" || nodeType == "let_binding") {
+		if vn := firstChildByType(node, "value_name"); vn != nil {
+			name = vn.Content(src)
+		}
 	}
 	// JS/TS: arrow functions AND function expressions assigned to variables have no name
 	// field — it lives on the parent variable_declarator (`const h = (req,res)=>{}`,
@@ -604,6 +649,34 @@ func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) strin
 		name = assignedFunctionExpressionName(node, sf, src)
 	}
 	return name
+}
+
+// cDeclaratorIdentifier descends a C/C++ function_definition declarator
+// wrapper chain to the terminal identifier. tree-sitter-c/cpp wrap the
+// function name as function_declarator -> (pointer_declarator |
+// array_declarator | parenthesized_declarator | ...)* -> identifier. Bounded
+// so a malformed tree cannot loop; returns "" when no identifier is reached.
+// It is deliberately limited to declarator fields and identifier nodes and
+// never scans arbitrary source text for a name.
+func cDeclaratorIdentifier(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	for i := 0; i < 8; i++ {
+		child := node.ChildByFieldName("declarator")
+		if child == nil {
+			child = node.ChildByFieldName("name")
+		}
+		if child == nil {
+			return ""
+		}
+		switch child.Type() {
+		case "identifier", "field_identifier", "type_identifier":
+			return child.Content(src)
+		}
+		node = child
+	}
+	return ""
 }
 
 // verilogDeclarationName unwraps the grammar's identifier wrapper nodes.  It
@@ -1884,6 +1957,48 @@ func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
 		return ""
 	}
 	return child.Content(src)
+}
+
+// firstChildByType returns the first DIRECT child of node whose type matches.
+// Used for grammars whose name lives in an unnamed-field wrapper child
+// (e.g. OCaml value_name) that extractFirstIdentifier cannot reach.
+func firstChildByType(node *sitter.Node, nodeType string) *sitter.Node {
+	if node == nil {
+		return nil
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil && child.Type() == nodeType {
+			return child
+		}
+	}
+	return nil
+}
+
+// firstIdentifierDescendant returns the text of the first identifier-like
+// node in node's subtree (bounded depth/width). Used for wrapper chains like
+// Elm's function_declaration_left -> lower_case_identifier. Deliberately
+// grammar-scoped (callers gate on the language) and never scans raw source.
+func firstIdentifierDescendant(node *sitter.Node, src []byte) string {
+	var walk func(*sitter.Node, int) string
+	walk = func(n *sitter.Node, depth int) string {
+		if n == nil || depth > 6 {
+			return ""
+		}
+		switch n.Type() {
+		case "identifier", "property_identifier", "field_identifier",
+			"simple_identifier", "type_identifier", "lower_case_identifier",
+			"upper_case_identifier":
+			return n.Content(src)
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			if got := walk(n.Child(i), depth+1); got != "" {
+				return got
+			}
+		}
+		return ""
+	}
+	return walk(node, 0)
 }
 
 // childByFieldOrType returns node's child for the given tree-sitter field name.

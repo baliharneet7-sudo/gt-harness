@@ -68,6 +68,9 @@ jobs:
       - name: Prove repository intelligence substrate
         run: python scripts/verify_gt_index_runtime.py
 
+      - name: Language depth audit
+        run: python scripts/central_language_depth_audit.py
+
       - name: Prove pinned Terminal-Bench language coverage
         run: |
           set -euo pipefail
@@ -162,6 +165,7 @@ jobs:
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \
             scripts/verify_tb2_language_contract.py \
+            scripts/central_language_depth_audit.py \
             scripts/decision_point_eval.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \

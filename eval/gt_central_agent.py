@@ -4245,10 +4245,20 @@ class MiniSweCentralAgent(BaseAgent):
                         (time.perf_counter() - retrieval_started) * 1_000.0,
                         6,
                     )
+                # Frontier evidence is bound to the GRAPH source revision (the
+                # mirrored/indexable path set). Comparing it against the full
+                # semantic source revision permanently rejects post-edit
+                # frontiers on any task whose semantic set contains a
+                # non-structural authored file (e.g. a model-written .pl helper:
+                # write-compressor 7/11 calls stale_rejected). Key staleness on
+                # the graph-bound revision so non-indexable files cannot poison
+                # delivery; genuine stale graphs are still caught because
+                # graph_source_revision only advances after a completed refresh.
+                frontier_source_revision = graph_source_revision or source_revision
                 frontier_decision = compile_incremental_frontier(
                     repository_evidence,
                     query_messages,
-                    source_revision=source_revision,
+                    source_revision=frontier_source_revision,
                     workspace_revision=snapshot.revision,
                     current_call=calls,
                     eligible_call=repository_evidence_eligible_call,
