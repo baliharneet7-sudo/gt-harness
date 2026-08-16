@@ -166,9 +166,13 @@ class TaskContract:
 
 _RESOURCE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:/app/)?(?:[A-Za-z0-9_.-]+/)*"
-    r"[A-Za-z0-9_.-]+\.(?:jsonl?|csv|txt|md|out|comp|py|c|cc|cpp|h|hpp|"
-    r"js|jsx|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml|cbl|cob|cpy|"
-    r"dat|ckpt|bpe)\b"
+    r"[A-Za-z0-9_.-]+\.(?:jsonl?|csv|tsv|txt|md|out|comp|py|c|cc|cpp|cxx|h|hpp|"
+    r"js|jsx|mjs|ts|tsx|java|rs|go|rb|php|sh|scm|toml|ya?ml|ini|cfg|conf|log|xml|"
+    r"html?|css|sql|db|cbl|cob|cpy|dat|ckpt|bpe|red|fasta|fa|npy|npz|bmp|png|"
+    r"jpe?g|gif|svg|ico|mp4|mov|webm|avi|mkv|mp3|wav|flac|ogg|gcode|nc|gz|gzip|"
+    r"tar|zip|tgz|bz2|xz|h5|hdf5|pkl|pt|onnx|safetensors|so|dll|exe|class|jar|"
+    r"wasm|lib|obj|stl|gltf|glb|ply|wrl|step|stp|vhd|vhdl|sv|asm|f90|f95|cs|fs|"
+    r"fsx|vb|mm|pas|ada|adb|hs|lua|pl|pm|tcl|tex|bib|sty|cls|nix|tf|hcl|cu|cuh)\b"
 )
 _ABSOLUTE_RESOURCE_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])/app/[A-Za-z0-9_./-]+"
@@ -185,7 +189,8 @@ _OUTPUT_CUE_RE = re.compile(
     r"(?i)\b(?:write|create|produce|generate|save|emit|deliver|output)\b"
 )
 _INPUT_CUE_RE = re.compile(
-    r"(?i)\b(?:read|input|incoming|source|provided|existing|unchanged)\b"
+    r"(?i)\b(?:read|input|incoming|source|provided|existing|unchanged|examine|"
+    r"inspect|reference|do not modify)\b"
 )
 # Executable tokens whose following path is a shell operand (INPUT), not the
 # deliverable named by a prose output verb earlier in the same clause.
@@ -207,13 +212,13 @@ def _resource_path(raw: str) -> str:
     return path
 
 
-def _resource_occurrences(line: str) -> list[tuple[int, str]]:
-    found: dict[tuple[int, str], None] = {}
+def _resource_occurrences(line: str) -> list[tuple[int, int, str]]:
+    found: dict[tuple[int, int, str], None] = {}
     for pattern in (_RESOURCE_PATH_RE, _ABSOLUTE_RESOURCE_RE, _EXTERNAL_RESOURCE_RE):
         for match in pattern.finditer(line or ""):
             cleaned = _resource_path(match.group(0))
             if cleaned and " " not in cleaned:
-                found[(match.start(), cleaned)] = None
+                found[(match.start(), match.end(), cleaned)] = None
     return sorted(found, key=lambda item: item[0])
 
 
@@ -333,6 +338,19 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
     section_role = TaskResourceRole.UNKNOWN
     flow_role = TaskResourceRole.UNKNOWN
 
+    # A path that a direct output verb names anywhere (``Write ... main.py.c``)
+    # is a deliverable; a later shell-operand occurrence (``python3 main.py.c``)
+    # must not reclassify it as INPUT.  Collect the per-path strong-direct flag
+    # before scoring so the shell-position rule can consult the whole task text,
+    # not only the current clause.
+    strong_direct_paths: set[str] = set()
+    for _raw in core.splitlines():
+        for _offset, _end, path in _resource_occurrences(_raw):
+            _clause, _clause_offset = _resource_clause(_raw, _offset)
+            _prefix = _clause[: _clause_offset + (_end - _offset)]
+            if _strong_direct_output(_prefix, path):
+                strong_direct_paths.add(path)
+
     for raw in core.splitlines():
         stripped = raw.strip()
         if not stripped:
@@ -358,7 +376,7 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
         elif input_cue:
             flow_role = TaskResourceRole.INPUT
 
-        for offset, path in _resource_occurrences(raw):
+        for offset, end, path in _resource_occurrences(raw):
             if path not in scores:
                 scores[path] = {}
                 spans[path] = stripped[:500]
@@ -366,7 +384,8 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
             row = scores[path]
             normalized = path.lower()
             clause, clause_offset = _resource_clause(raw, offset)
-            prefix = clause[: clause_offset + len(path)]
+            raw_span = end - offset
+            prefix = clause[: clause_offset + raw_span]
             basename = re.escape(path.rsplit("/", 1)[-1])
             clause_output = bool(_OUTPUT_CUE_RE.search(clause))
             clause_input = bool(_INPUT_CUE_RE.search(clause))
@@ -394,13 +413,16 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
             if direct_output:
                 add(TaskResourceRole.OUTPUT, direct_output)
             shell_role = _shell_position_role(clause, clause_offset, path)
-            if shell_role is not None and not _strong_direct_output(prefix, path):
+            if shell_role is not None and path not in strong_direct_paths:
                 # Shell position is mechanically stronger than a prose output
                 # verb *earlier in the same clause* that only bleeds onto this
                 # path.  For example in ``Write extract.js ... node extract.js
                 # /app/a.out > out.json`` the operand ``a.out`` is INPUT and the
                 # redirection target ``out.json`` is OUTPUT; only ``extract.js``
-                # (named directly by ``Write``) is the deliverable.
+                # (named directly by ``Write``) is the deliverable.  A path that
+                # a direct output verb names *anywhere* stays a deliverable even
+                # when it also appears as a shell operand (``Write ... main.py.c
+                # ... python3 main.py.c``).
                 add(shell_role, 100)
             if re.search(
                 rf"(?i)\b(?:read|have|provided|existing)\b(?:\s+\S+){{0,8}}\s+"

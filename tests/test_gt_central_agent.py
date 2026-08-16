@@ -1891,8 +1891,15 @@ async def test_supported_source_creation_activates_persistent_state_once(
     assert persistent["bootstrap"]["status"] == "selected"
     assert persistent["metrics"]["postflight_commits"] == 2
     assert persistent["state"]["files_modified"] == ["app.py"]
-    assert persistent["deliveries"] == []
-    assert all("GroundTruth" not in text for text in model.observed_history[-1])
+    decisive_deliveries = [
+        row
+        for row in persistent["deliveries"]
+        if any(meta.get("decisive") for meta in row.get("claim_metadata", ()))
+    ]
+    assert decisive_deliveries
+    assert all(
+        "GroundTruth" not in text for text in model.observed_history[-1]
+    )
     assert all(
         "not_applicable_no_supported_source" not in row.get("reason_codes", ())
         for row in receipt["preemptive_retrieval"]["decisions"]

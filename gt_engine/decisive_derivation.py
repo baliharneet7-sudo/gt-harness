@@ -59,6 +59,7 @@ SKIP_DIR_NAMES = frozenset(
         "target",
         ".extracted",
         "solution",
+        "tests",
     }
 )
 _SKIP_FILE_NAMES = frozenset(
@@ -75,7 +76,9 @@ class DecisiveKind(StrEnum):
     SECRET_LOCATION = "secret_location"
     BINARY_FORMAT = "binary_format"
     REQUIRED_CHECK = "required_check"
+    PROJECT_CHECK = "project_check"
     DELIVERABLE_STATE = "deliverable_state"
+    REPOSITORY_ANCHOR = "repository_anchor"
 
 
 class DecisiveStatus(StrEnum):
@@ -352,19 +355,27 @@ _CREDENTIAL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("OPENAI_API_KEY", r"\bOPENAI_API_KEY\s*[:=]\s*(?:'|\")?[A-Za-z0-9_\-]{10,80}"),
 )
 
-_BINARY_MAGICS: tuple[tuple[str, bytes, str], ...] = (
-    ("ELF", b"\x7fELF", "ELF"),
-    ("PE", b"MZ", "PE/COFF"),
-    ("MACHO", b"\xfe\xed\xfa\xce", "Mach-O"),
-    ("MACHO_64", b"\xfe\xed\xfa\xcf", "Mach-O 64-bit"),
-    ("GZIP", b"\x1f\x8b", "gzip"),
-    ("ZIP", b"PK\x03\x04", "ZIP archive"),
-    ("TAR", b"ustar", "tar archive"),
-    ("BZIP2", b"BZh", "bzip2"),
-    ("XZ", b"\xfd7zXZ", "xz"),
-    ("PNG", b"\x89PNG\r\n\x1a\n", "PNG image"),
-    ("JPEG", b"\xff\xd8\xff", "JPEG image"),
-    ("PDF", b"%PDF", "PDF"),
+_BINARY_MAGICS: tuple[tuple[str, int, bytes, str], ...] = (
+    ("ELF", 0, b"\x7fELF", "ELF"),
+    ("PE", 0, b"MZ", "PE/COFF"),
+    ("MACHO", 0, b"\xfe\xed\xfa\xce", "Mach-O"),
+    ("MACHO_64", 0, b"\xfe\xed\xfa\xcf", "Mach-O 64-bit"),
+    ("GZIP", 0, b"\x1f\x8b", "gzip"),
+    ("ZIP", 0, b"PK\x03\x04", "ZIP archive"),
+    ("TAR", 0, b"ustar", "tar archive"),
+    ("BZIP2", 0, b"BZh", "bzip2"),
+    ("XZ", 0, b"\xfd7zXZ", "xz"),
+    ("PNG", 0, b"\x89PNG\r\n\x1a\n", "PNG image"),
+    ("JPEG", 0, b"\xff\xd8\xff", "JPEG image"),
+    ("PDF", 0, b"%PDF", "PDF"),
+    ("MP4", 4, b"ftyp", "MP4/MOV video"),
+    ("BMP", 0, b"BM", "BMP image"),
+    ("NPY", 0, b"\x93NUMPY", "NumPy .npy array"),
+    ("WASM", 0, b"\0asm", "WebAssembly binary"),
+    ("SQLITE", 0, b"SQLite format 3\0", "SQLite database"),
+    ("WAV", 0, b"RIFF", "RIFF/WAV container"),
+    ("FLAC", 0, b"fLaC", "FLAC audio"),
+    ("OGG", 0, b"OggS", "OGG container"),
 )
 
 _ELF_CLASS = {1: "32-bit", 2: "64-bit"}
@@ -569,8 +580,11 @@ def _binary_detector(
         if len(entry.head) < 4:
             continue
         kind = ""
-        for _name, magic, label in _BINARY_MAGICS:
-            if entry.head.startswith(magic):
+        for _name, offset, magic, label in _BINARY_MAGICS:
+            end = offset + len(magic)
+            if end > len(entry.head):
+                continue
+            if entry.head[offset:end] == magic:
                 kind = label
                 break
         if not kind:
@@ -649,9 +663,13 @@ def _deliverable_detector(
         path = _norm_path(deliverable)
         if not path or len(path) > 200:
             continue
-        if path in workspace_paths:
-            continue
-        gap = f"Required deliverable {path} is absent in the workspace."
+        present = path in workspace_paths or any(
+            wp == path or wp.endswith("/" + path) for wp in workspace_paths
+        )
+        if present:
+            gap = f"Required deliverable {path} is present in the workspace."
+        else:
+            gap = f"Required deliverable {path} is absent in the workspace."
         facts.append(
             DecisiveFact(
                 fact_id=_stable_id(
@@ -673,12 +691,108 @@ def _deliverable_detector(
     return facts
 
 
+def _structural_anchor_detector(
+    workspace: tuple[WorkspaceEntry, ...],
+    focus_anchors: tuple[str, ...],
+    *,
+    source_revision: str,
+) -> list[DecisiveFact]:
+    """Emit a bounded certified repository anchor as a fallback decisive fact.
+
+    This guarantees the decisive frame is never empty on a healthy workspace:
+    when no detector can name a concrete task gap, the top certified catalog
+    focus anchor (a graph-derived ``path:line#symbol``) is still decision-relevant
+    grounded context.  It never fabricates a relationship and never references a
+    grader-only artifact.
+    """
+
+    if not focus_anchors:
+        return []
+    workspace_paths = {entry.path for entry in workspace}
+    facts: list[DecisiveFact] = []
+    for anchor in focus_anchors:
+        clean = _bounded_text(str(anchor or ""), 240).strip()
+        if not clean:
+            continue
+        path_part = clean.split("#", 1)[0].rsplit(":", 1)[0].strip()
+        if not path_part:
+            continue
+        if not (
+            path_part in workspace_paths
+            or any(path_part in entry_path for entry_path in workspace_paths)
+            or any(entry_path.endswith("/" + path_part) for entry_path in workspace_paths)
+        ):
+            continue
+        gap = f"Certified repository anchor: {clean}."
+        facts.append(
+            DecisiveFact(
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.REPOSITORY_ANCHOR.value, clean, source_revision
+                ),
+                claim_id=_stable_id(
+                    "claim", "decisive", DecisiveKind.REPOSITORY_ANCHOR.value, clean
+                ),
+                kind=DecisiveKind.REPOSITORY_ANCHOR,
+                path=path_part,
+                gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
+                detector="structural_anchor_detector",
+                source_revision=source_revision,
+                origin=EvidenceOrigin.PREEXISTING_REPOSITORY.value,
+            )
+        )
+        if len(facts) >= DERIVATION_MAX_FACTS:
+            break
+    return facts
+
+
+def _project_check_detector(
+    project_checks: tuple[str, ...],
+    *,
+    source_revision: str,
+) -> list[DecisiveFact]:
+    """Emit discovered repository-contract validation candidates.
+
+    ``evidence.project_checks`` (Makefile test targets, pytest config, npm
+    scripts, Cargo/Go modules) are discovered from the repository source that is
+    actually present in the workspace -- legal source 2.  They are advisory
+    candidates, never ``required``; the wording and kind reflect that.
+    """
+
+    facts: list[DecisiveFact] = []
+    for command in project_checks:
+        clean = _bounded_text(str(command or ""), 240).strip()
+        if not clean:
+            continue
+        gap = f"Project validation candidate: {clean}"
+        facts.append(
+            DecisiveFact(
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.PROJECT_CHECK.value, clean, source_revision
+                ),
+                claim_id=_stable_id(
+                    "claim", "decisive", DecisiveKind.PROJECT_CHECK.value, clean
+                ),
+                kind=DecisiveKind.PROJECT_CHECK,
+                path="",
+                gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
+                detector="project_check_detector",
+                source_revision=source_revision,
+                origin=EvidenceOrigin.PREEXISTING_REPOSITORY.value,
+            )
+        )
+        if len(facts) >= DERIVATION_MAX_FACTS:
+            break
+    return facts
+
+
 def derive_decisive_facts(
     *,
     instruction: str,
     workspace: tuple[WorkspaceEntry, ...],
     validation_commands: tuple[str, ...] = (),
     deliverables: tuple[str, ...] = (),
+    project_checks: tuple[str, ...] = (),
+    focus_anchors: tuple[str, ...] = (),
     source_revision: str = "",
 ) -> DecisiveDerivation:
     """Derive bounded task-decisive facts from the three legal sources only.
@@ -726,11 +840,22 @@ def derive_decisive_facts(
         ),
     )
     run(
+        "project_check_detector",
+        lambda: _project_check_detector(tuple(project_checks), source_revision=source_revision),
+    )
+    run(
         "deliverable_detector",
         lambda: _deliverable_detector(
             instruction, workspace, tuple(deliverables), source_revision=source_revision
         ),
     )
+    if not collected:
+        run(
+            "structural_anchor_detector",
+            lambda: _structural_anchor_detector(
+                workspace, tuple(focus_anchors), source_revision=source_revision
+            ),
+        )
 
     if not collected:
         return DecisiveDerivation(

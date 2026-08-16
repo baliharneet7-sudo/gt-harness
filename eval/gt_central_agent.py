@@ -1198,6 +1198,16 @@ def _derive_task_decisive_facts(
             for item in catalog.items
             if item.kind.value == "validation" and item.required and item.anchors
         )
+        project_checks = tuple(
+            item.anchors[0]
+            for item in catalog.items
+            if item.kind.value == "validation" and not item.required and item.anchors
+        )
+        focus_anchors = tuple(
+            item.anchors[0]
+            for item in catalog.items
+            if item.kind.value == "focus" and item.anchors
+        )
         deliverables = tuple(
             _relative_deliverable(item.path)
             for item in catalog.items
@@ -1208,6 +1218,8 @@ def _derive_task_decisive_facts(
             workspace=workspace,
             validation_commands=validation_commands,
             deliverables=deliverables,
+            project_checks=project_checks,
+            focus_anchors=focus_anchors,
             source_revision=source_revision,
         )
     except Exception as exc:  # noqa: BLE001 - derivation fails open to abstention

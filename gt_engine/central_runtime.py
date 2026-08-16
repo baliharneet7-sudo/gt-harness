@@ -144,7 +144,6 @@ _DERIVED_PATH_PARTS = frozenset(
 _BACKGROUND_ARTIFACT_NAMES = frozenset(
     {"benchmark_out.txt", "callback-test.txt", "a.out", "data.comp"}
 )
-_DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
 _BINARY_HEAD_BYTES = 2048
 _BINARY_HEAD_MAX_FILES = 32
@@ -436,14 +435,23 @@ def _external_manifest_command(paths: Iterable[str]) -> str:
 
 
 def task_deliverable_paths(instruction: str) -> tuple[str, ...]:
-    """Return only high-confidence OUTPUT paths from the typed task contract."""
+    """Return OUTPUT paths from the typed task contract.
+
+    The contract parser already assigns OUTPUT only through a mechanically
+    grounded cue (direct output verb, redirection target, ``output_data``
+    structure, or an output-cued flow role).  Trust that role rather than
+    re-filtering against a frozen suffix allowlist: TB2 deliverables are often
+    source or config files (``.py``, ``.c``, ``.toml``, ``.red``) that the
+    historical ``_DELIVERABLE_SUFFIXES`` list silently discarded.  The
+    source-revision model already classifies a code deliverable as both a task
+    output and validation/index source.
+    """
 
     return tuple(
         resource.path
         for resource in extract_task_resources(instruction)
         if resource.role is TaskResourceRole.OUTPUT
-        and resource.confidence >= 0.8
-        and resource.path.lower().endswith(_DELIVERABLE_SUFFIXES)
+        and resource.confidence >= 0.5
         and not is_submit_command(resource.path)
     )
 

@@ -302,7 +302,78 @@ class TestDecisiveDerivationDetectors:
             deliverables=("pipeline_parallel.py",),
             source_revision="r1",
         ).facts
-        assert not any(f.kind is DecisiveKind.DELIVERABLE_STATE for f in present)
+        present_fact = next(
+            (f for f in present if f.kind is DecisiveKind.DELIVERABLE_STATE), None
+        )
+        assert present_fact is not None
+        assert "present" in present_fact.gap_text
+        assert "absent" not in present_fact.gap_text
+
+    def test_binary_format_reports_offset_magics(self):
+        instruction = (
+            "Analyze the provided /app/example_video.mp4 and write "
+            "jump_analyzer.py that extracts the takeoff frame."
+        )
+        mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+        workspace = (
+            WorkspaceEntry("example_video.mp4", len(mp4), _sha("mp4"), mp4),
+            _text_entry("README.md", "docs\n"),
+        )
+        facts = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            deliverables=("jump_analyzer.py",),
+            source_revision="r1",
+        ).facts
+        binary = next((f for f in facts if f.kind is DecisiveKind.BINARY_FORMAT), None)
+        assert binary is not None
+        assert "MP4" in binary.gap_text
+
+    def test_project_check_emits_advisory_candidate(self):
+        instruction = "Fix the failing test in this repository."
+        workspace = (_text_entry("main.py", "print('ok')\n"),)
+        facts = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            project_checks=("make test",),
+            source_revision="r1",
+        ).facts
+        check = next((f for f in facts if f.kind is DecisiveKind.PROJECT_CHECK), None)
+        assert check is not None
+        assert "candidate" in check.gap_text
+        assert "make test" in check.gap_text
+
+    def test_structural_fallback_emits_certified_anchor(self):
+        instruction = "Reproduce the failure observed in the service."
+        workspace = (
+            _text_entry("src/service.go", "package main\n"),
+            _text_entry("README.md", "docs\n"),
+        )
+        facts = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            focus_anchors=("src/service.go:12#run",),
+            source_revision="r1",
+        ).facts
+        anchor = next(
+            (f for f in facts if f.kind is DecisiveKind.REPOSITORY_ANCHOR), None
+        )
+        assert anchor is not None
+        assert "src/service.go" in anchor.gap_text
+
+    def test_structural_fallback_abstains_without_workspace_match(self):
+        instruction = "Reproduce the failure observed in the service."
+        workspace = (_text_entry("README.md", "docs\n"),)
+        derivation = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            focus_anchors=("src/service.go:12#run",),
+            source_revision="r1",
+        )
+        assert derivation.status is DecisiveStatus.ABSTAINED
+        assert not any(
+            f.kind is DecisiveKind.REPOSITORY_ANCHOR for f in derivation.facts
+        )
 
 
 class TestDecisiveDerivationBoundedness:
@@ -646,7 +717,12 @@ class TestWorkspaceFromSnapshot:
             source_revision="source-1",
         )
         assert facts.status is DecisiveStatus.DERIVED
-        assert not any(fact.kind is DecisiveKind.DELIVERABLE_STATE for fact in facts.facts)
+        deliverable = next(
+            (fact for fact in facts.facts if fact.kind is DecisiveKind.DELIVERABLE_STATE), None
+        )
+        assert deliverable is not None
+        assert "present" in deliverable.gap_text
+        assert "absent" not in deliverable.gap_text
         assert any(fact.kind is DecisiveKind.SECRET_LOCATION for fact in facts.facts)
 
     def test_head_bytes_are_bounded(self):
