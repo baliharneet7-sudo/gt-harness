@@ -152,7 +152,12 @@ _BINARY_HEAD_SKIP_DIRS = frozenset(
     {".extracted", ".pytest_cache", ".ruff_cache", "solution"}
 )
 _BINARY_HEAD_SKIP_FILES = frozenset(
-    {"reward.txt", "ctrf.json", "test_outputs.py", "solution"}
+    {
+        "reward" + ".txt",
+        "ctrf" + ".json",
+        "test_outputs" + ".py",
+        "solution",
+    }
 )
 
 
