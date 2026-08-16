@@ -4570,19 +4570,11 @@ class MiniSweCentralAgent(BaseAgent):
                 legacy_runtime_payload = "\n\n".join(legacy_runtime_parts)
                 preemptive_payload = ""
                 runtime_payload = legacy_runtime_payload
-                if observed_fact_selected and pending_observed_fact is not None:
-                    observed_fact_ledger.add(pending_observed_fact.fact_id)
-                    observed_fact_deliveries.append(
-                        {
-                            "fact_id": pending_observed_fact.fact_id,
-                            "kind": pending_observed_fact.kind,
-                            "evidence_action": pending_observed_fact.evidence_action,
-                            "first_eligible_call": pending_observed_fact.eligible_call,
-                            "chars": len(observed_fact_payload_text),
-                            "not_predictive": True,
-                        }
-                    )
-                    pending_observed_fact = None
+                # The delivery row is built after the exact request hashes and
+                # message index are known (prepared_observed_fact_delivery
+                # below) and appended only after provider dispatch succeeds.
+                # The ledger add is deferred to the same point so a fact is
+                # never marked delivered for an un-dispatched request.
                 frontier_decisions.append(
                     {
                         "call": calls,
@@ -4954,6 +4946,32 @@ class MiniSweCentralAgent(BaseAgent):
                     }
                 else:
                     prepared_progress_delivery = None
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
+                    and observed_fact_selected
+                    and pending_observed_fact is not None
+                ):
+                    prepared_observed_fact_delivery = {
+                        "fact_id": pending_observed_fact.fact_id,
+                        "fact_ids": [pending_observed_fact.fact_id],
+                        "kind": pending_observed_fact.kind,
+                        "evidence_action": pending_observed_fact.evidence_action,
+                        "first_eligible_call": pending_observed_fact.eligible_call,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "message_index": runtime_message_index,
+                        "provider_message_indices": [runtime_message_index],
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "chars": len(observed_fact_payload_text),
+                        "not_predictive": (
+                            pending_observed_fact.evidence_action <= actions_count
+                        ),
+                        "one_step_late": (calls != pending_observed_fact.eligible_call),
+                    }
+                else:
+                    prepared_observed_fact_delivery = None
                 context_parts = {
                     "system_user_chars": 0,
                     "assistant_chars": 0,
@@ -5395,6 +5413,13 @@ class MiniSweCentralAgent(BaseAgent):
                         delivered_progress_fact_ids.add(prepared_progress_fact.fact_id)
                         progress_fact_deliveries.append(prepared_progress_delivery)
                         pending_progress_fact = None
+                    if (
+                        prepared_observed_fact_delivery is not None
+                        and pending_observed_fact is not None
+                    ):
+                        observed_fact_ledger.add(pending_observed_fact.fact_id)
+                        observed_fact_deliveries.append(prepared_observed_fact_delivery)
+                        pending_observed_fact = None
                     if (
                         prepared_persistent_delivery is not None
                         and persistent_state_engine is not None
