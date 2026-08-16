@@ -98,8 +98,9 @@ from gt_engine.decision_sufficiency import (
 from gt_engine.decisive_derivation import (
     DecisiveDerivation,
     DecisiveStatus,
-    build_workspace_scan,
+    binary_interest,
     derive_decisive_facts,
+    workspace_from_snapshot,
 )
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.diagnostics import extract_diagnostic_anchors
@@ -1164,29 +1165,34 @@ def _derive_task_decisive_facts(
     *,
     instruction: str,
     catalog: BootstrapCatalog,
-    workspace_root: str,
+    snapshot: Any,
+    cwd: str,
     source_revision: str,
 ) -> DecisiveDerivation:
     """Deterministic task-decisive fact derivation (context-dominance).
 
-    Runs host-side over the exact task workspace (legal source 2) plus the
-    instruction and the already-built catalog.  Zero provider calls; a
-    derivation failure degrades to a recorded abstention so the ordinary
-    persistent-state path continues untouched.
+    Runs host-side over the in-container sensor snapshot (legal source 2)
+    captured through the same ``environment.exec`` channel that builds the
+    graph mirror, plus the instruction and the already-built catalog.  Zero
+    provider calls; a derivation failure degrades to a recorded abstention so
+    the ordinary persistent-state path continues untouched.
     """
 
     def _relative_deliverable(path: str) -> str:
         raw = str(path or "").replace("\\", "/")
         if not raw.startswith("/"):
             return raw
-        root_abs = os.path.abspath(os.fspath(workspace_root or ".")).replace("\\", "/")
+        root_abs = os.path.abspath(os.fspath(cwd or ".")).replace("\\", "/")
         try:
             return os.path.relpath(raw, root_abs).replace("\\", "/")
         except ValueError:
             return raw
 
     try:
-        workspace = build_workspace_scan(workspace_root)
+        workspace = workspace_from_snapshot(
+            snapshot.entries,
+            getattr(snapshot, "binary_heads", None),
+        )
         validation_commands = tuple(
             item.anchors[0]
             for item in catalog.items
@@ -3101,6 +3107,7 @@ class MiniSweCentralAgent(BaseAgent):
         task_deliverables = task_deliverable_paths(instruction)
         external_paths = task_external_paths(instruction)
         shebang_paths = task_shebang_paths(instruction)
+        capture_binary_heads = binary_interest(instruction)
         snapshot = await self._sensor.scan(
             environment,
             cwd=self.cwd,
@@ -3108,6 +3115,7 @@ class MiniSweCentralAgent(BaseAgent):
             tracked_paths=task_deliverables,
             external_paths=external_paths,
             shebang_paths=shebang_paths,
+            capture_binary_heads=capture_binary_heads,
         )
         source_receipt = source_revision_receipt(snapshot, task_deliverables)
         source_revision = source_receipt.revision
@@ -3607,7 +3615,8 @@ class MiniSweCentralAgent(BaseAgent):
                             decisive_derivation = _derive_task_decisive_facts(
                                 instruction=instruction,
                                 catalog=catalog,
-                                workspace_root=self.cwd or "/app",
+                                snapshot=snapshot,
+                                cwd=self.cwd or "/app",
                                 source_revision=source_revision,
                             )
                             persistent_state_initialization["decisive_derivation"] = (
@@ -6280,6 +6289,7 @@ class MiniSweCentralAgent(BaseAgent):
                             tracked_paths=task_deliverables,
                             external_paths=external_paths,
                             shebang_paths=shebang_paths,
+                            capture_binary_heads=capture_binary_heads,
                         )
                     transition = diff_snapshots(
                         snapshot,
@@ -6647,7 +6657,8 @@ class MiniSweCentralAgent(BaseAgent):
                                 decisive_derivation = _derive_task_decisive_facts(
                                     instruction=instruction,
                                     catalog=catalog,
-                                    workspace_root=self.cwd or "/app",
+                                    snapshot=snapshot,
+                                    cwd=self.cwd or "/app",
                                     source_revision=source_revision,
                                 )
                                 persistent_state_initialization["decisive_derivation"] = (

@@ -26,6 +26,7 @@ import hashlib
 import os
 import posixpath
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -57,6 +58,7 @@ SKIP_DIR_NAMES = frozenset(
         "build",
         "target",
         ".extracted",
+        "solution",
     }
 )
 _SKIP_FILE_NAMES = frozenset(
@@ -249,6 +251,79 @@ def build_workspace_scan(
 
     walk(root_path, 0)
     return tuple(entries)
+
+
+def workspace_from_snapshot(
+    entries: Mapping[str, Any],
+    binary_heads: Mapping[str, bytes] | None = None,
+    *,
+    max_files: int = SCAN_MAX_FILES,
+    max_head_bytes: int = SCAN_MAX_HEAD_BYTES,
+    max_text_chars: int = SCAN_MAX_TEXT_CHARS,
+) -> tuple[WorkspaceEntry, ...]:
+    """Deterministic bounded projection of the host-side sensor snapshot.
+
+    The live Mini-SWE path runs inside a task container while the host process
+    owns the sensor: ``central_runtime.WorkspaceSensor`` captures workspace
+    metadata, digests, and bounded content through ``environment.exec`` (the
+    same legal channel that builds the graph mirror).  The host filesystem
+    never contains ``/app``, so a host-side ``os.listdir`` walk cannot be the
+    live source of truth.  This pure function re-projects the already-legal
+    in-container capture into the same ``WorkspaceEntry`` view the detectors
+    consume.
+
+    Entries are expected to expose ``kind``, ``size``, ``digest`` and optional
+    ``content`` (the ``central_runtime.FileState`` shape).  Only regular files
+    are admitted; skip rules mirror :func:`build_workspace_scan`; counts and
+    byte caps are fixed; paths are normalized to workspace-relative form.
+    ``binary_heads`` carries the bounded in-container head-byte capture for
+    non-source candidates (also captured through the sensor channel), enabling
+    the ``binary_format`` detector on the live path.
+    """
+
+    heads = {_norm_path(path): bytes(value or b"") for path, value in (binary_heads or {}).items()}
+    result: list[WorkspaceEntry] = []
+    for path in sorted(entries):
+        if len(result) >= max_files:
+            break
+        state = entries[path]
+        if getattr(state, "kind", "") != "f":
+            continue
+        normalized = _norm_path(path)
+        if not normalized:
+            continue
+        parts = normalized.split("/")
+        if any(part in SKIP_DIR_NAMES for part in parts[:-1]):
+            continue
+        if parts[-1] in _SKIP_FILE_NAMES:
+            continue
+        content = getattr(state, "content", None)
+        text = ""
+        if isinstance(content, str) and content:
+            text = _bounded_text(content, max_text_chars)
+        result.append(
+            WorkspaceEntry(
+                path=normalized,
+                size=int(getattr(state, "size", 0) or 0),
+                sha256=str(getattr(state, "digest", "") or ""),
+                head=heads.get(normalized, b"")[:max_head_bytes],
+                text=text,
+            )
+        )
+    return tuple(result)
+
+
+def binary_interest(instruction: str) -> bool:
+    """Instruction-anchored gate for bounded binary-head capture.
+
+    Mirrors the ``binary_format`` detector's own interest test exactly (terms
+    or path entities) so the sensor knows whether to spend one bounded
+    in-container head capture.
+    """
+
+    return bool(_instruction_terms(instruction) & _BINARY_TERMS) or bool(
+        _instruction_paths(instruction)
+    )
 
 
 _MAGIC_MIN = 8

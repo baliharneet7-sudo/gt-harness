@@ -9,8 +9,10 @@ from gt_engine.decisive_derivation import (
     DecisiveKind,
     DecisiveStatus,
     WorkspaceEntry,
+    binary_interest,
     build_workspace_scan,
     derive_decisive_facts,
+    workspace_from_snapshot,
 )
 from gt_engine.hybrid_retrieval import EvidenceAuthority, EvidenceOrigin
 from gt_engine.persistent_execution_state import (
@@ -547,3 +549,135 @@ class TestDecisiveDerivationEngineIntegration:
             current_source_revision="source-1", provider_call=1, max_tokens=512
         )
         assert "Task-decisive context:" not in frame.rendered_text
+
+
+# ---------------------------------------------------------------------------
+# snapshot-fed projection (container-boundary regression): the host cannot see
+# /app, so the live path must derive from the in-container sensor snapshot.
+# ---------------------------------------------------------------------------
+
+
+class _SnapshotFile:
+    """Duck-typed FileState shape consumed by ``workspace_from_snapshot``."""
+
+    def __init__(
+        self,
+        kind: str,
+        size: int,
+        digest: str,
+        content: str | None = None,
+    ):
+        self.kind = kind
+        self.size = size
+        self.digest = digest
+        self.content = content
+
+
+def _snapshot_entry(path: str, text: str) -> tuple[str, _SnapshotFile]:
+    return path, _SnapshotFile("f", len(text.encode("utf-8")), _sha(text), text)
+
+
+class TestWorkspaceFromSnapshot:
+    def test_snapshot_entries_project_into_workspace(self):
+        entries = {
+            "main.py": _SnapshotFile("f", 5, _sha("hello"), "hello"),
+            "data.csv": _SnapshotFile("f", 4, _sha("a,b\n"), "a,b\n"),
+            "subdir": _SnapshotFile("d", 0, "", None),
+        }
+        workspace = workspace_from_snapshot(entries)
+        paths = [entry.path for entry in workspace]
+        assert paths == ["data.csv", "main.py"]
+        assert all(entry.text for entry in workspace)
+
+    def test_binary_head_enables_binary_format_detector(self):
+        instruction = (
+            "I have provided a file a.out that is a compiled C binary. "
+            "Write me a program extract.js that when run with node extract.js "
+            "/app/a.out > out.json extracts memory values."
+        )
+        entries = {
+            "a.out": _SnapshotFile("f", len(ELF_64), _sha("binary"), None),
+            "main.c": _SnapshotFile("f", 5, _sha("hello"), "hello"),
+        }
+        workspace = workspace_from_snapshot(
+            entries, binary_heads={"a.out": ELF_64}
+        )
+        facts = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            source_revision="source-1",
+        )
+        assert facts.status is DecisiveStatus.DERIVED
+        kinds = {fact.kind for fact in facts.facts}
+        assert DecisiveKind.BINARY_FORMAT in kinds
+        binary = next(fact for fact in facts.facts if fact.kind is DecisiveKind.BINARY_FORMAT)
+        assert binary.path == "a.out"
+        assert "ELF" in binary.gap_text
+
+    def test_skip_rules_apply_to_snapshot_entries(self):
+        entries = {
+            "main.py": _SnapshotFile("f", 5, _sha("hello"), "hello"),
+            "reward.txt": _SnapshotFile("f", 3, _sha("abc"), "abc"),
+            "ctrf.json": _SnapshotFile("f", 2, _sha("{}"), "{}"),
+            "solution/main.py": _SnapshotFile("f", 1, _sha("x"), "x"),
+            ".extracted/a.out": _SnapshotFile("f", 4, _sha("elf"), None),
+        }
+        workspace = workspace_from_snapshot(entries)
+        paths = [entry.path for entry in workspace]
+        assert paths == ["main.py"]
+
+    def test_deliverable_present_in_snapshot_suppresses_absent_fact(self):
+        instruction = (
+            "Produce /app/out.json containing the extracted memory values. "
+            "Sanitize the API keys in this repository."
+        )
+        entries = {
+            "config.py": _SnapshotFile(
+                "f", 40, _sha('AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n'),
+                'AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n',
+            ),
+            "out.json": _SnapshotFile("f", 20, _sha('{"ok": true}\n'), '{"ok": true}\n'),
+        }
+        workspace = workspace_from_snapshot(entries)
+        facts = derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            deliverables=("out.json",),
+            source_revision="source-1",
+        )
+        assert facts.status is DecisiveStatus.DERIVED
+        assert not any(fact.kind is DecisiveKind.DELIVERABLE_STATE for fact in facts.facts)
+        assert any(fact.kind is DecisiveKind.SECRET_LOCATION for fact in facts.facts)
+
+    def test_head_bytes_are_bounded(self):
+        entries = {
+            "a.bin": _SnapshotFile("f", 100_000, _sha("big"), None),
+        }
+        heads = {"a.bin": b"\x00" * 100_000}
+        workspace = workspace_from_snapshot(
+            entries, heads, max_head_bytes=64
+        )
+        assert len(workspace[0].head) == 64
+
+    def test_snapshot_projection_is_deterministic(self):
+        entries = {
+            "b.py": _SnapshotFile("f", 5, _sha("hello"), "hello"),
+            "a.py": _SnapshotFile("f", 5, _sha("world"), "world"),
+        }
+        first = workspace_from_snapshot(entries)
+        second = workspace_from_snapshot(dict(reversed(list(entries.items()))))
+        assert [entry.path for entry in first] == [entry.path for entry in second]
+        assert [entry.text for entry in first] == [entry.text for entry in second]
+
+
+class TestBinaryInterest:
+    def test_binary_terms_trigger_interest(self):
+        assert binary_interest(
+            "I have provided a file a.out that is a compiled C binary."
+        )
+        assert binary_interest("Identify the file type of archive.tar.gz.")
+
+    def test_plain_instruction_has_no_binary_interest(self):
+        assert not binary_interest(
+            "Please help sanitize my github repository dclm of all API keys."
+        )

@@ -146,6 +146,14 @@ _BACKGROUND_ARTIFACT_NAMES = frozenset(
 )
 _DELIVERABLE_SUFFIXES = (".jsonl", ".json", ".csv", ".txt", ".md", ".out", ".comp")
 _MAX_SOURCE_CAPTURE_BYTES = 250_000
+_BINARY_HEAD_BYTES = 2048
+_BINARY_HEAD_MAX_FILES = 32
+_BINARY_HEAD_SKIP_DIRS = frozenset(
+    {".extracted", ".pytest_cache", ".ruff_cache", "solution"}
+)
+_BINARY_HEAD_SKIP_FILES = frozenset(
+    {"reward.txt", "ctrf.json", "test_outputs.py", "solution"}
+)
 
 
 def _may_be_content_signature_source(path: str) -> bool:
@@ -178,6 +186,7 @@ class WorkspaceSnapshot:
     healthy: bool
     reason: str = ""
     elapsed_seconds: float = 0.0
+    binary_heads: dict[str, bytes] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1369,6 +1378,7 @@ class WorkspaceSensor:
                 False,
                 reason,
                 elapsed,
+                binary_heads=previous.binary_heads,
             )
         return WorkspaceSnapshot("", {}, False, reason, elapsed)
 
@@ -1384,6 +1394,7 @@ class WorkspaceSensor:
         tracked_paths: Iterable[str] = (),
         external_paths: Iterable[str] = (),
         shebang_paths: Iterable[str] = (),
+        capture_binary_heads: bool = False,
     ) -> WorkspaceSnapshot:
         started = time.monotonic()
         tracked = {
@@ -1661,7 +1672,121 @@ class WorkspaceSensor:
                 # Content witnesses improve semantic features, but metadata and
                 # hashes remain authoritative if both capture mechanisms fail.
                 pass
-        return replace(snapshot, entries=entries, revision=_snapshot_revision(entries))
+        binary_heads = dict(previous.binary_heads) if previous is not None else {}
+        if capture_binary_heads:
+            head_candidates: list[str] = []
+            for path, state in sorted(entries.items()):
+                if len(head_candidates) >= _BINARY_HEAD_MAX_FILES:
+                    break
+                if state.kind != "f":
+                    continue
+                relative = _workspace_relative_path(path)
+                if (
+                    is_validation_source(path)
+                    or relative in tracked
+                    or relative in shebang_candidates
+                ):
+                    continue
+                parts = relative.split("/")
+                if any(part in _BINARY_HEAD_SKIP_DIRS for part in parts[:-1]):
+                    continue
+                if parts[-1] in _BINARY_HEAD_SKIP_FILES:
+                    continue
+                old = comparison_previous.entries.get(path) if comparison_previous else None
+                if old is not None and _same_metadata(old, state) and path in binary_heads:
+                    continue
+                head_candidates.append(path)
+            for head_batch in tuple(
+                head_candidates[offset : offset + 8]
+                for offset in range(0, len(head_candidates), 8)
+            ):
+                script = (
+                    "import base64,json,sys;"
+                    "print(json.dumps({p:base64.b64encode(open(p,'rb').read("
+                    + str(_BINARY_HEAD_BYTES)
+                    + ")).decode() for p in sys.argv[1:]}))"
+                )
+                command = (
+                    "python3 -c "
+                    + shlex.quote(script)
+                    + " "
+                    + " ".join(shlex.quote(path) for path in head_batch)
+                )
+                try:
+                    kwargs = {"cwd": cwd, "env": {}, "timeout_sec": 10}
+                    encoded_heads: dict[str, Any] = {}
+                    if self._capture_backend != "posix_base64":
+                        captured = (
+                            await recorder.exec(
+                                environment,
+                                command,
+                                category=HostExecCategory.WORKSPACE_CAPTURE,
+                                action_id=action_id,
+                                source_revision=source_revision,
+                                **kwargs,
+                            )
+                            if recorder is not None
+                            else await environment.exec(command, **kwargs)
+                        )
+                        if captured.return_code == 0:
+                            try:
+                                parsed = json.loads(captured.stdout or "{}")
+                                if isinstance(parsed, dict):
+                                    encoded_heads = parsed
+                            except (TypeError, ValueError):
+                                encoded_heads = {}
+                        else:
+                            self._capture_backend = "posix_base64"
+                    missing_heads: list[str] = []
+                    for path in head_batch:
+                        value = encoded_heads.get(path)
+                        if not isinstance(value, str):
+                            missing_heads.append(path)
+                            continue
+                        try:
+                            head_bytes = base64.b64decode(value, validate=True)
+                        except (ValueError, TypeError):
+                            missing_heads.append(path)
+                            continue
+                        binary_heads[path] = head_bytes[:_BINARY_HEAD_BYTES]
+                    if missing_heads:
+                        fallback_command = (
+                            "for p in "
+                            + " ".join(shlex.quote(path) for path in missing_heads)
+                            + "; do printf '%s\\t' \"$p\"; "
+                            + "head -c "
+                            + str(_BINARY_HEAD_BYTES)
+                            + " \"$p\" | base64 | tr -d '\\n'; printf '\\n'; done"
+                        )
+                        fallback = (
+                            await recorder.exec(
+                                environment,
+                                fallback_command,
+                                category=HostExecCategory.WORKSPACE_CAPTURE,
+                                action_id=action_id,
+                                source_revision=source_revision,
+                                **kwargs,
+                            )
+                            if recorder is not None
+                            else await environment.exec(fallback_command, **kwargs)
+                        )
+                        if fallback.return_code == 0:
+                            for line in (fallback.stdout or "").splitlines():
+                                path, separator, value = line.partition("\t")
+                                if separator and path in missing_heads and value:
+                                    try:
+                                        head_bytes = base64.b64decode(value, validate=True)
+                                    except (ValueError, TypeError):
+                                        continue
+                                    binary_heads[path] = head_bytes[:_BINARY_HEAD_BYTES]
+                except Exception:
+                    pass
+        return replace(
+            snapshot,
+            entries=entries,
+            revision=_snapshot_revision(entries),
+            binary_heads=binary_heads,
+        )
 
 
 def lint_commands(paths: Iterable[str]) -> tuple[tuple[str, str], ...]:

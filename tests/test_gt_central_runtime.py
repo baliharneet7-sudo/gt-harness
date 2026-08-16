@@ -1124,6 +1124,159 @@ async def test_sensor_caches_missing_python_capture_backend_across_source_edits(
 
 
 @pytest.mark.asyncio
+async def test_sensor_captures_binary_heads_only_on_request():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    elf_head = b"\x7fELF\x02\x01\x01\x00" + bytes(24)
+    encoded = base64.b64encode(elf_head).decode()
+    source = "int v = 1;\n"
+    source_encoded = base64.b64encode(source.encode()).decode()
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if command.startswith("sha256sum"):
+                return Result(("a" * 64) + "  app.c\n")
+            if command.startswith("python3 -c"):
+                if "open(" in command:
+                    return Result('{"a.bin": "' + encoded + '"}\n')
+                return Result('{"app.c": "' + source_encoded + '"}\n')
+            return Result("f\t9\t2.0\t2.0\tapp.c\t\nf\t28\t2.0\t2.0\ta.bin\t\n")
+
+    sensor = WorkspaceSensor()
+    without = await sensor.scan(Environment(), cwd="/app")
+    with_heads = await sensor.scan(Environment(), cwd="/app", capture_binary_heads=True)
+
+    assert without.binary_heads == {}
+    assert with_heads.binary_heads == {"a.bin": elf_head}
+    assert with_heads.entries["app.c"].content == source
+
+
+@pytest.mark.asyncio
+async def test_sensor_binary_heads_preserved_across_unchanged_scans():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    elf_head = b"\x7fELF\x02\x01\x01\x00" + bytes(24)
+    encoded = base64.b64encode(elf_head).decode()
+    capture_calls = 0
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            nonlocal capture_calls
+            if command.startswith("sha256sum"):
+                return Result(("a" * 64) + "  app.c\n")
+            if command.startswith("python3 -c") and "open(" in command:
+                capture_calls += 1
+                return Result('{"a.bin": "' + encoded + '"}\n')
+            return Result("f\t9\t2.0\t2.0\tapp.c\t\nf\t28\t2.0\t2.0\ta.bin\t\n")
+
+    sensor = WorkspaceSensor()
+    first = await sensor.scan(Environment(), cwd="/app", capture_binary_heads=True)
+    second = await sensor.scan(
+        Environment(), cwd="/app", previous=first, capture_binary_heads=True
+    )
+
+    assert first.binary_heads == {"a.bin": elf_head}
+    assert second.binary_heads == {"a.bin": elf_head}
+    assert capture_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sensor_binary_heads_do_not_change_workspace_revision():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    elf_head = b"\x7fELF\x02\x01\x01\x00" + bytes(24)
+    encoded = base64.b64encode(elf_head).decode()
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if command.startswith("sha256sum"):
+                return Result(("a" * 64) + "  app.c\n")
+            if command.startswith("python3 -c") and "open(" in command:
+                return Result('{"a.bin": "' + encoded + '"}\n')
+            return Result("f\t9\t2.0\t2.0\tapp.c\t\nf\t28\t2.0\t2.0\ta.bin\t\n")
+
+    sensor = WorkspaceSensor()
+    plain = await sensor.scan(Environment(), cwd="/app")
+    headed = await sensor.scan(Environment(), cwd="/app", capture_binary_heads=True)
+
+    assert plain.revision == headed.revision
+
+
+@pytest.mark.asyncio
+async def test_sensor_binary_head_capture_skips_grader_artifact_names():
+    import base64
+
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    encoded = base64.b64encode(b"\x7fELF" + bytes(24)).decode()
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if command.startswith("sha256sum"):
+                lines = []
+                for token in command.split("-- ", 1)[-1].split():
+                    lines.append(("a" * 64) + "  " + token)
+                return Result("\n".join(lines) + "\n")
+            if command.startswith("python3 -c") and "open(" in command:
+                return Result('{"reward.txt": "' + encoded + '"}\n')
+            return Result(
+                "f\t9\t2.0\t2.0\tapp.c\t\n"
+                "f\t28\t2.0\t2.0\treward.txt\t\n"
+                "f\t28\t2.0\t2.0\tctrf.json\t\n"
+                "f\t28\t2.0\t2.0\ttest_outputs.py\t\n"
+                "f\t28\t2.0\t2.0\tsolution/main.py\t\n"
+            )
+
+    snapshot = await WorkspaceSensor().scan(
+        Environment(), cwd="/app", capture_binary_heads=True
+    )
+
+    assert snapshot.binary_heads == {}
+    assert snapshot.healthy is True
+
+
+@pytest.mark.asyncio
+async def test_sensor_binary_head_failure_fails_open():
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        async def exec(self, command, **kwargs):
+            if command.startswith("sha256sum"):
+                return Result(("a" * 64) + "  app.c\n")
+            if command.startswith("python3 -c") and "open(" in command:
+                return Result("boom\n", 1)
+            return Result("f\t9\t2.0\t2.0\tapp.c\t\nf\t28\t2.0\t2.0\ta.bin\t\n")
+
+    snapshot = await WorkspaceSensor().scan(
+        Environment(), cwd="/app", capture_binary_heads=True
+    )
+
+    assert snapshot.healthy is True
+    assert snapshot.binary_heads == {}
+
+
+@pytest.mark.asyncio
 async def test_sensor_captures_allowlisted_external_source_path():
     import base64
 
