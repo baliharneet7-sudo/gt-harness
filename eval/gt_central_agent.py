@@ -108,6 +108,11 @@ from gt_engine.hybrid_retrieval import (
     build_preemptive_frame,
     filter_provider_known_context,
 )
+from gt_engine.observed_facts import (
+    ObservedFact,
+    extract_observed_facts,
+    observed_fact_payload,
+)
 from gt_engine.persistent_execution_state import (
     SELECT_CATALOG_TOOL_NAME,
     BootstrapCatalog,
@@ -1395,6 +1400,7 @@ class MiniSweCentralAgent(BaseAgent):
         max_validation_timeout_sec: float = 120.0,
         validation_timeout_budget_ratio: float = 0.20,
         enable_progress_control: bool = True,
+        enable_observed_facts: bool | None = None,
         context_capacity_chars: int = 400_000,
         context_trigger_chars: int | None = None,
         context_target_chars: int | None = None,
@@ -1616,6 +1622,12 @@ class MiniSweCentralAgent(BaseAgent):
             1.0, max(0.01, float(validation_timeout_budget_ratio))
         )
         self.enable_progress_control = enable_progress_control
+        self.enable_observed_facts = bool(
+            enable_observed_facts
+            if enable_observed_facts is not None
+            else enable_repository_intelligence and integration_mode
+            not in {GTIntegrationMode.OFF, GTIntegrationMode.AUDIT}
+        )
         self.context_capacity_chars = max(10_000, int(context_capacity_chars))
         self.context_trigger_chars = max(
             1_000,
@@ -3094,6 +3106,12 @@ class MiniSweCentralAgent(BaseAgent):
         activity_events = 0
         task_progress_changes = 0
         source_validation_debt = False
+        # General observed-execution fact surface (source 3): mechanically
+        # recognizable facts in the model's own command output, delivered at
+        # most once per task when new to the provider view.
+        observed_fact_ledger: set[str] = set()
+        observed_fact_deliveries: list[dict[str, Any]] = []
+        pending_observed_fact: ObservedFact | None = None
         if graph_receipt.complete:
             repository_evidence, repository_session = await self._start_repository_session(
                 environment,
@@ -4466,6 +4484,17 @@ class MiniSweCentralAgent(BaseAgent):
                     revision=source_revision,
                     priority=40,
                 )
+                if pending_observed_fact is not None:
+                    register_contribution(
+                        surface="observed_execution",
+                        payload=observed_fact_payload(pending_observed_fact),
+                        claim_ids=(pending_observed_fact.fact_id,),
+                        fact_ids=(pending_observed_fact.fact_id,),
+                        evidence_action=pending_observed_fact.evidence_action,
+                        eligible_call=pending_observed_fact.eligible_call,
+                        revision=pending_observed_fact.source_revision,
+                        priority=10,
+                    )
                 compiled_contributions = compile_contributions(
                     tuple(contribution_candidates),
                     # Raw workspace/source revision and graph source revision
@@ -4506,6 +4535,14 @@ class MiniSweCentralAgent(BaseAgent):
                 if progress_payload and not contribution_selected("progress_frame"):
                     progress_payload = ""
                     prepared_progress_fact = None
+                observed_fact_payload_text = ""
+                observed_fact_selected = False
+                if (
+                    pending_observed_fact is not None
+                    and contribution_selected("observed_execution")
+                ):
+                    observed_fact_payload_text = observed_fact_payload(pending_observed_fact)
+                    observed_fact_selected = True
                 contribution_receipt = compiled_contributions.as_dict()
                 contribution_receipt.update(
                     {
@@ -4526,12 +4563,26 @@ class MiniSweCentralAgent(BaseAgent):
                         frontier_payload,
                         guidance_payload,
                         progress_payload,
+                        observed_fact_payload_text,
                     )
                     if item
                 ]
                 legacy_runtime_payload = "\n\n".join(legacy_runtime_parts)
                 preemptive_payload = ""
                 runtime_payload = legacy_runtime_payload
+                if observed_fact_selected and pending_observed_fact is not None:
+                    observed_fact_ledger.add(pending_observed_fact.fact_id)
+                    observed_fact_deliveries.append(
+                        {
+                            "fact_id": pending_observed_fact.fact_id,
+                            "kind": pending_observed_fact.kind,
+                            "evidence_action": pending_observed_fact.evidence_action,
+                            "first_eligible_call": pending_observed_fact.eligible_call,
+                            "chars": len(observed_fact_payload_text),
+                            "not_predictive": True,
+                        }
+                    )
+                    pending_observed_fact = None
                 frontier_decisions.append(
                     {
                         "call": calls,
@@ -6958,6 +7009,21 @@ class MiniSweCentralAgent(BaseAgent):
                         validation=classification,
                         proposed=proposed,
                     )
+                    # General observed-execution fact surface (source 3):
+                    # recognize decision-relevant facts in the model's own
+                    # command output and mark them pending for the next
+                    # provider request (once per task).  Pattern-driven and
+                    # cross-task, never a grader read.
+                    if self.enable_observed_facts:
+                        _observed_facts = extract_observed_facts(
+                            command=command,
+                            output=output["output"],
+                            source_revision=source_revision,
+                            evidence_action=actions_count,
+                            eligible_call=calls + 1,
+                            already_delivered=observed_fact_ledger,
+                        )
+                        pending_observed_fact = _observed_facts[0] if _observed_facts else None
                     if self.preflight_mode is not PreflightMode.OFF:
                         self._features.record_action_postflight(
                             proposed,
@@ -8969,6 +9035,10 @@ class MiniSweCentralAgent(BaseAgent):
                                     "evidence_action": pending_progress_fact.evidence_action,
                                 }
                             ),
+                        },
+                        "observed_facts": {
+                            "enabled": bool(self.enable_observed_facts),
+                            "fact_deliveries": observed_fact_deliveries,
                         },
                         "deadline": {
                             "execution_budget_sec": effective_budget,

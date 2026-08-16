@@ -27,6 +27,7 @@ SURFACE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("progress", ("progress", "fact_deliveries")),
     ("completion", ("completion", "deliveries")),
     ("completion_visible", ("completion", "visible_deliveries")),
+    ("observed_execution", ("observed_facts", "fact_deliveries")),
 )
 
 

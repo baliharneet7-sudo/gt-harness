@@ -137,3 +137,74 @@ def test_receipt_audit_fails_closed_on_illegal_evidence_origin(tmp_path):
     report = audit_run_root(tmp_path)
     assert report["audit_status"] == "INTEGRITY_FAILED"
     assert any("illegal_evidence_origin" in item for item in report["failures"])
+
+
+def test_abstention_gap_surfaces_when_observed_fact_marker_present_but_undelivered(
+    tmp_path,
+):
+    """The recurrence gate: a task whose trajectory contains a mechanically
+    recognizable observed fact (source 3) but whose receipt records zero
+    observed-fact deliveries must be flagged as an abstention gap, while
+    integrity (no-grader-access) stays certified."""
+    task = tmp_path / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    trajectory = {
+        "info": {"exit_status": "Submitted"},
+        "messages": [
+            {"role": "user", "content": "Fix it."},
+            {
+                "role": "assistant",
+                "content": "",
+                "extra": {"actions": [{"command": "readelf -h a.out", "tool_call_id": "c1"}]},
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": (
+                    "Type: DYN (Position-Independent Executable file)\n"
+                    "Class: ELF64\n"
+                ),
+                "extra": {
+                    "returncode": 0,
+                    "raw_output": (
+                        "Type: DYN (Position-Independent Executable file)\nClass: ELF64\n"
+                    ),
+                },
+            },
+        ],
+    }
+    (task / "miniswe_trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt = {
+        "actions": 1,
+        "model_call_contexts": [],
+        "features": {"effect_trace": []},
+        "guidance_deliveries": [],
+        "observed_facts": {"enabled": True, "fact_deliveries": []},
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+    assert report["audit_status"] == "INTEGRITY_CERTIFIED"
+    assert any("observed_fact_abstention_gap" in gap for gap in report["abstention_gaps"])
+
+
+def test_no_abstention_gap_when_observed_facts_delivered(tmp_path):
+    task = tmp_path / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    (task / "miniswe_trajectory.json").write_text(
+        json.dumps({"info": {"exit_status": "Submitted"}, "messages": []}),
+        encoding="utf-8",
+    )
+    receipt = {
+        "actions": 1,
+        "model_call_contexts": [],
+        "features": {"effect_trace": []},
+        "guidance_deliveries": [],
+        "observed_facts": {
+            "enabled": True,
+            "fact_deliveries": [{"fact_id": "observed-x", "chars": 40}],
+        },
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    report = audit_run_root(tmp_path)
+    assert report["abstention_gaps"] == []

@@ -38,6 +38,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from gt_engine.delivery_audit import audit_provider_deliveries  # noqa: E402
+from gt_engine.observed_facts import (  # noqa: E402
+    extract_observed_facts,
+)
 
 # Grader-only artifact path markers that must never appear as a read source in
 # the active runtime.  These are deliberately specific to hidden verifier /
@@ -231,6 +234,57 @@ def _static_source_boundary() -> dict[str, object]:
     }
 
 
+def _trajectory_observed_markers(trajectory: dict) -> int:
+    """Count mechanically recognizable observed-fact markers in a trajectory's
+    tool outputs (source 3).  Uses the same pattern table as the live engine."""
+
+    count = 0
+    seen: set[str] = set()
+    for message in trajectory.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text += str(part.get("text") or "")
+        extra = message.get("extra") or {}
+        raw = str(extra.get("raw_output") or "") or text
+        command = str(extra.get("command") or "")
+        facts = extract_observed_facts(
+            command=command,
+            output=raw,
+            source_revision="audit",
+            evidence_action=0,
+            eligible_call=1,
+            already_delivered=seen,
+        )
+        for fact in facts:
+            seen.add(fact.fact_id)
+            count += 1
+    return count
+
+
+def _abstention_gap(receipt: dict, trajectory: dict | None, task: str) -> list[str]:
+    """Flag tasks where the model observed decision-relevant facts (source 3)
+    but GT delivered none of them — the extract-elf recurrence gate."""
+
+    observed = (receipt.get("observed_facts") or {}).get("fact_deliveries") or []
+    if observed:
+        return []
+    if trajectory is None:
+        return []
+    markers = _trajectory_observed_markers(trajectory)
+    if markers:
+        return [
+            f"{task}:observed_fact_abstention_gap:{markers}_markers_seen_but_0_delivered"
+        ]
+    return []
+
+
 def _receipt_integrity(receipt: dict, task: str) -> tuple[list[dict], list[str]]:
     """Validate every model-visible delivery's evidence provenance is legal."""
 
@@ -303,8 +357,23 @@ def audit_run_root(root: Path) -> dict:
             "delivery_failures": failures,
         }
         receipt_failures.extend(failures)
+        trajectory_path = receipt_path.parent / "miniswe_trajectory.json"
+        trajectory = None
+        if trajectory_path.exists():
+            try:
+                trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                trajectory = None
+        gap_failures = _abstention_gap(receipt, trajectory, task=task)
+        per_task[task]["abstention_gap"] = gap_failures
+        receipt_failures.extend(failures)
 
     all_failures = static_failures + receipt_failures
+    abstention_gaps = [
+        gap
+        for result in per_task.values()
+        for gap in (result.get("abstention_gap") or [])
+    ]
     proven = bool(static["checked_files"]) and not all_failures
     return {
         "schema": "gt.central_integrity_audit.v1",
@@ -312,6 +381,7 @@ def audit_run_root(root: Path) -> dict:
         "static": static,
         "receipts_audited": len(receipts),
         "per_task": per_task,
+        "abstention_gaps": abstention_gaps,
         "failures": all_failures,
         "audit_status": "INTEGRITY_CERTIFIED" if proven else "INTEGRITY_FAILED",
     }
