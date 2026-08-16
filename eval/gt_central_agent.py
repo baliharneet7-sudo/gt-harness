@@ -95,6 +95,12 @@ from gt_engine.decision_sufficiency import (
     ProviderVisibleState,
     compile_decision_sufficiency,
 )
+from gt_engine.decisive_derivation import (
+    DecisiveDerivation,
+    DecisiveStatus,
+    build_workspace_scan,
+    derive_decisive_facts,
+)
 from gt_engine.deep_metrics import normalized_token_cost
 from gt_engine.diagnostics import extract_diagnostic_anchors
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
@@ -107,12 +113,6 @@ from gt_engine.hybrid_retrieval import (
     RetrievalState,
     build_preemptive_frame,
     filter_provider_known_context,
-)
-from gt_engine.decisive_derivation import (
-    DecisiveDerivation,
-    DecisiveStatus,
-    build_workspace_scan,
-    derive_decisive_facts,
 )
 from gt_engine.observed_facts import (
     ObservedFact,

@@ -40,7 +40,6 @@ from pathlib import Path
 from gt_engine.decisive_derivation import (
     DecisiveStatus,
     WorkspaceEntry,
-    build_workspace_scan,
     derive_decisive_facts,
 )
 

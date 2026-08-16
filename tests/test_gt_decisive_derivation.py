@@ -5,8 +5,6 @@ import json
 import os
 import tempfile
 
-import pytest
-
 from gt_engine.decisive_derivation import (
     DecisiveKind,
     DecisiveStatus,
@@ -14,7 +12,7 @@ from gt_engine.decisive_derivation import (
     build_workspace_scan,
     derive_decisive_facts,
 )
-from gt_engine.hybrid_retrieval import EvidenceAuthority, EvidenceOrigin, StructuralLink
+from gt_engine.hybrid_retrieval import EvidenceAuthority, EvidenceOrigin
 from gt_engine.persistent_execution_state import (
     BootstrapSelection,
     ContextFrameKind,

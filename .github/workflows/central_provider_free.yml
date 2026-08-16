@@ -154,6 +154,7 @@ jobs:
             gt_engine/graph_context.py gt_engine/task_contract.py \
             gt_engine/indexer.py gt_engine/hybrid_retrieval.py \
             gt_engine/diagnostics.py \
+            gt_engine/decisive_derivation.py \
             gt_engine/decision_sufficiency.py \
             gt_engine/persistent_execution_state.py \
             gt_engine/thin_compiler.py \
@@ -174,6 +175,9 @@ jobs:
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_trajectory_audit.py \
             scripts/central_integrity_audit.py \
+            scripts/central_decision_completeness.py \
+            scripts/central_decisive_replay.py \
+            scripts/central_pre_smoke_gate.py \
             gt_engine/replay_bundle.py \
             scripts/central_efficiency_replay.py \
             scripts/central_regression_preservation_replay.py \
@@ -215,7 +219,8 @@ jobs:
             tests/test_live_retrieval_profile.py \
             tests/test_gt_contributions.py \
             tests/test_gt_component_registry.py \
-            tests/test_decision_point_eval.py
+            tests/test_decision_point_eval.py \
+            tests/test_gt_decisive_derivation.py
 
       - name: Provider-free receipt
         if: always()

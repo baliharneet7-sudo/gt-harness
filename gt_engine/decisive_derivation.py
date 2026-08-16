@@ -26,7 +26,7 @@ import hashlib
 import os
 import posixpath
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -443,8 +443,14 @@ def _secret_detector(
         )
         facts.append(
             DecisiveFact(
-                fact_id=_stable_id("decisive", DecisiveKind.SECRET_LOCATION.value, pattern_name, hit_path, source_revision),
-                claim_id=_stable_id("claim", "decisive", DecisiveKind.SECRET_LOCATION.value, pattern_name, hit_path, hit_line),
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.SECRET_LOCATION.value, pattern_name, hit_path,
+                    source_revision,
+                ),
+                claim_id=_stable_id(
+                    "claim", "decisive", DecisiveKind.SECRET_LOCATION.value, pattern_name,
+                    hit_path, hit_line,
+                ),
                 kind=DecisiveKind.SECRET_LOCATION,
                 path=hit_path,
                 line=hit_line,
@@ -499,8 +505,12 @@ def _binary_detector(
         gap = f"Binary {entry.path} is a {kind} file."
         facts.append(
             DecisiveFact(
-                fact_id=_stable_id("decisive", DecisiveKind.BINARY_FORMAT.value, entry.path, kind, source_revision),
-                claim_id=_stable_id("claim", "decisive", DecisiveKind.BINARY_FORMAT.value, entry.path, kind),
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.BINARY_FORMAT.value, entry.path, kind, source_revision
+                ),
+                claim_id=_stable_id(
+                    "claim", "decisive", DecisiveKind.BINARY_FORMAT.value, entry.path, kind
+                ),
                 kind=DecisiveKind.BINARY_FORMAT,
                 path=entry.path,
                 gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
@@ -531,7 +541,9 @@ def _required_check_detector(
         gap = f"Required validation command: {clean}"
         facts.append(
             DecisiveFact(
-                fact_id=_stable_id("decisive", DecisiveKind.REQUIRED_CHECK.value, clean, source_revision),
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.REQUIRED_CHECK.value, clean, source_revision
+                ),
                 claim_id=_stable_id("claim", "decisive", DecisiveKind.REQUIRED_CHECK.value, clean),
                 kind=DecisiveKind.REQUIRED_CHECK,
                 path="",
@@ -567,8 +579,12 @@ def _deliverable_detector(
         gap = f"Required deliverable {path} is absent in the workspace."
         facts.append(
             DecisiveFact(
-                fact_id=_stable_id("decisive", DecisiveKind.DELIVERABLE_STATE.value, path, source_revision),
-                claim_id=_stable_id("claim", "decisive", DecisiveKind.DELIVERABLE_STATE.value, path),
+                fact_id=_stable_id(
+                    "decisive", DecisiveKind.DELIVERABLE_STATE.value, path, source_revision
+                ),
+                claim_id=_stable_id(
+                    "claim", "decisive", DecisiveKind.DELIVERABLE_STATE.value, path
+                ),
                 kind=DecisiveKind.DELIVERABLE_STATE,
                 path=path,
                 gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),

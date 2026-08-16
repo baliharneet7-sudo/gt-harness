@@ -19,8 +19,6 @@ from typing import Any
 
 from gt_engine.decisive_derivation import (
     DecisiveDerivation,
-    DecisiveFact,
-    DecisiveKind,
     DecisiveStatus,
 )
 from gt_engine.hybrid_retrieval import (
