@@ -108,6 +108,12 @@ from gt_engine.hybrid_retrieval import (
     build_preemptive_frame,
     filter_provider_known_context,
 )
+from gt_engine.decisive_derivation import (
+    DecisiveDerivation,
+    DecisiveStatus,
+    build_workspace_scan,
+    derive_decisive_facts,
+)
 from gt_engine.observed_facts import (
     ObservedFact,
     extract_observed_facts,
@@ -1152,6 +1158,57 @@ def _preemptive_retrieval_gate_reason(
     ):
         return "validation_pass_no_diagnostic"
     return None
+
+
+def _derive_task_decisive_facts(
+    *,
+    instruction: str,
+    catalog: BootstrapCatalog,
+    workspace_root: str,
+    source_revision: str,
+) -> DecisiveDerivation:
+    """Deterministic task-decisive fact derivation (context-dominance).
+
+    Runs host-side over the exact task workspace (legal source 2) plus the
+    instruction and the already-built catalog.  Zero provider calls; a
+    derivation failure degrades to a recorded abstention so the ordinary
+    persistent-state path continues untouched.
+    """
+
+    def _relative_deliverable(path: str) -> str:
+        raw = str(path or "").replace("\\", "/")
+        if not raw.startswith("/"):
+            return raw
+        root_abs = os.path.abspath(os.fspath(workspace_root or ".")).replace("\\", "/")
+        try:
+            return os.path.relpath(raw, root_abs).replace("\\", "/")
+        except ValueError:
+            return raw
+
+    try:
+        workspace = build_workspace_scan(workspace_root)
+        validation_commands = tuple(
+            item.anchors[0]
+            for item in catalog.items
+            if item.kind.value == "validation" and item.required and item.anchors
+        )
+        deliverables = tuple(
+            _relative_deliverable(item.path)
+            for item in catalog.items
+            if item.kind.value == "deliverable" and item.required and item.path
+        )
+        return derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace,
+            validation_commands=validation_commands,
+            deliverables=deliverables,
+            source_revision=source_revision,
+        )
+    except Exception as exc:  # noqa: BLE001 - derivation fails open to abstention
+        return DecisiveDerivation(
+            status=DecisiveStatus.ABSTAINED,
+            reason_codes=(f"derivation_error:{type(exc).__name__}",),
+        )
 
 
 def _retrieval_action_state(
@@ -3547,6 +3604,15 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                         }
                         if catalog.complete:
+                            decisive_derivation = _derive_task_decisive_facts(
+                                instruction=instruction,
+                                catalog=catalog,
+                                workspace_root=self.cwd or "/app",
+                                source_revision=source_revision,
+                            )
+                            persistent_state_initialization["decisive_derivation"] = (
+                                decisive_derivation.as_dict()
+                            )
                             persistent_state_engine = (
                                 PersistentExecutionStateEngine.initialize_from_graph(
                                     task=instruction,
@@ -3565,6 +3631,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         for document in preemptive_repository.documents
                                     },
                                     workspace_root=self.cwd or "/app",
+                                    decisive=decisive_derivation,
                                 )
                             )
                             remaining_for_bootstrap = (
@@ -6577,6 +6644,15 @@ class MiniSweCentralAgent(BaseAgent):
                                 "activation_action": actions_count,
                             }
                             if catalog.complete:
+                                decisive_derivation = _derive_task_decisive_facts(
+                                    instruction=instruction,
+                                    catalog=catalog,
+                                    workspace_root=self.cwd or "/app",
+                                    source_revision=source_revision,
+                                )
+                                persistent_state_initialization["decisive_derivation"] = (
+                                    decisive_derivation.as_dict()
+                                )
                                 persistent_state_engine = (
                                     PersistentExecutionStateEngine.initialize_from_graph(
                                         task=instruction,
@@ -6595,6 +6671,7 @@ class MiniSweCentralAgent(BaseAgent):
                                             for document in activation_repository.documents
                                         },
                                         workspace_root=self.cwd or "/app",
+                                        decisive=decisive_derivation,
                                     )
                                 )
                                 remaining_for_bootstrap = (

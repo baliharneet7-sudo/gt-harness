@@ -149,6 +149,7 @@ class EvidenceAuthority(StrEnum):
     RANKING_SUPPORT = "ranking_support"
     CERTIFIED_RELATION = "certified_relation"
     EXECUTION_OBSERVATION = "execution_observation"
+    DETERMINISTIC_DERIVED = "deterministic_derived"
 
 
 _CHANNEL_ORDER = {

@@ -61,6 +61,7 @@ PROVIDER_MATERIALITY_REASONS = frozenset(
         "related_advisory_obligation",
         "current_attributable_failure",
         "declared_validation_status_change",
+        "task_decisive_evidence",
     }
 )
 

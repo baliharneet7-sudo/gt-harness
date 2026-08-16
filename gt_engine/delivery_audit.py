@@ -309,6 +309,7 @@ def audit_provider_deliveries(
                     "identity_only",
                     "certified_relation",
                     "execution_observation",
+                    "deterministic_derived",
                 }
                 and metadata_by_claim[claim_id].get("novel_to_provider_view") is True
                 and metadata_by_claim[claim_id].get("known_to_model") is False

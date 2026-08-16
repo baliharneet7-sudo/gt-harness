@@ -17,6 +17,12 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
+from gt_engine.decisive_derivation import (
+    DecisiveDerivation,
+    DecisiveFact,
+    DecisiveKind,
+    DecisiveStatus,
+)
 from gt_engine.hybrid_retrieval import (
     EvidenceAuthority,
     EvidenceOrigin,
@@ -1203,6 +1209,7 @@ class PersistentExecutionStateEngine:
         workspace_root: str = "/app",
         path_origins: dict[str, EvidenceOrigin] | None = None,
         path_origin_revisions: dict[str, str] | None = None,
+        decisive: DecisiveDerivation | None = None,
     ) -> None:
         task_digest = hashlib.sha256(str(task or "").encode("utf-8")).hexdigest()
         self._catalog = catalog
@@ -1279,7 +1286,19 @@ class PersistentExecutionStateEngine:
         self._receipts: list[dict[str, Any]] = []
         self._last_dispatched_version = 0
         self._exposed_claim_ids: set[str] = set()
+        self._decisive = decisive or DecisiveDerivation(
+            status=DecisiveStatus.ABSTAINED,
+            reason_codes=("no_decisive_derivation",),
+        )
         self._record("initialize", source_revision=catalog.source_revision)
+        self._record(
+            "decisive_derivation",
+            status=self._decisive.status.value,
+            reason_codes=list(self._decisive.reason_codes),
+            detectors=dict(self._decisive.detectors),
+            fact_count=len(self._decisive.facts),
+            scan=dict(self._decisive.scan),
+        )
 
     @classmethod
     def initialize_from_graph(
@@ -1292,6 +1311,7 @@ class PersistentExecutionStateEngine:
         workspace_root: str = "/app",
         path_origins: dict[str, EvidenceOrigin] | None = None,
         path_origin_revisions: dict[str, str] | None = None,
+        decisive: DecisiveDerivation | None = None,
     ) -> PersistentExecutionStateEngine:
         if not catalog.complete:
             raise ValueError("persistent execution state requires a complete graph catalog")
@@ -1303,6 +1323,7 @@ class PersistentExecutionStateEngine:
             workspace_root=workspace_root,
             path_origins=path_origins,
             path_origin_revisions=path_origin_revisions,
+            decisive=decisive,
         )
 
     @property
@@ -2041,6 +2062,7 @@ class PersistentExecutionStateEngine:
             known_to_model: bool = False,
             known_texts: tuple[str, ...] = (),
             relation: str = "",
+            detector: str = "",
         ) -> dict[str, Any]:
             return {
                 "origin": origin.value,
@@ -2053,6 +2075,8 @@ class PersistentExecutionStateEngine:
                 "relation_endpoint": relation_endpoint,
                 "declared_validation_id": declared_validation_id,
                 "relation": relation,
+                "detector": detector,
+                "decisive": bool(detector),
                 "_known_texts": known_texts,
             }
 
@@ -2067,6 +2091,24 @@ class PersistentExecutionStateEngine:
             ):
                 return item
             return None
+
+        if self._last_dispatched_version == 0:
+            for fact in self._decisive.facts:
+                lines.append(
+                    (
+                        fact.claim_id,
+                        fact.gap_text,
+                        metadata(
+                            origin=EvidenceOrigin(str(fact.origin)),
+                            authority=EvidenceAuthority.DETERMINISTIC_DERIVED,
+                            materiality_reason="task_decisive_evidence",
+                            origin_revision=fact.source_revision,
+                            relation_endpoint=fact.path,
+                            known_texts=(),
+                            detector=fact.detector,
+                        ),
+                    )
+                )
 
         initial_focus = _certified_repository_item(focus)
         if (
@@ -2340,10 +2382,15 @@ class PersistentExecutionStateEngine:
             row[2].get("authority") == EvidenceAuthority.CERTIFIED_RELATION.value
             for row in frame_rows
         )
+        decisive_fact = any(bool(row[2].get("decisive")) for row in frame_rows)
         header = (
-            "Repository facts for the next decision:"
-            if repository_fact
-            else "Current task execution status:"
+            "Task-decisive context:"
+            if decisive_fact
+            else (
+                "Repository facts for the next decision:"
+                if repository_fact
+                else "Current task execution status:"
+            )
         )
         selected: list[str] = []
         claim_ids: list[str] = []
