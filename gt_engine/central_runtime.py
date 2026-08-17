@@ -479,6 +479,7 @@ class CheckEvidence:
     command_class: str = ""
     failure_kind: str = ""
     source_revision: str = ""
+    authority: str = ""
 
 
 # The historical direct inventory is 10 FACT identities plus 7 CAP_OWNER
@@ -1290,6 +1291,7 @@ class EvidenceLedger:
                 else ""
             ),
             source_revision=(classification.source_revision if classification else revision),
+            authority=(classification.authority.value if classification else ""),
         )
         self.outcomes[key] = evidence
         if effective_returncode == 0:
@@ -1297,7 +1299,15 @@ class EvidenceLedger:
             return
         self.checks[key] = evidence
 
-    def submit_decision(self, revision: str, *, sensor_healthy: bool = True) -> SubmitDecision:
+    def submit_decision(
+        self,
+        revision: str,
+        *,
+        sensor_healthy: bool = True,
+        plan_partial: bool = False,
+        uncovered_obligations: tuple[str, ...] = (),
+        validating_evidence_present: bool = True,
+    ) -> SubmitDecision:
         if not sensor_healthy:
             return SubmitDecision(InterventionDecision.PASS, reason="sensor degraded")
         blockers = tuple(
@@ -1307,8 +1317,25 @@ class EvidenceLedger:
                 if item.grounded and item.revision == revision and item.returncode != 0
             )
         )
-        if not blockers:
+        if (
+            not blockers
+            and plan_partial
+            and uncovered_obligations
+            and not validating_evidence_present
+        ):
+            # The model is submitting while mechanically recognizable task
+            # requirements remain unverified and no declared/standard-runner
+            # validation has passed at the current revision.  This is a
+            # bounded one-shot nudge (todo-gating), not a veto.
+            blockers = tuple(
+                text if len(text) <= 200 else text[:197] + "..."
+                for text in uncovered_obligations[:2]
+            )
+            reason = "unverified task requirements remain"
+        elif not blockers:
             return SubmitDecision(InterventionDecision.PASS)
+        else:
+            reason = "fresh grounded check is failing"
         hold_key = (revision, blockers)
         used = self._holds.get(hold_key, 0)
         if used >= self.max_holds:
@@ -1321,17 +1348,33 @@ class EvidenceLedger:
         return SubmitDecision(
             InterventionDecision.HOLD_ONCE,
             blockers,
-            reason="fresh grounded check is failing",
+            reason=reason,
         )
 
-    def readiness_evidence(self, revision: str) -> tuple[CheckEvidence, ...]:
-        """Return recognized checks whose results belong to the current revision."""
+    def readiness_evidence(
+        self, revision: str, *, validating_only: bool = False
+    ) -> tuple[CheckEvidence, ...]:
+        """Return recognized checks whose results belong to the current revision.
+
+        ``validating_only`` restricts the surface to checks with real declared
+        or standard-runner authority; host syntax probes and custom probes are
+        evidence but never task-validation certificates.
+        """
         return tuple(
             sorted(
                 (
                     item
                     for item in self.outcomes.values()
-                    if item.grounded and item.revision == revision
+                    if item.grounded
+                    and item.revision == revision
+                    and (
+                        not validating_only
+                        or item.authority
+                        in {
+                            ValidationAuthority.DECLARED.value,
+                            ValidationAuthority.STANDARD_RUNNER.value,
+                        }
+                    )
                 ),
                 key=lambda item: item.command,
             )
@@ -4084,6 +4127,8 @@ class CentralFeatureRuntime:
         failing_checks: int = 0,
         blockers: tuple[str, ...] = (),
         source_revision: str | None = None,
+        validating_pass_count: int | None = None,
+        reason: str = "fresh_grounded_failure",
     ) -> None:
         if held and not refused:
             raise ValueError("a submit action cannot be held without a refusal")
@@ -4117,15 +4162,13 @@ class CentralFeatureRuntime:
                 action_id=action_id,
                 revision=revision,
                 source_revision=source_rev,
-                reason="fresh_grounded_failure",
+                reason=reason,
                 payload={
                     "submission_risk": True,
                     "refused": True,
                     "fresh_failure": True,
                     "blockers": list(blockers),
-                    "message": self._payload("submit_refusal", "submit", "fresh_grounded_failure")[
-                        "message"
-                    ],
+                    "message": self._payload("submit_refusal", "submit", reason)["message"],
                 },
             )
             self._emit(
@@ -4134,14 +4177,23 @@ class CentralFeatureRuntime:
                 action_id=action_id,
                 revision=revision,
                 source_revision=source_rev,
-                reason="fresh_grounded_failure",
+                reason=reason,
                 payload={
                     "owner_feature": "submit_refusal",
                     "submission_risk": True,
                     "blockers": list(blockers),
-                    "message": "Current source revision retains a failing required check.",
+                    "message": (
+                        "Current source revision retains unverified task requirements."
+                        if reason == "unverified_obligations"
+                        else "Current source revision retains a failing required check."
+                    ),
                 },
             )
+        validated_by = (
+            validating_pass_count
+            if validating_pass_count is not None
+            else (passing_checks if sensor_healthy and failing_checks == 0 else 0)
+        )
         self._emit(
             "GT_CERT_DELIVERY",
             boundary="submit",
@@ -4156,17 +4208,26 @@ class CentralFeatureRuntime:
                 "check_count": check_count,
                 "passing_checks": passing_checks,
                 "failing_checks": failing_checks,
+                "validating_pass_count": (
+                    validating_pass_count if validating_pass_count is not None else passing_checks
+                ),
                 "readiness": (
                     "blocked"
                     if refused
                     else "validated"
-                    if sensor_healthy and passing_checks > 0 and failing_checks == 0
+                    if sensor_healthy and validated_by > 0 and failing_checks == 0
                     else "unverified"
                 ),
                 "message": (
-                    "Submission readiness has current passing check evidence."
-                    if sensor_healthy and passing_checks > 0 and failing_checks == 0
-                    else "Submission readiness was evaluated without claiming validation."
+                    "Submission readiness has a declared or standard-runner "
+                    "validation passing at the current revision."
+                    if sensor_healthy and validated_by > 0 and failing_checks == 0
+                    else (
+                        "Submission readiness: no declared or standard-runner "
+                        "validation has passed at the current revision."
+                        if validating_pass_count == 0
+                        else "Submission readiness was evaluated without claiming validation."
+                    )
                 ),
             },
         )

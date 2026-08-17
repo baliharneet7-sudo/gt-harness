@@ -1,47 +1,73 @@
-# GT-Harness — GroundTruth × nano-harness
+# GT-Harness — GroundTruth × Mini-SWE
 
-> **[nano-harness](https://github.com/TroyJLorents-GH/nano-harness) by Troy J
-> Lorents supplies the small agent loop. In GT-enabled runs, GroundTruth is the
-> deterministic evidence engine inside that loop—not an after-the-fact trace
-> annotator.**
+**GroundTruth (GT)** is a deterministic, LLM-free repository-intelligence engine
+for coding agents. Inside the loop it builds a source-backed graph of the
+workspace, retrieves bounded evidence, and delivers it to the model only when it
+is provably grounded — every provider request is hash-accounted, so exposure is
+auditable rather than assumed.
 
-This repository embeds **GroundTruth (GT)** — a deterministic, LLM-free codebase-evidence
-engine — alongside the stock nano-harness. The stock `nano/` loop remains the GT-off baseline.
-The active Terminal-Bench GT arm is `eval.gt_central_agent:MiniSweCentralAgent`, with the
-host-owned runtime in `gt_engine/`. It builds a bounded source mirror, validates the pinned
-graph substrate, selects source-backed facts, and accounts for every provider request without
-asking the model to acknowledge GT.
+GT wraps the **Mini-SWE agent** ([`mini-swe-agent`](https://pypi.org/project/mini-swe-agent/),
+pinned 2.3.0), running Terminal-Bench 2.0 tasks through Harbor. The GT-off and
+GT-on arms install the same pinned Mini-SWE bundle; the only difference is GT
+activation — so the comparison is the treatment, not package drift. The
+host-owned GT runtime is `eval/gt_central_agent.py:MiniSweCentralAgent`; with GT
+disabled the stock Mini-SWE loop runs unchanged. The historical predecessor of
+this repo, nano-harness, is documented below for provenance.
 
-The active GT arm follows this deterministic boundary:
+## The problem
 
-1. **Model selection:** the model returns a Bash action; GT does not predict it.
-2. **Preflight:** the host normalizes a typed proposal and runs bounded deterministic checks;
-   paid runs currently use SHADOW mode, so the original command executes unchanged.
-3. **Execution/postflight:** the host executes the command, then GT observes the result,
-   source/workspace revisions, validation status, graph changes, and all 17 feature paths.
-4. **Next request:** grounded evidence is delivered at the first eligible provider request;
-   private engine state is accounted separately from model-visible text.
-5. **Audit:** exact request hashes, lifecycle counters, source revisions, graph provenance,
-   replay blobs, and outcome-first metrics make exposure and resource deltas verifiable.
+LLM coding agents act on context they cannot verify: retrieval is ungrounded,
+"evidence" is unaccounted, and nothing connects a delivered fact to the exact
+provider request that used it. GT treats evidence like a build system treats
+artifacts — deterministic, fail-closed, and receipted.
 
-The architecture and behavioral contract are documented in
-[`docs/architecture.md`](docs/architecture.md) and [`AGENTS.md`](AGENTS.md). Exposure is not
-mislabeled as semantic consumption or causal benefit; the frozen GT-off baseline supplies the
-comparison, and a live GT-on efficiency claim requires an authorized matched smoke.
-The implementation audit and remaining ten-task gate are recorded in
-[`details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md`](details_done/GT_FINAL_REGRESSION_REPAIR_AND_89_GATE_20260809.md).
+## How it works
 
-**With GT disabled
-(no `--gt-root`), this harness is byte-identical to stock nano-harness** — that property is
-enforced by tests, and it is what makes clean GT-on vs. GT-off benchmark comparisons possible.
+1. **Graph substrate.** A pinned tree-sitter indexer builds a certified
+   `CALLS`/`ASSERTED_BY` graph (48+ languages) from the exact source revision.
+2. **Hybrid retrieval.** Five channels — exact, lexical, BM25, a frozen local
+   Snowflake Arctic ONNX embedder, and certified graph structure — fused by
+   equal-weight reciprocal-rank fusion into bounded complete evidence spans.
+3. **Evidence delivery.** Grounded facts reach the model only at their first
+   eligible provider request, under a shared 1,200-token budget; everything else
+   stays private controller state.
+4. **Pre/postflight.** Every model-selected command is normalized, classified,
+   and receipted before and after execution (SHADOW by default: the original
+   command executes unchanged).
+5. **Audit.** Exact request hashes, source revisions, and delivery receipts make
+   every exposed byte verifiable, including a provider-free reproduction path.
 
-All credit for the base harness — the loop, tools, providers, prompts, and the Terminal Bench
-adapter — belongs to upstream nano-harness. Everything below this section is its original
-README.
+## Measured results (honest version)
+
+- **Retrieval — Agent Retrieval Bench, 427/427 rows, 25 repositories:** ranked
+  MRR **0.4372**, Recall@20 **0.7072**, BCY@8K **0.5198**; delivered-payload
+  MRR **0.4207**. Leads the supplied comparisons (Qwen3-Embedding-4B/8B, RepoMap,
+  BM25, lexical) on the primary metrics. [Full results](RETRIEVAL_BENCH_RESULTS.md).
+- **Ten-task matched smoke (Mini-SWE):** the GT-on arm matched the frozen
+  GT-off baseline at **9/10 official** with **−31.3% tokens, −51 API calls,
+  −53 assistant steps, −103 model actions** across the common solved tasks. A
+  single matched-smoke signal, not a causal claim.
+- **Not claimed yet:** solve-rate uplift and the 89-task run. Provider-free
+  implementation proof (all 17 feature paths, readiness, pre-smoke gate) is
+  complete and runs green in the source-built CI workflow.
+
+## Reproduce
+
+```bash
+pip install -e .
+python -m scripts.central_feature_census   # all 17 feature paths proven
+python scripts/central_readiness_audit.py  # prints READY
+```
+
+Architecture and behavioral contract:
+[`docs/architecture.md`](docs/architecture.md). All credit for the base agent —
+the Mini-SWE loop, tools, providers, prompts, and the Terminal-Bench adapter —
+belongs to the `mini-swe-agent` project. The nano-harness section below is the
+repo's historical predecessor and is preserved for provenance.
 
 ---
 
-# nano-harness (the base harness)
+# nano-harness (historical predecessor)
 
 ![nano-harness — a coding agent in ~970 lines](docs/assets/banner.png)
 
@@ -118,11 +144,10 @@ Docker container, the exact shipping harness installed per container):
 |---------|-------|-------|-------|
 | nano-harness | Claude Opus 4.8 | 89 (full) | **59.6% (53/89)** |
 
-The table above is the historical stock nano-harness result, not a GT-on result. The current
-GT implementation has passed its provider-free and exact pre-smoke gates, but no new paid GT-on
-score is claimed yet. The next authorized measurement is a ten-task matched smoke against the
-frozen GT-off baseline; the 89-task GT run remains blocked until that outcome and efficiency
-audit passes.
+The table above is the historical stock nano-harness result, not a GT-on result.
+GT's own measured results — the 427-row retrieval benchmark and matched-smoke
+accounting — are in the section above. Solve-rate uplift is not claimed until a
+matched outcome and efficiency gate passes.
 
 Self-run through Harbor, every task in its own Docker container, the exact shipping
 harness installed per container. Errored trials (agent wall-clock timeouts on the

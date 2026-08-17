@@ -29,6 +29,7 @@ from gt_engine.central_runtime import (  # noqa: E402
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
     EvidenceLedger,
+    InterventionDecision,
     WorkspaceSnapshot,
     WorkspaceTransition,
     classify_change,
@@ -39,6 +40,7 @@ from gt_engine.central_runtime import (  # noqa: E402
     normalize_command,
     task_deliverable_paths,
 )
+from gt_engine.completion import CompletionStatus, compile_completion_plan  # noqa: E402
 from gt_engine.preflight import ActionDisposition, adapt_proposed_action  # noqa: E402
 from gt_engine.provider_view import build_provider_view  # noqa: E402
 
@@ -149,6 +151,11 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
         task_deliverables=deliverables,
     )
     ledger = EvidenceLedger(max_holds=1)
+    plan = compile_completion_plan(
+        instruction,
+        cwd=str((receipt.get("task_working_directory") or "/app") or "/app"),
+    )
+    submit_projections: list[dict[str, Any]] = []
     source_revision = "replay-s0"
     source_epoch = 0
     artifact_debt_triggers: list[dict[str, str]] = []
@@ -313,12 +320,52 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             engine_syntax_checks_replayed += 1
         if is_submit_command(event["command"]):
             readiness = ledger.readiness_evidence(source_revision)
+            validating_evidence = ledger.readiness_evidence(
+                source_revision, validating_only=True
+            )
+            validating_pass_count = sum(
+                item.returncode == 0 for item in validating_evidence
+            )
+            certificate_validating = (
+                validating_pass_count
+                if validating_pass_count
+                else (1 if plan.executable else 0)
+            )
+            decision = ledger.submit_decision(
+                source_revision,
+                sensor_healthy=True,
+                plan_partial=plan.status is CompletionStatus.PARTIAL,
+                uncovered_obligations=plan.uncovered_obligation_texts,
+                validating_evidence_present=certificate_validating > 0,
+            )
+            refused = decision.decision is InterventionDecision.HOLD_ONCE
+            submit_projections.append(
+                {
+                    "action": action_id,
+                    "decision": decision.decision.value,
+                    "reason": decision.reason,
+                    "blockers": list(decision.blockers),
+                    "plan_status": plan.status.value,
+                    "uncovered_obligations": list(plan.uncovered_obligation_texts),
+                    "uncovered_count": len(plan.uncovered_obligation_texts),
+                    "validating_pass_count": validating_pass_count,
+                    "plan_executable": bool(plan.executable),
+                }
+            )
             runtime.record_submit(
                 action_id=action_id,
                 revision="replay-w0",
                 source_revision=source_revision,
-                refused=False,
+                refused=refused,
+                held=refused,
                 sensor_healthy=True,
+                validating_pass_count=certificate_validating,
+                blockers=decision.blockers,
+                reason=(
+                    "unverified_obligations"
+                    if refused and "unverified task requirements" in (decision.reason or "")
+                    else "fresh_grounded_failure"
+                ),
                 check_count=len(readiness),
                 passing_checks=sum(item.returncode == 0 for item in readiness),
                 failing_checks=sum(item.returncode != 0 for item in readiness),
@@ -486,6 +533,7 @@ def replay_task(trajectory_path: Path, receipt_path: Path, task_name: str) -> di
             ),
             "simulated_deliveries": simulated_deliveries,
             "submit_holds": summary["action_metrics"]["submit_holds"],
+            "submit_gate_projection": submit_projections,
             "batch_interrupts": summary["action_metrics"]["batch_interrupts"],
             "interrupted_actions": summary["action_metrics"]["interrupted_actions"],
             "preflight_shadow": {
@@ -532,10 +580,32 @@ def _outcomes(task: dict[str, Any]) -> list[str]:
     )
     if old_attributable_cert_count > 0 and ledger_total == 0:
         failed.append("old attributable certificate checks were lost by the repaired policy")
-    if task["new"]["submit_holds"] or task["new"]["batch_interrupts"]:
-        failed.append("repaired policy blocked or interrupted Mini-SWE")
-    if task["new"]["interrupted_actions"]:
-        failed.append("repaired policy cancelled Mini-SWE actions")
+    if task["new"]["batch_interrupts"] or task["new"]["interrupted_actions"]:
+        failed.append(
+            "repaired policy interrupted or cancelled Mini-SWE actions in SHADOW: "
+            f"batch_interrupts={task['new']['batch_interrupts']} "
+            f"interrupted={task['new']['interrupted_actions']}"
+        )
+    projected_holds = sum(
+        1
+        for row in task["new"].get("submit_gate_projection") or ()
+        if row["decision"] == InterventionDecision.HOLD_ONCE.value
+    )
+    if task["new"]["submit_holds"] != projected_holds:
+        failed.append(
+            f"submit-gate projection mismatch: holds={task['new']['submit_holds']} "
+            f"projected={projected_holds}"
+        )
+    for projection in task["new"].get("submit_gate_projection") or ():
+        if projection["decision"] == InterventionDecision.HOLD_ONCE.value and not (
+            projection["plan_status"] == CompletionStatus.PARTIAL.value
+            and projection["uncovered_count"] > 0
+            and projection["validating_pass_count"] == 0
+        ):
+            failed.append(
+                "repaired policy held a submit outside the obligation gate: "
+                f"action={projection['action']} reason={projection['reason']}"
+            )
     return failed
 
 
@@ -575,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
             f"new_guidance={task['new']['guidance_events']} "
             f"old_cert={task['old']['certificate'].get('check_count')} "
             f"new_cert={task['new']['certificate']['check_count']} "
-            f"debt_triggers={len(task['new']['artifact_debt_triggers'])}"
+            f"debt_triggers={len(task['new']['artifact_debt_triggers'])} "
+            f"submit_holds={task['new']['submit_holds']}"
         )
         for failure in failures:
             print(f"    ! {task_name}: {failure}")

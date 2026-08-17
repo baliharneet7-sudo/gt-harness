@@ -1054,6 +1054,16 @@ def _command_hash_short(command: str) -> str:
     ).hexdigest()[:16]
 
 
+def _revision_short(revision: Any) -> str:
+    """Bound a ledger source revision for display inside a 200-char recap.
+
+    The full revision stays in the typed ledger; the marker carries a short
+    prefix so the atomic recap remains under the cap for real 64-char hashes.
+    """
+    value = str(revision or "?")
+    return value if len(value) <= 12 else value[:12]
+
+
 def _raw_output_hash(tool: dict[str, Any]) -> str:
     extra = tool.get("extra")
     raw = extra.get("raw_output") if isinstance(extra, dict) else None
@@ -1203,7 +1213,9 @@ def _turn_semantic_parts(
     read_identity = _turn_read_identity(tool, recent_reads)
     if read_identity is not None:
         path, revision = read_identity
-        parts.append(f"read {_bounded_text(path, 80)}@" + (revision or "?"))
+        parts.append(
+            f"read {_bounded_text(path, 16)}@{_revision_short(revision)}"
+        )
     if isinstance(latest_validation, dict):
         v_command = str(latest_validation.get("command") or "")
         if v_command and _match_turn_commands(commands, v_command):
@@ -1212,7 +1224,7 @@ def _turn_semantic_parts(
             )
             parts.append(
                 f"validation rc={latest_validation.get('returncode')}@"
-                + (revision or "?")
+                + _revision_short(revision)
             )
     return parts
 

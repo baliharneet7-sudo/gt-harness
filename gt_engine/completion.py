@@ -41,6 +41,7 @@ class CompletionPlan:
     obligation_ids: tuple[str, ...]
     uncovered_obligation_ids: tuple[str, ...]
     target_paths: tuple[str, ...]
+    uncovered_obligation_texts: tuple[str, ...] = ()
 
     @property
     def executable(self) -> bool:
@@ -54,6 +55,7 @@ class CompletionPlan:
             "obligation_ids": list(self.obligation_ids),
             "uncovered_obligation_ids": list(self.uncovered_obligation_ids),
             "target_paths": list(self.target_paths),
+            "uncovered_obligation_texts": list(self.uncovered_obligation_texts),
         }
 
 
@@ -110,6 +112,19 @@ _EXACT_PIPE_RE = re.compile(
 _SIZE_RE = re.compile(
     r"(?i)(?P<path>/?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
     r"[^.\n]{0,100}?\bat\s+most\s+(?P<limit>\d+)\s+bytes\b"
+)
+_DELIVERABLE_VERB_RE = re.compile(
+    r"(?i)\b(write|create|produce|generate|output|store|save|emit|place|put)\b"
+)
+# Semantic-qualifier patterns: an obligation whose text uses these cannot be
+# fully covered by output existence, so it keeps the plan PARTIAL.
+_SEMANTIC_QUALIFIER_RE = re.compile(
+    r"(?i)"
+    r"\b(match(es|ing|ed)?|equal(s|ing|ed)?|threshold|exactly|identical|"
+    r"reference|consistent|correct|accurate)\b"
+    r"|\b(at least|at most|must (be|contain|have|match)|same as)\b"
+    r"|\b(contain(s|ing|ed)?|includ(e|es|ing|ed)?|implement(s|ing|ed)?)\b"
+    r"|[<>]=?\s*\d|%\s*(of|\d)"
 )
 
 
@@ -195,7 +210,13 @@ def _compile_output_existence(
     *,
     skip_paths: set[str],
 ) -> tuple[CompletionPredicate, ...]:
-    """Compile progress probes for confirmed outputs without claiming coverage."""
+    """Compile existence probes for confirmed outputs.
+
+    A probe covers an obligation only when the obligation text names the
+    output path and the requirement is deliverable creation, not semantic
+    content: any comparison/qualifier language keeps the obligation
+    uncovered and therefore keeps the plan PARTIAL.
+    """
 
     compiled: list[CompletionPredicate] = []
     for resource in contract.resources:
@@ -204,13 +225,30 @@ def _compile_output_existence(
         path = _absolute(resource.path, cwd)
         if not path or path in skip_paths:
             continue
+        basename = posixpath.basename(path)
+        pattern = (
+            r"(?<![A-Za-z0-9_.-])"
+            + re.escape(basename)
+            + r"(?![A-Za-z0-9_-])"
+        )
+        bound_obligations = tuple(
+            obligation.obligation_id
+            for obligation in contract.obligations
+            if (
+                not _SEMANTIC_QUALIFIER_RE.search(obligation.text)
+                and _DELIVERABLE_VERB_RE.search(obligation.text)
+                and re.search(pattern, obligation.text)
+            )
+        )
         command = f"test -s {shlex.quote(path)}"
         compiled.append(
             CompletionPredicate(
-                predicate_id=_predicate_id("required_output_exists", command, ()),
+                predicate_id=_predicate_id(
+                    "required_output_exists", command, bound_obligations
+                ),
                 kind="required_output_exists",
                 command=command,
-                obligation_ids=(),
+                obligation_ids=bound_obligations,
                 target_paths=(path,),
                 dependency_paths=(path,),
             )
@@ -236,15 +274,24 @@ def compile_completion_plan(instruction: str, *, cwd: str = "/app") -> Completio
         predicate, obligation_ids = result
         compiled.append(predicate)
         covered.update(obligation_ids)
-    compiled.extend(
-        _compile_output_existence(
-            contract,
-            cwd,
-            skip_paths={path for item in compiled for path in item.target_paths},
-        )
+    output_predicates = _compile_output_existence(
+        contract,
+        cwd,
+        skip_paths={path for item in compiled for path in item.target_paths},
+    )
+    compiled.extend(output_predicates)
+    covered.update(
+        obligation_id
+        for predicate in output_predicates
+        for obligation_id in predicate.obligation_ids
     )
     obligation_ids = tuple(item.obligation_id for item in contract.obligations)
     uncovered = tuple(item for item in obligation_ids if item not in covered)
+    uncovered_texts = tuple(
+        obligation.text
+        for obligation in contract.obligations
+        if obligation.obligation_id in uncovered
+    )
     status = (
         CompletionStatus.COMPLETE
         if compiled and obligation_ids and not uncovered
@@ -259,6 +306,7 @@ def compile_completion_plan(instruction: str, *, cwd: str = "/app") -> Completio
         obligation_ids=obligation_ids,
         uncovered_obligation_ids=uncovered,
         target_paths=target_paths,
+        uncovered_obligation_texts=uncovered_texts,
     )
 
 

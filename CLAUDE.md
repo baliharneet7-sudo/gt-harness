@@ -173,6 +173,30 @@ Minimal coding agent harness. Score >30% on Terminal-bench and SWE-bench Verifie
 **Started:** 2026-05-02 · **Hardening landed:** 2026-06-17
 **Owner:** Troy
 
+### Certified rollback pins (2026-08-14)
+
+Current is the only authorized provider-free pin. Keep two priors for rollback.
+
+- **Current:** `3d66944` — keep hybrid catalog ranks and legal empty PES through the release gate. Linux PF [`31819669760`](https://github.com/harneet2512/gt-harness/actions/runs/31819669760) printed `READY`, `SMOKE_APPROVED`, `provider_calls: 0`.
+- **Prior 1:** `a296060` — implements neighbors off the first state frame. Linux PF [`31775927430`](https://github.com/harneet2512/gt-harness/actions/runs/31775927430) printed `READY`, `SMOKE_APPROVED`, `provider_calls: 0`.
+- **Prior 2:** `426fe59` — task-start localization off the first provider call. Linux PF [`31775025525`](https://github.com/harneet2512/gt-harness/actions/runs/31775025525).
+
+Do not canary or smoke any SHA except **current** until a new Linux PF passes on that SHA. Rollback only if Troy asks: `git reset --hard <sha>`.
+
+### Retained bootstrap canary (2026-08-14)
+
+One paid persistent-bootstrap canary ran on `3d66944` via the native DeepSeek
+route (`GT_LITELLM_MODEL=openai/deepseek-v4-flash`,
+`OPENAI_BASE_URL=https://api.deepseek.com`). Receipt
+`artifacts/bootstrap_canary_3d66944.json` +
+`artifacts/provider_route_proof_3d66944.json`: 1 provider call, 0 action
+executions, `select_catalog` forced, `thinking.type=disabled`,
+`num_retries=0`, generative selection valid, 1,365 input / 236 output tokens,
+3.5 s latency, response model `deepseek-v4-flash`, fingerprint
+`a26a7955944dc5c60445bff77fac9c8e`, cost 0.0 as reported. Standalone CI form:
+`.github/workflows/bootstrap_canary.yml`. The next step remains a separately
+authorized matched evaluation.
+
 Core loop, 3 tools, 2 providers, CLI, logger all built with tests (52 passing).
 Loop hardening: per-step token cap, API retries, output-truncation recovery,
 verify pass, 60s bash timeout, system prompt v2 (see design doc §3.5a).
@@ -1483,9 +1507,54 @@ evidence, not official leaderboard equivalence.
 
 Local broad tests pass apart from the explicitly fail-closed Windows indexer
 checks: the checked-in `gt-index.exe` predates Objective-C registry support.
-This is not waived. The current source-built Linux provider-free workflow must
-rebuild the indexer, provision the pinned Snowflake ONNX asset, and pass census,
-readiness, pre-smoke, static, workflow, and receipt gates at the exact pushed
-commit. Until then the status is implementation-verified locally but release-
-unverified; no paid smoke, solve uplift, non-regression, or efficiency claim is
-authorized.
+This is not waived. The current source-built Linux provider-free pin is
+`3d66944` (workflow `31819669760`): `READY`, `SMOKE_APPROVED`,
+`provider_calls: 0`. See **Certified rollback pins** under Current Status.
+That is implementation certification only. The next authorized spend is the
+one paid bootstrap canary on that exact SHA; no task smoke, solve uplift,
+non-regression, or efficiency claim is authorized until that canary is
+retained and a matched evaluation is separately approved.
+
+## Canonical evaluation workflow registry (2026-08-15)
+
+These are the correct, dispatchable workflows. Each family's active entry is
+the one to use; the list is verified identical (26/26 workflows, byte-equal
+names) on both `harneet2512/gt-harness` (branch
+`baseline-swe-live-lite-v4flash0731`, HEAD `c5073c4`) and
+`hbali-stack/gt-harness` (main, merge HEAD `b478d15`) via the GitHub API on
+2026-08-15. No live run has been dispatched from this registry; verification
+only.
+
+**DeepSWE (1):** `deepswe_miniswe_central.yml` — DeepSWE v1.1 Mini-SWE central
+runtime, the single DeepSWE path. Preflight stays `SHADOW`; `certified_full`
+is the labeled integrated product. Outcome authority:
+`scripts/deepswe_release_gate.py`.
+
+**Terminal-Bench 2.0 (10):** `tb2_miniswe_central.yml` (GT-on matrix, the
+active TB2 entry), `tb2_miniswe_engine.yml`, `tb2_miniswe_gt_single.yml`,
+`tb2_miniswe_baseline.yml`, `tb2_miniswe_baseline_matrix.yml`,
+`tb2_miniswe_baseline_sharded.yml`, `tb2_gt.yml`, `tb2_baseline.yml`,
+`tb2_baseline_sharded.yml`, `tokenrouter_tb2_monitor.yml` (diagnostic-only
+route monitor, never a solve/efficiency claim).
+
+**SWE-bench Live Lite (7):** `live_lite_full.yml` (coordinator: inference +
+per-shard eval + bundle; smoke=5/pilot20/pilot100/full300; default model
+`deepseek/deepseek-v4-flash`; `GT_BASELINE=1` for the baseline arm),
+`live_lite_eval.yml`, `live_lite_inference.yml`, `live_lite_bundle.yml`,
+`live_lite_cache_images.yml`, `swebench_live_lite_full.yml` (300-task
+mini-swe-agent/pier path), `gt_v4flash_30.yml` (30-task no-think diagnostic).
+
+Port provenance: the Live Lite family was ported byte-faithfully from
+`hbali-stack/gt-harness-swe-live-lite` ref
+`origin/baseline-swe-live-lite-v4flash0731` (commit `04c3da7`) into
+`harneet2512/gt-harness` as commit `8dcdad3` (40 files: 7 workflows +
+`setup-eval` action + 20 `scripts/swebench/*` + 4 `scripts/verify/*` +
+3 `scripts/ci/*` + `scripts/setup_models.py` + `src/groundtruth/mcp/tools.py`
++ 3 datasets). 39/40 blobs are byte-identical to the fork; the exception
+`benchmarks/data/swebench_pro_public_tags.jsonl` is Git-LFS in the fork and
+ships its real content, whose sha256 matches the fork's LFS oid
+`0c9a294f...`. Known fork-inherited gaps (present in the fork, not a port
+defect): `patches/oh054/apply_gt_tools.py` and `models/e5-small-v2` are
+referenced by the `setup-eval` action but absent from the fork itself, so
+the cache-miss install branch that invokes `apply_gt_tools.py` is broken in
+the source fork as well; verify those before any paid Live Lite dispatch.

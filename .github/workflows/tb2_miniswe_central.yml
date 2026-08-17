@@ -524,6 +524,7 @@ jobs:
                 --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
                 --ak enable_context_compaction=true --ak enable_completion_controller=true
                 --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
+                --ak enable_shadow_submit_gate=true
                 --ak require_graph_ready=true
               ) ;;
             *) echo "::error::unknown arm: $ARM"; exit 2 ;;

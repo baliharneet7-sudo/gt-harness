@@ -1475,6 +1475,7 @@ class MiniSweCentralAgent(BaseAgent):
         max_validation_timeout_sec: float = 120.0,
         validation_timeout_budget_ratio: float = 0.20,
         enable_progress_control: bool = True,
+        enable_shadow_submit_gate: bool = False,
         enable_observed_facts: bool | None = None,
         context_capacity_chars: int = 400_000,
         context_trigger_chars: int | None = None,
@@ -1550,6 +1551,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_completion_controller = False
             enable_progress_control = False
             enable_adaptive_validation_timeout = False
+            enable_shadow_submit_gate = False
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
             enable_feature_guidance = False
@@ -1560,6 +1562,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
+            enable_shadow_submit_gate = False
         elif self.policy_mode is GTPolicyMode.CERTIFIED_SHADOW:
             enable_lint = False
             enable_task_start_advisory = False
@@ -1697,6 +1700,7 @@ class MiniSweCentralAgent(BaseAgent):
             1.0, max(0.01, float(validation_timeout_budget_ratio))
         )
         self.enable_progress_control = enable_progress_control
+        self.enable_shadow_submit_gate = bool(enable_shadow_submit_gate)
         self.enable_observed_facts = bool(
             enable_observed_facts
             if enable_observed_facts is not None
@@ -6123,8 +6127,24 @@ class MiniSweCentralAgent(BaseAgent):
                                         "diagnostic": raw_probe_diagnostic,
                                     }
                                 )
+                        validating_evidence = self._ledger.readiness_evidence(
+                            source_revision, validating_only=True
+                        )
+                        validating_pass_count = sum(
+                            item.returncode == 0 for item in validating_evidence
+                        )
+                        plan_is_complete = completion_plan.executable
+                        certificate_validating = (
+                            validating_pass_count
+                            if validating_pass_count
+                            else (1 if plan_is_complete else 0)
+                        )
                         decision = self._ledger.submit_decision(
-                            source_revision, sensor_healthy=snapshot.healthy
+                            source_revision,
+                            sensor_healthy=snapshot.healthy,
+                            plan_partial=completion_plan.status is CompletionStatus.PARTIAL,
+                            uncovered_obligations=completion_plan.uncovered_obligation_texts,
+                            validating_evidence_present=certificate_validating > 0,
                         )
                         readiness_evidence = self._ledger.readiness_evidence(source_revision)
                         readiness_kwargs = {
@@ -6138,7 +6158,13 @@ class MiniSweCentralAgent(BaseAgent):
                         }
                         hold_submit = bool(
                             decision.decision == InterventionDecision.HOLD_ONCE
-                            and self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                            and (
+                                self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                                or (
+                                    self.preflight_mode is PreflightMode.SHADOW
+                                    and self.enable_shadow_submit_gate
+                                )
+                            )
                         )
                         self._features.record_submit(
                             action_id=actions_count,
@@ -6147,6 +6173,14 @@ class MiniSweCentralAgent(BaseAgent):
                             refused=hold_submit,
                             held=hold_submit,
                             sensor_healthy=snapshot.healthy,
+                            validating_pass_count=certificate_validating,
+                            blockers=decision.blockers,
+                            reason=(
+                                "unverified_obligations"
+                                if hold_submit
+                                and decision.reason == "unverified task requirements remain"
+                                else "fresh_grounded_failure"
+                            ),
                             **readiness_kwargs,
                         )
                         receipts.append(
@@ -6163,6 +6197,9 @@ class MiniSweCentralAgent(BaseAgent):
                         )
                         if hold_submit:
                             blocker_text = ", ".join(decision.blockers[:2])
+                            obligations_hold = (
+                                decision.reason == "unverified task requirements remain"
+                            )
                             blocker_diagnostic = next(
                                 (
                                     project_validation_probe_diagnostics.get(
@@ -6175,15 +6212,23 @@ class MiniSweCentralAgent(BaseAgent):
                                 ),
                                 "",
                             )
-                            preflight_text = (
-                                "Pre-execution check: current validation is failing; "
-                                f"blocker={blocker_text}."
-                                + (
-                                    f" diagnostic={blocker_diagnostic}"
-                                    if blocker_diagnostic
-                                    else ""
+                            if obligations_hold:
+                                preflight_text = (
+                                    "Pre-execution check: unverified task requirements "
+                                    "remain; outstanding obligations: "
+                                    + blocker_text
+                                    + "."
                                 )
-                            )
+                            else:
+                                preflight_text = (
+                                    "Pre-execution check: current validation is failing; "
+                                    f"blocker={blocker_text}."
+                                    + (
+                                        f" diagnostic={blocker_diagnostic}"
+                                        if blocker_diagnostic
+                                        else ""
+                                    )
+                                )
                             pending_reconsideration_cycle = proposed.cycle_id
                             pending_preflight_evidence = {
                                 "fact_id": "submit-"

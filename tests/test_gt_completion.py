@@ -47,7 +47,7 @@ def test_write_compressor_compiles_to_complete_oracle_free_plan():
     assert all("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in item.command for item in plan.predicates)
 
 
-def test_partial_plan_exposes_confirmed_outputs_as_progress_probes_only():
+def test_partial_plan_binds_creation_obligations_but_keeps_semantic_ones_uncovered():
     plan = compile_completion_plan(SCHEDULER_TASK, cwd="/app")
 
     assert plan.status is CompletionStatus.PARTIAL
@@ -57,8 +57,35 @@ def test_partial_plan_exposes_confirmed_outputs_as_progress_probes_only():
         "/app/task_file/output_data/plan_b1.jsonl",
         "/app/task_file/output_data/plan_b2.jsonl",
     )
-    assert all(item.obligation_ids == () for item in plan.predicates)
+    # The creation obligation ("produce a plan in ...plan_b1.jsonl
+    # ...plan_b2.jsonl") is bound by both existence probes; the scheduling
+    # constraint stays uncovered so the plan remains PARTIAL.
+    assert plan.predicates[0].obligation_ids
+    assert plan.predicates[0].obligation_ids == plan.predicates[1].obligation_ids
+    assert plan.uncovered_obligation_ids
     assert all(item.command.startswith("test -s ") for item in plan.predicates)
+
+
+def test_semantic_obligations_never_bind_output_existence():
+    plan = compile_completion_plan(
+        "Produce /app/out.json; the values must match the reference.", cwd="/app"
+    )
+
+    assert plan.status is CompletionStatus.PARTIAL
+    assert all(item.obligation_ids == () for item in plan.predicates)
+    assert plan.uncovered_obligation_texts
+
+
+def test_pure_creation_obligation_binds_and_plan_becomes_executable():
+    plan = compile_completion_plan(
+        "Create /app/out.json with the extracted integers.", cwd="/app"
+    )
+
+    assert plan.status is CompletionStatus.COMPLETE
+    assert plan.executable is True
+    assert plan.predicates[0].kind == "required_output_exists"
+    assert plan.predicates[0].obligation_ids
+    assert plan.uncovered_obligation_ids == ()
 
 
 def test_exact_completion_predicates_do_not_duplicate_output_existence_probe():

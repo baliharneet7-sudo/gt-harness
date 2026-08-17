@@ -255,6 +255,41 @@ def test_cleared_read_body_becomes_typed_recap_receipt_without_command_text():
     assert metrics.recap_chars_added > 0
 
 
+def test_recap_fits_200_chars_with_real_length_revision():
+    body = "F" * 300
+    revision = hashlib.sha256(b"live").hexdigest()
+    assert len(revision) == 64
+    messages = _history(("cat /app/src/app.py", body, 0), ("pytest -q", "ok", 0))
+    active_state = {
+        "source_revision": revision,
+        "read_history": [
+            _read_observation("/app/src/app.py", body, source_revision=revision),
+        ],
+    }
+
+    view, metrics = build_provider_view(
+        messages,
+        active_state=active_state,
+        trigger_chars=200,
+        target_chars=150,
+        keep_recent_turns=1,
+    )
+
+    recap = next(
+        m["content"]
+        for m in view
+        if str(m.get("content") or "").startswith("[Earlier tool result cleared:")
+    )
+    assert metrics.recap_receipts == 1
+    assert metrics.recap_fallbacks == 0
+    assert len(recap) <= 200
+    assert f"read /app/src/app.py@{revision[:12]}" in recap
+    assert "sha256=" in recap and "chars=" in recap
+    assert "cat /app/src/app.py" not in recap
+    digest = recap.rsplit("sha256=", 1)[1].split(".")[0].strip()
+    assert digest == hashlib.sha256(body.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def test_recap_atomic_overflow_falls_back_to_bare_receipt():
     body = "E" * 100
     bare = "[Earlier tool result cleared: chars=100 sha256=abc returncode=0.]"

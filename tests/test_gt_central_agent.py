@@ -985,7 +985,9 @@ class _ScriptedModel:
     def query(self, messages):
         self.observed = [str(item.get("content") or "") for item in messages]
         self.observed_history.append(self.observed)
-        command = next(self.commands)
+        command = next(self.commands, None)
+        if command is None:
+            raise RuntimeError("scripted model script exhausted")
         return {
             "role": "assistant",
             "content": "act",
@@ -1015,7 +1017,9 @@ class _BatchModel(_ScriptedModel):
     def query(self, messages):
         self.observed = [str(item.get("content") or "") for item in messages]
         self.observed_history.append(self.observed)
-        commands = next(self.batches)
+        commands = next(self.batches, None)
+        if commands is None:
+            raise RuntimeError("scripted batch model script exhausted")
         return {
             "role": "assistant",
             "content": "act",
@@ -2289,7 +2293,8 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
 
     original = "rm src/greeter.py"
     revised = "rm -f src/greeter.py"
-    model = _ScriptedModel([original, revised, "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    model = _ScriptedModel([original, revised, submit, submit])
     environment = TransferEnvironment()
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -2309,7 +2314,8 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
     executed = [command for command, _env in environment.commands]
     assert original in executed
     assert revised in executed
-    assert len(model.observed_history) == 3
+    assert len(model.observed_history) == 4
+    assert executed.count(submit) == 1
     assert "[GT certified evidence: src/greeter.py:" not in "\n".join(model.observed_history[1])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     decisions = receipt["decision_sufficiency"]["decisions"]
@@ -2871,7 +2877,8 @@ async def test_partial_completion_plan_executes_no_private_predicates(tmp_path):
     agent._model_factory = lambda: model
 
     await agent.run(
-        "Produce /app/task_file/output_data/plan_b1.jsonl and satisfy all scheduling constraints.",
+        "Produce /app/task_file/output_data/plan_b1.jsonl containing exactly 3 rows "
+        "and satisfy all scheduling constraints.",
         environment,
         AgentContext(),
     )
@@ -3686,7 +3693,7 @@ async def test_unclassified_exploration_failure_alone_does_not_split_batch(tmp_p
 @pytest.mark.asyncio
 async def test_assistive_safe_breaks_mutating_batch_before_stale_second_action(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-    model = _BatchModel([["touch app.py", "rm app.py"], [submit]])
+    model = _BatchModel([["touch app.py", "rm app.py"], [submit], [submit]])
     environment = _ObservedMutationEnvironment("touch app.py", "f\t6\t2.0\t2.0\tapp.py\t\n")
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -3696,7 +3703,7 @@ async def test_assistive_safe_breaks_mutating_batch_before_stale_second_action(t
     )
     agent._model_factory = lambda: model
 
-    await agent.run("Create app.py.", environment, AgentContext())
+    await agent.run("Create app.py matching the reference layout.", environment, AgentContext())
 
     commands = [command for command, _ in environment.commands]
     assert "touch app.py" in commands
@@ -3716,7 +3723,7 @@ async def test_assistive_safe_breaks_mutating_batch_before_stale_second_action(t
 @pytest.mark.asyncio
 async def test_compound_mutating_action_breaks_batch_after_observed_directory_change(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-    model = _BatchModel([["mkdir -p work && echo made", "cat work/result"], [submit]])
+    model = _BatchModel([["mkdir -p work && echo made", "cat work/result"], [submit], [submit]])
     environment = _ObservedMutationEnvironment(
         "mkdir -p work && echo made", "d\t0\t2.0\t2.0\twork\t\n"
     )
@@ -3727,7 +3734,9 @@ async def test_compound_mutating_action_breaks_batch_after_observed_directory_ch
     )
     agent._model_factory = lambda: model
 
-    await agent.run("Create the work directory.", environment, AgentContext())
+    await agent.run(
+        "Create the work directory containing the expected layout.", environment, AgentContext()
+    )
 
     commands = [command for command, _ in environment.commands]
     assert "mkdir -p work && echo made" in commands
@@ -4374,6 +4383,59 @@ async def test_grounded_failure_warns_before_submit_without_holding_it(tmp_path)
     assert "Submit again to continue without another hold" not in trajectory
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
     assert receipt["metrics"]["submit_holds"] == 0
+
+
+@pytest.mark.asyncio
+async def test_shadow_submit_gate_holds_once_on_unverified_obligations(tmp_path):
+    class CheckEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if "COMPLETE_TASK" in command:
+                return ExecResult(stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0)
+            raise AssertionError(command)
+
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    environment = CheckEnvironment()
+    model = _ScriptedModel([submit, submit])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="shadow",
+        enable_shadow_submit_gate=True,
+    )
+    agent._model_factory = lambda: model
+
+    task = (
+        "Write a program extract.js that reads /app/a.out and writes the "
+        "extracted integers to /app/out.json so that the values MUST match "
+        "the reference solution."
+    )
+    await agent.run(task, environment, AgentContext())
+
+    executed_submits = [command for command, _ in environment.commands if command == submit]
+    assert executed_submits == [submit]
+    assert len(model.observed_history) == 2
+    assert any("unverified task requirements" in item for item in model.observed_history[1])
+    trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
+    assert "unverified task requirements" in trajectory
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["submit_holds"] == 1
+    assert receipt["metrics"]["submit_risks"] == 1
+    feature_ids = {row["feature_id"] for row in receipt["features"]["receipts"]}
+    assert "submit_refusal" in feature_ids
+    assert "GT_SS_SUBMIT_RED" in feature_ids
+    red = next(
+        row
+        for row in receipt["features"]["receipts"]
+        if row["feature_id"] == "GT_SS_SUBMIT_RED"
+    )
+    assert red["payload"]["blockers"]
+    assert "unverified" in red["payload"]["message"]
 
 
 @pytest.mark.asyncio

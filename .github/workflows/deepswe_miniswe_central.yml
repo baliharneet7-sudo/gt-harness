@@ -719,6 +719,7 @@ jobs:
                 --ak enable_completion_controller=true
                 --ak enable_progress_control=true
                 --ak enable_adaptive_validation_timeout=true
+                --ak enable_shadow_submit_gate=true
                 --ak enable_decision_sufficiency=true
               )
             else

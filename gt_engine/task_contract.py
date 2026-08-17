@@ -272,6 +272,26 @@ def _direct_output_score(prefix: str, path: str) -> int:
     return 0
 
 
+def _to_file_output_score(prefix: str, path: str) -> int:
+    """Score the ``... to the file <path>`` deliverable construction.
+
+    Sentence-boundary splitting cuts a parenthetical example (``(e.g. ...)``)
+    between an output verb and its path, so the clause-local direct-verb rule
+    cannot see the pairing.  ``write ... to the file /app/answer.txt`` is
+    unambiguous deliverable language and names the path immediately after
+    ``the file``, so it is scored directly from the line prefix.
+    """
+
+    escaped = re.escape(path.rsplit("/", 1)[-1])
+    if re.search(
+        rf"(?is)\b(?:to|into)\s+the\s+(?:output\s+)?file\s+"
+        rf"(?:/app/)?(?:[\w.-]+/)*{escaped}\b",
+        prefix[-200:],
+    ):
+        return 90
+    return 0
+
+
 def _strong_direct_output(prefix: str, path: str) -> bool:
     """True when an output verb directly names ``path`` within a few words.
 
@@ -412,6 +432,8 @@ def extract_task_resources(issue_text: str) -> tuple[TaskResource, ...]:
             direct_output = _direct_output_score(prefix, path)
             if direct_output:
                 add(TaskResourceRole.OUTPUT, direct_output)
+            if _to_file_output_score(raw[: end], path):
+                add(TaskResourceRole.OUTPUT, 90)
             shell_role = _shell_position_role(clause, clause_offset, path)
             if shell_role is not None and path not in strong_direct_paths:
                 # Shell position is mechanically stronger than a prose output
