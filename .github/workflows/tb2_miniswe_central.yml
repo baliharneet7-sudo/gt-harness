@@ -565,7 +565,7 @@ jobs:
         # dense_receipt.get("available") is True; dense_proof.get("available") is True
         # provider_delivery_failures; invalid_provider_deliveries;
         # invalid_intelligence or invalid_dense or invalid_provider_deliveries
-        # INVALID TREATMENT RELEASE; invalid_treatment_release;
+        # INVALID GT TREATMENT; INVALID TREATMENT RELEASE; invalid_treatment_release;
         # not lifecycle_report["passed"]; not promotion_report.passed;
         # call1_gt_changed_tasks; This is intervention accounting.
         run: python scripts/tb2_merge_results.py
