@@ -1,6 +1,8 @@
 import json, os, sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.deep_metrics import extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries

@@ -554,6 +554,20 @@ jobs:
           CANARY_PROVIDER: ${{ needs.plan.outputs.canary_provider }}
           GT_COMMIT: ${{ needs.resolve.outputs.sha }}
           GT_RUN_ID: ${{ github.run_id }}
+        # The merge implementation lives in scripts/tb2_merge_results.py to
+        # stay below GitHub's expression-size limit. These anchors keep the
+        # fail-closed release contract reviewable at the dispatch surface:
+        # invalid_intelligence = [; out = [; harbor_result=got[0] if got else None
+        # audit_treatment_runtime; build_feature_lifecycle_report;
+        # assess_tb2_promotion; invalid_treatment_release_tasks;
+        # fingerprint drift does not excuse a baseline loss.
+        # from gt_engine.delivery_audit import audit_provider_deliveries
+        # dense_receipt.get("available") is True; dense_proof.get("available") is True
+        # provider_delivery_failures; invalid_provider_deliveries;
+        # invalid_intelligence or invalid_dense or invalid_provider_deliveries
+        # INVALID TREATMENT RELEASE; invalid_treatment_release;
+        # not lifecycle_report["passed"]; not promotion_report.passed;
+        # call1_gt_changed_tasks; This is intervention accounting.
         run: python scripts/tb2_merge_results.py
 
       - name: Upload merged result
