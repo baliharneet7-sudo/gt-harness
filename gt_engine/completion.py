@@ -15,6 +15,7 @@ import shlex
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 
+from gt_engine.preflight import ActionOperation
 from gt_engine.task_contract import TaskContract, TaskResourceRole, extract_task_contract
 
 
@@ -307,6 +308,36 @@ def compile_completion_plan(instruction: str, *, cwd: str = "/app") -> Completio
         uncovered_obligation_ids=uncovered,
         target_paths=target_paths,
         uncovered_obligation_texts=uncovered_texts,
+    )
+
+
+def should_schedule_completion(
+    plan: CompletionPlan,
+    *,
+    workspace_revision: str,
+    last_evaluated_revision: str,
+    material_workspace_change: bool,
+    proposed_operation: ActionOperation,
+    budget_risk: bool,
+) -> bool:
+    """Decide whether a complete plan must be evaluated at this boundary.
+
+    The old target-path-only trigger missed valid work performed through
+    generators, renames, or opaque programs.  A complete plan is cheap and
+    mechanical, so any material workspace transition, explicit validation, or
+    deterministic budget-risk boundary is sufficient.  A revision is never
+    evaluated twice.
+    """
+
+    return bool(
+        plan.executable
+        and workspace_revision
+        and workspace_revision != last_evaluated_revision
+        and (
+            material_workspace_change
+            or proposed_operation is ActionOperation.VALIDATE
+            or budget_risk
+        )
     )
 
 

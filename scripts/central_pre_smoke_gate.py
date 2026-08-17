@@ -27,6 +27,8 @@ RELEASE_TESTS = (
     "tests/test_gt_central_runtime.py::test_documented_direct_census_entrypoint_is_executable",
     "tests/test_gt_central_agent.py::test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit",
     "tests/test_gt_central_agent.py::test_executable_completion_certificate_auto_submits_before_next_model_call",
+    "tests/test_gt_central_agent.py::test_source_less_task_is_denominator_excluded_not_graph_invalid",
+    "tests/test_gt_central_agent.py::test_assistive_convergence_returns_forbidden_artifact_read_before_execution",
     "tests/test_gt_central_agent.py::test_partial_completion_plan_executes_no_private_predicates",
     "tests/test_gt_central_agent.py::test_custom_probe_failure_is_not_reframed_as_model_guidance",
     "tests/test_gt_central_agent.py::test_context_transform_preserves_oversized_read_before_budget_pressure",

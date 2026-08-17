@@ -78,6 +78,7 @@ from gt_engine.completion import (
     PredicateObservation,
     certificate_from_observations,
     compile_completion_plan,
+    should_schedule_completion,
 )
 from gt_engine.context_frontier import (
     FrontierDisposition,
@@ -89,6 +90,7 @@ from gt_engine.contributions import (
     GTContribution,
     compile_contributions,
 )
+from gt_engine.convergence_controller import convergence_preflight
 from gt_engine.decision_sufficiency import (
     DecisionEvidenceBundle,
     DecisionSufficiencyDisposition,
@@ -194,6 +196,7 @@ from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
 from gt_engine.retrieval_profile import FINAL_RETRIEVAL_PROFILE
 from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
+from gt_engine.task_semantic_substrate import TaskSemanticSubstrate
 from gt_engine.trajectory_utilization import SemanticUtilizationTracker
 from gt_engine.uplift_policy import (
     EvidenceAuthority,
@@ -201,6 +204,39 @@ from gt_engine.uplift_policy import (
     OpportunityKind,
     certify_opportunity,
 )
+
+
+def _account_preemptive_contribution_result(
+    decision: dict[str, Any],
+    *,
+    compilation: dict[str, Any],
+    contribution_selected: bool,
+) -> None:
+    """Finalize retriever selection at the request-wide compiler boundary."""
+
+    if contribution_selected or decision.get("status") != "selected":
+        return
+    accounting = next(
+        (
+            row
+            for row in compilation.get("accounting") or ()
+            if isinstance(row, dict) and row.get("surface") == "preemptive_retrieval"
+        ),
+        None,
+    )
+    if accounting is None:
+        return
+    disposition = str(accounting.get("disposition") or "not_selected")
+    reasons = [
+        *list(decision.get("reason_codes") or ()),
+        f"contribution_{disposition}",
+        *list(accounting.get("reason_codes") or ()),
+    ]
+    decision["retriever_status_before_contribution_compiler"] = "selected"
+    decision["contribution_compiler_disposition"] = disposition
+    decision["contribution_compiler_selected"] = False
+    decision["status"] = "abstained"
+    decision["reason_codes"] = list(dict.fromkeys(str(item) for item in reasons if item))
 
 # The persistent artifact is the controller's current decision frame, not an
 # optional advisory. It must be packed before every other model-visible GT
@@ -1161,6 +1197,60 @@ def _preemptive_retrieval_gate_reason(
     return None
 
 
+def _derive_task_semantic_facts(
+    *,
+    instruction: str,
+    snapshot: Any,
+    cwd: str,
+    source_revision: str,
+    validation_commands: tuple[str, ...] = (),
+    deliverables: tuple[str, ...] = (),
+    project_checks: tuple[str, ...] = (),
+    focus_anchors: tuple[str, ...] = (),
+    path_origins: dict[str, str] | None = None,
+) -> DecisiveDerivation:
+    """Derive graph-independent task evidence from the legal sensor view."""
+
+    def _relative_deliverable(path: str) -> str:
+        raw = str(path or "").replace("\\", "/")
+        if not raw.startswith("/"):
+            return raw
+        root_abs = os.path.abspath(os.fspath(cwd or ".")).replace("\\", "/")
+        try:
+            return os.path.relpath(raw, root_abs).replace("\\", "/")
+        except ValueError:
+            return raw
+
+    try:
+        normalized_validation_commands = tuple(
+            command.strip() for command in validation_commands if command.strip()
+        )
+        validation_command_set = set(normalized_validation_commands)
+        return derive_decisive_facts(
+            instruction=instruction,
+            workspace=workspace_from_snapshot(
+                snapshot.entries,
+                getattr(snapshot, "binary_heads", None),
+                path_origins=path_origins,
+            ),
+            validation_commands=normalized_validation_commands,
+            deliverables=tuple(_relative_deliverable(path) for path in deliverables),
+            project_checks=tuple(
+                command
+                for command in project_checks
+                if command.strip() and command.strip() not in validation_command_set
+            ),
+            focus_anchors=tuple(focus_anchors),
+            source_revision=source_revision,
+            allow_empty_workspace=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - legal derivation abstains
+        return DecisiveDerivation(
+            status=DecisiveStatus.ABSTAINED,
+            reason_codes=(f"derivation_error:{type(exc).__name__}",),
+        )
+
+
 def _derive_task_decisive_facts(
     *,
     instruction: str,
@@ -1178,21 +1268,7 @@ def _derive_task_decisive_facts(
     the ordinary persistent-state path continues untouched.
     """
 
-    def _relative_deliverable(path: str) -> str:
-        raw = str(path or "").replace("\\", "/")
-        if not raw.startswith("/"):
-            return raw
-        root_abs = os.path.abspath(os.fspath(cwd or ".")).replace("\\", "/")
-        try:
-            return os.path.relpath(raw, root_abs).replace("\\", "/")
-        except ValueError:
-            return raw
-
     try:
-        workspace = workspace_from_snapshot(
-            snapshot.entries,
-            getattr(snapshot, "binary_heads", None),
-        )
         validation_commands = tuple(
             item.anchors[0]
             for item in catalog.items
@@ -1209,18 +1285,19 @@ def _derive_task_decisive_facts(
             if item.kind.value == "focus" and item.anchors
         )
         deliverables = tuple(
-            _relative_deliverable(item.path)
+            item.path
             for item in catalog.items
             if item.kind.value == "deliverable" and item.required and item.path
         )
-        return derive_decisive_facts(
+        return _derive_task_semantic_facts(
             instruction=instruction,
-            workspace=workspace,
+            snapshot=snapshot,
+            cwd=cwd,
+            source_revision=source_revision,
             validation_commands=validation_commands,
             deliverables=deliverables,
             project_checks=project_checks,
             focus_anchors=focus_anchors,
-            source_revision=source_revision,
         )
     except Exception as exc:  # noqa: BLE001 - derivation fails open to abstention
         return DecisiveDerivation(
@@ -3149,23 +3226,24 @@ class MiniSweCentralAgent(BaseAgent):
         repository_fact_tracker = RepositoryFactTracker(
             task_start_source_paths=frozenset(initial_source_paths)
         )
+        task_semantic_path_origins: dict[str, str] = {}
         repository_evidence_action = 0
         repository_evidence_eligible_call = 1
         completion_plan = compile_completion_plan(instruction, cwd=self.cwd)
+        completion_dependency_paths = frozenset(
+            _workspace_target_path(path, cwd=self.cwd)
+            for predicate in completion_plan.predicates
+            for path in (*predicate.target_paths, *predicate.dependency_paths)
+        )
         completion_certificates: list[CompletionCertificate] = []
         self._completion_cache.clear()
         self._completion_cache_hits = 0
         self._completion_probe_execs = 0
         last_completion_workspace_revision = ""
-        completion_target_paths = {
-            path[len(self.cwd.rstrip("/")) + 1 :]
-            if path.startswith(self.cwd.rstrip("/") + "/")
-            else path.lstrip("./")
-            for path in completion_plan.target_paths
-        }
         auto_submit_attempts = 0
         auto_submit_count = 0
         controller_opportunities: list[dict[str, Any]] = []
+        convergence_preflight_receipts: list[dict[str, Any]] = []
         project_validation_probes: list[dict[str, Any]] = []
         project_validation_probe_revisions: set[str] = set()
         project_validation_probe_diagnostics: dict[str, str] = {}
@@ -3225,6 +3303,40 @@ class MiniSweCentralAgent(BaseAgent):
         explicit_checks = self._features.register_project_checks(
             (*explicit_checks, *repository_evidence.project_checks)
         )
+        task_semantic_substrate: TaskSemanticSubstrate | None = None
+        if (
+            self.runtime_mode == "treatment"
+            and self.integration_mode is GTIntegrationMode.ACTIVE
+            and self.policy_active
+        ):
+            initial_semantic_derivation = _derive_task_semantic_facts(
+                instruction=instruction,
+                snapshot=snapshot,
+                cwd=self.cwd,
+                source_revision=source_revision,
+                validation_commands=tuple(explicit_checks),
+                deliverables=tuple(task_deliverables),
+                project_checks=tuple(repository_evidence.project_checks),
+                focus_anchors=tuple(
+                    ":".join(
+                        part
+                        for part in (
+                            str(anchor.get("path") or ""),
+                            str(anchor.get("line") or ""),
+                        )
+                        if part
+                    )
+                    + (f"#{anchor.get('symbol')}" if anchor.get("symbol") else "")
+                    for anchor in repository_evidence.anchors
+                    if anchor.get("path")
+                ),
+                path_origins=task_semantic_path_origins,
+            )
+            task_semantic_substrate = TaskSemanticSubstrate.from_derivation(
+                initial_semantic_derivation,
+                evidence_action=0,
+                eligible_call=1,
+            )
         if repository_evidence.available:
             self._features.register_structural_evidence(
                 source_revision=source_revision,
@@ -3656,7 +3768,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         for document in preemptive_repository.documents
                                     },
                                     workspace_root=self.cwd or "/app",
-                                    decisive=decisive_derivation,
+                                    decisive=None,
                                 )
                             )
                             remaining_for_bootstrap = (
@@ -3939,6 +4051,21 @@ class MiniSweCentralAgent(BaseAgent):
                 runtime_enrichment_chars = 0
                 runtime_message_index: int | None = None
                 delivery_metadata: dict[str, Any] | None = None
+                task_semantic_frame = (
+                    task_semantic_substrate.compile_context(
+                        current_source_revision=source_revision,
+                        current_call=calls,
+                        provider_messages=query_messages,
+                        max_chars=min(1_800, self.gt_request_token_budget * 6),
+                    )
+                    if task_semantic_substrate is not None
+                    else None
+                )
+                task_semantic_payload = (
+                    task_semantic_frame.rendered_text
+                    if task_semantic_frame is not None
+                    else ""
+                )
                 persistent_state_frame = (
                     persistent_state_engine.compile_context(
                         current_source_revision=source_revision,
@@ -4501,6 +4628,17 @@ class MiniSweCentralAgent(BaseAgent):
                         revision=persistent_state_frame.source_revision,
                         priority=PERSISTENT_STATE_CONTRIBUTION_PRIORITY,
                     )
+                if task_semantic_frame is not None:
+                    register_contribution(
+                        surface="task_semantic_substrate",
+                        payload=task_semantic_payload,
+                        claim_ids=task_semantic_frame.claim_ids,
+                        fact_ids=task_semantic_frame.fact_ids,
+                        evidence_action=task_semantic_frame.evidence_action,
+                        eligible_call=task_semantic_frame.eligible_call,
+                        revision=task_semantic_frame.source_revision,
+                        priority=8,
+                    )
                 if preemptive_frame is not None:
                     register_contribution(
                         surface="preemptive_retrieval",
@@ -4612,14 +4750,25 @@ class MiniSweCentralAgent(BaseAgent):
                     contribution_id = _by_surface.get(surface)
                     return bool(contribution_id and contribution_id in _selected)
 
-                if preemptive_frame is not None and not contribution_selected(
-                    "preemptive_retrieval"
-                ):
-                    preemptive_frame = None
+                if preemptive_frame is not None:
+                    preemptive_contribution_selected = contribution_selected(
+                        "preemptive_retrieval"
+                    )
+                    _account_preemptive_contribution_result(
+                        preemptive_decision,
+                        compilation=compiled_contributions.as_dict(),
+                        contribution_selected=preemptive_contribution_selected,
+                    )
+                    if not preemptive_contribution_selected:
+                        preemptive_frame = None
                 if persistent_state_payload and not contribution_selected(
                     "persistent_execution_state"
                 ):
                     persistent_state_payload = ""
+                if task_semantic_payload and not contribution_selected(
+                    "task_semantic_substrate"
+                ):
+                    task_semantic_payload = ""
                 if frontier_payload and not contribution_selected("graph_frontier"):
                     frontier_payload = ""
                 if guidance_payload and not contribution_selected("feature_fact"):
@@ -4651,6 +4800,7 @@ class MiniSweCentralAgent(BaseAgent):
                 legacy_runtime_parts = [
                     item
                     for item in (
+                        task_semantic_payload,
                         persistent_state_payload,
                         frontier_payload,
                         guidance_payload,
@@ -5069,6 +5219,7 @@ class MiniSweCentralAgent(BaseAgent):
                     "assistant_chars": 0,
                     "tool_observation_chars": 0,
                     "preemptive_retrieval_chars": len(preemptive_payload),
+                    "task_semantic_substrate_chars": len(task_semantic_payload),
                     "persistent_execution_state_chars": len(persistent_state_payload),
                     "runtime_advisory_chars": len(guidance_payload),
                     "context_frontier_chars": len(frontier_payload),
@@ -5077,6 +5228,7 @@ class MiniSweCentralAgent(BaseAgent):
                         0,
                         runtime_enrichment_chars
                         - len(preemptive_payload)
+                        - len(task_semantic_payload)
                         - len(persistent_state_payload)
                         - len(guidance_payload)
                         - len(frontier_payload)
@@ -5110,6 +5262,7 @@ class MiniSweCentralAgent(BaseAgent):
                             and not provider_view_metrics.compacted,
                         ),
                         ("preemptive_retrieval", bool(preemptive_payload)),
+                        ("task_semantic_substrate", bool(task_semantic_payload)),
                         ("persistent_execution_state", bool(persistent_state_payload)),
                         ("certified_evidence", bool(legacy_runtime_payload)),
                     )
@@ -5158,6 +5311,12 @@ class MiniSweCentralAgent(BaseAgent):
                         "runtime_message_index": runtime_message_index,
                         "preemptive_retrieval": dict(preemptive_decision),
                         "preemptive_retrieval_delivered": bool(preemptive_payload),
+                        "task_semantic_substrate": (
+                            task_semantic_frame.as_dict()
+                            if task_semantic_frame is not None
+                            else None
+                        ),
+                        "task_semantic_substrate_delivered": False,
                         "persistent_execution_state": (
                             persistent_state_frame.as_dict()
                             if persistent_state_frame is not None
@@ -5229,6 +5388,27 @@ class MiniSweCentralAgent(BaseAgent):
                             str(item) for item in preemptive_decision.get("reason_codes") or ()
                         ),
                         source_revision=graph_source_revision,
+                    )
+                if task_semantic_frame is not None:
+                    provider_evidence.prepare(
+                        surface=ProviderEvidenceSurface.TASK_SEMANTIC_SUBSTRATE,
+                        fact_ids=task_semantic_frame.fact_ids,
+                        claim_ids=task_semantic_frame.claim_ids,
+                        evidence_action=task_semantic_frame.evidence_action,
+                        eligible_call=task_semantic_frame.eligible_call,
+                        prepared_call=calls,
+                        message_indices=(
+                            (runtime_message_index,)
+                            if task_semantic_payload and runtime_message_index is not None
+                            else ()
+                        ),
+                        chars=len(task_semantic_payload),
+                        disposition=(
+                            None
+                            if task_semantic_payload
+                            else ProviderEvidenceDisposition.CONTROLLER_ONLY
+                        ),
+                        source_revision=task_semantic_frame.source_revision,
                     )
                 if persistent_state_frame is not None:
                     provider_evidence.prepare(
@@ -5513,6 +5693,22 @@ class MiniSweCentralAgent(BaseAgent):
                         observed_fact_deliveries.append(prepared_observed_fact_delivery)
                         pending_observed_fact = None
                     if (
+                        task_semantic_payload
+                        and task_semantic_substrate is not None
+                        and task_semantic_frame is not None
+                        and runtime_message_index is not None
+                    ):
+                        task_semantic_substrate.mark_dispatched(
+                            task_semantic_frame,
+                            call=calls,
+                            request_payload_sha256=request_payload_sha256,
+                            provider_messages_sha256=provider_messages_sha256,
+                            message_index=runtime_message_index,
+                        )
+                        model_call_contexts[-1][
+                            "task_semantic_substrate_delivered"
+                        ] = True
+                    if (
                         prepared_persistent_delivery is not None
                         and persistent_state_engine is not None
                         and persistent_state_frame is not None
@@ -5757,6 +5953,32 @@ class MiniSweCentralAgent(BaseAgent):
                             preflight = pass_decision(
                                 proposed, f"preflight_exception:{type(exc).__name__}"
                             )
+                        convergence_decision = convergence_preflight(
+                            proposed,
+                            cwd=self.cwd,
+                            source_revision=source_revision,
+                            progress_state=self._progress.state,
+                            unresolved_anchors=tuple(
+                                list(explicit_checks)[:2]
+                                or list(completion_plan.uncovered_obligation_texts)[:2]
+                                or sorted(task_deliverables)[:2]
+                            ),
+                        )
+                        convergence_preflight_receipts.append(
+                            {
+                                "action_id": proposed.action_id,
+                                "cycle_id": proposed.cycle_id,
+                                "model_call": calls,
+                                "source_revision": source_revision,
+                                **convergence_decision.as_dict(),
+                            }
+                        )
+                        if (
+                            preflight.disposition is ActionDisposition.PASS
+                            and convergence_decision.disposition
+                            is ActionDisposition.RETURN_TO_MODEL
+                        ):
+                            preflight = convergence_decision
                         sufficiency_row: dict[str, Any] | None = None
                         if self.enable_decision_sufficiency:
                             sufficiency_row = {
@@ -6411,6 +6633,17 @@ class MiniSweCentralAgent(BaseAgent):
                         )
                         for path in transition.changed_paths
                     )
+                    for classified_change in classified_transition:
+                        if classified_change.path not in after.entries:
+                            task_semantic_path_origins.pop(classified_change.path, None)
+                            continue
+                        task_semantic_path_origins[classified_change.path] = {
+                            ChangeOrigin.MODEL_AUTHORED: "model_authored",
+                            ChangeOrigin.TASK_DELIVERABLE: "task_deliverable",
+                            ChangeOrigin.VALIDATOR_DERIVED: "generated_artifact",
+                            ChangeOrigin.BACKGROUND_DERIVED: "generated_artifact",
+                            ChangeOrigin.UNKNOWN: "generated_artifact",
+                        }[classified_change.origin]
                     material_workspace_change = any(
                         item.origin
                         in {
@@ -6567,6 +6800,42 @@ class MiniSweCentralAgent(BaseAgent):
                     retrieval_validation_state = classification.status.value
                     retrieval_evidence_action = actions_count
                     retrieval_eligible_call = calls + 1
+                    if task_semantic_substrate is not None and (
+                        material_workspace_change
+                        or repository_evidence_action == actions_count
+                        or proposed.operation is ActionOperation.VALIDATE
+                    ):
+                        task_semantic_substrate.refresh(
+                            _derive_task_semantic_facts(
+                                instruction=instruction,
+                                snapshot=snapshot,
+                                cwd=self.cwd,
+                                source_revision=source_revision,
+                                validation_commands=tuple(explicit_checks),
+                                deliverables=tuple(task_deliverables),
+                                project_checks=tuple(repository_evidence.project_checks),
+                                focus_anchors=tuple(
+                                    ":".join(
+                                        part
+                                        for part in (
+                                            str(anchor.get("path") or ""),
+                                            str(anchor.get("line") or ""),
+                                        )
+                                        if part
+                                    )
+                                    + (
+                                        f"#{anchor.get('symbol')}"
+                                        if anchor.get("symbol")
+                                        else ""
+                                    )
+                                    for anchor in repository_evidence.anchors
+                                    if anchor.get("path")
+                                ),
+                                path_origins=task_semantic_path_origins,
+                            ),
+                            evidence_action=actions_count,
+                            eligible_call=calls + 1,
+                        )
                     if (
                         persistent_state_engine is None
                         and self.enable_persistent_execution_state
@@ -6739,7 +7008,7 @@ class MiniSweCentralAgent(BaseAgent):
                                             for document in activation_repository.documents
                                         },
                                         workspace_root=self.cwd or "/app",
-                                        decisive=decisive_derivation,
+                                        decisive=None,
                                     )
                                 )
                                 remaining_for_bootstrap = (
@@ -7256,15 +7525,28 @@ class MiniSweCentralAgent(BaseAgent):
                         action_id=actions_count,
                     )
                     auto_submitted = False
+                    completion_dependency_changed = bool(
+                        completion_dependency_paths
+                        & {
+                            _workspace_target_path(path, cwd=self.cwd)
+                            for path in transition.changed_paths
+                        }
+                    )
                     completion_triggered = bool(
                         self.enable_completion_controller
-                        and completion_plan.executable
                         and snapshot.healthy
                         and source_receipt.complete
-                        and snapshot.revision != last_completion_workspace_revision
-                        and (
-                            bool(set(transition.changed_paths) & completion_target_paths)
-                            or proposed.operation is ActionOperation.VALIDATE
+                        and should_schedule_completion(
+                            completion_plan,
+                            workspace_revision=snapshot.revision,
+                            last_evaluated_revision=(last_completion_workspace_revision),
+                            material_workspace_change=(
+                                material_workspace_change
+                                or completion_dependency_changed
+                            ),
+                            proposed_operation=proposed.operation,
+                            budget_risk=self._progress.state
+                            in {"STALLED", "CONTRADICTED", "BUDGET_RISK"},
                         )
                     )
                     if completion_triggered:
@@ -8297,6 +8579,13 @@ class MiniSweCentralAgent(BaseAgent):
                     "task_character_budget_closed_precheck" in set(row.get("reason_codes") or ())
                     for row in preemptive_retrieval_decisions
                 ),
+                "preemptive_retrieval_compiler_rejected_calls": sum(
+                    row.get("status") == "abstained"
+                    and row.get("retriever_status_before_contribution_compiler")
+                    == "selected"
+                    and row.get("contribution_compiler_selected") is False
+                    for row in preemptive_retrieval_decisions
+                ),
                 "preemptive_retrieval_cache_hits": sum(
                     bool(row.get("cache_hit")) for row in preemptive_retrieval_decisions
                 ),
@@ -8814,6 +9103,10 @@ class MiniSweCentralAgent(BaseAgent):
                     int(row.get("preemptive_retrieval_chars") or 0)
                     for row in dispatched_model_call_contexts
                 ),
+                "task_semantic_substrate_context_chars_added": sum(
+                    int(row.get("task_semantic_substrate_chars") or 0)
+                    for row in dispatched_model_call_contexts
+                ),
                 "persistent_execution_state_context_chars_added": sum(
                     int(row.get("persistent_execution_state_chars") or 0)
                     for row in dispatched_model_call_contexts
@@ -8829,6 +9122,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "total_gt_context_chars_added": sum(
                     int(row.get("runtime_advisory_chars") or 0)
                     + int(row.get("preemptive_retrieval_chars") or 0)
+                    + int(row.get("task_semantic_substrate_chars") or 0)
                     + int(row.get("persistent_execution_state_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
@@ -8838,6 +9132,7 @@ class MiniSweCentralAgent(BaseAgent):
                 "newly_inserted_context_chars": sum(
                     int(row.get("runtime_advisory_chars") or 0)
                     + int(row.get("preemptive_retrieval_chars") or 0)
+                    + int(row.get("task_semantic_substrate_chars") or 0)
                     + int(row.get("persistent_execution_state_chars") or 0)
                     + int(row.get("context_frontier_chars") or 0)
                     + int(row.get("progress_frame_chars") or 0)
@@ -9070,6 +9365,12 @@ class MiniSweCentralAgent(BaseAgent):
                             "repository_refresh_timeout_sec": (self.repository_refresh_timeout_sec),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
                             "decision_sufficiency": self.enable_decision_sufficiency,
+                            "task_semantic_substrate": bool(
+                                task_semantic_substrate is not None
+                            ),
+                            "convergence_controller": bool(
+                                self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
+                            ),
                             "persistent_execution_state": (self.enable_persistent_execution_state),
                             "persistent_state_bootstrap_timeout_sec": (
                                 self.persistent_state_bootstrap_timeout_sec
@@ -9143,6 +9444,19 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                         "repository_work_receipts": list(self._repository_work_receipts),
                         "checkpoint_ledger": self._checkpoints.summary(),
+                        "task_semantic_substrate": (
+                            task_semantic_substrate.as_dict()
+                            if task_semantic_substrate is not None
+                            else {
+                                "schema": "gt.task_semantic_substrate.v1",
+                                "status": "disabled",
+                                "derivation": None,
+                                "delivered_claim_count": 0,
+                                "represented_claim_count": 0,
+                                "compilations": [],
+                                "deliveries": [],
+                            }
+                        ),
                         "persistent_execution_state": {
                             "activation": persistent_state_activation,
                             "initialization": persistent_state_initialization,
@@ -9209,6 +9523,22 @@ class MiniSweCentralAgent(BaseAgent):
                         "observed_facts": {
                             "enabled": bool(self.enable_observed_facts),
                             "fact_deliveries": observed_fact_deliveries,
+                        },
+                        "convergence_controller": {
+                            "schema": "gt.convergence_controller.v1",
+                            "preflights": convergence_preflight_receipts,
+                            "return_candidates": sum(
+                                row.get("disposition") == "return_to_model"
+                                for row in convergence_preflight_receipts
+                            ),
+                            "applied_returns": sum(
+                                row.get("applied_disposition") == "return_to_model"
+                                for row in feature_summary.get("action_cycles") or ()
+                                if "forbidden_benchmark_artifact_path"
+                                in (row.get("applied_reason_codes") or ())
+                                or "convergence_budget_requires_verification"
+                                in (row.get("applied_reason_codes") or ())
+                            ),
                         },
                         "deadline": {
                             "execution_budget_sec": effective_budget,

@@ -20,6 +20,7 @@ from gt_engine.thin_compiler import (
 )
 
 SURFACE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("task_semantic_substrate", ("task_semantic_substrate", "deliveries")),
     ("preemptive_retrieval", ("preemptive_retrieval", "deliveries")),
     ("persistent_execution_state", ("persistent_execution_state", "deliveries")),
     ("guidance", ("guidance_deliveries",)),

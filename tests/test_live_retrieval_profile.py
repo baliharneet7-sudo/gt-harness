@@ -53,16 +53,23 @@ def test_paid_context_arms_enable_the_pinned_live_retriever():
         assert "SNOWFLAKE_TOKENIZER_SHA256:" in workflow
         assert "tokenizer.json\" | sha256sum -c -" in workflow
         assert "Provision pinned Snowflake ONNX runtime asset" in workflow
-        assert (
-            "if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}"
-            in workflow
-        )
-        assert workflow.count("--ak enable_preemptive_retrieval=true") == 2
-        assert workflow.count("--ak enable_decision_sufficiency=true") == 2
-        assert workflow.count(
-            '--ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"'
-        ) == 2
-        assert "--ak enable_preemptive_retrieval=false" in workflow
+    engine = (root / ".github" / "workflows" / "tb2_miniswe_engine.yml").read_text(
+        encoding="utf-8"
+    )
+    central = (root / ".github" / "workflows" / "tb2_miniswe_central.yml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        "if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}"
+        in engine
+    )
+    assert "inputs.arm" not in central
+    assert central.count("--ak enable_preemptive_retrieval=true") == 1
+    assert central.count("--ak enable_decision_sufficiency=true") == 1
+    assert central.count(
+        '--ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"'
+    ) == 1
+    assert "--ak enable_preemptive_retrieval=false" not in central
 
 
 def test_central_matrix_provisions_and_proves_dense_backend_inside_each_run_job():
@@ -113,6 +120,35 @@ def test_central_merge_fails_closed_on_any_provider_delivery_integrity_error():
     assert "invalid_intelligence or invalid_dense or invalid_provider_deliveries" in merge_block
     assert "INVALID TREATMENT RELEASE" in merge_block
     assert "invalid_treatment_release" in merge_block
+    assert 'not lifecycle_report["passed"]' in merge_block
+    assert "not promotion_report.passed" in merge_block
+
+
+def test_central_matrix_is_treatment_only_and_uses_the_frozen_baseline_gate():
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "tb2_miniswe_central.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "inputs.arm" not in workflow
+    assert "inputs.feature" not in workflow
+    assert "comparison_profile:" in workflow
+    assert "repair20-v1" in workflow
+    assert "full89-v1" not in workflow
+    assert "      include:" not in workflow
+    assert "      exclude:" not in workflow
+    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 4
+    assert "integration_mode=off" not in workflow
+    assert "integration_mode=audit" not in workflow
+    assert "preflight_mode=assistive_safe" in workflow
+    assert "preflight_mode=shadow" not in workflow
+    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
+    assert "build_feature_lifecycle_report" in workflow
+    assert "assess_tb2_promotion" in workflow
+    assert "promotion_report.json" in workflow
+    assert "feature_lifecycle_report.json" in workflow
+    assert "FINGERPRINT DRIFT (CONFOUND)" not in workflow
+    assert "fingerprint drift does not excuse" in workflow
 
 
 def test_central_merge_requires_explicit_dense_backend_success():

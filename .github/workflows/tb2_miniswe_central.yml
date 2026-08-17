@@ -1,75 +1,36 @@
 # Terminal-Bench 2.0 MINI-SWE CENTRAL RUNTIME matrix, one job per task.
 #
-# Same shape as the GT-off baseline matrix, but runs the host-owned GT-on
-# control plane (eval.gt_central_agent:MiniSweCentralAgent). Private runtime
+# Uses the already-frozen 2026-07-31 baseline only as a post-hoc comparator and
+# runs the host-owned GT treatment control plane
+# (eval.gt_central_agent:MiniSweCentralAgent). Private runtime
 # code, state, provider credentials, and feature configuration stay on the
 # Harbor host; only literal model-selected Bash commands enter the task image.
 #
-# Matched repair-mix control for the frozen GT-off baseline (17/20 on this
-# selected slice). The default pool covers every known outcome regression,
-# known GT-working trajectories, and prior GT-on flips. This is not a
-# leaderboard submission; clear `include` explicitly before any full run.
-# --agent-timeout-multiplier 1.0. Do not rerun the baseline.
+# Promotion-capable runs use one immutable task profile from the frozen
+# baseline. Arbitrary subsets are diagnostic-only and cannot emit a verdict.
+# --agent-timeout-multiplier 1.0. This workflow has no baseline-generation arm.
 name: TB2 miniswe central matrix (GT-on)
 
 on:
   workflow_dispatch:
     inputs:
-      model:
-        description: "Model id for harbor -m; native DeepSeek requires deepseek-v4-flash"
-        type: string
-        default: "deepseek-v4-flash"
-      provider:
-        description: "OpenAI-compatible provider route"
+      comparison_profile:
+        description: "Frozen comparison denominator"
         type: choice
-        options: [configured, deepseek]
-        default: deepseek
-      base_url:
-        description: "OpenAI-compatible gateway URL; exported as OPENAI_BASE_URL (overrides the repo secret)"
-        type: string
-        default: ""
+        options: [repair20-v1]
+        default: repair20-v1
       parallel:
         description: "Max concurrent task jobs (GHA concurrency cap)"
         type: string
         default: "10"
-      include:
-        description: "20-task repair mix by default; clear explicitly only for an authorized full run"
-        type: string
-        default: "extract-elf,mcmc-sampling-stan,prove-plus-comm,qemu-alpine-ssh,regex-chess,sanitize-git-repo,torch-tensor-parallelism,video-processing,winning-avg-corewars,write-compressor,headless-terminal,portfolio-optimization,schemelike-metacircular-eval,cobol-modernization,llm-inference-batching-scheduler,fix-code-vulnerability,feal-linear-cryptanalysis,count-dataset-tokens,largest-eigenval,torch-pipeline-parallelism"
-      exclude:
-        description: "Optional comma-separated task names/globs to drop from the pool"
+      ref:
+        description: "Exact treatment commit or branch; blank freezes the dispatch commit"
         type: string
         default: ""
-      dataset:
-        description: "Harbor dataset name@version"
-        type: string
-        default: "terminal-bench@2.0"
-      image_tag:
-        description: "Task image tag (all TB2.0 task images are alexgshaw/<task>:<tag>). Cache key component; bump when the dataset images change"
-        type: string
-        default: "20251031"
-      ref:
-        description: "Repository ref to check out (the ENGINE code lives on the inline-engine branch)"
-        type: string
-        default: "inline-engine"
-      arm:
-        description: "Conservative component arm; paid execution still requires the pre-smoke gate"
-        type: choice
-        options: ["off", audit, certified_context, certified_controllers, certified_full]
-        default: audit
-      feature:
-        description: "Integrated all-17 runtime (component behavior is selected by arm)"
-        type: choice
-        options: [integrated]
-        default: integrated
       replay_capture:
         description: "Capture bounded provider requests/responses for deterministic trajectory replay (paid; default off)"
         type: boolean
         default: false
-      step_limit:
-        description: "Maximum Mini-SWE model calls per task; use 1 only for authorized decision-point capture"
-        type: string
-        default: "100"
       provider_preflight_timeout_sec:
         description: "Provider preflight timeout for this run; increase for queued TokenRouter routes"
         type: string
@@ -83,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 1
       - id: freeze
         name: Freeze exact treatment commit
@@ -101,11 +62,14 @@ jobs:
     timeout-minutes: 20
     outputs:
       tasks: ${{ steps.enum.outputs.tasks }}
+      task_set_sha256: ${{ steps.enum.outputs.task_set_sha256 }}
+      canary_model: ${{ steps.canary_identity.outputs.model }}
+      canary_provider: ${{ steps.canary_identity.outputs.provider }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_BASE_URL: https://api.deepseek.com
       GT_LITELLM_MODEL: openai/deepseek-v4-flash
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
@@ -118,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -145,7 +109,6 @@ jobs:
             vendor/groundtruth_mcp-*.whl
 
       - name: Provision pinned Snowflake ONNX runtime asset
-        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
         run: |
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
@@ -192,7 +155,7 @@ jobs:
 
       - name: Prove exact persistent bootstrap provider contract (gates all jobs)
         env:
-          MODEL: ${{ inputs.model }}
+          MODEL: deepseek-v4-flash
           PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
         run: |
           set -euo pipefail
@@ -205,6 +168,23 @@ jobs:
               --timeout-sec "$PROVIDER_PREFLIGHT_TIMEOUT_SEC" \
               --output bootstrap-canary.json
 
+      - id: canary_identity
+        name: Export observed bootstrap canary identity
+        run: |
+          python - <<'EOF'
+          import json, os
+          from pathlib import Path
+
+          payload = json.loads(Path("bootstrap-canary.json").read_text(encoding="utf-8"))
+          identity = ((payload.get("receipt") or {}).get("response_identity") or {})
+          model = str(identity.get("model") or "")
+          provider = str(identity.get("provider") or "")
+          if model != "deepseek-v4-flash" or provider != "openai":
+              raise SystemExit("::error::bootstrap canary observed identity mismatch")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"model={model}\nprovider={provider}\n")
+          EOF
+
       - name: Upload exact bootstrap proof
         if: always()
         uses: actions/upload-artifact@v4
@@ -216,35 +196,43 @@ jobs:
       - name: Enumerate dataset tasks
         id: enum
         env:
-          DATASET: ${{ inputs.dataset }}
-          INCLUDE: ${{ inputs.include }}
-          EXCLUDE: ${{ inputs.exclude }}
+          DATASET: terminal-bench@2.0
+          COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
         run: |
           set -euo pipefail
           harbor dataset download "$DATASET" -o ds --export
           python - <<'EOF'
-          import fnmatch, json, os
+          import json, os
           from pathlib import Path
+
+          from scripts.tb2_promotion_gate import task_set_sha256
 
           dataset = os.environ["DATASET"]
           root = Path("ds") / dataset.split("@", 1)[0]
-          tasks = sorted(p.name for p in root.iterdir() if p.is_dir())
-          if not tasks:
+          available = {p.name for p in root.iterdir() if p.is_dir()}
+          if not available:
               raise SystemExit(f"::error::no tasks found under {root}")
 
-          def patterns(raw):
-              return [s.strip() for s in raw.split(",") if s.strip()]
-
-          inc, exc = patterns(os.environ["INCLUDE"]), patterns(os.environ["EXCLUDE"])
-          if inc:
-              tasks = [t for t in tasks if any(fnmatch.fnmatch(t, p) for p in inc)]
-          if exc:
-              tasks = [t for t in tasks if not any(fnmatch.fnmatch(t, p) for p in exc)]
-          if not tasks:
-              raise SystemExit("::error::include/exclude filtered every task out")
+          baseline = json.loads(
+              Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          profile_id = os.environ["COMPARISON_PROFILE"]
+          profile = baseline["manifest"]["profiles"][profile_id]
+          tasks = sorted(
+              row["task"] for row in baseline["rows"]
+          ) if profile.get("task_source") == "all_rows" else sorted(profile["task_ids"])
+          missing = sorted(set(tasks) - available)
+          if missing:
+              raise SystemExit(f"::error::profile tasks absent from dataset: {missing}")
+          digest = task_set_sha256(tasks)
+          if len(tasks) != profile["task_count"] or digest != profile["task_set_sha256"]:
+              raise SystemExit("::error::frozen comparison profile failed count/hash validation")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"tasks={json.dumps(tasks)}\n")
+              f.write(f"task_set_sha256={digest}\n")
 
           summary = [f"## Plan: {len(tasks)} tasks as individual jobs", ""]
           summary.append("`" + ", ".join(tasks) + "`")
@@ -265,8 +253,8 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.provider == 'deepseek' && secrets.DEEPSEEK_API_KEY || secrets.OPENAI_API_KEY }}
-      OPENAI_BASE_URL: ${{ inputs.provider == 'deepseek' && 'https://api.deepseek.com' || (inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL) }}
+      OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      OPENAI_BASE_URL: https://api.deepseek.com
       GT_LITELLM_MODEL: openai/deepseek-v4-flash
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
@@ -313,7 +301,6 @@ jobs:
             vendor/groundtruth_mcp-*.whl
 
       - name: Provision pinned Snowflake ONNX runtime asset in task job
-        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
         run: |
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
@@ -344,7 +331,6 @@ jobs:
           PY
 
       - name: Verify pinned dense backend before Mini-SWE
-        if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}
         run: |
           set -euo pipefail
           MODEL_DIR="$RUNNER_TEMP/snowflake-arctic-embed-m" python - <<'PY'
@@ -411,7 +397,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/tb2-img.tar.gz
-          key: tb2-img-${{ matrix.task }}-${{ inputs.image_tag }}
+          key: tb2-img-${{ matrix.task }}-20251031
 
       - name: Load cached task image
         if: steps.restore.outputs.cache-hit == 'true'
@@ -421,7 +407,7 @@ jobs:
 
       - name: Resolve Harbor's exact task-owned agent budget
         env:
-          DATASET: ${{ inputs.dataset }}
+          DATASET: terminal-bench@2.0
           TASK: ${{ matrix.task }}
         run: |
           set -euo pipefail
@@ -439,103 +425,40 @@ jobs:
       - name: Run harbor - task ${{ matrix.task }}
         id: harbor
         env:
-          MODEL: ${{ inputs.model }}
-          DATASET: ${{ inputs.dataset }}
+          MODEL: deepseek-v4-flash
+          DATASET: terminal-bench@2.0
           TASK: ${{ matrix.task }}
-          ARM: ${{ inputs.arm }}
-          FEATURE: ${{ inputs.feature }}
           REPLAY_CAPTURE: ${{ inputs.replay_capture }}
-          STEP_LIMIT: ${{ inputs.step_limit }}
+          STEP_LIMIT: "100"
         run: |
           set -uo pipefail
           AGENT="eval.gt_central_agent:MiniSweCentralAgent"
-          [ "$FEATURE" = "integrated" ] || { echo "::error::unknown feature: $FEATURE"; exit 2; }
-          FEATURE_ARGS=()
-          case "$ARM" in
-            off)
-              FEATURE_ARGS+=(
-                --ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off
-                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
-                --ak enable_persistent_execution_state=false
-                --ak enable_all_features=false --ak enable_submit_readiness=false
-                --ak enable_lint=false --ak enable_feature_guidance=false
-                --ak enable_context_frontier=false --ak enable_context_compaction=false
-                --ak enable_completion_controller=false --ak enable_progress_control=false
-                --ak enable_adaptive_validation_timeout=false --ak require_graph_ready=false
-              ) ;;
-            audit)
-              FEATURE_ARGS+=(
-                --ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow
-                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
-                --ak enable_persistent_execution_state=false
-                --ak enable_all_features=true --ak enable_submit_readiness=true
-                --ak enable_repository_intelligence=true
-                --ak enable_lint=false --ak enable_feature_guidance=false
-                --ak enable_context_frontier=false --ak enable_context_compaction=false
-                --ak enable_completion_controller=false --ak enable_progress_control=false
-                --ak enable_adaptive_validation_timeout=false --ak require_graph_ready=false
-              ) ;;
-            certified_context)
-              FEATURE_ARGS+=(
-                --ak integration_mode=active --ak policy_mode=certified_active
-                --ak enable_all_features=true --ak enable_submit_readiness=true
-                --ak enable_repository_intelligence=true
-                --ak preflight_mode=shadow --ak enable_lint=false
-                --ak enable_feature_guidance=true --ak enable_context_frontier=true
-                --ak enable_preemptive_retrieval=true
-                --ak enable_decision_sufficiency=true
-                --ak enable_persistent_execution_state=true
-                --ak persistent_state_bootstrap_timeout_sec=45
-                --ak persistent_state_bootstrap_input_tokens=2000
-                --ak persistent_state_bootstrap_output_tokens=512
-                --ak persistent_state_context_tokens=512
-                --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
-                --ak enable_context_compaction=false --ak enable_completion_controller=false
-                --ak enable_progress_control=false --ak enable_adaptive_validation_timeout=false
-                --ak require_graph_ready=true
-              ) ;;
-            certified_controllers)
-              FEATURE_ARGS+=(
-                --ak integration_mode=active --ak policy_mode=certified_active
-                --ak enable_all_features=false --ak enable_submit_readiness=false
-                --ak enable_repository_intelligence=false
-                --ak preflight_mode=shadow --ak enable_lint=true
-                --ak enable_feature_guidance=false --ak enable_context_frontier=false
-                --ak enable_preemptive_retrieval=false --ak enable_decision_sufficiency=false
-                --ak enable_persistent_execution_state=false
-                --ak enable_context_compaction=false --ak enable_completion_controller=true
-                --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
-                --ak require_graph_ready=false
-              ) ;;
-            certified_full)
-              FEATURE_ARGS+=(
-                --ak integration_mode=active --ak policy_mode=certified_active
-                --ak enable_all_features=true --ak enable_submit_readiness=true
-                --ak enable_repository_intelligence=true
-                --ak preflight_mode=shadow --ak enable_lint=true
-                --ak enable_feature_guidance=true --ak enable_context_frontier=true
-                --ak enable_preemptive_retrieval=true
-                --ak enable_decision_sufficiency=true
-                --ak enable_persistent_execution_state=true
-                --ak persistent_state_bootstrap_timeout_sec=45
-                --ak persistent_state_bootstrap_input_tokens=2000
-                --ak persistent_state_bootstrap_output_tokens=512
-                --ak persistent_state_context_tokens=512
-                --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
-                --ak enable_context_compaction=true --ak enable_completion_controller=true
-                --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
-                --ak enable_shadow_submit_gate=true
-                --ak require_graph_ready=true
-              ) ;;
-            *) echo "::error::unknown arm: $ARM"; exit 2 ;;
-          esac
+          FEATURE_ARGS=(
+            --ak integration_mode=active --ak policy_mode=certified_active
+            --ak enable_all_features=true --ak enable_submit_readiness=true
+            --ak enable_repository_intelligence=true
+            --ak preflight_mode=assistive_safe --ak enable_lint=true
+            --ak enable_feature_guidance=true --ak enable_context_frontier=true
+            --ak enable_preemptive_retrieval=true
+            --ak enable_decision_sufficiency=true
+            --ak enable_persistent_execution_state=true
+            --ak persistent_state_bootstrap_timeout_sec=45
+            --ak persistent_state_bootstrap_input_tokens=2000
+            --ak persistent_state_bootstrap_output_tokens=512
+            --ak persistent_state_context_tokens=512
+            --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
+            --ak enable_context_compaction=true --ak enable_completion_controller=true
+            --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
+            --ak enable_shadow_submit_gate=true
+            --ak require_graph_ready=true
+          )
           FEATURE_ARGS+=(
             --ak execution_budget_sec="$EXECUTION_BUDGET"
             --ak enable_task_start_advisory=false
             --ak enable_replay_capture="$REPLAY_CAPTURE"
             --ak step_limit="$STEP_LIMIT"
           )
-          JOB_NAME="tb2-miniswe-central-${ARM}-${FEATURE}-${GITHUB_RUN_ID}-${TASK}"
+          JOB_NAME="tb2-miniswe-central-certified_full-integrated-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
           harbor run \
@@ -555,7 +478,7 @@ jobs:
         id: saveimg
         env:
           TASK: ${{ matrix.task }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_TAG: "20251031"
         run: |
           IMG="alexgshaw/${TASK}:${IMAGE_TAG}"
           set +e
@@ -579,7 +502,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/tb2-img.tar.gz
-          key: tb2-img-${{ matrix.task }}-${{ inputs.image_tag }}
+          key: tb2-img-${{ matrix.task }}-20251031
 
       - name: Fix artifact permissions
         if: always()
@@ -596,7 +519,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-${{ matrix.task }}
+          name: tb2-miniswe-central-certified_full-integrated-${{ github.run_id }}-task-${{ matrix.task }}
           path: |
             results/terminal-bench/
             dense-backend-proof.json
@@ -618,27 +541,37 @@ jobs:
       - name: Download all task artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-task-*
+          pattern: tb2-miniswe-central-certified_full-integrated-${{ github.run_id }}-task-*
           path: tasks
           merge-multiple: false
 
       - name: Merge task results
         env:
           EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
-          GT_ARM: ${{ inputs.arm }}
+          TASK_SET_SHA256: ${{ needs.plan.outputs.task_set_sha256 }}
+          COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
+          CANARY_MODEL: ${{ needs.plan.outputs.canary_model }}
+          CANARY_PROVIDER: ${{ needs.plan.outputs.canary_provider }}
+          GT_COMMIT: ${{ needs.resolve.outputs.sha }}
+          GT_RUN_ID: ${{ github.run_id }}
         run: |
           python - <<'EOF'
           import json, os, sys
           from pathlib import Path
 
+          from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
           from gt_engine.deep_metrics import extract_trajectory
           from gt_engine.delivery_audit import audit_provider_deliveries
+          from scripts.central_feature_lifecycle import build_feature_lifecycle_report
           from scripts.central_release_gate import audit_treatment_runtime
+          from scripts.tb2_regression_forensics import build_regression_forensics
+          from scripts.tb2_promotion_gate import assess_tb2_promotion, treatment_from_merged
 
           expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
-          arm = os.environ.get("GT_ARM") or ""
-          dense_required = arm in {"certified_context", "certified_full"}
+          dense_required = True
           trials, missing, per_task, receipt_metrics = [], [], [], []
+          observed_artifact_tasks = set()
+          feature_receipts = []
           deep_tasks = {}
 
           def solved(t):
@@ -648,9 +581,13 @@ jobs:
 
           for task_dir in sorted(Path("tasks").glob("*")):
               task_name = task_dir.name.split("-task-", 1)[-1]
+              observed_artifact_tasks.add(task_name)
               receipt_paths = list(task_dir.rglob("central_receipt.json"))
               if receipt_paths:
                   receipt = json.loads(receipt_paths[0].read_text(encoding="utf-8"))
+                  receipt_for_lifecycle = dict(receipt)
+                  receipt_for_lifecycle["task"] = task_name
+                  feature_receipts.append(receipt_for_lifecycle)
                   metrics = receipt.get("metrics") or {}
                   intelligence = receipt.get("repository_intelligence") or {}
                   preemptive = receipt.get("preemptive_retrieval") or {}
@@ -700,7 +637,14 @@ jobs:
                       "output_tokens": metrics.get("output_tokens"),
                       "cache_tokens": metrics.get("cache_tokens"),
                       "total_tokens": metrics.get("total_tokens"),
+                      "normalized_cost_usd": metrics.get("normalized_cost_usd"),
                       "api_calls": metrics.get("api_calls"),
+                      "executor_api_calls": metrics.get("executor_api_calls"),
+                      "bootstrap_api_calls": metrics.get("bootstrap_api_calls"),
+                      "persistent_applicable": (
+                          ((receipt.get("product_mechanism_census") or {})
+                          .get("persistent_execution_state") or {}).get("applicable")
+                      ),
                       "actions": metrics.get("actions"),
                       "effective_task_actions": metrics.get("effective_task_actions"),
                       "actual_environment_execs": metrics.get("actual_environment_execs"),
@@ -765,6 +709,20 @@ jobs:
                       "control_provider_messages_sha256": control_provider_hash,
                       "provider_messages_sha256": provider_hash,
                       "system_fingerprints": system_fingerprints,
+                      "executor_models": list(executor_identity.get("models") or ()),
+                      "executor_providers": list(executor_identity.get("providers") or ()),
+                      "executor_identity_complete": bool(
+                          executor_identity.get("model_identity_complete") is True
+                          and executor_identity.get("provider_identity_complete") is True
+                          and executor_identity.get("stable_model_identity") is True
+                          and executor_identity.get("stable_provider_identity") is True
+                      ),
+                      "bootstrap_model": str(
+                          (provider_identity.get("bootstrap") or {}).get("model") or ""
+                      ),
+                      "bootstrap_provider": str(
+                          (provider_identity.get("bootstrap") or {}).get("provider") or ""
+                      ),
                       "call1_gt_view_changed": bool(
                           control_provider_hash
                           and provider_hash
@@ -787,7 +745,7 @@ jobs:
                   })
               results = list(task_dir.rglob("result.json"))
               if not results:
-                  missing.append(task_dir.name)
+                  missing.append(task_name)
                   trajectories = list(task_dir.rglob("miniswe_trajectory.json"))
                   if trajectories:
                       deep_tasks[task_name] = extract_trajectory(
@@ -818,6 +776,11 @@ jobs:
                       receipt_path=receipt_paths[0] if receipt_paths else None,
                       harbor_result=got[0] if got else None,
                   )
+
+          missing.extend(
+              task for task in expected if task not in observed_artifact_tasks
+          )
+          missing = list(dict.fromkeys(missing))
 
           graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
           errored = [t for t in trials if t.get("exception_info")]
@@ -857,29 +820,51 @@ jobs:
               for row in receipt_metrics
               if row["call1_gt_view_changed"]
           ]
-          # Known frozen GT-off baseline serving fingerprint (2026-07-31). A
-          # different serving deployment is a confound for any solve/efficiency
-          # comparison against that baseline; surface it as a warning rather
-          # than silently reading a deployment change as a regression.
-          known_baseline_fingerprints = {
-              "fp_a18b46594c_prod0820_fp8_kvcache_20260402",
-          }
+          # Response model/provider identity is the comparison identity.
+          # Serving fingerprints remain non-gating metadata.
           observed_fingerprints = {
               fp
               for row in receipt_metrics
               for fp in (row.get("system_fingerprints") or ())
               if fp
           }
-          fingerprint_drift = (
-              sorted(observed_fingerprints)
-              if observed_fingerprints
-              and not observed_fingerprints.intersection(known_baseline_fingerprints)
-              else []
+          fingerprint_metadata = sorted(observed_fingerprints)
+          observed_executor_models = sorted({
+              model
+              for row in receipt_metrics
+              for model in row.get("executor_models") or ()
+              if model
+          })
+          observed_executor_providers = sorted({
+              provider
+              for row in receipt_metrics
+              for provider in row.get("executor_providers") or ()
+              if provider
+          })
+          applicable_rows = [
+              row for row in receipt_metrics if row.get("persistent_applicable") is True
+          ]
+          observed_bootstrap_models = sorted({
+              row["bootstrap_model"] for row in applicable_rows if row["bootstrap_model"]
+          })
+          observed_bootstrap_providers = sorted({
+              row["bootstrap_provider"] for row in applicable_rows if row["bootstrap_provider"]
+          })
+          observed_identity_complete = bool(
+              len(receipt_metrics) == len(expected)
+              and all(row["executor_identity_complete"] for row in receipt_metrics)
+              and all(row["bootstrap_model"] and row["bootstrap_provider"] for row in applicable_rows)
+          )
+          observed_identity_stable = bool(
+              observed_executor_models == ["deepseek-v4-flash"]
+              and observed_executor_providers == ["openai"]
+              and observed_bootstrap_models == ["deepseek-v4-flash"]
+              and observed_bootstrap_providers == ["openai"]
           )
 
           out = ["# TB2 miniswe central matrix (GT-on)", ""]
-          out.append("- arm: **${{ inputs.arm }}**")
-          out.append("- feature: **${{ inputs.feature }}**")
+          out.append("- arm: **certified_full**")
+          out.append("- feature: **integrated 17+1**")
           if missing:
               out.append(f"> **INCOMPLETE**: {len(missing)} task(s) produced no "
                          f"result.json: {', '.join(missing)}. The score below covers "
@@ -926,13 +911,11 @@ jobs:
                   f"task(s): {', '.join(call1_gt_changed_tasks)}. This is intervention "
                   "accounting, not a baseline-parity failure."
               )
-          if fingerprint_drift:
+          if fingerprint_metadata:
               out.append(
-                  f"> **FINGERPRINT DRIFT (CONFOUND)**: this run's serving fingerprints "
-                  f"{fingerprint_drift} do not match the frozen GT-off baseline "
-                  f"(fp_a18b46594c_prod0820_fp8_kvcache_20260402). Any solve/efficiency "
-                  "delta vs that baseline is confounded by a serving-deployment change "
-                  "and must not be read as a GT regression."
+                  f"> **SERVING FINGERPRINT METADATA**: {fingerprint_metadata}. The model "
+                  "ID remains the comparison identity; fingerprint drift does not excuse "
+                  "losses or block the frozen-baseline promotion verdict."
               )
           out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
           for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
@@ -967,7 +950,7 @@ jobs:
                   f"{row['censored'] or False} |"
               )
 
-          Path("merged.json").write_text(json.dumps({
+          merged_payload = {
               "expected_tasks": n_expected,
               "missing_tasks": missing,
               "n_trials": len(trials),
@@ -980,13 +963,113 @@ jobs:
               "invalid_treatment_release_tasks": invalid_treatment_release,
               "dense_backend_required": dense_required,
               "call1_gt_changed_tasks": call1_gt_changed_tasks,
-              "fingerprint_drift_tasks": fingerprint_drift,
+              "fingerprint_metadata": fingerprint_metadata,
               "trial_results": trials,
               "receipt_metrics": receipt_metrics,
-          }, indent=2), encoding="utf-8")
-          Path("deep_metrics_${{ inputs.arm }}.json").write_text(json.dumps({
+              "treatment_manifest": {
+                  "model": "deepseek-v4-flash",
+                  "gt_commit": os.environ["GT_COMMIT"],
+                  "run_id": os.environ["GT_RUN_ID"],
+                  "system_fingerprints": sorted(observed_fingerprints),
+                  "profile_id": os.environ["COMPARISON_PROFILE"],
+                  "planned_task_ids": expected,
+                  "task_set_sha256": os.environ["TASK_SET_SHA256"],
+                  "observed_identity": {
+                      "executor_models": observed_executor_models,
+                      "executor_providers": observed_executor_providers,
+                      "bootstrap_model": (
+                          observed_bootstrap_models[0]
+                          if len(observed_bootstrap_models) == 1
+                          else ""
+                      ),
+                      "bootstrap_provider": (
+                          observed_bootstrap_providers[0]
+                          if len(observed_bootstrap_providers) == 1
+                          else ""
+                      ),
+                      "canary_model": os.environ["CANARY_MODEL"],
+                      "canary_provider": os.environ["CANARY_PROVIDER"],
+                      "route": "deepseek:native:api.deepseek.com",
+                      "api_host": "api.deepseek.com",
+                      "complete": observed_identity_complete,
+                      "stable": observed_identity_stable,
+                  },
+                  "runtime_contract": {
+                      "catalog_model": "openai/deepseek-v4-flash",
+                      "response_model": "deepseek-v4-flash",
+                      "route": "deepseek:native:api.deepseek.com",
+                      "api_host": "api.deepseek.com",
+                      "adapter_provider": "openai",
+                      "mini_version": "2.2.8",
+                      "agent_class": "eval.gt_central_agent:MiniSweCentralAgent",
+                      "preflight_mode": "assistive_safe",
+                      "temperature": 1.0,
+                      "step_limit": 100,
+                      "environment_timeout_sec": 30,
+                      "timeout_multiplier": 1.0,
+                      "agent_timeout_multiplier": 1.0,
+                      "system_template_sha256": "6fb54145bbb1724ce77430ff3852887acbd4a5cce10c86cd8dfbf4c7d55f1091",
+                      "instance_template_sha256": "546a89156d7823eb34eb49c5b31a3703df4d27639d034a6d13f0162488d70821",
+                      "observation_template_sha256": "da32186e7f86c2070607e69fdb7465b25cdfd108a4e932a379ea3763161db4a8",
+                      "tool_contract": "miniswe_bash_command_v1",
+                  },
+              },
+          }
+          lifecycle_report = build_feature_lifecycle_report(
+              feature_receipts,
+              forced_feature_ids=CENTRAL_FEATURE_IDS,
+              forced_proof={
+                  "status": "passed",
+                  "exact_commit": os.environ["GT_COMMIT"],
+                  "feature_ids": list(CENTRAL_FEATURE_IDS),
+              },
+              expected_task_ids=expected,
+          )
+          treatment = treatment_from_merged(merged_payload)
+          baseline = json.loads(
+              Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          promotion_report = assess_tb2_promotion(baseline, treatment)
+          forensics_report = build_regression_forensics(
+              baseline,
+              treatment,
+              treatment_artifact_root=Path("tasks"),
+          )
+          merged_payload["feature_lifecycle_passed"] = lifecycle_report["passed"]
+          merged_payload["promotion_passed"] = promotion_report.passed
+          merged_payload["forensics_complete"] = forensics_report["passed"]
+
+          out += [
+              "",
+              "## Release verdicts",
+              "",
+              f"- 17+1 mechanism lifecycle: **{'PASS' if lifecycle_report['passed'] else 'FAIL'}**",
+              f"- frozen-baseline promotion: **{'PASS' if promotion_report.passed else 'FAIL'}**",
+              f"- legacy features naturally fired: **{lifecycle_report['naturally_fired_legacy_feature_count']}/17**",
+              f"- solve flips: **{', '.join(promotion_report.flips) or 'none'}**",
+              f"- baseline solve losses: **{', '.join(promotion_report.losses) or 'none'}**",
+          ]
+
+          Path("merged.json").write_text(
+              json.dumps(merged_payload, indent=2), encoding="utf-8"
+          )
+          Path("feature_lifecycle_report.json").write_text(
+              json.dumps(lifecycle_report, indent=2), encoding="utf-8"
+          )
+          Path("tb2_treatment.json").write_text(
+              json.dumps(treatment, indent=2), encoding="utf-8"
+          )
+          Path("promotion_report.json").write_text(
+              json.dumps(promotion_report.as_dict(), indent=2), encoding="utf-8"
+          )
+          Path("regression_forensics.json").write_text(
+              json.dumps(forensics_report, indent=2), encoding="utf-8"
+          )
+          Path("deep_metrics_certified_full.json").write_text(json.dumps({
               "schema": "central-deep-metrics-v2",
-              "arm": "${{ inputs.arm }}",
+              "arm": "certified_full",
               "run_id": "${{ github.run_id }}",
               "tasks": deep_tasks,
           }, indent=2), encoding="utf-8")
@@ -997,7 +1080,8 @@ jobs:
               f.write(body)
           print(body[:4000])
           if (invalid_intelligence or invalid_dense or invalid_provider_deliveries
-                  or invalid_treatment_release):
+                  or invalid_treatment_release or not lifecycle_report["passed"]
+                  or not promotion_report.passed):
               sys.exit(2)
           EOF
 
@@ -1005,9 +1089,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tb2-miniswe-central-${{ inputs.arm }}-${{ inputs.feature }}-${{ github.run_id }}-MERGED
+          name: tb2-miniswe-central-certified_full-integrated-${{ github.run_id }}-MERGED
           path: |
             merged.json
             SUMMARY.md
             deep_metrics_*.json
+            feature_lifecycle_report.json
+            tb2_treatment.json
+            promotion_report.json
+            regression_forensics.json
           if-no-files-found: warn

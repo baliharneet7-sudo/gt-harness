@@ -310,7 +310,11 @@ def main() -> int:
     drift: list[str] = []
     for path, expected in _outputs().items():
         if args.check:
-            if not path.is_file() or path.read_bytes() != expected:
+            actual = path.read_bytes() if path.is_file() else b""
+            # Git may materialize text files with CRLF on Windows.  Generated
+            # semantic content is newline-invariant; do not report checkout
+            # policy as inventory drift.
+            if not path.is_file() or actual.replace(b"\r\n", b"\n") != expected:
                 drift.append(str(path.relative_to(HARNESS_ROOT)))
         else:
             path.write_bytes(expected)

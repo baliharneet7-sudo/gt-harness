@@ -4510,6 +4510,7 @@ class CentralFeatureRuntime:
         }
         rows: list[dict[str, Any]] = []
         for trace in self._effect_trace:
+            compiler_status = str((trace.get("context_compiler") or {}).get("status") or "")
             linked_claim_ids = [
                 claim_id
                 for claim_id, receipt_key in self._claim_receipts.items()
@@ -4521,8 +4522,21 @@ class CentralFeatureRuntime:
                 outcome = "existing_engine_actuation"
             elif any(claim_id in framed_claims for claim_id in linked_claim_ids):
                 outcome = "prepared_decision_frame"
+            elif compiler_status in {
+                "audit_only",
+                "controller_state_considered",
+                "existing_engine_actuation",
+                "no_eligible_model_call",
+                "provider_payload",
+                "stale_state_rejected",
+                "superseded_before_request",
+            }:
+                outcome = compiler_status
             elif any(claims[claim_id]["active"] for claim_id in linked_claim_ids):
-                outcome = "pending_decision_claim"
+                if int(trace.get("applied_call") or 0) >= self._last_context_compiler_call:
+                    outcome = "no_eligible_model_call"
+                else:
+                    outcome = "pending_decision_claim"
             elif linked_claim_ids:
                 suppressed = any(
                     claims[claim_id].get("invalidated_reason") == "task_start_advisory_disabled"
@@ -4664,6 +4678,11 @@ class CentralFeatureRuntime:
                 "provider_message_indices": list(
                     (fact or {}).get("provider_message_indices") or ()
                 ),
+                "superseded_by_effect_id": (
+                    latest_by_feature.get(str(trace["feature_id"]), "")
+                    if status == "superseded_before_request"
+                    else ""
+                ),
             }
 
     def progress_ledger(self) -> dict[str, Any]:
@@ -4746,7 +4765,9 @@ class CentralFeatureRuntime:
                             if int(trace.get("applied_call") or 0)
                             >= self._last_context_compiler_call
                             else "unaccounted_bug"
-                        )
+                        ),
+                        "terminal": True,
+                        "eligible_model_calls_after_effect": 0,
                     }
                 ),
             }

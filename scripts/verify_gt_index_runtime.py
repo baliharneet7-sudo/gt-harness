@@ -280,10 +280,23 @@ def verify() -> dict[str, object]:
             (language_root / fixture_name).parent.mkdir(
                 parents=True, exist_ok=True
             )
+            fixture_text = _STRUCTURAL_FIXTURES.get(
+                capability.name, "/* parser coverage fixture */\n"
+            )
+            # Each language fixture is indexed in one shared graph. Reusing
+            # the generic target/caller names across languages creates a real
+            # cross-file ambiguity for parsers whose resolver deliberately
+            # refuses to certify an unqualified name match. Namespace these
+            # auxiliary fixtures so the gate measures parser-backed CALLS,
+            # not an artifact of the test corpus itself. The explicit root
+            # fixtures above remain the stable target/caller witness.
+            if capability.caller_support:
+                prefix = capability.name.replace("-", "_")
+                fixture_text = fixture_text.replace(
+                    "target", f"{prefix}_target"
+                ).replace("caller", f"{prefix}_caller")
             (language_root / fixture_name).write_text(
-                _STRUCTURAL_FIXTURES.get(
-                    capability.name, "/* parser coverage fixture */\n"
-                ),
+                fixture_text,
                 encoding="utf-8",
             )
         source_revision = "fixture-source-r0"

@@ -211,6 +211,48 @@ uplift, or efficiency. The next authorized evidence is a new exact-commit Linux
 provider-free pass; only after it succeeds may the exact bootstrap canary run.
 No task smoke or benchmark is authorized from this working tree.
 
+## Universal task semantics and bounded convergence (2026-08-17)
+
+Repository intelligence and its graph-applicability denominator remain
+unchanged, but graph non-applicability must not make the executor blind to
+facts that are mechanically derivable without a graph. The active treatment
+therefore owns one graph-independent `TaskSemanticSubstrate`. It derives only
+from the instruction, the bounded workspace sensor, repository files actually
+transferred from that workspace, and already-observed validation discovery.
+It may expose structural binary format, explicit or discovered check commands,
+certified focus anchors, and required-deliverable present/absent state. Empty
+source workspaces may still derive instruction-owned checks and deliverables.
+Every fact is revision-bound, origin-labelled, one-shot per semantic claim,
+packed through the shared contribution budget, hash-bound to the exact provider
+view, and counted by the authoritative delivery audit. It is an evolution of
+the integrated treatment, not a silently invented nineteenth product mechanism;
+the executable census remains 17+1.
+
+Task-semantic context uses the neutral heading `Current task evidence:`. The
+old `Task-decisive context` wording must not be used for this universal surface:
+deterministic evidence can reduce uncertainty without proving that it alone is
+decisive. Persistent execution state no longer owns duplicate copies of these
+facts in the live agent.
+
+The TB2 promotion workflow is treatment-only and fixed to the frozen
+`repair20-v1` denominator. It has no GT-off or arbitrary full-profile dispatch
+path. Its runtime contract requires `preflight_mode=assistive_safe`; a shadow
+receipt cannot promote. DeepSWE remains on its separately authorized shadow
+contract and must not be changed implicitly.
+
+Assistive convergence is narrow and mechanical. Before execution it may
+return an action that directly targets known benchmark-harness/grader artifact
+paths. At deterministic `STALLED`, `CONTRADICTED`, or `BUDGET_RISK` state it
+may also return another repository-root-wide search in favor of an unresolved
+declared check or deliverable probe. It never rewrites or suppresses a command,
+never treats ordinary task runtime logs as grader artifacts, and degrades to
+PASS outside those proven cases. Each proposal and applied return is receipted.
+
+Executable completion is re-evaluated once per new workspace revision after a
+material change, a change to any compiled predicate dependency, an explicit
+validation action, or deterministic budget risk. This closes generator,
+rename, opaque-program, and non-source-deliverable gaps without making a partial
+semantic plan auto-submittable.
 
 ## What counts as GT working
 

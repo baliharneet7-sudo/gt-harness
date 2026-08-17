@@ -151,12 +151,22 @@ def audit() -> dict[str, bool]:
             workflow.count("python scripts/verify_tb2_language_contract.py") >= 2
         ),
         "preflight_default_is_off": agent.preflight_mode is PreflightMode.OFF,
-        "paid_preflight_is_shadow_only": all(
-            "--ak preflight_mode=shadow" in item and "--ak enable_preflight=true" not in item
-            for item in workflows
+        # TB2 is now a single treatment-only dispatch and deliberately uses
+        # ASSISTIVE_SAFE. The legacy engine workflow remains the shadow-only
+        # diagnostic surface; DeepSWE is also audited independently below.
+        "paid_preflight_is_shadow_only": (
+            "--ak preflight_mode=assistive_safe" in workflow
+            and "--ak preflight_mode=shadow" in verification_workflow
+            and all("--ak enable_preflight=true" not in item for item in workflows)
         ),
-        "staged_policy_arms_are_explicit_and_default_safe": all(
-            _has_explicit_policy_arms(item) for item in workflows
+        "staged_policy_arms_are_explicit_and_default_safe": (
+            (
+                "options: [repair20-v1]" in workflow
+                and "inputs.arm" not in workflow
+                and "--ak integration_mode=active --ak policy_mode=certified_active"
+                in workflow
+            )
+            and _has_explicit_policy_arms(verification_workflow)
         ),
         "one_switch_off_is_provider_neutral": (
             GTIntegrationMode.OFF.value == "off"
@@ -237,12 +247,11 @@ def audit() -> dict[str, bool]:
         ),
         "paid_persistent_state_contract_is_explicit": (
             all(
-                item.count("--ak enable_persistent_execution_state=true") == 2
-                and item.count("--ak enable_persistent_execution_state=false") == 3
-                and item.count("--ak persistent_state_bootstrap_timeout_sec=45") == 2
-                and item.count("--ak persistent_state_bootstrap_input_tokens=2000") == 2
-                and item.count("--ak persistent_state_bootstrap_output_tokens=512") == 2
-                and item.count("--ak persistent_state_context_tokens=512") == 2
+                item.count("--ak enable_persistent_execution_state=true") >= 1
+                and item.count("--ak persistent_state_bootstrap_timeout_sec=45") >= 1
+                and item.count("--ak persistent_state_bootstrap_input_tokens=2000") >= 1
+                and item.count("--ak persistent_state_bootstrap_output_tokens=512") >= 1
+                and item.count("--ak persistent_state_context_tokens=512") >= 1
                 for item in workflows
             )
             and deepswe_workflow.count("--ak enable_persistent_execution_state=true") >= 2
@@ -280,8 +289,8 @@ def audit() -> dict[str, bool]:
             in deepswe_workflow
         ),
         "paid_live_retrieval_matches_arb_profile": all(
-            item.count("--ak enable_preemptive_retrieval=true") == 2
-            and item.count("preemptive_retrieval_model_dir=") == 2
+            item.count("--ak enable_preemptive_retrieval=true") >= 1
+            and item.count("preemptive_retrieval_model_dir=") >= 1
             and "python -m pip install -e '.[retrieval]'" in item
             and "Provision pinned Snowflake ONNX runtime asset" in item
             for item in workflows

@@ -143,7 +143,7 @@ def test_bundle_audit_counts_only_exact_valid_pairs(tmp_path):
     assert report["validity_counts"] == {"valid": 1}
 
 
-def test_paid_workflow_exposes_bounded_step_limit_for_capture():
+def test_promotion_workflow_freezes_the_baseline_matched_step_limit():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
@@ -151,7 +151,7 @@ def test_paid_workflow_exposes_bounded_step_limit_for_capture():
         / "tb2_miniswe_central.yml"
     ).read_text(encoding="utf-8")
 
-    assert "      step_limit:" in workflow
-    assert "STEP_LIMIT: ${{ inputs.step_limit }}" in workflow
+    assert "      step_limit:" not in workflow
+    assert 'STEP_LIMIT: "100"' in workflow
     assert '--ak step_limit="$STEP_LIMIT"' in workflow
     assert "--ak step_limit=100" not in workflow

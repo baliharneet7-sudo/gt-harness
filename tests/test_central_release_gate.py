@@ -14,7 +14,7 @@ STATIC = {
 def _treatment() -> dict:
     return {
         "integration_mode": "active",
-        "preflight_mode": "shadow",
+        "preflight_mode": "assistive_safe",
         "component_configuration": {
             "context_compaction": True,
             "completion_controller": True,
@@ -22,6 +22,8 @@ def _treatment() -> dict:
             "adaptive_validation_timeout": True,
             "preemptive_retrieval": True,
             "persistent_execution_state": True,
+            "task_semantic_substrate": True,
+            "convergence_controller": True,
             "gt_request_token_budget": 1200,
         },
         "repository_intelligence": {
@@ -172,6 +174,27 @@ def _treatment() -> dict:
             ],
             "failures": [],
             "valid": True,
+        },
+        "task_semantic_substrate": {
+            "schema": "gt.task_semantic_substrate.v1",
+            "status": "abstained",
+            "derivation": {"status": "abstained", "facts": []},
+            "compilations": [
+                {
+                    "call": 1,
+                    "candidate_count": 0,
+                    "accounted_count": 0,
+                    "selected_count": 0,
+                    "accounting": [],
+                }
+            ],
+            "deliveries": [],
+        },
+        "convergence_controller": {
+            "schema": "gt.convergence_controller.v1",
+            "preflights": [],
+            "return_candidates": 0,
+            "applied_returns": 0,
         },
         "product_mechanism_census": {
             "accounting_contract": "17_legacy_features_plus_1_persistent_state",
@@ -360,6 +383,16 @@ def test_release_gate_fails_closed_when_outcome_preservation_is_disabled():
     assert report.passed is False
     assert "treatment-1:context_compaction_disabled" in report.failures
     assert "treatment-1:completion_controller_disabled" in report.failures
+
+
+def test_release_gate_requires_graph_independent_semantic_context():
+    receipt = _treatment()
+    receipt["component_configuration"]["task_semantic_substrate"] = False
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:task_semantic_substrate_disabled" in report.failures
 
 
 def test_release_gate_rejects_repeated_or_diagnostic_free_project_probe():
@@ -568,6 +601,15 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
             "selected_surfaces": [],
         }
     )
+    receipt["task_semantic_substrate"]["compilations"].append(
+        {
+            "call": 2,
+            "candidate_count": 0,
+            "accounted_count": 0,
+            "selected_count": 0,
+            "accounting": [],
+        }
+    )
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
@@ -576,6 +618,7 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
 
 def test_persistent_state_only_profile_gates_isolation_not_disabled_full_controls():
     receipt = _treatment()
+    receipt["preflight_mode"] = "shadow"
     for name in (
         "context_compaction",
         "completion_controller",

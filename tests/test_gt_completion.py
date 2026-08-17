@@ -5,8 +5,9 @@ from gt_engine.completion import (
     PredicateObservation,
     certificate_from_observations,
     compile_completion_plan,
+    should_schedule_completion,
 )
-
+from gt_engine.preflight import ActionOperation
 
 WRITE_COMPRESSOR_TASK = """Please solve this issue: I have a decompressor in
 /app/decomp.c. It reads compressed data from stdin and writes the decompressed
@@ -44,7 +45,10 @@ def test_write_compressor_compiles_to_complete_oracle_free_plan():
     }
     assert plan.uncovered_obligation_ids == ()
     assert plan.target_paths == ("/app/data.comp",)
-    assert all("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in item.command for item in plan.predicates)
+    assert all(
+        "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in item.command
+        for item in plan.predicates
+    )
 
 
 def test_partial_plan_binds_creation_obligations_but_keeps_semantic_ones_uncovered():
@@ -136,3 +140,32 @@ def test_unknown_or_stale_predicate_never_auto_submits():
     )
     assert certificate.status is CompletionStatus.INCOMPLETE
     assert certificate.auto_submit_eligible is False
+
+
+def test_complete_plan_is_scheduled_on_any_material_change_or_budget_risk():
+    plan = compile_completion_plan(WRITE_COMPRESSOR_TASK, cwd="/app")
+
+    assert should_schedule_completion(
+        plan,
+        workspace_revision="w2",
+        last_evaluated_revision="w1",
+        material_workspace_change=True,
+        proposed_operation=ActionOperation.OTHER,
+        budget_risk=False,
+    )
+    assert should_schedule_completion(
+        plan,
+        workspace_revision="w2",
+        last_evaluated_revision="w1",
+        material_workspace_change=False,
+        proposed_operation=ActionOperation.READ,
+        budget_risk=True,
+    )
+    assert not should_schedule_completion(
+        plan,
+        workspace_revision="w2",
+        last_evaluated_revision="w2",
+        material_workspace_change=True,
+        proposed_operation=ActionOperation.VALIDATE,
+        budget_risk=True,
+    )

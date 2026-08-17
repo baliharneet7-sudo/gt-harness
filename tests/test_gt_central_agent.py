@@ -1895,12 +1895,22 @@ async def test_supported_source_creation_activates_persistent_state_once(
     assert persistent["bootstrap"]["status"] == "selected"
     assert persistent["metrics"]["postflight_commits"] == 2
     assert persistent["state"]["files_modified"] == ["app.py"]
-    decisive_deliveries = [
+    semantic_deliveries = [
         row
-        for row in persistent["deliveries"]
-        if any(meta.get("decisive") for meta in row.get("claim_metadata", ()))
+        for row in receipt["task_semantic_substrate"]["deliveries"]
+        if any(
+            meta.get("kind") == "deliverable_state"
+            for meta in row.get("claim_metadata", ())
+        )
     ]
-    assert decisive_deliveries
+    assert len(semantic_deliveries) == 2
+    assert semantic_deliveries[0]["delivered_before_call"] == 1
+    assert semantic_deliveries[1]["delivered_before_call"] == 2
+    assert not any(
+        meta.get("decisive")
+        for row in persistent["deliveries"]
+        for meta in row.get("claim_metadata", ())
+    )
     assert all(
         "GroundTruth" not in text for text in model.observed_history[-1]
     )
@@ -2104,23 +2114,28 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
     call = receipt["model_call_contexts"][0]
     assert call["control_provider_messages_sha256"]
     assert call["control_request_payload_sha256"]
-    assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
+    assert call["control_provider_messages_sha256"] != call["provider_messages_sha256"]
+    assert call["task_semantic_substrate_delivered"] is True
+    assert "Required validation command: pytest -q" in first_request
     _delivery_rows, delivery_failures, delivery_totals = audit_provider_deliveries(
         receipt, task="preemptive-integration"
     )
     assert delivery_failures == []
-    assert delivery_totals["delivery_count"] == 0
+    assert delivery_totals["delivery_count"] == 1
+    assert delivery_totals["surfaces"]["task_semantic_substrate"]["delivery_count"] == 1
     assert receipt["metrics"]["preemptive_retrieval_deliveries"] == 0
     assert receipt["metrics"]["preemptive_retrieval_claims_delivered"] == 0
     assert receipt["metrics"]["preemptive_retrieval_duplicate_claims"] == 0
     compiler = receipt["contribution_compiler"]
     assert compiler["candidate_count"] == compiler["accounted_count"]
-    assert compiler["calls"][0]["selected_surfaces"] == []
+    assert compiler["calls"][0]["selected_surfaces"] == ["task_semantic_substrate"]
     replay = load_replay_bundle(tmp_path / "gt_replay")
     pair_validation = validate_decision_point_row(
         replay["calls"][0], task_id="preemptive-retrieval"
     )
-    assert pair_validation.validity is DecisionPointValidity.MISSING_INTERVENTION
+    assert pair_validation.validity is DecisionPointValidity.VALID
+    assert pair_validation.case is not None
+    assert "Required validation command: pytest -q" in pair_validation.case.payload
     if model_dir:
         dense = next(
             row
@@ -2486,7 +2501,7 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     )
     agent._model_factory = lambda: model
 
-    await agent.run("Fix the repository implementation.", TransferEnvironment(), AgentContext())
+    await agent.run("Create /app/out.json.", TransferEnvironment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     intelligence = receipt["repository_intelligence"]
@@ -2501,8 +2516,18 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     assert preemptive["decisions"][0]["status"] == "abstained"
     assert preemptive["decisions"][0]["reason_codes"] == ["not_applicable_no_supported_source"]
     call = receipt["model_call_contexts"][0]
-    assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
-    assert call["control_request_payload_sha256"] == call["request_payload_sha256"]
+    assert call["control_provider_messages_sha256"] != call["provider_messages_sha256"]
+    assert call["control_request_payload_sha256"] != call["request_payload_sha256"]
+    assert call["task_semantic_substrate_delivered"] is True
+    assert any("Current task evidence:" in item for item in model.observed_history[0])
+    semantic = receipt["task_semantic_substrate"]
+    assert len(semantic["deliveries"]) == 1
+    assert semantic["deliveries"][0]["delivered_before_call"] == 1
+    assert any(
+        fact["kind"] == "deliverable_state"
+        and "absent in the workspace" in fact["gap_text"]
+        for fact in semantic["deliveries"][0]["fact_metadata"]
+    )
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
     assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
@@ -2510,6 +2535,45 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     assert persistent_census["applicable"] is False
     assert persistent_census["correctly_abstained"] is True
     assert persistent_census["exercised"] is False
+
+
+@pytest.mark.asyncio
+async def test_assistive_convergence_returns_forbidden_artifact_read_before_execution(
+    tmp_path,
+):
+    model = _ScriptedModel(
+        [
+            "cat /logs/verifier/output.txt",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    environment = _Environment()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="assistive_safe",
+        enable_submit_readiness=False,
+        enable_completion_controller=False,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the workspace and report.", environment, AgentContext())
+
+    executed = [command for command, _ in environment.commands]
+    assert "cat /logs/verifier/output.txt" not in executed
+    assert any(
+        "benchmark-harness or grader-only path" in text
+        for text in model.observed_history[1]
+    )
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    convergence = receipt["convergence_controller"]
+    assert convergence["return_candidates"] == 1
+    assert convergence["applied_returns"] == 1
+    assert any(
+        "forbidden_benchmark_artifact_path" in row["reason_codes"]
+        for row in convergence["preflights"]
+    )
 
 
 def test_tb2_workflow_gates_matrix_with_exact_runtime_bootstrap_canary():
@@ -2525,7 +2589,7 @@ def test_tb2_workflow_gates_matrix_with_exact_runtime_bootstrap_canary():
     assert "--output bootstrap-canary.json" in workflow
     assert "uses: ./.github/workflows/central_provider_free.yml" in workflow
     assert "needs: [resolve, provider_free]" in workflow
-    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 3
+    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 4
     assert "name: bootstrap-canary-${{ github.run_id }}" in workflow
     provider_free = (
         Path(__file__).resolve().parents[1]
@@ -3989,11 +4053,11 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert '--agent-import-path "$AGENT"' in workflow
     assert "--ak integration_mode=active" in workflow
     assert "--ak policy_mode=certified_active" in workflow
-    assert "--ak integration_mode=off --ak policy_mode=off --ak preflight_mode=off" in workflow
-    assert (
-        "--ak integration_mode=audit --ak policy_mode=audit --ak preflight_mode=shadow" in workflow
-    )
-    assert "--ak preflight_mode=shadow" in workflow
+    assert "inputs.arm" not in workflow
+    assert "inputs.feature" not in workflow
+    assert "--ak integration_mode=off" not in workflow
+    assert "--ak integration_mode=audit" not in workflow
+    assert "--ak preflight_mode=assistive_safe" in workflow
     assert "--ak enable_context_compaction=true" in workflow
     assert "--ak enable_adaptive_validation_timeout=true" in workflow
     assert "--ak enable_completion_controller=true" in workflow
@@ -4004,6 +4068,9 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
     assert "harbor_result=got[0] if got else None" in workflow
+    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
+    assert "assess_tb2_promotion" in workflow
+    assert "build_feature_lifecycle_report" in workflow
 
 
 @pytest.mark.asyncio

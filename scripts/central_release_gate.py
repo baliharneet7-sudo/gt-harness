@@ -681,6 +681,43 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
     )
 
 
+def _deterministic_task_controls(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Require graph-independent context and convergence lifecycle accounting."""
+
+    configuration = receipt.get("component_configuration") or {}
+    semantic = receipt.get("task_semantic_substrate") or {}
+    convergence = receipt.get("convergence_controller") or {}
+    contexts = receipt.get("model_call_contexts") or []
+    compilations = semantic.get("compilations") or []
+    preflights = convergence.get("preflights") or []
+    failures: list[str] = []
+    if configuration.get("task_semantic_substrate") is not True:
+        failures.append(f"{label}:task_semantic_substrate_disabled")
+    if semantic.get("schema") != "gt.task_semantic_substrate.v1":
+        failures.append(f"{label}:task_semantic_substrate_receipt_missing")
+    if len(compilations) != len(contexts):
+        failures.append(f"{label}:task_semantic_compilation_call_count")
+    for index, row in enumerate(compilations, start=1):
+        if int(row.get("candidate_count") or 0) != int(row.get("accounted_count") or 0):
+            failures.append(f"{label}:task_semantic_unaccounted:{index}")
+    if convergence.get("schema") != "gt.convergence_controller.v1":
+        failures.append(f"{label}:convergence_controller_receipt_missing")
+    if len(preflights) != int(receipt.get("actions") or 0):
+        failures.append(f"{label}:convergence_preflight_action_count")
+    return ReleaseGateCheck(
+        "deterministic_task_controls",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "semantic_compilations": len(compilations),
+            "convergence_preflights": len(preflights),
+        },
+    )
+
+
 def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     """Require the four fail-open controls used by the frozen treatment."""
 
@@ -863,6 +900,7 @@ def audit_treatment_runtime(
         _dense(receipt, label),
         _delivery(receipt, label),
         _contribution_budget(receipt, label),
+        _deterministic_task_controls(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _persistent_execution_state(receipt, label),

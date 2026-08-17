@@ -260,6 +260,7 @@ def workspace_from_snapshot(
     entries: Mapping[str, Any],
     binary_heads: Mapping[str, bytes] | None = None,
     *,
+    path_origins: Mapping[str, str] | None = None,
     max_files: int = SCAN_MAX_FILES,
     max_head_bytes: int = SCAN_MAX_HEAD_BYTES,
     max_text_chars: int = SCAN_MAX_TEXT_CHARS,
@@ -285,6 +286,12 @@ def workspace_from_snapshot(
     """
 
     heads = {_norm_path(path): bytes(value or b"") for path, value in (binary_heads or {}).items()}
+    origins = {
+        _norm_path(path): str(value)
+        for path, value in (path_origins or {}).items()
+        if _norm_path(path)
+    }
+    valid_origins = frozenset(origin.value for origin in EvidenceOrigin)
     result: list[WorkspaceEntry] = []
     for path in sorted(entries):
         if len(result) >= max_files:
@@ -311,6 +318,11 @@ def workspace_from_snapshot(
                 sha256=str(getattr(state, "digest", "") or ""),
                 head=heads.get(normalized, b"")[:max_head_bytes],
                 text=text,
+                origin=(
+                    origins.get(normalized, EvidenceOrigin.PREEXISTING_REPOSITORY.value)
+                    if origins.get(normalized) in valid_origins
+                    else EvidenceOrigin.PREEXISTING_REPOSITORY.value
+                ),
             )
         )
     return tuple(result)
@@ -514,15 +526,15 @@ def _secret_detector(
     facts: list[DecisiveFact] = []
     for pattern_name, pattern in _CREDENTIAL_PATTERNS:
         regex = re.compile(pattern)
-        hits: list[tuple[str, int]] = []
+        hits: list[tuple[str, int, str]] = []
         for entry in _text_entries(workspace):
             for line_no, line in enumerate(entry.text.splitlines(), start=1):
                 if regex.search(line):
-                    hits.append((entry.path, line_no))
+                    hits.append((entry.path, line_no, entry.origin))
                     break
         if not hits:
             continue
-        hit_path, hit_line = hits[0]
+        hit_path, hit_line, hit_origin = hits[0]
         gap = (
             f"Credential class {pattern_name} present in workspace "
             f"at {hit_path}:{hit_line} ({len(hits)} file(s) contaminated)."
@@ -543,7 +555,7 @@ def _secret_detector(
                 gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
                 detector="secret_detector",
                 source_revision=source_revision,
-                origin=EvidenceOrigin.PREEXISTING_REPOSITORY.value,
+                origin=hit_origin,
             )
         )
         if len(facts) >= DERIVATION_MAX_FACTS:
@@ -605,7 +617,7 @@ def _binary_detector(
                 gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
                 detector="binary_format_detector",
                 source_revision=source_revision,
-                origin=EvidenceOrigin.PREEXISTING_REPOSITORY.value,
+                origin=entry.origin,
             )
         )
         if len(facts) >= DERIVATION_MAX_FACTS:
@@ -676,7 +688,11 @@ def _deliverable_detector(
                     "decisive", DecisiveKind.DELIVERABLE_STATE.value, path, source_revision
                 ),
                 claim_id=_stable_id(
-                    "claim", "decisive", DecisiveKind.DELIVERABLE_STATE.value, path
+                    "claim",
+                    "decisive",
+                    DecisiveKind.DELIVERABLE_STATE.value,
+                    path,
+                    "present" if present else "absent",
                 ),
                 kind=DecisiveKind.DELIVERABLE_STATE,
                 path=path,
@@ -709,6 +725,7 @@ def _structural_anchor_detector(
     if not focus_anchors:
         return []
     workspace_paths = {entry.path for entry in workspace}
+    workspace_origins = {entry.path: entry.origin for entry in workspace}
     facts: list[DecisiveFact] = []
     for anchor in focus_anchors:
         clean = _bounded_text(str(anchor or ""), 240).strip()
@@ -737,7 +754,9 @@ def _structural_anchor_detector(
                 gap_text=_bounded_text(gap, FACT_MAX_GAP_CHARS),
                 detector="structural_anchor_detector",
                 source_revision=source_revision,
-                origin=EvidenceOrigin.PREEXISTING_REPOSITORY.value,
+                origin=workspace_origins.get(
+                    path_part, EvidenceOrigin.PREEXISTING_REPOSITORY.value
+                ),
             )
         )
         if len(facts) >= DERIVATION_MAX_FACTS:
@@ -794,19 +813,23 @@ def derive_decisive_facts(
     project_checks: tuple[str, ...] = (),
     focus_anchors: tuple[str, ...] = (),
     source_revision: str = "",
+    allow_empty_workspace: bool = False,
 ) -> DecisiveDerivation:
     """Derive bounded task-decisive facts from the three legal sources only.
 
     Deterministic by construction: every detector is a pure function of the
     instruction text, the workspace entries, and the caller-provided catalog
-    rows.  A missing instruction or an empty workspace abstains.
+    rows.  A missing instruction abstains.  The legacy decisive caller also
+    abstains on an empty workspace; the universal semantic substrate may
+    explicitly allow it so instruction-owned deliverables and checks are
+    still derived for genuinely source-less tasks.
     """
 
     instruction = str(instruction or "")
     if not instruction.strip():
         return _abstain("instruction_empty")
     workspace = tuple(workspace)
-    if not workspace:
+    if not workspace and not allow_empty_workspace:
         return _abstain("workspace_scan_empty")
 
     detector_calls: dict[str, int] = {}

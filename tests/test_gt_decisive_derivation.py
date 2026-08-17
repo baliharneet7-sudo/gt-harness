@@ -649,6 +649,14 @@ def _snapshot_entry(path: str, text: str) -> tuple[str, _SnapshotFile]:
 
 
 class TestWorkspaceFromSnapshot:
+    def test_snapshot_projection_preserves_explicit_model_authored_origin(self):
+        workspace = workspace_from_snapshot(
+            {"generated.py": _SnapshotFile("f", 12, "a" * 64, "token = 'x'")},
+            path_origins={"generated.py": EvidenceOrigin.MODEL_AUTHORED.value},
+        )
+
+        assert workspace[0].origin == EvidenceOrigin.MODEL_AUTHORED.value
+
     def test_snapshot_entries_project_into_workspace(self):
         entries = {
             "main.py": _SnapshotFile("f", 5, _sha("hello"), "hello"),

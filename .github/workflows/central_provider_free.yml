@@ -108,12 +108,16 @@ jobs:
             tests/test_central_integrity_audit.py \
             tests/test_gt_delivery_audit.py \
             tests/test_gt_runtime_gate.py \
+            tests/test_gt_preemptive_decision_accounting.py \
             tests/test_gt_contributions.py \
             tests/test_provider_view.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_progress.py \
+            tests/test_gt_completion.py \
+            tests/test_task_semantic_substrate.py \
+            tests/test_convergence_controller.py \
             tests/test_provider_evidence.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py \
@@ -124,6 +128,9 @@ jobs:
             tests/test_decision_sufficiency.py \
             tests/test_persistent_execution_state.py \
             tests/test_central_release_gate.py \
+            tests/test_central_feature_lifecycle.py \
+            tests/test_tb2_promotion_gate.py \
+            tests/test_tb2_regression_forensics.py \
             tests/test_deepswe_release_gate.py \
             tests/test_hybrid_repository.py \
             tests/test_graph_retrieval_repairs.py \
@@ -165,10 +172,17 @@ jobs:
             gt_engine/snowflake_onnx.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/delivery_audit.py \
+            gt_engine/runtime_gate.py \
+            gt_engine/task_semantic_substrate.py \
+            gt_engine/convergence_controller.py \
+            gt_engine/completion.py \
             gt_engine/uplift_policy.py \
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             scripts/central_release_gate.py \
+            scripts/central_feature_lifecycle.py \
+            scripts/tb2_promotion_gate.py \
+            scripts/tb2_regression_forensics.py \
             scripts/central_bootstrap_canary.py \
             scripts/deepswe_release_gate.py \
             scripts/central_feature_census.py \
@@ -189,6 +203,9 @@ jobs:
             tests/test_gt_uplift_policy.py \
             tests/test_gt_preflight.py tests/test_provider_view.py \
             tests/test_provider_evidence.py tests/test_gt_progress.py \
+            tests/test_gt_completion.py \
+            tests/test_task_semantic_substrate.py \
+            tests/test_convergence_controller.py \
             tests/test_gt_intelligence_layer.py \
             tests/test_gt_repository_intelligence.py \
             tests/test_gt_repository_mirror.py \
@@ -202,6 +219,8 @@ jobs:
             tests/test_central_trajectory_audit.py \
             tests/test_central_integrity_audit.py \
             tests/test_gt_delivery_audit.py \
+            tests/test_gt_runtime_gate.py \
+            tests/test_gt_preemptive_decision_accounting.py \
             tests/test_replay_bundle.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
@@ -212,6 +231,9 @@ jobs:
             tests/test_decision_sufficiency.py \
             tests/test_persistent_execution_state.py \
             tests/test_central_release_gate.py \
+            tests/test_central_feature_lifecycle.py \
+            tests/test_tb2_promotion_gate.py \
+            tests/test_tb2_regression_forensics.py \
             tests/test_deepswe_release_gate.py \
             tests/test_hybrid_repository.py \
             tests/test_graph_retrieval_repairs.py \

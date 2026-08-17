@@ -17,6 +17,7 @@ class ProviderEvidenceSurface(StrEnum):
     PREFLIGHT_RETURN = "preflight_return"
     PERSISTENT_EXECUTION_STATE = "persistent_execution_state"
     OBSERVED_EXECUTION = "observed_execution"
+    TASK_SEMANTIC_SUBSTRATE = "task_semantic_substrate"
 
 
 class ProviderEvidenceDisposition(StrEnum):
