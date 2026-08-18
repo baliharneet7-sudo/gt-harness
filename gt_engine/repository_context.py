@@ -805,6 +805,42 @@ class RepositoryContextEngine:
         facts = tuple(
             _stable_id("gt-context-fact-", claim, opportunity.source_revision) for claim in claims
         )
+        semantic_claims = {item.claim_id for item in semantic.items}
+        execution_claims = {view.view_id for view in execution_views}
+        impact_claims = {fact.claim_id for fact in impact}
+        diagnostic_claims = {fact.claim_id for fact in diagnostics}
+        validation_claims = {fact.claim_id for fact in validation}
+        claim_metadata = tuple(
+            {
+                "claim_id": claim,
+                "origin": (
+                    "execution_observation"
+                    if claim in diagnostic_claims
+                    else EvidenceOrigin.PREEXISTING_REPOSITORY.value
+                ),
+                "authority": (
+                    "execution_observation"
+                    if claim in diagnostic_claims
+                    else "certified_structural"
+                    if claim in execution_claims or claim in impact_claims
+                    else "compiler_semantic"
+                    if claim in semantic_claims
+                    else "declared_validation"
+                    if claim in validation_claims
+                    else "unknown"
+                ),
+                "materiality_reason": (
+                    "current_attributable_failure"
+                    if claim in diagnostic_claims
+                    else "new_unresolved_task_obligation"
+                    if claim in validation_claims
+                    else "decision_relevant_repository_context"
+                ),
+                "source_revision": opportunity.source_revision,
+                "graph_revision": opportunity.graph_revision,
+            }
+            for claim in claims
+        )
         contribution = GTContribution.create(
             surface="repository_context",
             kind=ContributionKind.EVIDENCE,
@@ -815,6 +851,7 @@ class RepositoryContextEngine:
             eligible_call=opportunity.eligible_call,
             source_revision=opportunity.source_revision,
             priority=18,
+            claim_metadata=claim_metadata,
         )
         return RepositoryContextProjection(
             status=RepositoryContextStatus.DELIVER,

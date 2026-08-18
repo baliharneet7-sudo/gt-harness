@@ -150,6 +150,11 @@ def test_benchmark_manifest_freezes_common_scaffold_and_rejects_duplicate_arms()
     assert payload["manifest_sha256"]
     assert len(payload["treatments"]) == 2
     assert payload["parity_treatment_ids"] == ["bare", "groundtruth"]
+    assert BenchmarkManifest.from_dict(payload).as_dict() == payload
+
+    tampered = {**payload, "max_steps": configured_max_steps + 1}
+    with pytest.raises(ValueError, match="content or hash mismatch"):
+        BenchmarkManifest.from_dict(tampered)
 
     with pytest.raises(ValueError, match="treatment IDs must be unique"):
         BenchmarkManifest.create(

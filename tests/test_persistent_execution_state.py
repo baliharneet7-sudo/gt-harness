@@ -1403,6 +1403,115 @@ def test_graph_discovery_after_edit_updates_state_without_a_second_model_plan():
     assert engine.metrics["graph_rebases"] == 1
 
 
+def test_new_model_authored_graph_endpoint_never_becomes_repository_advice():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=(),
+        present_paths=("src/service.py", "src/api.py"),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection("not-json", catalog),
+        current_source_revision="source-1",
+    )
+    initial = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    engine.mark_context_dispatched(initial)
+
+    created = _proposed("printf 'pass\\n' > scratch_probe.py")
+    engine.commit_postflight(
+        created,
+        returncode=0,
+        output="",
+        changed_paths=("scratch_probe.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=(
+            StructuralLink(
+                source_path="scratch_probe.py",
+                target_path="src/service.py",
+                relation="CALLS",
+                confidence=1.0,
+                provenance=("graph_edge:CALLS",),
+                certified=True,
+            ),
+        ),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("scratch_probe.py",),
+        present_paths=("src/service.py", "src/api.py", "scratch_probe.py"),
+    )
+
+    obligation = next(
+        item for item in engine.snapshot.obligations if item.relation == "calls"
+    )
+    assert obligation.source_origin is EvidenceOrigin.MODEL_AUTHORED
+    assert obligation.path_origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+    frame = engine.compile_context(
+        current_source_revision="source-2", provider_call=2, max_tokens=512
+    )
+    assert "scratch_probe.py" not in frame.rendered_text
+    assert all(
+        row.get("origin") != EvidenceOrigin.MODEL_AUTHORED.value
+        for row in frame.claim_metadata
+    )
+
+
+def test_relational_profile_keeps_advisory_obligations_controller_only():
+    catalog = _catalog()
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=(),
+        present_paths=("src/service.py", "src/api.py"),
+    )
+    engine.apply_bootstrap(
+        parse_bootstrap_selection("not-json", catalog),
+        current_source_revision="source-1",
+    )
+    initial = engine.compile_context(
+        current_source_revision="source-1", provider_call=1, max_tokens=512
+    )
+    engine.mark_context_dispatched(initial)
+    edit = _proposed("sed -i 's/pass/return 1/' src/service.py")
+    engine.commit_postflight(
+        edit,
+        returncode=0,
+        output="",
+        changed_paths=("src/service.py",),
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        validation_status="unknown",
+    )
+    engine.rebase_graph(
+        evidence=_evidence("source-2"),
+        structural_links=_links()[:1],
+        current_source_revision="source-2",
+        current_graph_revision="graph-2",
+        graph_complete=True,
+        changed_paths=("src/service.py",),
+        present_paths=("src/service.py", "src/api.py"),
+    )
+
+    frame = engine.compile_context(
+        current_source_revision="source-2",
+        provider_call=2,
+        max_tokens=512,
+        include_advisory_obligations=False,
+    )
+
+    assert frame.rendered_text == ""
+    assert frame.kind is ContextFrameKind.NONE
+    assert any(item.relation == "calls" for item in engine.snapshot.obligations)
+
+
 def test_graph_advisories_do_not_create_a_false_submit_block():
     catalog = build_bootstrap_catalog(
         instruction="Fix save_user.",

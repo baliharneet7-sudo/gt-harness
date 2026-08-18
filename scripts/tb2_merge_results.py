@@ -1,15 +1,19 @@
-import json, os, sys
+import json
+import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from gt_engine.benchmark_parity import audit_runtime_receipt
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.deep_metrics import extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.treatment_adapter import BenchmarkManifest
 from scripts.central_feature_lifecycle import build_feature_lifecycle_report
 from scripts.central_release_gate import audit_treatment_runtime
-from scripts.tb2_regression_forensics import build_regression_forensics
 from scripts.tb2_promotion_gate import assess_tb2_promotion, treatment_from_merged
+from scripts.tb2_regression_forensics import build_regression_forensics
 
 expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
 dense_required = True
@@ -17,6 +21,7 @@ trials, missing, per_task, receipt_metrics = [], [], [], []
 observed_artifact_tasks = set()
 feature_receipts = []
 deep_tasks = {}
+verified_benchmark_manifests = {}
 
 def solved(t):
     rewards = (t.get("verifier_result") or {}).get("rewards") or {}
@@ -72,6 +77,26 @@ for task_dir in sorted(Path("tasks").glob("*")):
                 for check in audit_treatment_runtime(receipt, label=task_name)
                 for failure in check.failures
             ]
+            manifest_paths = list(task_dir.rglob("benchmark-manifest.json"))
+            if len(manifest_paths) != 1:
+                treatment_release_failures.append(
+                    f"{task_name}:benchmark_manifest_artifact_count:{len(manifest_paths)}"
+                )
+            else:
+                try:
+                    benchmark_manifest = BenchmarkManifest.from_dict(
+                        json.loads(manifest_paths[0].read_text(encoding="utf-8"))
+                    )
+                    parity = audit_runtime_receipt(benchmark_manifest, receipt)
+                    verified_benchmark_manifests[task_name] = benchmark_manifest.as_dict()
+                    treatment_release_failures.extend(
+                        f"{task_name}:benchmark_runtime_parity:{failure}"
+                        for failure in parity.failures
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    treatment_release_failures.append(
+                        f"{task_name}:benchmark_manifest_invalid:{type(exc).__name__}"
+                    )
         receipt_metrics.append({
             "task": task_name,
             "feature_count": (receipt.get("features") or {}).get("feature_count"),
@@ -254,6 +279,23 @@ invalid_provider_deliveries = [
     for row in receipt_metrics
     if row["provider_delivery_failures"]
 ]
+manifest_hashes = sorted(
+    {
+        str(row.get("manifest_sha256") or "")
+        for row in verified_benchmark_manifests.values()
+        if str(row.get("manifest_sha256") or "")
+    }
+)
+manifest_task_set_valid = set(verified_benchmark_manifests) == set(expected)
+common_manifest_valid = manifest_task_set_valid and len(manifest_hashes) == 1
+if not common_manifest_valid:
+    reason = (
+        "run_wide_benchmark_manifest_task_set_mismatch"
+        if not manifest_task_set_valid
+        else "run_wide_benchmark_manifest_hash_mismatch"
+    )
+    for row in receipt_metrics:
+        row["treatment_release_failures"].append(f"{row['task']}:{reason}")
 invalid_treatment_release = [
     row["task"]
     for row in receipt_metrics
@@ -370,8 +412,16 @@ for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
     out.append(f"| {name} | {mark} | {json.dumps(rewards) if rewards else (exc or 'no reward')} |")
 
 out += [
-    "", "## Central runtime metrics", "",
-    "| task | total tokens | uncached input | calls | model actions | effective task execs | controller execs | cached reads | checks | changes | failed | repeated | guidance delivered/candidates/suppressed | frontier deliveries/chars | graph nodes/edges | mirror/index ms | intelligence | censored |",
+    "",
+    "## Central runtime metrics",
+    "",
+    (
+        "| task | total tokens | uncached input | calls | model actions | "
+        "effective task execs | controller execs | cached reads | checks | "
+        "changes | failed | repeated | guidance delivered/candidates/suppressed | "
+        "frontier deliveries/chars | graph nodes/edges | mirror/index ms | "
+        "intelligence | censored |"
+    ),
     "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
 ]
 for row in sorted(receipt_metrics, key=lambda x: x["task"]):
@@ -394,6 +444,19 @@ for row in sorted(receipt_metrics, key=lambda x: x["task"]):
         f"{row['censored'] or False} |"
     )
 
+baseline = json.loads(
+    Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
+        encoding="utf-8"
+    )
+)
+baseline_runtime_contract = dict(
+    (baseline.get("manifest") or {}).get("model_identity") or {}
+)
+treatment_runtime_contract = {
+    **baseline_runtime_contract,
+    "agent_class": "eval.gt_central_agent:MiniSweCentralAgent",
+    "preflight_mode": "assistive_safe",
+}
 merged_payload = {
     "expected_tasks": n_expected,
     "missing_tasks": missing,
@@ -411,7 +474,7 @@ merged_payload = {
     "trial_results": trials,
     "receipt_metrics": receipt_metrics,
     "treatment_manifest": {
-        "model": "deepseek-v4-flash",
+        "model": os.environ["CANARY_MODEL"],
         "gt_commit": os.environ["GT_COMMIT"],
         "run_id": os.environ["GT_RUN_ID"],
         "system_fingerprints": sorted(observed_fingerprints),
@@ -438,25 +501,9 @@ merged_payload = {
             "complete": observed_identity_complete,
             "stable": observed_identity_stable,
         },
-        "runtime_contract": {
-            "catalog_model": "openai/deepseek-v4-flash",
-            "response_model": "deepseek-v4-flash",
-            "route": "deepseek:native:api.deepseek.com",
-            "api_host": "api.deepseek.com",
-            "adapter_provider": "openai",
-            "mini_version": "2.2.8",
-            "agent_class": "eval.gt_central_agent:MiniSweCentralAgent",
-            "preflight_mode": "assistive_safe",
-            "temperature": 1.0,
-            "step_limit": 100,
-            "environment_timeout_sec": 30,
-            "timeout_multiplier": 1.0,
-            "agent_timeout_multiplier": 1.0,
-            "system_template_sha256": "6fb54145bbb1724ce77430ff3852887acbd4a5cce10c86cd8dfbf4c7d55f1091",
-            "instance_template_sha256": "546a89156d7823eb34eb49c5b31a3703df4d27639d034a6d13f0162488d70821",
-            "observation_template_sha256": "da32186e7f86c2070607e69fdb7465b25cdfd108a4e932a379ea3763161db4a8",
-            "tool_contract": "miniswe_bash_command_v1",
-        },
+        "runtime_contract": treatment_runtime_contract,
+        "benchmark_manifest_sha256s": manifest_hashes,
+        "common_benchmark_manifest": common_manifest_valid,
     },
 }
 lifecycle_report = build_feature_lifecycle_report(
@@ -470,11 +517,6 @@ lifecycle_report = build_feature_lifecycle_report(
     expected_task_ids=expected,
 )
 treatment = treatment_from_merged(merged_payload)
-baseline = json.loads(
-    Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
-        encoding="utf-8"
-    )
-)
 promotion_report = assess_tb2_promotion(baseline, treatment)
 forensics_report = build_regression_forensics(
     baseline,
@@ -502,7 +544,10 @@ out += [
         if diagnostic_only
         else f"- frozen-baseline promotion: **{'PASS' if promotion_report.passed else 'FAIL'}**"
     ),
-    f"- legacy features naturally fired: **{lifecycle_report['naturally_fired_legacy_feature_count']}/17**",
+    (
+        "- legacy features naturally fired: "
+        f"**{lifecycle_report['naturally_fired_legacy_feature_count']}/17**"
+    ),
     f"- solve flips: **{', '.join(promotion_report.flips) or 'none'}**",
     f"- baseline solve losses: **{', '.join(promotion_report.losses) or 'none'}**",
 ]

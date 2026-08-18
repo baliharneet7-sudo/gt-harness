@@ -194,6 +194,76 @@ def test_bad_preemptive_hash_and_timing_fail_closed():
     assert totals["timely_count"] == 2
 
 
+def test_delivery_timing_uses_completed_action_ordinal_not_call_ordinal():
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["model_call_contexts"] = [
+        {
+            **_context(27, request="req-27", provider="provider-27"),
+            "completed_action_count_before_call": 34,
+        }
+    ]
+    receipt["task_semantic_substrate"] = {
+        "deliveries": [
+            {
+                "claim_ids": ["task-claim"],
+                "fact_ids": ["task-fact"],
+                "evidence_action": 34,
+                "first_eligible_call": 27,
+                "delivered_before_call": 27,
+                "delivered_before_model_query": True,
+                "not_predictive": False,
+                "one_step_late": False,
+                "request_payload_sha256": "req-27",
+                "provider_messages_sha256": "provider-27",
+                "message_index": 1,
+                "chars": 20,
+                "claim_metadata": [
+                    _claim_meta("task-claim", materiality_reason="task_decisive_evidence")
+                ],
+            }
+        ]
+    }
+
+    rows, failures, totals = audit_provider_deliveries(receipt)
+
+    assert not failures
+    assert rows[0]["predictive"] is False
+    assert totals["predictive_count"] == 0
+
+
+def test_model_authored_claim_metadata_fails_the_shared_delivery_audit():
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["task_semantic_substrate"] = {
+        "deliveries": [
+            {
+                "claim_ids": ["task-claim"],
+                "fact_ids": ["task-fact"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "req-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 20,
+                "claim_metadata": [
+                    _claim_meta("task-claim", origin="model_authored")
+                ],
+            }
+        ]
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert "task:delivery_unsafe_provider_origin:1:model_authored" in failures
+
+
 def test_provider_messages_hash_must_match_exact_call_context():
     receipt = _receipt()
     receipt["preemptive_retrieval"]["deliveries"][0][

@@ -103,6 +103,28 @@ class RepositoryFactTracker:
             if normalized:
                 self.model_authored_paths.setdefault(normalized, max(0, int(action_id)))
 
+    def record_task_start_paths(
+        self, paths: Sequence[str], *, evidence_action: int
+    ) -> None:
+        """Add source-backed paths transferred before the first model action.
+
+        The initial workspace sensor can precede repository transfer.  Paths
+        certified by the resulting task-start graph are still pre-existing;
+        leaving them absent here incorrectly degrades their provider authority
+        to unknown.
+        """
+
+        if int(evidence_action) != 0:
+            raise ValueError("task-start paths must be registered before model action 1")
+        normalized = {
+            self._path(path)
+            for path in paths
+            if self._path(path) and self._path(path) not in self.model_authored_paths
+        }
+        self.task_start_source_paths = frozenset(
+            (*self.task_start_source_paths, *normalized)
+        )
+
     def provenance_for(
         self,
         fact: ContextFrontierFact,

@@ -265,6 +265,8 @@ jobs:
       GT_DENSE_INTER_OP_THREADS: "1"
       TASKS_JSON: ${{ needs.plan.outputs.tasks }}
       TASK_SET_SHA256: ${{ needs.plan.outputs.task_set_sha256 }}
+      GT_COMMIT: ${{ needs.resolve.outputs.sha }}
+      CANARY_MODEL: ${{ needs.plan.outputs.canary_model }}
       # Provider credentials remain on the Harbor host. The external agent
       # passes an empty env mapping to every model-selected task command.
     steps:
@@ -414,14 +416,51 @@ jobs:
         run: |
           set -euo pipefail
           harbor dataset download "$DATASET" -o ds --export
-          DATASET_NAME="${DATASET%@*}"
-          TASK_CONFIG="ds/${DATASET_NAME}/${TASK}/task.toml"
           mkdir -p results/terminal-bench
-          EXECUTION_BUDGET=$(python scripts/resolve_harbor_budget.py \
-            --task-config "$TASK_CONFIG" \
-            --multiplier 1.0 \
-            --output "results/terminal-bench/harbor-budget-${TASK}.json")
+          EXECUTION_BUDGET=$(python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from scripts.resolve_harbor_budget import resolve_budget
+
+          tasks = json.loads(os.environ["TASKS_JSON"])
+          selected = os.environ["TASK"]
+          rows = {}
+          for task in tasks:
+              receipt = resolve_budget(
+                  Path("ds/terminal-bench") / task / "task.toml",
+                  multiplier=1.0,
+              )
+              rows[task] = {
+                  "task_config_sha256": receipt["task_config_sha256"],
+                  "base_timeout_sec": receipt["base_timeout_sec"],
+                  "timeout_multiplier": receipt["timeout_multiplier"],
+                  "execution_budget_sec": receipt["execution_budget_sec"],
+              }
+          policy = {
+              "schema": "gt.tb2.timeout_policy.v1",
+              "resolver": "scripts.resolve_harbor_budget:resolve_budget",
+              "resolved_task_budgets": rows,
+              "agent_timeout_multiplier": 1.0,
+          }
+          output = Path(os.environ["RUNNER_TEMP"]) / "gt-timeout-policy.json"
+          output.write_text(
+              json.dumps(policy, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          budget_output = (
+              Path("results/terminal-bench") / f"harbor-budget-{selected}.json"
+          )
+          budget_output.write_text(
+              json.dumps(rows[selected], indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(rows[selected]["execution_budget_sec"])
+          PY
+          )
           echo "EXECUTION_BUDGET=${EXECUTION_BUDGET}" >> "$GITHUB_ENV"
+          echo "GT_TIMEOUT_POLICY_PATH=$RUNNER_TEMP/gt-timeout-policy.json" >> "$GITHUB_ENV"
           echo "resolved Harbor agent budget: ${EXECUTION_BUDGET}s"
 
       - name: Capture source-owned runtime observation
@@ -434,7 +473,6 @@ jobs:
           import inspect
           import json
           import os
-          import platform
           from pathlib import Path
 
           from eval.gt_central_agent import MiniSweCentralAgent
@@ -462,6 +500,9 @@ jobs:
           dense_proof = json.loads(
               Path("dense-backend-proof.json").read_text(encoding="utf-8")
           )
+          timeout_policy = json.loads(
+              Path(os.environ["GT_TIMEOUT_POLICY_PATH"]).read_text(encoding="utf-8")
+          )
           if dense_proof.get("available") is not True:
               raise SystemExit("dense backend proof is not available")
 
@@ -477,7 +518,7 @@ jobs:
                   "task_order_sha256": task_set_sha,
               },
               "provider_request": {
-                  "provider_identity": os.environ["GT_LITELLM_MODEL"],
+                  "provider_identity": os.environ["CANARY_MODEL"],
                   "temperature": float(temperature),
                   "sampling_parameters": {
                       "temperature": float(temperature),
@@ -500,25 +541,19 @@ jobs:
               "loaded_asset_receipt": {
                   "embedding_configuration_sha256": digest(dense_proof),
               },
-              "runner_environment": {
-                  "hardware_assumptions_sha256": digest({
-                      "runner_os": os.environ.get("RUNNER_OS", ""),
-                      "runner_arch": os.environ.get("RUNNER_ARCH", ""),
-                      "platform": platform.platform(),
-                      "machine": platform.machine(),
-                      "cpu_count": os.cpu_count(),
-                  }),
-              },
-              "runtime_policy": {
+               "runner_environment": {
+                   "hardware_assumptions_sha256": digest({
+                       "runner_os": os.environ.get("RUNNER_OS", ""),
+                       "runner_arch": os.environ.get("RUNNER_ARCH", ""),
+                   }),
+               },
+               "runtime_policy": {
                   "retry_policy_sha256": digest({
                       "executor_retry_policy": "provider_once_no_retry",
                       "provider_retries": 0,
                   }),
-                  "timeout_policy_sha256": digest({
-                      "execution_budget_sec": int(float(os.environ["EXECUTION_BUDGET"])),
-                      "agent_timeout_multiplier": 1.0,
-                  }),
-              },
+                   "timeout_policy_sha256": digest(timeout_policy),
+               },
               "metering_adapter": {
                   "token_accounting_sha256": digest({
                       "cost_tracking": os.environ.get(
@@ -569,42 +604,158 @@ jobs:
           PY
           echo "GT_RUNTIME_OBSERVATION_PATH=$RUNNER_TEMP/gt-runtime-sources/$TASK/runtime-observation.json" >> "$GITHUB_ENV"
 
+      - name: Build caller-owned benchmark identity
+        env:
+          COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
+          DATASET: terminal-bench@2.0
+        run: |
+          set -euo pipefail
+          IDENTITY_ROOT="$RUNNER_TEMP/gt-benchmark-identity/$TASK"
+          mkdir -p "$IDENTITY_ROOT"
+          STEP_LIMIT=$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          baseline = json.loads(
+              Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          print(int(baseline["manifest"]["model_identity"]["step_limit"]))
+          PY
+          )
+          IDENTITY_ROOT="$IDENTITY_ROOT" python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def digest(value):
+              encoded = json.dumps(
+                  value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+              ).encode("utf-8")
+              return hashlib.sha256(encoded).hexdigest()
+
+          root = Path(os.environ["IDENTITY_ROOT"])
+          tasks = json.loads(os.environ["TASKS_JSON"])
+          (root / "tasks.json").write_text(
+              json.dumps(tasks, ensure_ascii=False, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          baseline = json.loads(
+              Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          temperature = float(baseline["manifest"]["model_identity"]["temperature"])
+          dense_proof = json.loads(
+              Path("dense-backend-proof.json").read_text(encoding="utf-8")
+          )
+          timeout_policy = json.loads(
+              Path(os.environ["GT_TIMEOUT_POLICY_PATH"]).read_text(encoding="utf-8")
+          )
+          execution_contract = {
+              "task_count": len(tasks),
+              "task_order_sha256": os.environ["TASK_SET_SHA256"],
+              "provider_identity": os.environ["CANARY_MODEL"],
+              "temperature": temperature,
+              "sampling_parameters": {
+                  "temperature": temperature,
+                  "num_retries": 0,
+              },
+              "tool_envelope_sha256": digest({
+                  "agent_import_path": "eval.gt_central_agent:MiniSweCentralAgent",
+                  "tool_contract": "miniswe_bash_command_v1",
+                  "runner": "harbor",
+              }),
+              "hook_envelope_sha256": digest({
+                  "host_owned": True,
+                  "preflight_mode": "assistive_safe",
+                  "task_start_advisory": False,
+                  "source_observation_boundary": "pre-provider-agent-construction",
+              }),
+              "embedding_configuration_sha256": digest(dense_proof),
+              "hardware_assumptions_sha256": digest({
+                  "runner_os": os.environ.get("RUNNER_OS", ""),
+                  "runner_arch": os.environ.get("RUNNER_ARCH", ""),
+              }),
+              "retry_policy_sha256": digest({
+                  "executor_retry_policy": "provider_once_no_retry",
+                  "provider_retries": 0,
+              }),
+              "timeout_policy_sha256": digest(timeout_policy),
+              "token_accounting_sha256": digest({
+                  "cost_tracking": os.environ.get(
+                      "MSWEA_COST_TRACKING", "ignore_errors"
+                  ),
+                  "receipt_fields": [
+                      "input_tokens",
+                      "output_tokens",
+                      "total_tokens",
+                      "provider_calls",
+                      "provider_cost_usd",
+                  ],
+              }),
+          }
+          (root / "execution-contract.json").write_text(
+              json.dumps(
+                  execution_contract, indent=2, sort_keys=True
+              ) + "\n",
+              encoding="utf-8",
+          )
+          descriptor = json.loads(
+              Path("eval/treatments/tb2_central_relational_v2.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          descriptor.pop("runtime_agent_kwargs", None)
+          descriptor["source_sha"] = os.environ["GT_COMMIT"]
+          (root / "treatments.json").write_text(
+              json.dumps([descriptor], indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          python -m scripts.build_benchmark_manifest \
+            --benchmark-id "${DATASET}/${COMPARISON_PROFILE}" \
+            --task-manifest "$IDENTITY_ROOT/tasks.json" \
+            --model-id "$CANARY_MODEL" \
+            --scaffold-sha "$GT_COMMIT" \
+            --treatments "$IDENTITY_ROOT/treatments.json" \
+            --execution-contract "$IDENTITY_ROOT/execution-contract.json" \
+            --max-steps "$STEP_LIMIT" \
+            --trials-per-task 1 \
+            --output "$IDENTITY_ROOT/benchmark-manifest.json"
+          echo "GT_STEP_LIMIT=$STEP_LIMIT" >> "$GITHUB_ENV"
+          echo "GT_BENCHMARK_MANIFEST_PATH=$IDENTITY_ROOT/benchmark-manifest.json" >> "$GITHUB_ENV"
+
       - name: Run harbor - task ${{ matrix.task }}
         id: harbor
         env:
-          MODEL: deepseek-v4-flash
+          MODEL: ${{ needs.plan.outputs.canary_model }}
           DATASET: terminal-bench@2.0
           TASK: ${{ matrix.task }}
           REPLAY_CAPTURE: ${{ inputs.replay_capture }}
-          STEP_LIMIT: "100"
         run: |
-          set -uo pipefail
+          set -euo pipefail
           AGENT="eval.gt_central_agent:MiniSweCentralAgent"
-          FEATURE_ARGS=(
-            --ak integration_mode=active --ak policy_mode=certified_active
-            --ak enable_all_features=true --ak enable_submit_readiness=true
-            --ak enable_repository_intelligence=true
-            --ak preflight_mode=assistive_safe --ak enable_lint=true
-            --ak enable_feature_guidance=true --ak enable_context_frontier=true
-            --ak enable_preemptive_retrieval=true
-            --ak enable_decision_sufficiency=true
-            --ak enable_persistent_execution_state=true
-            --ak persistent_state_bootstrap_timeout_sec=45
-            --ak persistent_state_bootstrap_input_tokens=2000
-            --ak persistent_state_bootstrap_output_tokens=512
-            --ak persistent_state_context_tokens=512
-            --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
-            --ak enable_context_compaction=true --ak enable_completion_controller=true
-            --ak enable_progress_control=true --ak enable_adaptive_validation_timeout=true
-            --ak enable_shadow_submit_gate=true
-            --ak require_graph_ready=true
+          TREATMENT_CONTRACT="$RUNNER_TEMP/gt-treatment-runtime.json"
+          python -m scripts.render_treatment_agent_args \
+            --descriptor eval/treatments/tb2_central_relational_v2.json \
+            --source-sha "$GT_COMMIT" \
+            --max-steps "$GT_STEP_LIMIT" \
+            --benchmark-manifest "$GT_BENCHMARK_MANIFEST_PATH" \
+            --output "$TREATMENT_CONTRACT"
+          mapfile -t FEATURE_ARGS < <(
+            python -m scripts.render_treatment_agent_args \
+              --emit-harbor-args "$TREATMENT_CONTRACT"
           )
           FEATURE_ARGS+=(
             --ak execution_budget_sec="$EXECUTION_BUDGET"
-            --ak enable_task_start_advisory=false
+            --ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
             --ak enable_replay_capture="$REPLAY_CAPTURE"
-            --ak step_limit="$STEP_LIMIT"
+            --ak treatment_runtime_contract_path="$TREATMENT_CONTRACT"
           )
+          cp "$TREATMENT_CONTRACT" gt-treatment-runtime.json
           JOB_NAME="tb2-miniswe-central-certified_full-integrated-${GITHUB_RUN_ID}-${TASK}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
@@ -625,6 +776,9 @@ jobs:
         run: |
           if [ -n "${GT_RUNTIME_OBSERVATION_PATH:-}" ] && [ -f "$GT_RUNTIME_OBSERVATION_PATH" ]; then
             cp "$GT_RUNTIME_OBSERVATION_PATH" runtime-observation.json
+          fi
+          if [ -n "${GT_BENCHMARK_MANIFEST_PATH:-}" ] && [ -f "$GT_BENCHMARK_MANIFEST_PATH" ]; then
+            cp "$GT_BENCHMARK_MANIFEST_PATH" benchmark-manifest.json
           fi
 
       - name: Cache task image for future runs
@@ -678,6 +832,8 @@ jobs:
             results/terminal-bench/
             dense-backend-proof.json
             runtime-observation.json
+            benchmark-manifest.json
+            gt-treatment-runtime.json
           if-no-files-found: warn
 
   merge:

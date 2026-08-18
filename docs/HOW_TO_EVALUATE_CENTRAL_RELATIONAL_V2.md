@@ -73,6 +73,25 @@ python -m scripts.build_benchmark_manifest `
 
 The builder hashes caller-owned files and writes atomically. It refuses to overwrite an input.
 
+For the checked-in TB2 workflow this construction is automatic and happens before
+the provider-owned agent loop. The task set comes from the selected frozen baseline
+profile, the step budget comes from that baseline's model identity, the model ID
+comes from the authenticated canary, and the source SHA is the exact checked-out
+commit. The workflow does not keep a second literal step limit or a hand-maintained
+feature argument list.
+
+The workflow then renders `eval/treatments/tb2_central_relational_v2.json` with
+`scripts/render_treatment_agent_args.py`. The generated runtime contract is hashed,
+passed to the agent, archived, and checked by the release gate. A legacy default
+profile is a hard failure rather than a fallback.
+
+Every task row must carry the same verified benchmark-manifest hash. The timeout
+contract contains the caller-derived budget map for the complete selected task
+set, so task-specific Harbor deadlines do not produce task-specific benchmark
+identities. Merge fails the whole treatment if any row is missing, has a different
+hash, or if any descriptor-controlled runtime argument differs from the effective
+agent value.
+
 ## 3. Prove implementation integrity
 
 Run focused and full local tests and static checks. Then freeze one exact commit and run the

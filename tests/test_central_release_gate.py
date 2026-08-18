@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import audit_release, audit_treatment_runtime
 
@@ -69,6 +72,16 @@ def _treatment() -> dict:
         "executor_calls": 1,
         "bootstrap_calls": 1,
         "actions": 0,
+        "action_accounting": {
+            "schema": "gt.action_accounting.v1",
+            "selected": 0,
+            "processed": 0,
+            "executed": 0,
+            "returned": 0,
+            "cancelled": 0,
+            "selected_equals_processed_plus_cancelled": True,
+            "processed_equals_executed_plus_returned": True,
+        },
         "host_execution": {"decision_actions": 0},
         "persistent_execution_state": {
             "activation": {
@@ -295,12 +308,42 @@ def _relational_treatment() -> dict:
     receipt["treatment_profile"] = "central_relational_v2"
     receipt["component_configuration"].update(
         {
+            "step_limit": 100,
+            "treatment_runtime_contract_sha256": "",
             "persistent_execution_state": True,
             "relational_context": True,
             "semantic_evidence": True,
             "dense_fallback_only": True,
+            "gt_task_evidence_budget_tokens": 4096,
+            "gt_task_critical_reserve_tokens": 512,
         }
     )
+    contract = {
+        "schema": "gt.treatment_runtime_arguments.v1",
+        "treatment_id": "fixture-relational",
+        "source_sha": "a" * 40,
+        "profile_id": "central_relational_v2",
+        "agent_kwargs": {
+            "integration_mode": "active",
+            "treatment_profile": "central_relational_v2",
+            "enable_persistent_execution_state": True,
+            "enable_preemptive_retrieval": True,
+            "enable_relational_context": True,
+            "enable_semantic_evidence": True,
+            "dense_fallback_only": True,
+            "step_limit": 100,
+        },
+    }
+    contract["contract_sha256"] = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt["treatment_runtime_contract"] = contract
+    receipt["component_configuration"]["effective_runtime_agent_kwargs"] = dict(
+        contract["agent_kwargs"]
+    )
+    receipt["component_configuration"]["treatment_runtime_contract_sha256"] = contract[
+        "contract_sha256"
+    ]
     receipt["preemptive_retrieval"]["decisions"] = [
         {
             "status": "abstained",
@@ -453,6 +496,16 @@ def _relational_treatment() -> dict:
                 "message_index": 1,
                 "chars": 70,
                 "tokens": 20,
+                "claim_metadata": [
+                    {
+                        "claim_id": claim_id,
+                        "origin": "preexisting_repository",
+                        "authority": "certified_structural",
+                        "materiality_reason": "decision_relevant_repository_context",
+                        "source_revision": "source-1",
+                    }
+                    for claim_id in ("semantic-1", "process-1")
+                ],
                 "projection": {
                     "status": "deliver",
                     "source_revision": "source-1",
@@ -488,6 +541,16 @@ def _relational_treatment() -> dict:
             ],
         }
     )
+    receipt["contribution_compiler"]["task_budget"] = {
+        "token_budget": 4096,
+        "critical_reserve_tokens": 512,
+        "used_regular_tokens": 40,
+        "used_critical_tokens": 0,
+        "used_tokens": 40,
+        "remaining_regular_tokens": 3544,
+        "remaining_total_tokens": 4056,
+        "exhausted": False,
+    }
     receipt["model_call_contexts"][0].update(
         {
             "relational_context": {
@@ -523,6 +586,44 @@ def test_treatment_gate_rejects_unified_contribution_budget_expansion():
     assert "treatment-1:contribution_token_budget_exceeded:1" in report.failures
 
 
+def test_treatment_gate_rejects_conflated_selected_and_executed_actions():
+    receipt = _relational_treatment()
+    receipt["action_accounting"].update(
+        {"selected": 2, "processed": 1, "executed": 1, "cancelled": 0}
+    )
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:selected_action_accounting_mismatch" in report.failures
+
+
+def test_treatment_gate_rejects_unobserved_runtime_budget_drift():
+    receipt = _relational_treatment()
+    receipt["component_configuration"]["effective_runtime_agent_kwargs"][
+        "gt_task_evidence_budget_tokens"
+    ] = 2048
+    receipt["treatment_runtime_contract"]["agent_kwargs"][
+        "gt_task_evidence_budget_tokens"
+    ] = 4096
+    contract = dict(receipt["treatment_runtime_contract"])
+    contract.pop("contract_sha256", None)
+    receipt["treatment_runtime_contract"]["contract_sha256"] = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    receipt["component_configuration"]["treatment_runtime_contract_sha256"] = receipt[
+        "treatment_runtime_contract"
+    ]["contract_sha256"]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert (
+        "treatment-1:treatment_runtime_gt_task_evidence_budget_tokens_mismatch"
+        in report.failures
+    )
+
+
 def test_release_gate_accepts_complete_evidence_contract():
     report = audit_release(
         [_relational_treatment()], static_evidence=STATIC, off_receipts=[_off()]
@@ -549,6 +650,19 @@ def test_strengthened_release_rejects_legacy_profile_receipt() -> None:
 
     assert report.passed is False
     assert "treatment-1:required_treatment_profile_mismatch" in report.failures
+
+
+def test_relational_runtime_gate_rejects_missing_treatment_contract() -> None:
+    receipt = _relational_treatment()
+    receipt.pop("treatment_runtime_contract")
+
+    failures = [
+        failure
+        for check in audit_treatment_runtime(receipt, label="task")
+        for failure in check.failures
+    ]
+
+    assert "task:treatment_runtime_contract_missing" in failures
 
 
 def test_relational_profile_requires_dense_backend_when_fallback_was_attempted():
@@ -804,6 +918,9 @@ def test_release_gate_counts_only_post_activation_persistent_lifecycle():
     receipt["calls"] = 3
     receipt["executor_calls"] = 2
     receipt["actions"] = 2
+    receipt["action_accounting"].update(
+        {"selected": 2, "processed": 2, "executed": 2}
+    )
     receipt["host_execution"]["decision_actions"] = 2
     receipt["persistent_execution_state"]["activation"] = {
         "initial_applicability": "not_applicable_no_supported_source",
@@ -841,6 +958,61 @@ def test_release_gate_counts_only_post_activation_persistent_lifecycle():
     persistent = next(
         check
         for check in audit_treatment_runtime(receipt, label="dynamic-task")
+        if check.name == "persistent_execution_state"
+    )
+
+    assert persistent.passed is True
+
+
+def test_release_gate_uses_lifecycle_counters_not_action_ordinals_after_activation():
+    receipt = _treatment()
+    receipt["calls"] = 3
+    receipt["executor_calls"] = 2
+    receipt["actions"] = 4
+    receipt["action_accounting"] = {
+        "selected": 5,
+        "processed": 4,
+        "executed": 3,
+        "returned": 1,
+        "cancelled": 1,
+    }
+    receipt["host_execution"]["decision_actions"] = 3
+    receipt["persistent_execution_state"]["activation"] = {
+        "initial_applicability": "not_applicable_no_supported_source",
+        "current_applicability": "source_backed",
+        "ever_applicable": True,
+        "activation_action": 2,
+        "activation_call": 2,
+        "processed_actions_before_activation": 2,
+        "executed_actions_at_activation": 1,
+        "correctly_abstained": False,
+    }
+    receipt["persistent_execution_state"]["metrics"].update(
+        {
+            "context_compilations": 1,
+            "preflight_projections": 2,
+            "postflight_commits": 3,
+        }
+    )
+    receipt["model_call_contexts"][0].update(
+        {
+            "call": 2,
+            "persistent_execution_state": {
+                "kind": "initial",
+                "provider_call": 2,
+                "state_version": 2,
+                "claim_ids": ["state-claim-1"],
+                "reason_codes": [],
+            },
+        }
+    )
+    receipt["persistent_execution_state"]["deliveries"][0].update(
+        {"first_eligible_call": 2, "delivered_before_call": 2}
+    )
+
+    persistent = next(
+        check
+        for check in audit_treatment_runtime(receipt, label="dynamic-mixed-actions")
         if check.name == "persistent_execution_state"
     )
 

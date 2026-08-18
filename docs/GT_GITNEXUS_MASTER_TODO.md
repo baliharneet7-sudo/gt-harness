@@ -1,5 +1,21 @@
 # Final GroundTruth Build TODO
 
+## 2026-08-18 post-smoke correction
+
+The archived regression smoke `32106687133` is diagnostic evidence, not proof of
+`central_relational_v2`. It ran commit
+`40b5332d0bbd91560f5118ffdcd98654ec1eb503` with treatment profile
+`central_pes_v1`; the inspected receipts explicitly record
+`relational_context=false` and `semantic_evidence=false`. Its 7/10 result therefore
+cannot validate or invalidate the strengthened relational path.
+
+That smoke exposed defects now repaired in the working tree: model-authored paths
+could be labelled as pre-existing evidence; persistent-state advisory output could
+duplicate repository context; GT had no shared per-task evidence budget; action
+and call ordinals were conflated; and the workflow could silently omit the
+strengthened profile. P0-P2 below means **implemented and locally testable**, not
+benchmark-proven. Exact-commit provider-free and outcome proof remain P3.
+
 ## Objective
 
 Build the strongest GroundTruth from measured GT failures and source-level lessons learned from
@@ -18,7 +34,10 @@ small-run GT versus strengthened GT on the frozen 20-task setup.
 | Incomplete fixes missed callers/tests/coupled files. | Reverse caller depth and certified test/relationship impact from changed anchors. | Implemented where certified graph relations exist. |
 | Unrelated edits redelivered context. | Semantic claim identity independent of global revision plus current-revision validation. | Implemented. |
 | Product accounting forked into a fake replacement mechanism. | Preserve exact 17+1 identity; repository context strengthens PES. | Implemented. |
-| Benchmark configuration was hardcoded/self-attested. | Caller-owned treatment JSON plus a fail-closed manifest/runtime audit. | Manifest, typed observation builder, host-path loading, and fail-closed audit are implemented; final workflow capture remains a P3 gate. |
+| Benchmark configuration was hardcoded/self-attested. | Caller-owned treatment JSON plus a fail-closed manifest/runtime audit. | Implemented: source SHA/model/step budget are caller-derived and the manifest is audited per task. |
+| Model-authored repository facts gained false authority. | Bind every claim to path origin, origin revision, authority, and materiality; unsafe origins are controller-only. | Implemented. |
+| GT payload accumulated across long tasks. | One shared discretionary-evidence budget with a protected critical reserve; preserve the mandatory bounded PES lifecycle frame. | Implemented: treatment-configured 4,096 total / 512 critical-reserve tokens for discretionary evidence. |
+| Difficult-task history became huge. | Bound GT additions and report when pressure is distinct assistant reasoning that GT may not delete. | Implemented truthfully; model over-exploration remains an outcome risk. |
 
 ## Completed build work
 
@@ -46,6 +65,20 @@ small-run GT versus strengthened GT on the frozen 20-task setup.
 - [x] Evaluate all five retrieval channels on every production retrieval state.
 - [x] Abstain on ambiguous same-file definitions and ambiguous re-export targets.
 - [x] Report observed context use without claiming counterfactual exploration replacement.
+- [x] Require claim-complete origin/authority/materiality metadata and reject missing,
+  model-authored, generated, and unknown origins from provider-visible shared contributions.
+- [x] Add one cumulative task evidence budget with a protected critical reserve.
+- [x] Separate selected, processed, executed, returned, and cancelled action counters and audit
+  their conservation equations.
+- [x] Use completed-action ordinals for non-prediction and lifecycle accounting.
+- [x] Configure `central_relational_v2` from a typed descriptor and fail closed on profile/runtime
+  mismatch.
+- [x] Build and verify a caller-owned benchmark manifest before provider execution; remove the
+  workflow's hand-maintained feature list and duplicate fixed step limit.
+- [x] Require one common benchmark-manifest hash across the complete task set and derive the full
+  selected-task timeout map without fixed task IDs or timeout values.
+- [x] Compare every treatment-controlled runtime argument with the effective agent value; do not
+  accept a hash that merely echoes an unused descriptor.
 
 ## P0-P2 completion state
 
@@ -98,10 +131,10 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ### P3 — final release proof, in order
 
-- [x] Finish broad local tests and static/type checks on the final working tree: 1,848 tests
-  collected; 1,843 runnable tests passed through the 1,847-test six-shard run plus the final
-  endpoint-origin regression, with five expected platform/asset skips. Changed-file Ruff, bytecode
-  compilation, and diff checks pass.
+- [x] Finish broad local tests and static/type checks on the final working tree: 1,880 tests
+  collected; 1,875 runnable tests pass in one complete final-tree run, with five expected
+  platform/asset skips. The provider-free readiness audit reports `READY`; changed-file Ruff,
+  bytecode compilation, workflow YAML parsing, and `git diff --check` pass.
 - [x] Review the final diff for stale zero-bootstrap/replacement-census behavior and duplicate
   provider surfaces.
 - [x] Wire independent runner observations for task order, tool/hook envelopes, hardware, retry,
@@ -109,16 +142,17 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
   workflow now creates source-owned documents after live budget/asset setup, composes them through
   the fixed-source builder, exports a runner-private `GT_RUNTIME_OBSERVATION_PATH`, and uploads
   the observation only after the task finishes. A copied declaration remains invalid.
-- [x] Freeze one exact commit: `4f37f1f4afc1a7a6c7a2fe8981906567c7537800`.
-- [ ] Run the exact-commit source-built Linux provider-free workflow with current indexer and pinned
-  ONNX asset. This proves integrity, not uplift. An isolated Linux source-built reproduction passes
-  the curated suite, readiness audit, and legal-source integrity audit; the formal hosted workflow
-  remains open because the Codespace login shell changes the temporary test cwd for one shell test.
+- [ ] Freeze a new exact commit containing the post-smoke provenance, budget, lifecycle,
+  treatment-identity, and merge-manifest repairs. The earlier
+  `4f37f1f4afc1a7a6c7a2fe8981906567c7537800` freeze predates these changes.
+- [ ] Run that exact commit through the source-built Linux provider-free workflow with current
+  indexer and pinned ONNX asset. This proves integration integrity, not uplift.
 - [ ] Execute the current engine against the 15 selected historical trajectories/workspaces where
   those legal task artifacts can be restored. The current archive has receipts and replay blobs but
   no legal source workspaces, so those rows are currently unavailable; never turn the frozen
   counterfactual predictions into fake replay measurements.
-- [ ] Freeze the final 20-task outcome prediction artifact.
+- [ ] Update and freeze the final 20-task outcome prediction artifact before inspecting any new
+  outcome.
 - [ ] Run the final frozen 20-task comparison: baseline, previous GT small run, strengthened GT.
 - [ ] Report resolve rate, flips, steps, calls, tokens, cost, evidence use, latency, abstentions, and
   invalid/provider-censored rows with the full denominator preserved.
@@ -137,9 +171,7 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ## Exact next step
 
-Run the exact hosted provider-free workflow for commit
-`4f37f1f4afc1a7a6c7a2fe8981906567c7537800`, then freeze the prediction artifact
-and run the three-arm baseline/previous-GT/strengthened-GT comparison. The
-Codespace source-built reproduction is documented in
-`docs/benchmarks/GT_P3_PROVIDER_FREE_PROOF_2026-08-18.md`; it is not a solve
-claim and does not replace the hosted workflow gate.
+Review and freeze the current working tree as one exact commit, then run the
+hosted source-built provider-free gate for that exact SHA. Only after it passes,
+freeze the updated prediction artifact and run the existing three-arm
+baseline/previous-GT/strengthened-GT comparison. GitNexus is not a run arm.

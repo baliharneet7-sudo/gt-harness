@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from gt_engine.context_frontier import (
     ContextFrontierKind,
     FactOrigin,
@@ -555,6 +557,16 @@ def test_task_start_repository_fact_expires_instead_of_spilling_to_call_two():
     assert first.facts[0].provenance.origin is FactOrigin.TASK_START
     assert second.disposition is FrontierDisposition.EXPIRED_WINDOW
     assert second.accounting[0]["eligible_call"] == 1
+
+
+def test_task_start_paths_cannot_be_registered_after_model_execution_begins():
+    tracker = RepositoryFactTracker(task_start_source_paths=frozenset())
+
+    with pytest.raises(
+        ValueError,
+        match="task-start paths must be registered before model action 1",
+    ):
+        tracker.record_task_start_paths(("src/generated.py",), evidence_action=1)
 
 
 def test_model_authored_graph_claim_is_controller_only_not_repository_guidance():

@@ -3462,6 +3462,55 @@ async def test_soft_compaction_defers_when_cache_break_savings_are_too_small(tmp
 
 
 @pytest.mark.asyncio
+async def test_reasoning_dominated_pressure_is_reported_without_deleting_reasoning(
+    tmp_path,
+):
+    class ReasoningHeavyModel(_ScriptedModel):
+        def __init__(self):
+            super().__init__(
+                [
+                    "echo one",
+                    "echo two",
+                    "echo three",
+                    "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+                ]
+            )
+            self.response_index = 0
+
+        def query(self, messages):
+            response = super().query(messages)
+            self.response_index += 1
+            response["content"] = (
+                f"distinct hypothesis {self.response_index}: " + "R" * 4_000
+            )
+            response["reasoning_content"] = (
+                f"private chain {self.response_index}: " + "Q" * 4_000
+            )
+            return response
+
+    model = ReasoningHeavyModel()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_context_compaction=True,
+        context_trigger_chars=1_500,
+        context_target_chars=800,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the state and finish.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    deferrals = receipt["metrics"]["context_compaction_deferrals"]
+    assert deferrals
+    assert any(
+        row["reason"] == "distinct_assistant_reasoning_preservation_boundary"
+        for row in deferrals
+    )
+    assert receipt["metrics"]["context_unique_reasoning_chars_removed"] == 0
+
+
+@pytest.mark.asyncio
 async def test_disabled_task_start_advisory_never_leaks_into_call_two(tmp_path):
     class TransferEnvironment(_Environment):
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
@@ -4373,7 +4422,7 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
     # value only so it can return before Harbor asynchronously cancels run().
     assert "--ak enable_lint=true" in workflow
     assert "--ak enable_submit_readiness=true" in workflow
-    assert "scripts/resolve_harbor_budget.py" in workflow
+    assert "python scripts/resolve_harbor_budget.py" in workflow
     assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
@@ -4384,25 +4433,46 @@ def test_paid_engine_workflow_receives_exact_harbor_budget_without_new_limit():
 
 
 def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
-    workflow = (
-        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "tb2_miniswe_central.yml"
-    ).read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "tb2_miniswe_central.yml").read_text(
+        encoding="utf-8"
+    )
+    descriptor = json.loads(
+        (root / "eval" / "treatments" / "tb2_central_relational_v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime = descriptor["runtime_agent_kwargs"]
 
     assert 'AGENT="eval.gt_central_agent:MiniSweCentralAgent"' in workflow
     assert '--agent-import-path "$AGENT"' in workflow
-    assert "--ak integration_mode=active" in workflow
-    assert "--ak policy_mode=certified_active" in workflow
+    assert "python -m scripts.render_treatment_agent_args" in workflow
+    assert "gt-treatment-runtime.json" in workflow
+    assert "python -m scripts.build_benchmark_manifest" in workflow
+    assert '--benchmark-manifest "$GT_BENCHMARK_MANIFEST_PATH"' in workflow
+    assert "benchmark-manifest.json" in workflow
+    assert "BenchmarkManifest.from_dict" in (
+        root / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
+    assert "audit_runtime_receipt" in (
+        root / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
+    assert descriptor["profile_id"] == "central_relational_v2"
+    assert runtime["policy_mode"] == "certified_active"
     assert "inputs.arm" not in workflow
     assert "inputs.feature" not in workflow
     assert "--ak integration_mode=off" not in workflow
     assert "--ak integration_mode=audit" not in workflow
-    assert "--ak preflight_mode=assistive_safe" in workflow
-    assert "--ak enable_context_compaction=true" in workflow
-    assert "--ak enable_adaptive_validation_timeout=true" in workflow
-    assert "--ak enable_completion_controller=true" in workflow
-    assert "--ak enable_progress_control=true" in workflow
+    assert runtime["preflight_mode"] == "assistive_safe"
+    assert runtime["enable_context_compaction"] is True
+    assert runtime["enable_adaptive_validation_timeout"] is True
+    assert runtime["enable_completion_controller"] is True
+    assert runtime["enable_progress_control"] is True
+    assert descriptor["preemptive_retrieval"] is True
+    assert descriptor["relational_context"] is True
+    assert descriptor["semantic_evidence"] is True
     assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
-    assert "scripts/resolve_harbor_budget.py" in workflow
+    assert "from scripts.resolve_harbor_budget import resolve_budget" in workflow
     assert "--agent-timeout-multiplier 1.0" in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
@@ -4410,7 +4480,9 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
     assert "assess_tb2_promotion" in workflow
     assert "build_feature_lifecycle_report" in workflow
-    assert '"execution_budget_sec": int(float(os.environ["EXECUTION_BUDGET"]))' in workflow
+    assert '"resolved_task_budgets": rows' in workflow
+    assert '"timeout_policy_sha256": digest(timeout_policy)' in workflow
+    assert '"execution_budget_sec": receipt["execution_budget_sec"]' in workflow
 
 
 @pytest.mark.asyncio

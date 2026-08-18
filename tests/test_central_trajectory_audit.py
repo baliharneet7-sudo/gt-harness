@@ -54,6 +54,14 @@ def _write_bundle(
     request_hash = "h" if complete_hashes else ""
     receipt = {
         "actions": 1,
+        "action_accounting": {
+            "schema": "gt.action_accounting.v1",
+            "selected": 1,
+            "processed": 1,
+            "executed": 1,
+            "returned": 0,
+            "cancelled": 0,
+        },
         "model_call_contexts": [
             {
                 "call": 1,
@@ -154,3 +162,28 @@ def test_audit_discovers_deepswe_trial_layout_by_task_name(tmp_path):
     report = audit_run_root(tmp_path)
 
     assert set(report["tasks"]) == {"alpha-fix", "beta-fix"}
+
+
+def test_cancelled_selected_actions_have_explicit_accounting(tmp_path):
+    _write_bundle(tmp_path)
+    trajectory_path = next(tmp_path.rglob("miniswe_trajectory.json"))
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    trajectory["messages"][1]["extra"]["actions"].append(
+        {"command": "cat other.py", "tool_call_id": "call-2"}
+    )
+    trajectory_path.write_text(json.dumps(trajectory), encoding="utf-8")
+    receipt_path = next(tmp_path.rglob("central_receipt.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["action_accounting"] = {
+        "schema": "gt.action_accounting.v1",
+        "selected": 2,
+        "processed": 1,
+        "executed": 0,
+        "returned": 1,
+        "cancelled": 1,
+    }
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "DETERMINISTIC_AUDIT_CERTIFIED"

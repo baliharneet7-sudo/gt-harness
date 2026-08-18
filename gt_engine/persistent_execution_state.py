@@ -380,6 +380,11 @@ class StateObligation:
     path: str
     relation: str
     source_path: str
+    source_origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
+    path_origin: EvidenceOrigin = EvidenceOrigin.PREEXISTING_REPOSITORY
+    source_origin_revision: str = ""
+    path_origin_revision: str = ""
+    evidence_authority: EvidenceAuthority = EvidenceAuthority.CERTIFIED_RELATION
     blocking: bool = False
     status: ObligationStatus = ObligationStatus.OPEN
     opened_revision: str = ""
@@ -393,6 +398,11 @@ class StateObligation:
             "path": self.path,
             "relation": self.relation,
             "source_path": self.source_path,
+            "source_origin": self.source_origin.value,
+            "path_origin": self.path_origin.value,
+            "source_origin_revision": self.source_origin_revision,
+            "path_origin_revision": self.path_origin_revision,
+            "evidence_authority": self.evidence_authority.value,
             "blocking": self.blocking,
             "status": self.status.value,
             "opened_revision": self.opened_revision,
@@ -1572,6 +1582,15 @@ class PersistentExecutionStateEngine:
                 path=target_path,
                 relation=link.relation,
                 source_path=source_path,
+                source_origin=self._path_origins.get(
+                    source_path, EvidenceOrigin.PREEXISTING_REPOSITORY
+                ),
+                path_origin=self._path_origins.get(
+                    target_path, EvidenceOrigin.PREEXISTING_REPOSITORY
+                ),
+                source_origin_revision=self._path_origin_revisions.get(source_path, ""),
+                path_origin_revision=self._path_origin_revisions.get(target_path, ""),
+                evidence_authority=EvidenceAuthority.CERTIFIED_RELATION,
                 blocking=False,
                 opened_revision=source_revision,
             )
@@ -1929,6 +1948,7 @@ class PersistentExecutionStateEngine:
             self._record("graph_rebase", disposition="evidence_source_revision_mismatch")
             return self._snapshot
         self._links = self._certified_links(structural_links)
+        previous_present_paths = self._present_paths
         if present_paths is not None:
             self._present_paths = frozenset(
                 self._state_path(path) for path in present_paths if self._state_path(path)
@@ -1950,9 +1970,18 @@ class PersistentExecutionStateEngine:
             )
         )
         for path in normalized_changed:
-            if path not in self._deliverable_paths:
+            if path in self._deliverable_paths:
+                self._path_origins[path] = EvidenceOrigin.TASK_DELIVERABLE
+                self._path_origin_revisions[path] = current_source_revision
+            elif path not in previous_present_paths:
                 self._path_origins[path] = EvidenceOrigin.MODEL_AUTHORED
                 self._path_origin_revisions[path] = current_source_revision
+            else:
+                # Editing an existing path does not change where that path
+                # entered the task.  Preserve its original provenance.
+                self._path_origins.setdefault(
+                    path, EvidenceOrigin.PREEXISTING_REPOSITORY
+                )
         if normalized_changed:
             obligations = self._open_adjacent_obligations(
                 normalized_changed,
@@ -2040,7 +2069,12 @@ class PersistentExecutionStateEngine:
     def _item(self, item_id: str) -> BootstrapCatalogItem | None:
         return next((item for item in self._catalog.items if item.item_id == item_id), None)
 
-    def _frame_lines(self, kind: ContextFrameKind) -> list[tuple[str, str, dict[str, Any]]]:
+    def _frame_lines(
+        self,
+        kind: ContextFrameKind,
+        *,
+        include_advisory_obligations: bool = True,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
         snapshot = self._snapshot
         focus_id = snapshot.current_focus_id
         if not focus_id and snapshot.graph_revision == self._catalog.graph_revision:
@@ -2186,6 +2220,15 @@ class PersistentExecutionStateEngine:
             for item in snapshot.obligations
             if item.status is ObligationStatus.OPEN
             and bool(_provider_material_relation(item.relation))
+            and (item.blocking or include_advisory_obligations)
+            and (
+                item.relation == "task_requirement"
+                or (
+                    item.source_origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                    and item.path_origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+                    and item.evidence_authority is EvidenceAuthority.CERTIFIED_RELATION
+                )
+            )
         ]
         for obligation in open_obligations[:4]:
             obligation_target = obligation.path or obligation.source_path
@@ -2208,10 +2251,10 @@ class PersistentExecutionStateEngine:
                         origin=(
                             EvidenceOrigin.TASK_DELIVERABLE
                             if obligation.kind == "produce_deliverable"
-                            else EvidenceOrigin.PREEXISTING_REPOSITORY
+                            else obligation.path_origin
                         ),
                         authority=(
-                            EvidenceAuthority.CERTIFIED_RELATION
+                            obligation.evidence_authority
                             if obligation.relation != "task_requirement"
                             else EvidenceAuthority.IDENTITY_ONLY
                         ),
@@ -2220,7 +2263,10 @@ class PersistentExecutionStateEngine:
                             if obligation.blocking
                             else "related_advisory_obligation"
                         ),
-                        origin_revision=obligation.opened_revision,
+                        origin_revision=(
+                            obligation.path_origin_revision
+                            or obligation.opened_revision
+                        ),
                         relation_endpoint=obligation.path,
                         known_texts=(
                             (obligation_target,)
@@ -2287,6 +2333,7 @@ class PersistentExecutionStateEngine:
         max_tokens: int,
         token_counter: Callable[[str], int] = _default_token_counter,
         provider_messages: Sequence[Mapping[str, Any]] = (),
+        include_advisory_obligations: bool = True,
     ) -> PersistentContextFrame:
         self._metrics["context_compilations"] += 1
         if current_source_revision != self._snapshot.source_revision:
@@ -2375,7 +2422,10 @@ class PersistentExecutionStateEngine:
             max_tokens,
             512 if kind in {ContextFrameKind.INITIAL, ContextFrameKind.CRITICAL} else 256,
         )
-        frame_rows = self._frame_lines(kind)
+        frame_rows = self._frame_lines(
+            kind,
+            include_advisory_obligations=include_advisory_obligations,
+        )
         repository_fact = any(
             row[2].get("authority") == EvidenceAuthority.CERTIFIED_RELATION.value
             for row in frame_rows

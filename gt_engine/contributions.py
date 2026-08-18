@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
@@ -30,6 +30,7 @@ class ContributionDisposition(StrEnum):
     INELIGIBLE_CALL = "ineligible_call"
     DUPLICATE_CLAIM = "duplicate_claim"
     DUPLICATE_TEXT = "duplicate_text"
+    UNSAFE_PROVENANCE = "unsafe_provenance"
     BUDGET = "budget"
 
 
@@ -64,6 +65,8 @@ class GTContribution:
     eligible_call: int
     source_revision: str
     priority: int
+    claim_metadata: tuple[dict[str, Any], ...] = ()
+    lifecycle_required: bool = False
 
     @classmethod
     def create(
@@ -78,10 +81,20 @@ class GTContribution:
         eligible_call: int,
         source_revision: str,
         priority: int,
+        claim_metadata: tuple[Mapping[str, Any], ...] = (),
+        lifecycle_required: bool = False,
     ) -> GTContribution:
         normalized = _normalized_payload(payload)
         claims = tuple(dict.fromkeys(str(item) for item in claim_ids if str(item)))
         facts = tuple(dict.fromkeys(str(item) for item in fact_ids if str(item)))
+        metadata = tuple(
+            {
+                str(key): value
+                for key, value in dict(row).items()
+                if not str(key).startswith("_")
+            }
+            for row in claim_metadata
+        )
         if kind is ContributionKind.EVIDENCE and not (normalized and (claims or facts)):
             raise ValueError("grounded evidence requires payload plus a claim or fact ID")
         identity = {
@@ -93,6 +106,8 @@ class GTContribution:
             "evidence_action": max(0, int(evidence_action)),
             "eligible_call": max(1, int(eligible_call)),
             "source_revision": str(source_revision),
+            "claim_metadata": metadata,
+            "lifecycle_required": bool(lifecycle_required),
         }
         return cls(
             contribution_id="gt-contribution-" + _canonical_hash(identity)[:20],
@@ -106,6 +121,47 @@ class GTContribution:
             eligible_call=max(1, int(eligible_call)),
             source_revision=str(source_revision),
             priority=int(priority),
+            claim_metadata=metadata,
+            lifecycle_required=bool(lifecycle_required),
+        )
+
+    @property
+    def unsafe_provider_origins(self) -> tuple[str, ...]:
+        unsafe = {"model_authored", "generated_artifact", "unknown"}
+        if self.kind is ContributionKind.EVIDENCE and not self.claim_metadata:
+            return ("unknown",)
+        if any(not str(row.get("origin") or "") for row in self.claim_metadata):
+            return ("unknown",)
+        covered_ids = {
+            str(value)
+            for row in self.claim_metadata
+            for value in (
+                row.get("claim_id"),
+                row.get("fact_id"),
+                row.get("evidence_id"),
+            )
+            if str(value or "")
+        }
+        required_ids = set(self.claim_ids or self.fact_ids)
+        if required_ids - covered_ids:
+            return ("unknown",)
+        return tuple(
+            dict.fromkeys(
+                str(row.get("origin") or "")
+                for row in self.claim_metadata
+                if str(row.get("origin") or "") in unsafe
+            )
+        )
+
+    @property
+    def critical(self) -> bool:
+        return bool(self.claim_metadata) and all(
+            str(row.get("materiality_reason") or "") in {
+                "current_attributable_failure",
+                "declared_validation_status_change",
+                "new_unresolved_task_obligation",
+            }
+            for row in self.claim_metadata
         )
 
 
@@ -130,6 +186,8 @@ class CompiledContributions:
     accounting: tuple[ContributionAccounting, ...]
     token_count: int = 0
     token_budget: int | None = None
+    task_budget_token_count: int = 0
+    task_budget_token_limit: int | None = None
 
     @property
     def candidate_count(self) -> int:
@@ -152,6 +210,68 @@ class CompiledContributions:
         }
 
 
+@dataclass(slots=True)
+class ContributionTaskBudget:
+    """Cumulative provider-visible GT budget with a narrow critical reserve."""
+
+    token_budget: int
+    critical_reserve_tokens: int = 0
+    used_regular_tokens: int = 0
+    used_critical_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        self.token_budget = max(0, int(self.token_budget))
+        self.critical_reserve_tokens = min(
+            self.token_budget, max(0, int(self.critical_reserve_tokens))
+        )
+
+    @property
+    def regular_budget(self) -> int:
+        return self.token_budget - self.critical_reserve_tokens
+
+    def available_tokens(self, *, critical: bool) -> int:
+        regular_remaining = max(0, self.regular_budget - self.used_regular_tokens)
+        if not critical:
+            return regular_remaining
+        reserve_remaining = max(
+            0, self.critical_reserve_tokens - self.used_critical_tokens
+        )
+        return regular_remaining + reserve_remaining
+
+    def commit(self, tokens: int, *, critical: bool) -> None:
+        amount = max(0, int(tokens))
+        available = self.available_tokens(critical=critical)
+        if amount > available:
+            raise ValueError("provider contribution exceeds remaining task budget")
+        regular_remaining = max(0, self.regular_budget - self.used_regular_tokens)
+        regular_used = min(amount, regular_remaining)
+        self.used_regular_tokens += regular_used
+        if critical:
+            self.used_critical_tokens += amount - regular_used
+
+    @property
+    def used_tokens(self) -> int:
+        return self.used_regular_tokens + self.used_critical_tokens
+
+    @property
+    def exhausted(self) -> bool:
+        return self.available_tokens(critical=True) == 0
+
+    def as_dict(self) -> dict[str, int | bool]:
+        return {
+            "token_budget": self.token_budget,
+            "task_budget_tokens": self.task_budget_token_count,
+            "task_budget_token_limit": self.task_budget_token_limit,
+            "critical_reserve_tokens": self.critical_reserve_tokens,
+            "used_regular_tokens": self.used_regular_tokens,
+            "used_critical_tokens": self.used_critical_tokens,
+            "used_tokens": self.used_tokens,
+            "remaining_regular_tokens": self.available_tokens(critical=False),
+            "remaining_total_tokens": self.available_tokens(critical=True),
+            "exhausted": self.exhausted,
+        }
+
+
 def compile_contributions(
     contributions: tuple[GTContribution, ...],
     *,
@@ -159,7 +279,9 @@ def compile_contributions(
     current_call: int,
     budget_chars: int,
     budget_tokens: int | None = None,
+    task_budget_tokens: int | None = None,
     token_counter: Callable[[str], int] = _default_token_counter,
+    allow_noncritical: bool = True,
 ) -> CompiledContributions:
     """Select complete contributions deterministically; ambiguity omits text."""
 
@@ -175,6 +297,9 @@ def compile_contributions(
     used_chars = 0
     limit = max(0, int(budget_chars))
     token_limit = None if budget_tokens is None else max(0, int(budget_tokens))
+    task_token_limit = (
+        None if task_budget_tokens is None else max(0, int(task_budget_tokens))
+    )
 
     ordered = sorted(
         enumerate(contributions),
@@ -195,6 +320,19 @@ def compile_contributions(
         elif contribution.kind is not ContributionKind.EVIDENCE or not contribution.payload:
             disposition = ContributionDisposition.CONTROLLER_ONLY
             reasons = ("not_provider_text",)
+        elif contribution.unsafe_provider_origins:
+            disposition = ContributionDisposition.UNSAFE_PROVENANCE
+            reasons = tuple(
+                f"{origin}_provider_authority"
+                for origin in contribution.unsafe_provider_origins
+            )
+        elif (
+            not allow_noncritical
+            and not contribution.critical
+            and not contribution.lifecycle_required
+        ):
+            disposition = ContributionDisposition.BUDGET
+            reasons = ("task_budget_reserved_for_critical_evidence",)
         elif selected_claims.intersection(contribution.claim_ids) or selected_facts.intersection(
             contribution.fact_ids
         ):
@@ -212,10 +350,21 @@ def compile_contributions(
             over_token_budget = bool(
                 token_limit is not None and token_counter(candidate_payload) > token_limit
             )
-            if used_chars + required > limit or over_token_budget:
+            candidate_task_payload = "\n\n".join(
+                item.payload
+                for item in (*selected, contribution)
+                if not item.lifecycle_required
+            )
+            over_task_budget = bool(
+                task_token_limit is not None
+                and token_counter(candidate_task_payload) > task_token_limit
+            )
+            if used_chars + required > limit or over_token_budget or over_task_budget:
                 disposition = ContributionDisposition.BUDGET
                 reasons = (
-                    "complete_contribution_exceeds_token_budget"
+                    "complete_contribution_exceeds_task_budget"
+                    if over_task_budget
+                    else "complete_contribution_exceeds_token_budget"
                     if over_token_budget
                     else "complete_contribution_does_not_fit",
                 )
@@ -235,12 +384,17 @@ def compile_contributions(
 
     accounting = tuple(decisions[item.contribution_id] for item in contributions)
     payload = "\n\n".join(item.payload for item in selected)
+    task_payload = "\n\n".join(
+        item.payload for item in selected if not item.lifecycle_required
+    )
     return CompiledContributions(
         payload=payload,
         selected_ids=tuple(item.contribution_id for item in selected),
         accounting=accounting,
         token_count=token_counter(payload),
         token_budget=token_limit,
+        task_budget_token_count=token_counter(task_payload),
+        task_budget_token_limit=task_token_limit,
     )
 
 
@@ -249,6 +403,7 @@ __all__ = [
     "ContributionAccounting",
     "ContributionDisposition",
     "ContributionKind",
+    "ContributionTaskBudget",
     "GTContribution",
     "compile_contributions",
 ]

@@ -6,6 +6,7 @@ from gt_engine.decisive_derivation import (
     WorkspaceEntry,
     derive_decisive_facts,
 )
+from gt_engine.hybrid_retrieval import EvidenceOrigin
 from gt_engine.task_semantic_substrate import TaskSemanticSubstrate
 
 ELF_64 = (
@@ -143,3 +144,74 @@ def test_provider_represented_fact_is_accounted_without_duplicate_text():
     assert frame is None
     receipt = substrate.as_dict()
     assert receipt["represented_claim_count"] == 1
+
+
+def test_model_authored_structural_fact_remains_controller_only():
+    payload = ELF_64
+    derivation = derive_decisive_facts(
+        instruction="Inspect the supplied binary.",
+        workspace=(
+            WorkspaceEntry(
+                path="agent-probe",
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+                head=payload,
+                origin=EvidenceOrigin.MODEL_AUTHORED.value,
+            ),
+        ),
+        source_revision="source-2",
+    )
+    substrate = TaskSemanticSubstrate.from_derivation(
+        derivation,
+        evidence_action=4,
+        eligible_call=3,
+    )
+
+    frame = substrate.compile_context(
+        current_source_revision="source-2",
+        current_call=3,
+        provider_messages=(),
+        max_chars=1_200,
+    )
+
+    assert frame is None
+    accounting = substrate.as_dict()["compilations"][-1]["accounting"]
+    assert accounting == [
+        {
+            "fact_id": derivation.facts[0].fact_id,
+            "claim_id": derivation.facts[0].claim_id,
+            "kind": "binary_format",
+            "disposition": "model_authored_controller_only",
+        }
+    ]
+
+
+def test_delivery_timing_compares_action_ordinals_with_completed_actions():
+    derivation = derive_decisive_facts(
+        instruction="Run pytest -q.",
+        workspace=(_entry("README.md", "task\n"),),
+        validation_commands=("pytest -q",),
+        source_revision="source-1",
+    )
+    substrate = TaskSemanticSubstrate.from_derivation(
+        derivation,
+        evidence_action=34,
+        eligible_call=27,
+    )
+    frame = substrate.compile_context(
+        current_source_revision="source-1",
+        current_call=27,
+        provider_messages=(),
+        max_chars=1_200,
+    )
+    assert frame is not None
+
+    substrate.mark_dispatched(
+        frame,
+        call=27,
+        completed_action_count_before_call=34,
+    )
+
+    delivery = substrate.as_dict()["deliveries"][-1]
+    assert delivery["not_predictive"] is True
+    assert delivery["completed_action_count_before_call"] == 34

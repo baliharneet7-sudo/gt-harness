@@ -143,7 +143,7 @@ def test_bundle_audit_counts_only_exact_valid_pairs(tmp_path):
     assert report["validity_counts"] == {"valid": 1}
 
 
-def test_promotion_workflow_freezes_the_baseline_matched_step_limit():
+def test_promotion_workflow_renders_the_caller_owned_treatment_contract():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
@@ -151,7 +151,18 @@ def test_promotion_workflow_freezes_the_baseline_matched_step_limit():
         / "tb2_miniswe_central.yml"
     ).read_text(encoding="utf-8")
 
-    assert "      step_limit:" not in workflow
-    assert 'STEP_LIMIT: "100"' in workflow
-    assert '--ak step_limit="$STEP_LIMIT"' in workflow
+    assert 'STEP_LIMIT: "100"' not in workflow
     assert "--ak step_limit=100" not in workflow
+    assert "scripts.render_treatment_agent_args" in workflow
+    assert "tb2_central_relational_v2.json" in workflow
+    assert "gt-treatment-runtime.json" in workflow
+    assert "scripts.build_benchmark_manifest" in workflow
+    assert "--benchmark-manifest" in workflow
+
+    merge_script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
+    assert '"step_limit": 100' not in merge_script
+    assert '"runtime_contract": treatment_runtime_contract' in merge_script
+    assert "len(manifest_hashes) == 1" in merge_script
+    assert '"common_benchmark_manifest": common_manifest_valid' in merge_script

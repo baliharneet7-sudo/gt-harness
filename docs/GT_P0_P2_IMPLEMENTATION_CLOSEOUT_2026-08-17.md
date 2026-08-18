@@ -1,5 +1,12 @@
 # GroundTruth P0-P2 Implementation Closeout
 
+> Superseded in part on 2026-08-18. Smoke `32106687133` exposed provenance,
+> cumulative-budget, lifecycle-accounting, and treatment-wiring defects. The
+> repairs and current proof boundary are documented in
+> `GT_REGRESSION_AND_EFFICIENCY_POSTMORTEM_2026-08-18.md` and
+> `GT_GITNEXUS_MASTER_TODO.md`. Do not use this older closeout's exact-commit
+> readiness statement as release authorization.
+
 This closeout covers the product implementation boundary. Final runner parity, exact-commit Linux
 proof, and outcome benchmarking are P3 and are not claimed here.
 
@@ -147,12 +154,13 @@ The machine-readable prediction is frozen in
 
 ## Verification completed on the working tree
 
-- 1,848 Python tests collected. The six-shard run covered the prior 1,847-test tree; all 1,842
-  runnable tests passed with five expected skips. The added caller/reference endpoint-origin
-  regression then passed in the focused post-review run (1,843 runnable passes total).
+- 1,880 Python tests collected on the final reviewed tree; all 1,875 runnable tests pass in one
+  complete run with five expected skips. This includes the later provenance, treatment identity,
+  task-budget, action-conservation, and run-wide manifest regressions.
 - Expected skips cover an unprovisioned pinned ONNX integration asset, the inverse graph smoke,
   one POSIX-only check, and two Windows privilege/mode checks.
-- Changed-file Ruff, Python bytecode compilation, and `git diff --check` pass.
+- The provider-free readiness audit reports `READY`. Changed-file Ruff, Python bytecode
+  compilation, workflow YAML parsing, and `git diff --check` pass.
 - Linux Codespace `go test ./...` and a source build of `cmd/gt-index` pass, including ambiguous
   re-export regression tests.
 - `tests/test_gt_engine.py` fell from about 227 seconds to 145 seconds by building one immutable

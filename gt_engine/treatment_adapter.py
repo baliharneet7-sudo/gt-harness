@@ -379,6 +379,65 @@ class BenchmarkManifest:
             manifest_sha256=hashlib.sha256(_canonical(payload)).hexdigest(),
         )
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> BenchmarkManifest:
+        """Rebuild and verify a serialized manifest without trusting its hash."""
+
+        row = dict(value)
+        if row.get("schema") != "gt.benchmark_manifest.v1":
+            raise ValueError("unsupported benchmark manifest schema")
+        treatment_rows = row.get("treatments")
+        if not isinstance(treatment_rows, list) or not treatment_rows:
+            raise ValueError("benchmark manifest treatments are missing")
+        treatments: list[BenchmarkTreatmentAdapter] = []
+        for serialized in treatment_rows:
+            if not isinstance(serialized, Mapping):
+                raise ValueError("benchmark manifest treatment must be an object")
+            descriptor = dict(serialized)
+            descriptor.pop("delivery_mode", None)
+            kind = str(descriptor.get("adapter_kind") or "")
+            agent_kwargs = descriptor.pop("agent_kwargs", None)
+            if kind == "groundtruth":
+                if not isinstance(agent_kwargs, Mapping):
+                    raise ValueError("GroundTruth manifest treatment is missing agent kwargs")
+                descriptor.update(
+                    {
+                        "preemptive_retrieval": bool(
+                            agent_kwargs.get("enable_preemptive_retrieval")
+                        ),
+                        "relational_context": bool(
+                            agent_kwargs.get("enable_relational_context")
+                        ),
+                        "dense_fallback_only": bool(
+                            agent_kwargs.get("dense_fallback_only")
+                        ),
+                        "semantic_evidence": bool(
+                            agent_kwargs.get("enable_semantic_evidence")
+                        ),
+                    }
+                )
+            if kind == "external":
+                descriptor.pop("scaffold_mode", None)
+                descriptor.pop("parity_eligible", None)
+            treatments.append(treatment_from_descriptor(descriptor))
+        rebuilt = cls.create(
+            benchmark_id=str(row.get("benchmark_id") or ""),
+            task_manifest_sha256=str(row.get("task_manifest_sha256") or ""),
+            model_id=str(row.get("model_id") or ""),
+            scaffold_sha=str(row.get("scaffold_sha") or ""),
+            max_steps=row.get("max_steps"),
+            trials_per_task=row.get("trials_per_task"),
+            execution_contract=(
+                row.get("execution_contract")
+                if isinstance(row.get("execution_contract"), Mapping)
+                else {}
+            ),
+            treatments=tuple(treatments),
+        )
+        if _canonical(rebuilt.as_dict()) != _canonical(row):
+            raise ValueError("benchmark manifest content or hash mismatch")
+        return rebuilt
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema": "gt.benchmark_manifest.v1",

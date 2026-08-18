@@ -29,6 +29,7 @@ from gt_engine.central_runtime import CentralFeatureRuntime, ValidationClassific
 from gt_engine.component_registry import audit_component_registry
 from gt_engine.host_execution import HostExecutionRecorder
 from gt_engine.preflight import PreflightMode
+from gt_engine.treatment_adapter import treatment_from_descriptor
 from scripts.central_feature_census import census as central_feature_census
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +117,30 @@ def audit() -> dict[str, bool]:
     workflows = tuple(path.read_text(encoding="utf-8") for path in workflow_paths)
     workflow = workflows[0]
     verification_workflow = workflows[1]
+    treatment_descriptor = json.loads(
+        (ROOT / "eval/treatments/tb2_central_relational_v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    treatment_runtime = treatment_descriptor.get("runtime_agent_kwargs") or {}
+    treatment_identity_descriptor = {
+        key: value
+        for key, value in treatment_descriptor.items()
+        if key != "runtime_agent_kwargs"
+    }
+    treatment_identity_descriptor["source_sha"] = "0" * 40
+    try:
+        treatment_effective_runtime = treatment_from_descriptor(
+            treatment_identity_descriptor
+        ).agent_kwargs()
+        treatment_effective_runtime.update(treatment_runtime)
+    except (TypeError, ValueError):
+        treatment_effective_runtime = {}
+    central_uses_typed_treatment = (
+        "scripts.render_treatment_agent_args" in workflow
+        and "tb2_central_relational_v2.json" in workflow
+        and "gt-treatment-runtime.json" in workflow
+    )
     provider_free_workflow = (ROOT / ".github/workflows/central_provider_free.yml").read_text(
         encoding="utf-8"
     )
@@ -154,20 +179,22 @@ def audit() -> dict[str, bool]:
         # TB2 is now a single treatment-only dispatch and deliberately uses
         # ASSISTIVE_SAFE. The legacy engine workflow remains the shadow-only
         # diagnostic surface; DeepSWE is also audited independently below.
-        "paid_preflight_is_shadow_only": (
-            "--ak preflight_mode=assistive_safe" in workflow
+        "paid_preflight_contract_is_explicit": (
+            central_uses_typed_treatment
+            and treatment_effective_runtime.get("preflight_mode") == "assistive_safe"
             and "--ak preflight_mode=shadow" in verification_workflow
             and all("--ak enable_preflight=true" not in item for item in workflows)
         ),
-        "staged_policy_arms_are_explicit_and_default_safe": (
+        "treatment_and_legacy_policy_contracts_are_explicit": (
             (
                 (
                     "options: [repair20-v1]" in workflow
                     or "options: [repair20-v1, regression-smoke-v1]" in workflow
                 )
                 and "inputs.arm" not in workflow
-                and "--ak integration_mode=active --ak policy_mode=certified_active"
-                in workflow
+                and central_uses_typed_treatment
+                and treatment_effective_runtime.get("integration_mode") == "active"
+                and treatment_effective_runtime.get("policy_mode") == "certified_active"
             )
             and _has_explicit_policy_arms(verification_workflow)
         ),
@@ -249,13 +276,21 @@ def audit() -> dict[str, bool]:
             ).read_text(encoding="utf-8")
         ),
         "paid_persistent_state_contract_is_explicit": (
-            all(
-                item.count("--ak enable_persistent_execution_state=true") >= 1
-                and item.count("--ak persistent_state_bootstrap_timeout_sec=45") >= 1
-                and item.count("--ak persistent_state_bootstrap_input_tokens=2000") >= 1
-                and item.count("--ak persistent_state_bootstrap_output_tokens=512") >= 1
-                and item.count("--ak persistent_state_context_tokens=512") >= 1
-                for item in workflows
+            central_uses_typed_treatment
+            and treatment_descriptor.get("profile_id") == "central_relational_v2"
+            and treatment_runtime.get("persistent_state_bootstrap_timeout_sec") == 45
+            and treatment_runtime.get("persistent_state_bootstrap_input_tokens") == 2000
+            and treatment_runtime.get("persistent_state_bootstrap_output_tokens") == 512
+            and treatment_runtime.get("persistent_state_context_tokens") == 512
+            and all(
+                marker in verification_workflow
+                for marker in (
+                    "--ak enable_persistent_execution_state=true",
+                    "--ak persistent_state_bootstrap_timeout_sec=45",
+                    "--ak persistent_state_bootstrap_input_tokens=2000",
+                    "--ak persistent_state_bootstrap_output_tokens=512",
+                    "--ak persistent_state_context_tokens=512",
+                )
             )
             and deepswe_workflow.count("--ak enable_persistent_execution_state=true") >= 2
             and deepswe_workflow.count("--ak persistent_state_bootstrap_timeout_sec=45") >= 2
@@ -292,12 +327,19 @@ def audit() -> dict[str, bool]:
             in deepswe_workflow
         ),
         "paid_live_retrieval_matches_arb_profile": all(
-            item.count("--ak enable_preemptive_retrieval=true") >= 1
-            and item.count("preemptive_retrieval_model_dir=") >= 1
-            and "python -m pip install -e '.[retrieval]'" in item
-            and "Provision pinned Snowflake ONNX runtime asset" in item
-            for item in workflows
+            marker in verification_workflow
+            for marker in (
+                "--ak enable_preemptive_retrieval=true",
+                "preemptive_retrieval_model_dir=",
+                "python -m pip install -e '.[retrieval]'",
+                "Provision pinned Snowflake ONNX runtime asset",
+            )
         )
+        and central_uses_typed_treatment
+        and treatment_descriptor.get("preemptive_retrieval") is True
+        and "preemptive_retrieval_model_dir=" in workflow
+        and "python -m pip install -e '.[retrieval]'" in workflow
+        and "Provision pinned Snowflake ONNX runtime asset" in workflow
         and "FINAL_RETRIEVAL_PROFILE" in source
         and "preemptive_retrieval_dense_candidate_limit" in run_source,
         "provider_free_gate_uses_real_live_dense_asset": (
@@ -323,21 +365,25 @@ def audit() -> dict[str, bool]:
             and "2fd12b88aafdd04a52c298e3940bcb189f9766d6"
             in provider_free_workflow
         ),
-        "paid_context_frontier_is_explicit": all(
-            "--ak enable_context_frontier=true" in item for item in workflows
+        "paid_context_frontier_is_explicit": (
+            treatment_runtime.get("enable_context_frontier") is True
+            and "--ak enable_context_frontier=true" in verification_workflow
         ),
-        "paid_graph_gate_is_explicit": all(
-            "--ak require_graph_ready=true" in item for item in workflows
+        "paid_graph_gate_is_explicit": (
+            treatment_runtime.get("require_graph_ready") is True
+            and "--ak require_graph_ready=true" in verification_workflow
         )
         and "graph_gate_failures" in run_source
         and "graph_degraded_fallback" in run_source
         and "graph_gate_blocked = False" in run_source,
-        "paid_deterministic_compaction_enabled": all(
-            "--ak enable_context_compaction=true" in item for item in workflows
+        "paid_deterministic_compaction_enabled": (
+            treatment_runtime.get("enable_context_compaction") is True
+            and "--ak enable_context_compaction=true" in verification_workflow
         )
         and "tests/test_provider_view.py" in provider_free_workflow,
-        "paid_adaptive_validation_timeout_is_explicit": all(
-            "--ak enable_adaptive_validation_timeout=true" in item for item in workflows
+        "paid_adaptive_validation_timeout_is_explicit": (
+            treatment_runtime.get("enable_adaptive_validation_timeout") is True
+            and "--ak enable_adaptive_validation_timeout=true" in verification_workflow
         ),
         "provider_free_gate_covers_execution_accounting": (
             "tests/test_gt_host_execution.py" in provider_free_workflow
@@ -424,23 +470,27 @@ def audit() -> dict[str, bool]:
             "eval.miniswe_agent:MiniSweEngineAgent" not in workflow
         ),
         "paid_exact_harbor_deadline_is_propagated": (
-            all(
-                "--ak enable_lint=true" in item
-                and "--ak enable_submit_readiness=true" in item
-                and "scripts/resolve_harbor_budget.py" in item
+            treatment_runtime.get("enable_lint") is True
+            and treatment_runtime.get("enable_submit_readiness") is True
+            and all(
+                (
+                    "scripts/resolve_harbor_budget.py" in item
+                    or "from scripts.resolve_harbor_budget import resolve_budget" in item
+                )
                 and '--ak execution_budget_sec="$EXECUTION_BUDGET"' in item
                 and "--agent-timeout-multiplier 1.0" in item
                 and "--ak model_timeout_sec" not in item
                 and "--ak model_loop_timeout_sec" not in item
                 for item in workflows
             )
+            and "--ak enable_lint=true" in verification_workflow
+            and "--ak enable_submit_readiness=true" in verification_workflow
         ),
         "paid_completion_and_progress_control_enabled": (
-            all(
-                "--ak enable_completion_controller=true" in item
-                and "--ak enable_progress_control=true" in item
-                for item in workflows
-            )
+            treatment_runtime.get("enable_completion_controller") is True
+            and treatment_runtime.get("enable_progress_control") is True
+            and "--ak enable_completion_controller=true" in verification_workflow
+            and "--ak enable_progress_control=true" in verification_workflow
             and "tests/test_gt_completion.py" in verification_workflow
             and "tests/test_gt_progress.py" in verification_workflow
             and "tests/test_harbor_budget.py" in verification_workflow

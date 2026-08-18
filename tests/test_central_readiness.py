@@ -42,6 +42,8 @@ def test_readiness_rejects_an_incomplete_groundtruth_runtime_surface():
 def test_paid_central_workflow_installs_and_proves_repository_runtime():
     result = audit()
 
+    assert result["paid_preflight_contract_is_explicit"] is True
+    assert result["treatment_and_legacy_policy_contracts_are_explicit"] is True
     assert result["paid_central_installs_vendored_groundtruth"] is True
     assert result["paid_central_exports_index_binary"] is True
     assert result["paid_central_executes_index_fixture"] is True

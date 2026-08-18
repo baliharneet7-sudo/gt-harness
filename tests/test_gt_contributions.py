@@ -16,6 +16,17 @@ def _contribution(**overrides):
         "priority": 10,
     }
     values.update(overrides)
+    if "claim_metadata" not in overrides:
+        authority_ids = values["claim_ids"] or values["fact_ids"]
+        values["claim_metadata"] = tuple(
+            {
+                "claim_id": authority_id,
+                "origin": "preexisting_repository",
+                "authority": "certified_structural",
+                "materiality_reason": "decision_relevant_repository_context",
+            }
+            for authority_id in authority_ids
+        )
     return GTContribution.create(**values)
 
 
@@ -145,6 +156,49 @@ def test_invalid_evidence_contribution_fails_closed():
         _contribution(payload="", claim_ids=(), fact_ids=())
 
 
+def test_contribution_compiler_rejects_model_authored_provider_authority():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    unsafe = _contribution(
+        surface="persistent_execution_state",
+        claim_metadata=(
+            {
+                "claim_id": "claim-a",
+                "origin": "model_authored",
+                "authority": "certified_relation",
+            },
+        ),
+    )
+
+    result = compile_contributions(
+        (unsafe,),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=1_000,
+    )
+
+    assert result.payload == ""
+    assert result.accounting[0].disposition is ContributionDisposition.UNSAFE_PROVENANCE
+    assert result.accounting[0].reason_codes == ("model_authored_provider_authority",)
+
+
+def test_contribution_compiler_rejects_missing_provider_provenance():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    missing = _contribution(claim_metadata=())
+
+    result = compile_contributions(
+        (missing,),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=1_000,
+    )
+
+    assert result.payload == ""
+    assert result.accounting[0].disposition is ContributionDisposition.UNSAFE_PROVENANCE
+    assert result.accounting[0].reason_codes == ("unknown_provider_authority",)
+
+
 def test_contribution_compiler_enforces_one_combined_token_budget():
     from gt_engine.contributions import ContributionDisposition, compile_contributions
 
@@ -214,3 +268,80 @@ def test_persistent_core_is_selected_before_large_diagnostic_retrieval():
     assert persistent.contribution_id in result.selected_ids
     dispositions = {row.contribution_id: row.disposition for row in result.accounting}
     assert dispositions[diagnostic.contribution_id] is ContributionDisposition.BUDGET
+
+
+def test_task_budget_is_cumulative_and_reserves_only_critical_evidence():
+    from gt_engine.contributions import ContributionTaskBudget
+
+    budget = ContributionTaskBudget(token_budget=100, critical_reserve_tokens=20)
+    assert budget.available_tokens(critical=False) == 80
+    budget.commit(75, critical=False)
+    assert budget.available_tokens(critical=False) == 5
+    assert budget.available_tokens(critical=True) == 25
+    budget.commit(5, critical=False)
+    assert budget.available_tokens(critical=False) == 0
+    assert budget.available_tokens(critical=True) == 20
+    budget.commit(20, critical=True)
+    assert budget.available_tokens(critical=True) == 0
+    assert budget.exhausted is True
+
+
+def test_lifecycle_required_context_survives_closed_discretionary_task_budget():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    persistent = _contribution(
+        surface="persistent_execution_state",
+        lifecycle_required=True,
+    )
+    optional = _contribution(
+        surface="repository_context",
+        payload="optional repository evidence",
+        claim_ids=("claim-b",),
+        fact_ids=("fact-b",),
+        claim_metadata=(
+            {
+                "claim_id": "claim-b",
+                "origin": "preexisting_repository",
+                "authority": "certified_structural",
+                "materiality_reason": "decision_relevant_repository_context",
+            },
+        ),
+    )
+
+    result = compile_contributions(
+        (persistent, optional),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=1_000,
+        budget_tokens=1_000,
+        task_budget_tokens=0,
+        allow_noncritical=False,
+    )
+
+    assert result.selected_ids == (persistent.contribution_id,)
+    assert result.task_budget_token_count == 0
+    dispositions = {row.contribution_id: row.disposition for row in result.accounting}
+    assert dispositions[optional.contribution_id] is ContributionDisposition.BUDGET
+
+
+def test_mixed_materiality_contribution_cannot_spend_critical_reserve():
+    mixed = _contribution(
+        claim_ids=("failure", "ordinary"),
+        fact_ids=(),
+        claim_metadata=(
+            {
+                "claim_id": "failure",
+                "origin": "execution_observation",
+                "authority": "execution_observation",
+                "materiality_reason": "current_attributable_failure",
+            },
+            {
+                "claim_id": "ordinary",
+                "origin": "preexisting_repository",
+                "authority": "certified_structural",
+                "materiality_reason": "decision_relevant_repository_context",
+            },
+        ),
+    )
+
+    assert mixed.critical is False

@@ -159,6 +159,10 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     assert "test: tests/test_core.py#test_work asserts src/core.py#work" in result.rendered_text
     assert result.execution_views[0].steps[0].source.symbol == "run"
     assert result.execution_views[0].steps[0].target.symbol == "work"
+    metadata = result.contributions[0].claim_metadata
+    assert metadata
+    assert {row["origin"] for row in metadata} == {"preexisting_repository"}
+    assert result.contributions[0].unsafe_provider_origins == ()
 
 
 def test_project_never_turns_reverse_traversal_into_an_execution_path() -> None:
@@ -403,6 +407,14 @@ def test_project_delivers_only_concrete_observed_diagnostic_for_current_anchor()
 
     assert len(result.diagnostic_facts) == 1
     assert result.diagnostic_facts[0].path == "src/core.py"
+    diagnostic_id = result.diagnostic_facts[0].claim_id
+    diagnostic_metadata = next(
+        row
+        for row in result.contributions[0].claim_metadata
+        if row["claim_id"] == diagnostic_id
+    )
+    assert diagnostic_metadata["origin"] == "execution_observation"
+    assert diagnostic_metadata["authority"] == "execution_observation"
     assert "incompatible return type" in result.rendered_text
     assert "unrelated" not in result.rendered_text
 

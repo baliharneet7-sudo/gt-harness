@@ -19,6 +19,7 @@ from gt_engine.decisive_derivation import (
     DecisiveKind,
     DecisiveStatus,
 )
+from gt_engine.hybrid_retrieval import EvidenceOrigin
 
 
 class SemanticEvidenceClass(StrEnum):
@@ -122,7 +123,17 @@ class TaskSemanticSubstrate:
         candidates: list[tuple[DecisiveFact, str]] = []
         for fact in self.derivation.facts:
             disposition = "selected_candidate"
-            if fact.claim_id in self.delivered_claim_ids:
+            origin = EvidenceOrigin(str(fact.origin))
+            if origin in {
+                EvidenceOrigin.MODEL_AUTHORED,
+                EvidenceOrigin.GENERATED_ARTIFACT,
+            }:
+                # The model already created this artifact.  Re-describing it as
+                # novel task/repository evidence creates a self-reinforcing
+                # context loop.  Keep the fact available to the host controller
+                # but never grant it provider-delivery authority.
+                disposition = "model_authored_controller_only"
+            elif fact.claim_id in self.delivered_claim_ids:
                 disposition = "already_delivered"
             elif fact.claim_id in self.represented_claim_ids or _represented_by_provider_view(
                 fact, provider_view
@@ -200,9 +211,15 @@ class TaskSemanticSubstrate:
         request_payload_sha256: str = "",
         provider_messages_sha256: str = "",
         message_index: int | None = None,
+        completed_action_count_before_call: int | None = None,
     ) -> None:
         self.delivered_claim_ids.update(frame.claim_ids)
         dispatched_call = frame.eligible_call if call is None else max(1, int(call))
+        completed_actions = (
+            frame.evidence_action
+            if completed_action_count_before_call is None
+            else max(0, int(completed_action_count_before_call))
+        )
         self.delivery_receipts.append(
             {
                 **frame.as_dict(),
@@ -211,7 +228,8 @@ class TaskSemanticSubstrate:
                 "first_eligible_call": frame.eligible_call,
                 "delivered_before_call": dispatched_call,
                 "delivered_before_model_query": True,
-                "not_predictive": frame.evidence_action <= dispatched_call,
+                "completed_action_count_before_call": completed_actions,
+                "not_predictive": frame.evidence_action <= completed_actions,
                 "one_step_late": dispatched_call != frame.eligible_call,
                 "request_payload_sha256": request_payload_sha256,
                 "provider_messages_sha256": provider_messages_sha256,

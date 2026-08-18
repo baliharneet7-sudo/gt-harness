@@ -91,6 +91,7 @@ from gt_engine.context_frontier import (
 )
 from gt_engine.contributions import (
     ContributionKind,
+    ContributionTaskBudget,
     GTContribution,
     compile_contributions,
 )
@@ -1472,6 +1473,52 @@ class MiniSweCentralAgent(BaseAgent):
     runtime_mode = "treatment"
     SUPPORTS_ATIF = True
 
+    def _effective_treatment_agent_kwargs(self) -> dict[str, Any]:
+        """Return runtime-owned values for every treatment-controlled argument."""
+
+        return {
+            "dense_fallback_only": self.dense_fallback_only,
+            "enable_adaptive_validation_timeout": self.enable_adaptive_validation_timeout,
+            "enable_all_features": self.enable_all_features,
+            "enable_completion_controller": self.enable_completion_controller,
+            "enable_context_compaction": self.enable_context_compaction,
+            "enable_context_frontier": self.enable_context_frontier,
+            "enable_decision_sufficiency": self.enable_decision_sufficiency,
+            "enable_feature_guidance": self.enable_feature_guidance,
+            "enable_lint": self.enable_lint,
+            "enable_persistent_execution_state": self.enable_persistent_execution_state,
+            "enable_preemptive_retrieval": self.enable_preemptive_retrieval,
+            "enable_progress_control": self.enable_progress_control,
+            "enable_relational_context": self.enable_relational_context,
+            "enable_repository_intelligence": self.enable_repository_intelligence,
+            "enable_semantic_evidence": self.enable_semantic_evidence,
+            "enable_shadow_submit_gate": self.enable_shadow_submit_gate,
+            "enable_submit_readiness": self.enable_submit_readiness,
+            "enable_task_start_advisory": self.enable_task_start_advisory,
+            "gt_task_critical_reserve_tokens": self.gt_task_critical_reserve_tokens,
+            "gt_task_evidence_budget_tokens": self.gt_task_evidence_budget_tokens,
+            "integration_mode": self.integration_mode.value,
+            "persistent_state_bootstrap_input_tokens": (
+                self.persistent_state_bootstrap_input_tokens
+            ),
+            "persistent_state_bootstrap_output_tokens": (
+                self.persistent_state_bootstrap_output_tokens
+            ),
+            "persistent_state_bootstrap_timeout_sec": (
+                self.persistent_state_bootstrap_timeout_sec
+            ),
+            "persistent_state_context_tokens": self.persistent_state_context_tokens,
+            "policy_mode": self.policy_mode.value,
+            "preflight_mode": self.preflight_mode.value,
+            "relational_context_max_branching": self.relational_context_max_branching,
+            "relational_context_max_depth": self.relational_context_max_depth,
+            "relational_context_max_processes": self.relational_context_max_processes,
+            "relational_context_max_tokens": self.relational_context_max_tokens,
+            "require_graph_ready": self.require_graph_ready,
+            "step_limit": self.step_limit,
+            "treatment_profile": self.treatment_profile,
+        }
+
     def _observed_benchmark_runtime_contract(self) -> dict[str, Any] | None:
         """Report runtime-owned parity facts without copying declared values."""
 
@@ -1484,23 +1531,7 @@ class MiniSweCentralAgent(BaseAgent):
         )
         if not isinstance(expected_kwargs, dict):
             expected_kwargs = {}
-        actual_values: dict[str, Any] = {
-            "integration_mode": self.integration_mode.value,
-            "treatment_profile": self.treatment_profile,
-            "enable_persistent_execution_state": (
-                self.enable_persistent_execution_state
-            ),
-            "enable_preemptive_retrieval": self.enable_preemptive_retrieval,
-            "enable_relational_context": self.enable_relational_context,
-            "enable_semantic_evidence": self.enable_semantic_evidence,
-            "dense_fallback_only": self.dense_fallback_only,
-            "relational_context_max_depth": self.relational_context_max_depth,
-            "relational_context_max_branching": (
-                self.relational_context_max_branching
-            ),
-            "relational_context_max_processes": self.relational_context_max_processes,
-            "relational_context_max_tokens": self.relational_context_max_tokens,
-        }
+        actual_values = self._effective_treatment_agent_kwargs()
         observed_kwargs = {
             key: actual_values.get(key, {"unobserved_runtime_key": key})
             for key in expected_kwargs
@@ -1672,6 +1703,8 @@ class MiniSweCentralAgent(BaseAgent):
         persistent_state_bootstrap_output_tokens: int = 512,
         persistent_state_context_tokens: int = 512,
         gt_request_token_budget: int = 1_200,
+        gt_task_evidence_budget_tokens: int | None = None,
+        gt_task_critical_reserve_tokens: int = 0,
         enable_context_compaction: bool = False,
         enable_completion_controller: bool = True,
         completion_check_timeout_sec: float = 10.0,
@@ -1698,6 +1731,7 @@ class MiniSweCentralAgent(BaseAgent):
         replay_capture_max_call_chars: int = 500_000,
         replay_capture_max_bundle_bytes: int = 25_000_000,
         treatment_profile: str = "central_pes_v1",
+        treatment_runtime_contract_path: str | Path | None = None,
         enable_relational_context: bool | None = None,
         enable_semantic_evidence: bool | None = None,
         semantic_evidence_max_items: int | None = None,
@@ -1726,6 +1760,35 @@ class MiniSweCentralAgent(BaseAgent):
                 f"{treatment_profile!r}; expected central_pes_v1 or central_relational_v2"
             )
         self.treatment_profile = normalized_treatment_profile
+        self.treatment_runtime_contract: dict[str, Any] | None = None
+        if treatment_runtime_contract_path is not None:
+            contract_path = Path(treatment_runtime_contract_path).resolve(strict=True)
+            loaded_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded_contract, dict):
+                raise ValueError("treatment runtime contract must contain an object")
+            supplied_hash = str(loaded_contract.get("contract_sha256") or "")
+            hash_material = dict(loaded_contract)
+            hash_material.pop("contract_sha256", None)
+            expected_hash = hashlib.sha256(
+                json.dumps(
+                    hash_material,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8", "surrogatepass")
+            ).hexdigest()
+            if supplied_hash != expected_hash:
+                raise ValueError("treatment runtime contract hash mismatch")
+            if loaded_contract.get("schema") != "gt.treatment_runtime_arguments.v1":
+                raise ValueError("unsupported treatment runtime contract schema")
+            contract_kwargs = loaded_contract.get("agent_kwargs")
+            if not isinstance(contract_kwargs, dict):
+                raise ValueError("treatment runtime contract missing agent_kwargs")
+            if contract_kwargs.get("treatment_profile") != self.treatment_profile:
+                raise ValueError("treatment runtime contract profile mismatch")
+            if int(contract_kwargs.get("step_limit") or 0) != int(step_limit):
+                raise ValueError("treatment runtime contract step limit mismatch")
+            self.treatment_runtime_contract = copy.deepcopy(loaded_contract)
         self.benchmark_identity = (
             copy.deepcopy(benchmark_identity)
             if isinstance(benchmark_identity, dict)
@@ -1995,6 +2058,14 @@ class MiniSweCentralAgent(BaseAgent):
                 if relational_context_max_depth is None
                 else relational_context_max_depth
             ),
+        )
+        self.gt_task_evidence_budget_tokens = (
+            None
+            if gt_task_evidence_budget_tokens is None
+            else max(0, int(gt_task_evidence_budget_tokens))
+        )
+        self.gt_task_critical_reserve_tokens = max(
+            0, int(gt_task_critical_reserve_tokens)
         )
         self.relational_context_max_branching = max(
             1,
@@ -3552,6 +3623,24 @@ class MiniSweCentralAgent(BaseAgent):
                     "revision_scope": "graph_input",
                 }
             )
+        if repository_evidence.substrate_ready:
+            repository_fact_tracker.record_task_start_paths(
+                tuple(
+                    dict.fromkeys(
+                        str(row.get("path") or "")
+                        for rows in (
+                            repository_evidence.anchors,
+                            repository_evidence.definitions,
+                            repository_evidence.references,
+                            repository_evidence.callers,
+                            repository_evidence.semantic_properties,
+                        )
+                        for row in rows
+                        if str(row.get("path") or "")
+                    )
+                ),
+                evidence_action=repository_evidence_action,
+            )
         self._features.record_repository_evidence_status(
             source_revision=source_revision,
             status=repository_evidence.status,
@@ -3641,6 +3730,18 @@ class MiniSweCentralAgent(BaseAgent):
         provider_responses_received = 0
         provider_response_identities: list[dict[str, str]] = []
         actions_count = 0
+        selected_actions_count = 0
+        executed_actions_count = 0
+        returned_actions_count = 0
+        cancelled_actions_count = 0
+        contribution_task_budget = (
+            ContributionTaskBudget(
+                token_budget=self.gt_task_evidence_budget_tokens,
+                critical_reserve_tokens=self.gt_task_critical_reserve_tokens,
+            )
+            if self.gt_task_evidence_budget_tokens is not None
+            else None
+        )
         input_tokens = output_tokens = cache_tokens = 0
         cost = 0.0
         receipts: list[dict[str, Any]] = []
@@ -3807,6 +3908,8 @@ class MiniSweCentralAgent(BaseAgent):
             "activation_graph_revision": (
                 repository_evidence.graph_revision if repository_ever_applicable else ""
             ),
+            "processed_actions_before_activation": 0,
+            "executed_actions_at_activation": 0,
             "correctly_abstained": False,
             "reason_codes": (
                 [] if repository_ever_applicable else ["not_applicable_at_transfer"]
@@ -4310,6 +4413,12 @@ class MiniSweCentralAgent(BaseAgent):
                                 messages,
                                 active_state=active_state,
                             )
+                            assistant_reasoning_chars = sum(
+                                len(str(message.get("content") or ""))
+                                + len(str(message.get("reasoning_content") or ""))
+                                for message in candidate_source
+                                if message.get("role") == "assistant"
+                            )
                             context_compaction_deferrals.append(
                                 {
                                     "call": calls,
@@ -4318,7 +4427,13 @@ class MiniSweCentralAgent(BaseAgent):
                                     "view_chars": view_chars,
                                     "projected_savings_chars": savings,
                                     "projected_savings_ratio": savings_ratio,
-                                    "reason": "minimum_safe_savings_not_met",
+                                    "assistant_reasoning_chars": assistant_reasoning_chars,
+                                    "reason": (
+                                        "distinct_assistant_reasoning_preservation_boundary"
+                                        if assistant_reasoning_chars
+                                        >= max(1, view_chars // 2)
+                                        else "minimum_safe_savings_not_met"
+                                    ),
                                 }
                             )
                     else:
@@ -4363,6 +4478,9 @@ class MiniSweCentralAgent(BaseAgent):
                         provider_call=calls,
                         max_tokens=self.persistent_state_context_tokens,
                         provider_messages=query_messages,
+                        include_advisory_obligations=(
+                            self.treatment_profile != "central_relational_v2"
+                        ),
                     )
                     if persistent_state_engine is not None
                     else None
@@ -5127,6 +5245,8 @@ class MiniSweCentralAgent(BaseAgent):
                     eligible_call: int,
                     revision: str,
                     priority: int,
+                    claim_metadata: tuple[dict[str, Any], ...] = (),
+                    lifecycle_required: bool = False,
                     _candidates: list[GTContribution] = contribution_candidates,
                     _by_surface: dict[str, str] = contribution_by_surface,
                 ) -> None:
@@ -5147,6 +5267,8 @@ class MiniSweCentralAgent(BaseAgent):
                         eligible_call=eligible_call,
                         source_revision=revision,
                         priority=priority,
+                        claim_metadata=claim_metadata,
+                        lifecycle_required=lifecycle_required,
                     )
                     _candidates.append(contribution)
                     _by_surface[surface] = contribution.contribution_id
@@ -5164,6 +5286,8 @@ class MiniSweCentralAgent(BaseAgent):
                         eligible_call=calls,
                         revision=persistent_state_frame.source_revision,
                         priority=PERSISTENT_STATE_CONTRIBUTION_PRIORITY,
+                        claim_metadata=persistent_state_frame.claim_metadata,
+                        lifecycle_required=True,
                     )
                 if task_semantic_frame is not None:
                     register_contribution(
@@ -5175,6 +5299,7 @@ class MiniSweCentralAgent(BaseAgent):
                         eligible_call=task_semantic_frame.eligible_call,
                         revision=task_semantic_frame.source_revision,
                         priority=8,
+                        claim_metadata=task_semantic_frame.fact_metadata,
                     )
                 if preemptive_frame is not None:
                     register_contribution(
@@ -5189,6 +5314,11 @@ class MiniSweCentralAgent(BaseAgent):
                             5
                             if retrieval_opportunity_kind in {"post_diagnostic", "post_validation"}
                             else 20
+                        ),
+                        claim_metadata=tuple(
+                            dict(row)
+                            for row in preemptive_decision.get("selected_evidence") or ()
+                            if isinstance(row, dict)
                         ),
                     )
                 if relational_context_result is not None:
@@ -5241,6 +5371,26 @@ class MiniSweCentralAgent(BaseAgent):
                     eligible_call=repository_evidence_eligible_call,
                     revision=source_revision,
                     priority=30,
+                    claim_metadata=tuple(
+                        {
+                            "claim_id": fact.claim_id,
+                            "origin": (
+                                "preexisting_repository"
+                                if fact.provenance is not None
+                                and fact.provenance.origin.value == "task_start"
+                                else "execution_observation"
+                                if fact.provenance is not None
+                                and fact.provenance.origin.value == "observed_external"
+                                else fact.provenance.origin.value
+                                if fact.provenance is not None
+                                else "unknown"
+                            ),
+                            "authority": "certified_structural",
+                            "materiality_reason": "decision_relevant_repository_context",
+                            "source_revision": source_revision,
+                        }
+                        for fact in frontier_decision.facts
+                    ),
                 )
                 register_contribution(
                     surface="feature_fact",
@@ -5259,6 +5409,29 @@ class MiniSweCentralAgent(BaseAgent):
                     eligible_call=max(1, pending_prepared_after_call + 1),
                     revision=source_revision,
                     priority=15,
+                    claim_metadata=tuple(
+                        {
+                            "claim_id": claim_id,
+                            "origin": "execution_observation",
+                            "authority": "deterministic_feature_evidence",
+                            "materiality_reason": "feature_control_evidence",
+                            "source_revision": source_revision,
+                        }
+                        for claim_id in tuple(
+                            dict.fromkeys(
+                                str(item)
+                                for item in (
+                                    *(
+                                        prepared_guidance_metadata.get("claim_ids") or ()
+                                    ),
+                                    *(
+                                        prepared_guidance_metadata.get("effect_ids") or ()
+                                    ),
+                                )
+                                if str(item)
+                            )
+                        )
+                    ),
                 )
                 register_contribution(
                     surface="progress_frame",
@@ -5281,6 +5454,19 @@ class MiniSweCentralAgent(BaseAgent):
                     ),
                     revision=source_revision,
                     priority=40,
+                    claim_metadata=(
+                        (
+                            {
+                                "claim_id": prepared_progress_fact.fact_id,
+                                "origin": "execution_observation",
+                                "authority": "deterministic_progress_state",
+                                "materiality_reason": "progress_state_change",
+                                "source_revision": source_revision,
+                            },
+                        )
+                        if prepared_progress_fact is not None
+                        else ()
+                    ),
                 )
                 if pending_observed_fact is not None:
                     register_contribution(
@@ -5292,6 +5478,26 @@ class MiniSweCentralAgent(BaseAgent):
                         eligible_call=pending_observed_fact.eligible_call,
                         revision=pending_observed_fact.source_revision,
                         priority=10,
+                        claim_metadata=(
+                            {
+                                "claim_id": pending_observed_fact.fact_id,
+                                "origin": "execution_observation",
+                                "authority": "execution_observation",
+                                "materiality_reason": "observed_execution_fact",
+                                "source_revision": pending_observed_fact.source_revision,
+                            },
+                        ),
+                    )
+                critical_contribution_pending = any(
+                    contribution.critical for contribution in contribution_candidates
+                )
+                request_contribution_budget = self.gt_request_token_budget
+                task_contribution_budget: int | None = None
+                allow_noncritical_contributions = True
+                if contribution_task_budget is not None:
+                    allow_noncritical_contributions = not critical_contribution_pending
+                    task_contribution_budget = contribution_task_budget.available_tokens(
+                        critical=critical_contribution_pending
                     )
                 compiled_contributions = compile_contributions(
                     tuple(contribution_candidates),
@@ -5305,8 +5511,10 @@ class MiniSweCentralAgent(BaseAgent):
                     # One request-wide budget. Individual producers may have
                     # smaller lifecycle budgets, but they cannot add those
                     # allowances together and bypass the shared ceiling.
-                    budget_chars=self.gt_request_token_budget * 8,
-                    budget_tokens=self.gt_request_token_budget,
+                    budget_chars=request_contribution_budget * 8,
+                    budget_tokens=request_contribution_budget,
+                    task_budget_tokens=task_contribution_budget,
+                    allow_noncritical=allow_noncritical_contributions,
                 )
                 selected_contribution_ids = set(compiled_contributions.selected_ids)
 
@@ -5368,6 +5576,7 @@ class MiniSweCentralAgent(BaseAgent):
                 contribution_receipt.update(
                     {
                         "call": calls,
+                        "completed_action_count_before_call": actions_count,
                         "source_revision": source_revision,
                         "selected_surfaces": [
                             surface
@@ -5897,6 +6106,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "chars": len(repository_context_payload),
                         "tokens": repository_context_projection.token_count,
                         "facts": unique_repository_context_facts,
+                        "claim_metadata": [
+                            dict(metadata)
+                            for contribution in repository_context_projection.contributions
+                            for metadata in contribution.claim_metadata
+                        ],
                         "projection": repository_context_projection.as_dict(),
                     }
                 else:
@@ -6458,6 +6672,14 @@ class MiniSweCentralAgent(BaseAgent):
                         call=calls,
                         request_hash=request_payload_sha256,
                     )
+                    if (
+                        contribution_task_budget is not None
+                        and compiled_contributions.task_budget_token_count > 0
+                    ):
+                        contribution_task_budget.commit(
+                            compiled_contributions.task_budget_token_count,
+                            critical=critical_contribution_pending,
+                        )
                     # Visible evidence becomes authoritative only after the
                     # durable marker succeeds and dispatch begins.  Until this
                     # point all surfaces are prepared data, not deliveries.
@@ -6621,6 +6843,7 @@ class MiniSweCentralAgent(BaseAgent):
                             request_payload_sha256=request_payload_sha256,
                             provider_messages_sha256=provider_messages_sha256,
                             message_index=runtime_message_index,
+                            completed_action_count_before_call=actions_count,
                         )
                         model_call_contexts[-1][
                             "task_semantic_substrate_delivered"
@@ -6828,6 +7051,7 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                 if not actions:
                     no_action_assistant_steps += 1
+                selected_actions_count += len(actions)
                 outputs: list[dict[str, Any]] = []
 
                 for index, (_action, proposed, classification) in enumerate(
@@ -7143,6 +7367,7 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                         )
                     if applied_disposition == ActionDisposition.RETURN_TO_MODEL:
+                        returned_actions_count += 1
                         pending_reconsideration_cycle = proposed.cycle_id
                         outputs.append(
                             {
@@ -7159,6 +7384,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "text": preflight_text,
                         }
                         cancelled = len(actions) - index - 1
+                        cancelled_actions_count += cancelled
                         for cancelled_proposal in proposed_actions[index + 1 :]:
                             self._features.record_cancelled_proposal(
                                 cancelled_proposal,
@@ -7340,6 +7566,7 @@ class MiniSweCentralAgent(BaseAgent):
                             }
                         )
                         if hold_submit:
+                            returned_actions_count += 1
                             blocker_text = ", ".join(decision.blockers[:2])
                             obligations_hold = (
                                 decision.reason == "unverified task requirements remain"
@@ -7391,6 +7618,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 }
                             )
                             cancelled = len(actions) - index - 1
+                            cancelled_actions_count += cancelled
                             for cancelled_proposal in proposed_actions[index + 1 :]:
                                 self._features.record_cancelled_proposal(
                                     cancelled_proposal,
@@ -7417,6 +7645,7 @@ class MiniSweCentralAgent(BaseAgent):
                             break
 
                     try:
+                        executed_actions_count += 1
                         remaining_for_action = (
                             None
                             if deadline is None
@@ -8024,6 +8253,14 @@ class MiniSweCentralAgent(BaseAgent):
                                     "activation_graph_revision": (
                                         repository_evidence.graph_revision
                                     ),
+                                    # Dynamic activation happens in the
+                                    # source-creating action's postflight.  Use
+                                    # explicit lifecycle counters from this
+                                    # boundary; action ordinals are not a safe
+                                    # proxy when preflight returns or batch
+                                    # cancellation occur.
+                                    "processed_actions_before_activation": actions_count,
+                                    "executed_actions_at_activation": executed_actions_count,
                                     "correctly_abstained": False,
                                     "reason_codes": [
                                         "supported_source_created",
@@ -8050,6 +8287,8 @@ class MiniSweCentralAgent(BaseAgent):
                                 "activation_graph_revision": (
                                     repository_evidence.graph_revision
                                 ),
+                                "processed_actions_before_activation": actions_count,
+                                "executed_actions_at_activation": executed_actions_count,
                                 "correctly_abstained": False,
                                 "reason_codes": [
                                     f"dynamic_activation_error:{type(exc).__name__}"
@@ -8653,6 +8892,7 @@ class MiniSweCentralAgent(BaseAgent):
                         )
                     if submit or auto_submitted:
                         cancelled = len(actions) - index - 1
+                        cancelled_actions_count += cancelled
                         if cancelled:
                             if self.preflight_mode is not PreflightMode.OFF:
                                 for cancelled_proposal in proposed_actions[index + 1 :]:
@@ -8686,6 +8926,7 @@ class MiniSweCentralAgent(BaseAgent):
                         break
                     if stale_batch_barrier:
                         cancelled = len(actions) - index - 1
+                        cancelled_actions_count += cancelled
                         for cancelled_proposal in proposed_actions[index + 1 :]:
                             self._features.record_cancelled_proposal(
                                 cancelled_proposal,
@@ -8795,8 +9036,10 @@ class MiniSweCentralAgent(BaseAgent):
             parser_confidences = [
                 float(row["proposed"].get("parser_confidence") or 0.0) for row in preflight_rows
             ]
-            seen_preflight_evidence: set[tuple[str, str, tuple[str, ...]]] = set()
-            duplicate_preflight_evidence = 0
+            seen_preflight_candidates: set[tuple[str, str, tuple[str, ...]]] = set()
+            seen_preflight_interventions: set[tuple[str, str, tuple[str, ...]]] = set()
+            duplicate_preflight_candidates = 0
+            duplicate_preflight_interventions = 0
             for row in preflight_rows:
                 evidence_key = (
                     str(row.get("source_revision") or ""),
@@ -8805,9 +9048,17 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 if not evidence_key[2]:
                     continue
-                if evidence_key in seen_preflight_evidence:
-                    duplicate_preflight_evidence += 1
-                seen_preflight_evidence.add(evidence_key)
+                if evidence_key in seen_preflight_candidates:
+                    duplicate_preflight_candidates += 1
+                seen_preflight_candidates.add(evidence_key)
+                if row.get("applied_disposition") not in {
+                    ActionDisposition.AUGMENT.value,
+                    ActionDisposition.RETURN_TO_MODEL.value,
+                }:
+                    continue
+                if evidence_key in seen_preflight_interventions:
+                    duplicate_preflight_interventions += 1
+                seen_preflight_interventions.add(evidence_key)
             action_metrics = feature_summary["action_metrics"]
             accountability_counts = feature_summary["effect_accountability_counts"]
             compiler_effect_counts = feature_summary[
@@ -8869,15 +9120,29 @@ class MiniSweCentralAgent(BaseAgent):
                 expected_persistent_preflights = (
                     actions_count
                     if persistent_activation_action == 0
-                    else max(0, actions_count - persistent_activation_action)
+                    else max(
+                        0,
+                        actions_count
+                        - int(
+                            persistent_state_activation.get(
+                                "processed_actions_before_activation"
+                            )
+                            or 0
+                        ),
+                    )
                 )
                 expected_persistent_postflights = (
-                    int(host_execution["decision_actions"])
+                    executed_actions_count
                     if persistent_activation_action == 0
                     else max(
                         0,
-                        int(host_execution["decision_actions"])
-                        - persistent_activation_action
+                        executed_actions_count
+                        - int(
+                            persistent_state_activation.get(
+                                "executed_actions_at_activation"
+                            )
+                            or 0
+                        )
                         + 1,
                     )
                 )
@@ -9149,6 +9414,11 @@ class MiniSweCentralAgent(BaseAgent):
                     "prepared_not_sent_events"
                 ],
                 "actions": actions_count,
+                "selected_actions": selected_actions_count,
+                "processed_actions": actions_count,
+                "executed_actions": executed_actions_count,
+                "returned_actions": returned_actions_count,
+                "cancelled_actions": cancelled_actions_count,
                 "assistant_steps": assistant_steps,
                 "trajectory_messages": len(messages),
                 "tokens_per_call": (
@@ -9322,6 +9592,11 @@ class MiniSweCentralAgent(BaseAgent):
                 "repository_context_followed_exploration": repository_context_utilization_summary[
                     "context_followed_exploration"
                 ],
+                "gt_task_evidence_budget": (
+                    contribution_task_budget.as_dict()
+                    if contribution_task_budget is not None
+                    else None
+                ),
                 "certified_controller_actuations": auto_submit_attempts,
                 "provider_context_limit_tokens": self.provider_context_limit_tokens,
                 "provider_context_hard_ratio": self.provider_context_hard_ratio,
@@ -10109,7 +10384,15 @@ class MiniSweCentralAgent(BaseAgent):
                     bool(row.get("reconsideration", {}).get("command_changed"))
                     for row in action_cycles
                 ),
-                "preflight_duplicate_evidence": duplicate_preflight_evidence,
+                # Candidate duplication is expected when the model retries an
+                # unchanged proposal.  The precision failure is applying the
+                # same intervention twice; admission dedup must keep this at
+                # zero.
+                "preflight_duplicate_evidence": duplicate_preflight_interventions,
+                "preflight_duplicate_evidence_candidates": (
+                    duplicate_preflight_candidates
+                ),
+                "preflight_duplicate_interventions": duplicate_preflight_interventions,
                 "preflight_false_interventions": None,
                 "preflight_false_intervention_status": "requires_outcome_oracle",
                 "postflight_only_feature_count": sum(
@@ -10395,6 +10678,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "policy_mode": self.policy_mode.value,
                         "preflight_mode": self.preflight_mode.value,
                         "benchmark_identity": self.benchmark_identity,
+                        "treatment_runtime_contract": self.treatment_runtime_contract,
                         "observed_runtime_contract": (
                             self._observed_benchmark_runtime_contract()
                         ),
@@ -10408,6 +10692,18 @@ class MiniSweCentralAgent(BaseAgent):
                         },
                         "product_mechanism_census": product_mechanism_census,
                         "component_configuration": {
+                            "step_limit": self.step_limit,
+                            "effective_runtime_agent_kwargs": (
+                                self._effective_treatment_agent_kwargs()
+                            ),
+                            "treatment_runtime_contract_sha256": (
+                                str(
+                                    (self.treatment_runtime_contract or {}).get(
+                                        "contract_sha256"
+                                    )
+                                    or ""
+                                )
+                            ),
                             "feature_guidance": self.enable_feature_guidance,
                             "context_frontier": self.enable_context_frontier,
                             "context_compaction": self.enable_context_compaction,
@@ -10466,6 +10762,12 @@ class MiniSweCentralAgent(BaseAgent):
                                 self.persistent_state_context_tokens
                             ),
                             "gt_request_token_budget": self.gt_request_token_budget,
+                            "gt_task_evidence_budget_tokens": (
+                                self.gt_task_evidence_budget_tokens
+                            ),
+                            "gt_task_critical_reserve_tokens": (
+                                self.gt_task_critical_reserve_tokens
+                            ),
                             "preemptive_retrieval_token_budget": (
                                 self.preemptive_retrieval_token_budget
                             ),
@@ -10496,6 +10798,22 @@ class MiniSweCentralAgent(BaseAgent):
                             provider_requests_prepared + bootstrap_provider_calls
                         ),
                         "actions": actions_count,
+                        "action_accounting": {
+                            "schema": "gt.action_accounting.v1",
+                            "selected": selected_actions_count,
+                            "processed": actions_count,
+                            "executed": executed_actions_count,
+                            "returned": returned_actions_count,
+                            "cancelled": cancelled_actions_count,
+                            "selected_equals_processed_plus_cancelled": (
+                                selected_actions_count
+                                == actions_count + cancelled_actions_count
+                            ),
+                            "processed_equals_executed_plus_returned": (
+                                actions_count
+                                == executed_actions_count + returned_actions_count
+                            ),
+                        },
                         "elapsed_seconds": elapsed_seconds,
                         "workspace_sensor_healthy": snapshot.healthy,
                         "workspace_sensor_reason": snapshot.reason,
@@ -10724,6 +11042,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "contribution_compiler": {
                             "schema": "gt.contribution_compiler.runtime.v1",
                             "calls": contribution_compilations,
+                            "task_budget": (
+                                contribution_task_budget.as_dict()
+                                if contribution_task_budget is not None
+                                else None
+                            ),
                             "candidate_count": sum(
                                 int(row.get("candidate_count") or 0)
                                 for row in contribution_compilations

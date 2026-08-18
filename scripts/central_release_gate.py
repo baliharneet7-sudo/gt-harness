@@ -10,6 +10,7 @@ dense backend, delivery, preflight, or baseline-shield fact is absent.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -451,7 +452,17 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
 
     executor_calls = int(receipt.get("executor_calls") or 0)
     actions = int(receipt.get("actions") or 0)
-    host_executed = int((receipt.get("host_execution") or {}).get("decision_actions") or 0)
+    action_accounting = receipt.get("action_accounting") or {}
+    processed_actions = int(
+        action_accounting.get("processed")
+        if "processed" in action_accounting
+        else actions
+    )
+    executed_actions = int(
+        action_accounting.get("executed")
+        if "executed" in action_accounting
+        else (receipt.get("host_execution") or {}).get("decision_actions") or 0
+    )
     if not isinstance(runtime.get("activation"), dict):
         failures.append(f"{label}:persistent_activation_missing")
     elif activation.get("ever_applicable") is not True or activation.get(
@@ -462,7 +473,7 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     activation_call = int(activation.get("activation_call") or 0)
     if activation.get("initial_applicability") == "not_applicable_no_supported_source":
         if not (
-            1 <= activation_action <= actions
+            1 <= activation_action <= max(actions, processed_actions)
             and 2 <= activation_call <= executor_calls
             and activation.get("current_applicability") == "source_backed"
         ):
@@ -482,13 +493,25 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         for row in model_call_contexts
         if int(row.get("call") or 0) >= max(1, activation_call)
     ]
+    processed_before_activation = int(
+        activation.get("processed_actions_before_activation")
+        if "processed_actions_before_activation" in activation
+        else activation_action
+    )
+    executed_at_activation = int(
+        activation.get("executed_actions_at_activation")
+        if "executed_actions_at_activation" in activation
+        else activation_action
+    )
     expected_preflights = (
-        actions if activation_action == 0 else max(0, actions - activation_action)
+        processed_actions
+        if activation_action == 0
+        else max(0, processed_actions - processed_before_activation)
     )
     expected_postflights = (
-        host_executed
+        executed_actions
         if activation_action == 0
-        else max(0, host_executed - activation_action + 1)
+        else max(0, executed_actions - executed_at_activation + 1)
     )
     if int(runtime_metrics.get("context_compilations") or 0) != len(eligible_contexts):
         failures.append(f"{label}:persistent_context_compilation_count")
@@ -707,6 +730,8 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
     calls = runtime.get("calls") or []
     configuration = receipt.get("component_configuration") or {}
     configured_budget = int(configuration.get("gt_request_token_budget") or 0)
+    configured_task_budget = configuration.get("gt_task_evidence_budget_tokens")
+    task_budget = runtime.get("task_budget")
     failures: list[str] = []
     if configured_budget <= 0:
         failures.append(f"{label}:gt_request_token_budget_missing")
@@ -716,13 +741,55 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
     for index, row in enumerate(calls, start=1):
         if int(row.get("candidate_count") or 0) != int(row.get("accounted_count") or 0):
             failures.append(f"{label}:contribution_unaccounted:{index}")
-        if int(row.get("token_budget") or 0) != configured_budget:
+        call_budget = int(row.get("token_budget") or 0)
+        payload_tokens = int(row.get("payload_tokens") or 0)
+        task_payload_tokens = int(
+            row.get("task_budget_tokens")
+            if "task_budget_tokens" in row
+            else payload_tokens
+        )
+        if (
+            call_budget > configured_budget
+            or (configured_task_budget is None and call_budget != configured_budget)
+            or (configured_task_budget is not None and call_budget < 0)
+        ):
             failures.append(f"{label}:contribution_token_budget_mismatch:{index}")
-        if int(row.get("payload_tokens") or 0) > configured_budget:
+        if payload_tokens > call_budget or payload_tokens > configured_budget:
             failures.append(f"{label}:contribution_token_budget_exceeded:{index}")
+        task_call_budget = row.get("task_budget_token_limit")
+        if task_call_budget is not None and task_payload_tokens > int(task_call_budget):
+            failures.append(f"{label}:contribution_task_budget_exceeded:{index}")
         selected_surfaces = tuple(row.get("selected_surfaces") or ())
         if len(selected_surfaces) != len(set(selected_surfaces)):
             failures.append(f"{label}:contribution_surface_duplicate:{index}")
+    if configured_task_budget is None:
+        if task_budget is not None:
+            failures.append(f"{label}:unexpected_contribution_task_budget")
+    else:
+        configured_task_budget = int(configured_task_budget)
+        if not isinstance(task_budget, dict):
+            failures.append(f"{label}:contribution_task_budget_missing")
+        else:
+            used_regular = int(task_budget.get("used_regular_tokens") or 0)
+            used_critical = int(task_budget.get("used_critical_tokens") or 0)
+            used_total = int(task_budget.get("used_tokens") or 0)
+            reserve = int(task_budget.get("critical_reserve_tokens") or 0)
+            payload_total = sum(
+                int(
+                    row.get("task_budget_tokens")
+                    if "task_budget_tokens" in row
+                    else row.get("payload_tokens") or 0
+                )
+                for row in calls
+            )
+            if int(task_budget.get("token_budget") or -1) != configured_task_budget:
+                failures.append(f"{label}:contribution_task_budget_mismatch")
+            if not (0 <= reserve <= configured_task_budget):
+                failures.append(f"{label}:contribution_task_reserve_invalid")
+            if used_total != used_regular + used_critical or used_total != payload_total:
+                failures.append(f"{label}:contribution_task_usage_mismatch")
+            if used_critical > reserve or used_total > configured_task_budget:
+                failures.append(f"{label}:contribution_task_budget_exceeded")
     return ReleaseGateCheck(
         "contribution_budget",
         not failures,
@@ -731,6 +798,118 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
             "task": label,
             "calls": len(calls),
             "configured_token_budget": configured_budget,
+            "configured_task_budget": configured_task_budget,
+        },
+    )
+
+
+def _action_lifecycle(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    accounting = receipt.get("action_accounting")
+    metrics = receipt.get("metrics") or {}
+    failures: list[str] = []
+    if not isinstance(accounting, dict):
+        failures.append(f"{label}:action_accounting_missing")
+        return ReleaseGateCheck(
+            "action_lifecycle",
+            False,
+            tuple(failures),
+            {"task": label},
+        )
+    if accounting.get("schema") != "gt.action_accounting.v1":
+        failures.append(f"{label}:action_accounting_schema")
+    values: dict[str, int] = {}
+    for key in ("selected", "processed", "executed", "returned", "cancelled"):
+        value = accounting.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            failures.append(f"{label}:action_accounting_invalid:{key}")
+            value = 0
+        values[key] = int(value)
+    if values["selected"] != values["processed"] + values["cancelled"]:
+        failures.append(f"{label}:selected_action_accounting_mismatch")
+    if values["processed"] != values["executed"] + values["returned"]:
+        failures.append(f"{label}:processed_action_accounting_mismatch")
+    if int(receipt.get("actions") or 0) != values["processed"]:
+        failures.append(f"{label}:receipt_action_accounting_mismatch")
+    host_executed = int((receipt.get("host_execution") or {}).get("decision_actions") or 0)
+    if host_executed != values["executed"]:
+        failures.append(f"{label}:host_execution_action_accounting_mismatch")
+    for key, metric_key in (
+        ("selected", "selected_actions"),
+        ("processed", "processed_actions"),
+        ("executed", "executed_actions"),
+        ("returned", "returned_actions"),
+        ("cancelled", "cancelled_actions"),
+    ):
+        if metric_key in metrics and int(metrics.get(metric_key) or 0) != values[key]:
+            failures.append(f"{label}:metric_action_accounting_mismatch:{metric_key}")
+    return ReleaseGateCheck(
+        "action_lifecycle",
+        not failures,
+        tuple(failures),
+        {"task": label, **values},
+    )
+
+
+def _treatment_runtime_identity(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Prove the caller-selected treatment is the treatment that executed."""
+
+    contract = receipt.get("treatment_runtime_contract")
+    failures: list[str] = []
+    observed_profile = str(receipt.get("treatment_profile") or "")
+    if observed_profile != "central_relational_v2":
+        failures.append(f"{label}:required_treatment_profile_mismatch")
+    if not isinstance(contract, dict):
+        failures.append(f"{label}:treatment_runtime_contract_missing")
+        return ReleaseGateCheck(
+            "treatment_runtime_identity",
+            False,
+            tuple(failures),
+            {"task": label, "observed_profile": observed_profile},
+        )
+    if contract.get("schema") != "gt.treatment_runtime_arguments.v1":
+        failures.append(f"{label}:treatment_runtime_contract_schema")
+    supplied_hash = str(contract.get("contract_sha256") or "")
+    material = dict(contract)
+    material.pop("contract_sha256", None)
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+    if supplied_hash != expected_hash:
+        failures.append(f"{label}:treatment_runtime_contract_hash")
+    kwargs = contract.get("agent_kwargs")
+    configuration = receipt.get("component_configuration") or {}
+    effective_kwargs = configuration.get("effective_runtime_agent_kwargs")
+    if not isinstance(kwargs, dict):
+        failures.append(f"{label}:treatment_runtime_agent_kwargs_missing")
+    elif not isinstance(effective_kwargs, dict):
+        failures.append(f"{label}:effective_runtime_agent_kwargs_missing")
+    else:
+        for key, expected_value in kwargs.items():
+            if key == "benchmark_identity":
+                continue
+            if key not in effective_kwargs:
+                failures.append(f"{label}:treatment_runtime_{key}_unobserved")
+            elif effective_kwargs.get(key) != expected_value:
+                failures.append(f"{label}:treatment_runtime_{key}_mismatch")
+    if supplied_hash != str(
+        configuration.get("treatment_runtime_contract_sha256") or ""
+    ):
+        failures.append(f"{label}:treatment_runtime_receipt_hash_mismatch")
+    return ReleaseGateCheck(
+        "treatment_runtime_identity",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "observed_profile": observed_profile,
+            "contract_sha256": supplied_hash,
         },
     )
 
@@ -956,10 +1135,12 @@ def audit_treatment_runtime(
         else ()
     )
     return (
+        _treatment_runtime_identity(receipt, label),
         _substrate(receipt, label),
         _dense(receipt, label),
         _delivery(receipt, label),
         _contribution_budget(receipt, label),
+        _action_lifecycle(receipt, label),
         _deterministic_task_controls(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),

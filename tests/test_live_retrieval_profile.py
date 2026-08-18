@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -59,13 +60,19 @@ def test_paid_context_arms_enable_the_pinned_live_retriever():
     central = (root / ".github" / "workflows" / "tb2_miniswe_central.yml").read_text(
         encoding="utf-8"
     )
+    descriptor = json.loads(
+        (root / "eval" / "treatments" / "tb2_central_relational_v2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime = descriptor["runtime_agent_kwargs"]
     assert (
         "if: ${{ inputs.arm == 'certified_context' || inputs.arm == 'certified_full' }}"
         in engine
     )
     assert "inputs.arm" not in central
-    assert central.count("--ak enable_preemptive_retrieval=true") == 1
-    assert central.count("--ak enable_decision_sufficiency=true") == 1
+    assert descriptor["preemptive_retrieval"] is True
+    assert runtime["enable_decision_sufficiency"] is True
     assert central.count(
         '--ak preemptive_retrieval_model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"'
     ) == 1
@@ -120,6 +127,12 @@ def test_central_merge_fails_closed_on_any_provider_delivery_integrity_error():
     assert "invalid_intelligence or invalid_dense or invalid_provider_deliveries" in merge_block
     assert "INVALID TREATMENT RELEASE" in merge_block
     assert "invalid_treatment_release" in merge_block
+    assert "benchmark_manifest_artifact_count" in (
+        root / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
+    assert "audit_runtime_receipt" in (
+        root / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
     assert 'not lifecycle_report["passed"]' in merge_block
     assert "not promotion_report.passed" in merge_block
 
@@ -128,6 +141,11 @@ def test_central_matrix_is_treatment_only_and_uses_the_frozen_baseline_gate():
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github" / "workflows" / "tb2_miniswe_central.yml").read_text(
         encoding="utf-8"
+    )
+    descriptor = json.loads(
+        (root / "eval" / "treatments" / "tb2_central_relational_v2.json").read_text(
+            encoding="utf-8"
+        )
     )
 
     assert "inputs.arm" not in workflow
@@ -140,7 +158,7 @@ def test_central_matrix_is_treatment_only_and_uses_the_frozen_baseline_gate():
     assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 4
     assert "integration_mode=off" not in workflow
     assert "integration_mode=audit" not in workflow
-    assert "preflight_mode=assistive_safe" in workflow
+    assert descriptor["runtime_agent_kwargs"]["preflight_mode"] == "assistive_safe"
     assert "preflight_mode=shadow" not in workflow
     assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
     assert "build_feature_lifecycle_report" in workflow

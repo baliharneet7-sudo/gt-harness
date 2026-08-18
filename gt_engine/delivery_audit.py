@@ -223,6 +223,18 @@ def audit_provider_deliveries(
         delivered = row["delivered_before_call"]
         eligible = row["first_eligible_call"]
         context = contexts.get(delivered) if isinstance(delivered, int) else None
+        completed_actions = (
+            context.get("completed_action_count_before_call")
+            if isinstance(context, dict)
+            else None
+        )
+        if isinstance(completed_actions, int) and isinstance(
+            row.get("evidence_action"), int
+        ):
+            # Calls and actions are different ordinal domains.  The provider
+            # call receipt records the exact number of completed actions at
+            # dispatch, so use that instead of trusting producer-local flags.
+            row["predictive"] = row["evidence_action"] > completed_actions
         if context is None:
             failures.append(f"{task}:delivery_call_context_missing:{index}")
         dispatch_valid = bool(
@@ -276,6 +288,18 @@ def audit_provider_deliveries(
             and not row["predictive"]
         )
         semantic_support_valid = True
+        unsafe_origins = {
+            str(item.get("origin") or "")
+            for item in (*row["selected_evidence"], *row["claim_metadata"])
+            if str(item.get("origin") or "")
+            in {"model_authored", "generated_artifact", "unknown"}
+        }
+        if unsafe_origins:
+            semantic_support_valid = False
+            failures.append(
+                f"{task}:delivery_unsafe_provider_origin:{index}:"
+                + ",".join(sorted(unsafe_origins))
+            )
         if row["surface"] == "preemptive_retrieval":
             selected_evidence = row["selected_evidence"]
             semantic_support_valid = bool(selected_evidence) and all(
@@ -353,6 +377,11 @@ def audit_provider_deliveries(
         elif row["surface"] == "repository_context":
             raw = row["raw"]
             projection = raw.get("projection") or {}
+            metadata_by_claim = {
+                str(item.get("claim_id") or ""): item
+                for item in row["claim_metadata"]
+                if str(item.get("claim_id") or "")
+            }
             semantic = projection.get("semantic_evidence") or {}
             semantic_ids = {
                 str(item.get("claim_id") or "")
@@ -395,6 +424,17 @@ def audit_provider_deliveries(
                 == str(raw.get("source_revision") or "")
                 and str(projection.get("graph_revision") or "")
                 == str(raw.get("graph_revision") or "")
+                and set(row["claim_ids"]) <= set(metadata_by_claim)
+                and all(
+                    str(metadata_by_claim[claim_id].get("origin") or "")
+                    in {"preexisting_repository", "execution_observation"}
+                    and str(metadata_by_claim[claim_id].get("authority") or "")
+                    and str(
+                        metadata_by_claim[claim_id].get("materiality_reason") or ""
+                    )
+                    and str(metadata_by_claim[claim_id].get("source_revision") or "")
+                    for claim_id in row["claim_ids"]
+                )
             )
             if not semantic_support_valid:
                 failures.append(

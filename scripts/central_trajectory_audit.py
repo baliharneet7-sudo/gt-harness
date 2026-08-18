@@ -45,7 +45,6 @@ LEGAL_EVIDENCE_ORIGINS: frozenset[str] = frozenset(
         "task_start",
         "checkout_source",
         "preexisting_repository",
-        "model_authored",
         "observed_external",
         "external_runtime",
         "task_deliverable",
@@ -280,8 +279,25 @@ def audit_task(trajectory_path: Path, receipt_path: Path, task: str) -> dict[str
     failures.extend(effect_failures)
     failures.extend(delivery_failures)
     action_count = _trajectory_action_count(trajectory)
+    accounting = receipt.get("action_accounting")
     recorded_actions = receipt.get("actions")
-    if isinstance(recorded_actions, int) and recorded_actions != action_count:
+    if isinstance(accounting, dict):
+        selected = int(accounting.get("selected") or 0)
+        processed = int(accounting.get("processed") or 0)
+        executed = int(accounting.get("executed") or 0)
+        returned = int(accounting.get("returned") or 0)
+        cancelled = int(accounting.get("cancelled") or 0)
+        if selected != action_count:
+            failures.append(
+                f"{task}:trajectory_selected_action_count_mismatch:{action_count}!={selected}"
+            )
+        if selected != processed + cancelled:
+            failures.append(f"{task}:selected_action_accounting_mismatch")
+        if processed != executed + returned:
+            failures.append(f"{task}:processed_action_accounting_mismatch")
+        if recorded_actions != processed:
+            failures.append(f"{task}:receipt_processed_action_count_mismatch")
+    elif isinstance(recorded_actions, int) and recorded_actions != action_count:
         failures.append(
             f"{task}:trajectory_receipt_action_count_mismatch:{action_count}!={recorded_actions}"
         )
@@ -294,6 +310,7 @@ def audit_task(trajectory_path: Path, receipt_path: Path, task: str) -> dict[str
         "task": task,
         "trajectory_actions": action_count,
         "receipt_actions": recorded_actions,
+        "action_accounting": accounting,
         "effects": effects,
         "effect_dispositions": dict(sorted(dispositions.items())),
         "deliveries": deliveries,
