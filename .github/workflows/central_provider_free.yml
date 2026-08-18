@@ -110,6 +110,9 @@ jobs:
             tests/test_gt_runtime_gate.py \
             tests/test_gt_preemptive_decision_accounting.py \
             tests/test_gt_contributions.py \
+            tests/test_repository_context.py \
+            tests/test_treatment_adapter.py \
+            tests/test_render_treatment_agent_args.py \
             tests/test_provider_view.py \
             tests/test_gt_host_execution.py \
             tests/test_central_efficiency_replay.py \
@@ -167,6 +170,7 @@ jobs:
             gt_engine/thin_compiler.py \
             gt_engine/hybrid_repository.py gt_engine/preemptive_retrieval.py \
             gt_engine/component_registry.py gt_engine/contributions.py \
+            gt_engine/repository_context.py gt_engine/treatment_adapter.py \
             gt_engine/retrieval_profile.py \
             gt_engine/decision_point_eval.py \
             gt_engine/snowflake_onnx.py \
@@ -180,6 +184,7 @@ jobs:
             gt_engine/experiment.py eval/gt_central_agent.py \
             scripts/central_readiness_audit.py \
             scripts/central_release_gate.py \
+            scripts/render_treatment_agent_args.py scripts/tb2_merge_results.py \
             scripts/central_feature_lifecycle.py \
             scripts/tb2_promotion_gate.py \
             scripts/tb2_regression_forensics.py \
@@ -240,6 +245,9 @@ jobs:
             tests/test_snowflake_onnx_backend.py \
             tests/test_live_retrieval_profile.py \
             tests/test_gt_contributions.py \
+            tests/test_repository_context.py \
+            tests/test_treatment_adapter.py \
+            tests/test_render_treatment_agent_args.py \
             tests/test_gt_component_registry.py \
             tests/test_decision_point_eval.py \
             tests/test_gt_decisive_derivation.py
