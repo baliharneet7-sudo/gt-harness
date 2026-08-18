@@ -299,6 +299,7 @@ jobs:
       SNOWFLAKE_TOKENIZER_SHA256: 91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854
       GT_DENSE_INTRA_OP_THREADS: "4"
       GT_DENSE_INTER_OP_THREADS: "1"
+      MSWEA_SILENT_STARTUP: "1"
       TASKS_JSON: ${{ needs.plan.outputs.tasks }}
       TASK_SET_SHA256: ${{ needs.plan.outputs.task_set_sha256 }}
       PREDICTION_SHA256: ${{ needs.plan.outputs.prediction_sha256 }}

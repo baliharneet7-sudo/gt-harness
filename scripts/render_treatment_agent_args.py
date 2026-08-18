@@ -12,6 +12,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+# This module has a machine-readable stdout contract when emitting Harbor
+# arguments.  mini-swe-agent 2.2.x otherwise prints a startup banner at import
+# time, which would become invalid command-line arguments in a shell mapfile.
+os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
+
 from eval.gt_central_agent import MiniSweCentralAgent
 from gt_engine.treatment_adapter import (
     BenchmarkManifest,
