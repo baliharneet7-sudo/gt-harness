@@ -142,11 +142,17 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
   workflow now creates source-owned documents after live budget/asset setup, composes them through
   the fixed-source builder, exports a runner-private `GT_RUNTIME_OBSERVATION_PATH`, and uploads
   the observation only after the task finishes. A copied declaration remains invalid.
-- [ ] Freeze a new exact commit containing the post-smoke provenance, budget, lifecycle,
-  treatment-identity, and merge-manifest repairs. The earlier
-  `4f37f1f4afc1a7a6c7a2fe8981906567c7537800` freeze predates these changes.
-- [ ] Run that exact commit through the source-built Linux provider-free workflow with current
-  indexer and pinned ONNX asset. This proves integration integrity, not uplift.
+- [x] Freeze the implementation as exact commit `15bc9424cec8c9bfdf34db58c66e645ec92f8724`,
+  including the post-smoke provenance, budget, lifecycle, treatment-identity, merge-manifest,
+  hosted-coverage, and receipt-completeness repairs.
+- [x] Run the exact runtime commit through the source-built Linux provider-free workflow with
+  the current indexer and pinned ONNX asset. Run `32153590102` passed every job step and its
+  artifact records `provider_calls: 0`, `dataset_verified: true`, dataset commit
+  `2fd12b88aafdd04a52c298e3940bcb189f9766d6`, and 89 verified tasks. This proves integration
+  integrity, not uplift.
+- [x] Perform a post-proof deep audit. It found and repaired two proof gaps: hosted certification
+  now directly tests/lints every changed Python release path, and the uploaded receipt retains
+  the actual dataset language-contract JSON. No missing P0-P2 implementation path remains.
 - [ ] Execute the current engine against the 15 selected historical trajectories/workspaces where
   those legal task artifacts can be restored. The current archive has receipts and replay blobs but
   no legal source workspaces, so those rows are currently unavailable; never turn the frozen
@@ -171,7 +177,6 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ## Exact next step
 
-Review and freeze the current working tree as one exact commit, then run the
-hosted source-built provider-free gate for that exact SHA. Only after it passes,
-freeze the updated prediction artifact and run the existing three-arm
-baseline/previous-GT/strengthened-GT comparison. GitNexus is not a run arm.
+The next step is the outcome phase: freeze the updated prediction artifact, then run
+the existing three-arm baseline/previous-GT/strengthened-GT comparison. GitNexus is
+not a run arm. The provider-free proof does not establish solve uplift or efficiency.
