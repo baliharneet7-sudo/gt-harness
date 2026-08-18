@@ -83,11 +83,15 @@ jobs:
         run: |
           set -euo pipefail
           dataset="$RUNNER_TEMP/terminal-bench-2-language-contract"
+          language_receipt="$RUNNER_TEMP/tb2-language-contract.json"
           git init "$dataset"
           git -C "$dataset" remote add origin https://github.com/harbor-framework/terminal-bench-2.git
           git -C "$dataset" fetch --depth=1 origin 2fd12b88aafdd04a52c298e3940bcb189f9766d6
           git -C "$dataset" checkout --detach FETCH_HEAD
-          python scripts/verify_tb2_language_contract.py --dataset-root "$dataset"
+          python scripts/verify_tb2_language_contract.py --dataset-root "$dataset" \
+            > "$language_receipt"
+          cat "$language_receipt"
+          echo "GT_TB2_LANGUAGE_CONTRACT_RECEIPT=$language_receipt" >> "$GITHUB_ENV"
 
       - name: Central runtime tests
         run: |
@@ -269,6 +273,17 @@ jobs:
               "provider_calls": 0,
               "note": "Live task-container discoverability remains a separate gate.",
           }
+          language_receipt_path = Path(
+              os.environ.get("GT_TB2_LANGUAGE_CONTRACT_RECEIPT", "")
+          )
+          if language_receipt_path.is_file():
+              language_lines = language_receipt_path.read_text(encoding="utf-8").splitlines()
+              if language_lines:
+                  receipt["tb2_language_contract"] = json.loads(language_lines[-1])
+                  Path("tb2_language_contract.json").write_text(
+                      json.dumps(receipt["tb2_language_contract"], indent=2),
+                      encoding="utf-8",
+                  )
           Path("central_provider_free_receipt.json").write_text(
               json.dumps(receipt, indent=2), encoding="utf-8"
           )
@@ -280,5 +295,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: central-provider-free-${{ github.run_id }}
-          path: central_provider_free_receipt.json
+          path: |
+            central_provider_free_receipt.json
+            tb2_language_contract.json
           if-no-files-found: warn
