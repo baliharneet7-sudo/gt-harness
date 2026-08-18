@@ -5351,14 +5351,14 @@ class MiniSweCentralAgent(BaseAgent):
                             contribution.contribution_id
                         )
                 frontier_fact_ids = tuple(
-                    str(row.get("fact_id") or "")
-                    for row in frontier_decision.accounting
-                    if row.get("fact_id")
+                    str(fact.fact_id)
+                    for fact in frontier_decision.facts
+                    if str(fact.fact_id)
                 )
                 frontier_claim_ids = tuple(
-                    str(row.get("claim_id") or "")
-                    for row in frontier_decision.accounting
-                    if row.get("claim_id")
+                    str(fact.claim_id)
+                    for fact in frontier_decision.facts
+                    if str(fact.claim_id)
                 )
                 register_contribution(
                     surface="graph_frontier",
@@ -5367,7 +5367,7 @@ class MiniSweCentralAgent(BaseAgent):
                     fact_ids=frontier_fact_ids,
                     evidence_action=repository_evidence_action,
                     eligible_call=repository_evidence_eligible_call,
-                    revision=source_revision,
+                    revision=frontier_source_revision,
                     priority=30,
                     claim_metadata=tuple(
                         {
@@ -8994,6 +8994,12 @@ class MiniSweCentralAgent(BaseAgent):
                         extra={"exit_status": terminal, "submission": ""},
                     )
                 )
+            # Final action processing can create deferred effects after the
+            # ordinary per-action consume boundary. There is no later model
+            # request to consume them, but the controller and receipt still
+            # need one terminal application/accountability record. The effect
+            # cursor makes this flush idempotent for normal trajectories.
+            self._features.consume_effects(action_id=actions_count, call=calls)
             self.logs_dir.mkdir(parents=True, exist_ok=True)
             # Very fast provider-free tests can complete inside one Windows
             # monotonic clock tick.  Preserve the truthful lower bound that

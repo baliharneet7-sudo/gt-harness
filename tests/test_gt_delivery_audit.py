@@ -399,6 +399,52 @@ def test_persistent_state_refresh_is_repeated_context_not_duplicate_evidence():
     assert rows[1]["persistent_state_refresh"] is False
 
 
+def test_changed_fact_value_with_fresh_claim_is_not_duplicate_provider_claim():
+    receipt = {
+        "model_call_contexts": [
+            _context(1, request="req-1", provider="provider-1"),
+            _context(2, request="req-2", provider="provider-2"),
+        ],
+        "task_semantic_substrate": {
+            "deliveries": [
+                {
+                    "claim_ids": ["claim-absent"],
+                    "fact_ids": ["fact-deliverable"],
+                    "first_eligible_call": 1,
+                    "delivered_before_call": 1,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-1",
+                    "provider_messages_sha256": "provider-1",
+                    "message_index": 1,
+                    "chars": 20,
+                    "claim_metadata": [_claim_meta("claim-absent")],
+                },
+                {
+                    "claim_ids": ["claim-present"],
+                    "fact_ids": ["fact-deliverable"],
+                    "first_eligible_call": 2,
+                    "delivered_before_call": 2,
+                    "delivered_before_model_query": True,
+                    "not_predictive": True,
+                    "one_step_late": False,
+                    "request_payload_sha256": "req-2",
+                    "provider_messages_sha256": "provider-2",
+                    "message_index": 1,
+                    "chars": 20,
+                    "claim_metadata": [_claim_meta("claim-present")],
+                },
+            ]
+        },
+    }
+
+    _rows, failures, totals = audit_provider_deliveries(receipt)
+
+    assert not any("duplicate_provider_claim" in item for item in failures)
+    assert totals["duplicate_count"] == 0
+
+
 def test_model_authored_preemptive_evidence_is_rejected_even_when_hashes_are_valid():
     receipt = _receipt()
     evidence = receipt["preemptive_retrieval"]["deliveries"][0]["selected_evidence"][0]

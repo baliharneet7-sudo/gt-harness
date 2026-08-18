@@ -203,6 +203,11 @@ class CompiledContributions:
             "payload_chars": len(self.payload),
             "payload_tokens": self.token_count,
             "token_budget": self.token_budget,
+            # Keep per-call task-budget usage explicit so the release gate can
+            # reconcile it with the cumulative task budget. Lifecycle-required
+            # context is intentionally excluded from this count.
+            "task_budget_tokens": self.task_budget_token_count,
+            "task_budget_token_limit": self.task_budget_token_limit,
             "selected_ids": list(self.selected_ids),
             "candidate_count": self.candidate_count,
             "accounted_count": self.accounted_count,

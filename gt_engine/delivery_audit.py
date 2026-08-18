@@ -75,28 +75,54 @@ def _first(row: dict[str, Any], *keys: str) -> Any:
 
 
 def _claims(row: dict[str, Any]) -> tuple[str, ...]:
+    """Return all row identities for reporting and historical totals."""
     values: list[str] = []
     for key in ("claim_ids", "evidence_ids", "effect_ids", "fact_ids"):
         value = row.get(key) or ()
         if isinstance(value, (list, tuple)):
             values.extend(str(item) for item in value if str(item).strip())
     if not values:
-        # Historical guidance/frontier rows predate claim_ids but contain
-        # concrete facts.  Give those anchors a stable accounting identity so
-        # old receipts remain auditable without inventing model usage.
-        for item in row.get("facts") or ():
-            if not isinstance(item, dict):
-                continue
-            anchor = ":".join(
-                str(item.get(key) or "").strip()
-                for key in ("path", "line", "symbol", "value")
-            ).strip(":")
-            if anchor:
-                values.append("anchor:" + hashlib.sha256(anchor.encode()).hexdigest()[:16])
-        for key in ("claim_anchors", "anchors"):
-            value = row.get(key) or ()
-            if isinstance(value, (list, tuple)):
-                values.extend("anchor:" + str(item) for item in value if str(item).strip())
+        values.extend(_legacy_anchor_claims(row))
+    return tuple(dict.fromkeys(values))
+
+
+def _legacy_anchor_claims(row: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    # Historical guidance/frontier rows predate claim_ids but contain
+    # concrete facts. Give those anchors a stable accounting identity so old
+    # receipts remain auditable without inventing model usage.
+    for item in row.get("facts") or ():
+        if not isinstance(item, dict):
+            continue
+        anchor = ":".join(
+            str(item.get(key) or "").strip()
+            for key in ("path", "line", "symbol", "value")
+        ).strip(":")
+        if anchor:
+            values.append("anchor:" + hashlib.sha256(anchor.encode()).hexdigest()[:16])
+    for key in ("claim_anchors", "anchors"):
+        value = row.get(key) or ()
+        if isinstance(value, (list, tuple)):
+            values.extend("anchor:" + str(item) for item in value if str(item).strip())
+    return values
+
+
+def _provider_claims(row: dict[str, Any]) -> tuple[str, ...]:
+    """Return identities that participate in duplicate provider detection.
+
+    Underlying fact/effect IDs are included only for legacy rows without an
+    explicit claim ID. A new claim can legitimately describe a changed value
+    for the same stable fact ID.
+    """
+    values: list[str] = []
+    for key in ("claim_ids", "evidence_ids", "effect_ids", "fact_ids"):
+        value = row.get(key) or ()
+        if isinstance(value, (list, tuple)):
+            values.extend(str(item) for item in value if str(item).strip())
+        if values:
+            break
+    if not values:
+        values.extend(_legacy_anchor_claims(row))
     return tuple(dict.fromkeys(values))
 
 
@@ -208,7 +234,7 @@ def audit_provider_deliveries(
     for index, row in enumerate(rows, start=1):
         identity = row["identity"]
         duplicate_identity = identity in identities
-        claim_overlap = seen_claims.intersection(row["claim_ids"])
+        claim_overlap = seen_claims.intersection(_provider_claims(row["raw"]))
         permitted_state_refresh = False
         if duplicate_identity:
             failures.append(f"{task}:duplicate_provider_delivery:{identity}")
@@ -217,7 +243,7 @@ def audit_provider_deliveries(
                 f"{task}:duplicate_provider_claim:{','.join(sorted(claim_overlap))}"
             )
         identities.add(identity)
-        seen_claims.update(row["claim_ids"])
+        seen_claims.update(_provider_claims(row["raw"]))
         duplicate = duplicate_identity or bool(claim_overlap and not permitted_state_refresh)
         row["persistent_state_refresh"] = permitted_state_refresh
         delivered = row["delivered_before_call"]
