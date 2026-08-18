@@ -645,6 +645,7 @@ jobs:
         env:
           COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
           DATASET: terminal-bench@2.0
+          TASK: ${{ matrix.task }}
         run: |
           set -euo pipefail
           IDENTITY_ROOT="$RUNNER_TEMP/gt-benchmark-identity/$TASK"
