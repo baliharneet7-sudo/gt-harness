@@ -218,14 +218,14 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	// contains a module-linking construct (export/import/from/require/use/mod) —
 	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
 	// so the graph isn't polluted with content-free anchors.
-	maybeAddFileAnchorNode(sf, src, isTest, result)
+	maybeAddFileAnchorNode(root, sf, src, isTest, result)
 
 	return result, nil
 }
 
 // maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
 // symbol nodes yet carries module-linking structure. See ParseFile caller for why.
-func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, result *ParseResult) {
+func maybeAddFileAnchorNode(root *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult) {
 	if len(result.Nodes) > 0 {
 		return
 	}
@@ -233,36 +233,14 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, resul
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	// Module-linking tokens common across languages. A barrel/re-export or pure
-	// import/use file STARTS a line with one of these even though it defines no
-	// symbols. #B3: the previous whole-text substring scan matched module-link
-	// tokens inside COMMENTS and string prose (any sentence containing " from ")
-	// and minted phantom File nodes for content-free files. Require the token at
-	// LINE START (after optional whitespace) on a non-comment line.
-	linkTokens := []string{"export ", "export*", "export{", "import ", "import{",
-		"from ", "require(", "use ", "pub use", "mod ", "pub mod "}
-	hasLink := false
-	for _, line := range strings.Split(text, "\n") {
-		t := strings.TrimSpace(line)
-		if t == "" {
-			continue
-		}
-		// Skip comment lines (//, #, /* and block-comment continuations '*').
-		if strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") ||
-			strings.HasPrefix(t, "/*") || strings.HasPrefix(t, "*") {
-			continue
-		}
-		for _, tok := range linkTokens {
-			if strings.HasPrefix(t, tok) {
-				hasLink = true
-				break
-			}
-		}
-		if hasLink {
-			break
-		}
+	if root == nil || root.HasError() {
+		return
 	}
-	if !hasLink {
+	// A successfully parsed source file containing real syntax remains useful
+	// repository evidence even when it declares no symbol (for example, a shell
+	// entrypoint made only of commands). Comments and shebangs alone carry no
+	// executable or module structure and therefore remain node-free.
+	if !hasNonCommentSyntax(root) {
 		return
 	}
 	// Derive a stable module name from the file's base name (sans extension).
@@ -285,13 +263,47 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, resul
 		StartLine:     1,
 		EndLine:       endLine,
 		Language:      sf.Language,
-		IsExported:    true,
+		IsExported:    hasModuleLinkSyntax(text),
 		// E3 (Fable 2026-07-05): stamp is_test on the synthetic anchor too. A tests/ barrel
 		// (re-export __init__.py / index.ts) yields zero symbol nodes, so only this anchor is
 		// emitted for it — without the flag it entered the graph as PRODUCTION and became an
 		// FTS-seedable test PATH (the walker's file-level isTest already knows the truth).
 		IsTest: isTest,
 	})
+}
+
+func hasModuleLinkSyntax(text string) bool {
+	linkTokens := []string{"export ", "export*", "export{", "import ", "import{",
+		"from ", "require(", "use ", "pub use", "mod ", "pub mod "}
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") ||
+			strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") ||
+			strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		for _, token := range linkTokens {
+			if strings.HasPrefix(trimmed, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasNonCommentSyntax(node *sitter.Node) bool {
+	if node == nil {
+		return false
+	}
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		kind := strings.ToLower(child.Type())
+		if kind == "comment" || strings.Contains(kind, "comment") || kind == "shebang" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // linkGoReceiverMethods sets Label="Method" and ParentID for Go receiver methods

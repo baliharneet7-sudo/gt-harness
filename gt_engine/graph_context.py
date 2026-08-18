@@ -88,6 +88,13 @@ def _tables(con: sqlite3.Connection) -> set[str]:
         return set()
 
 
+def _columns(con: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in con.execute(f'PRAGMA table_info("{table}")')}
+    except sqlite3.Error:
+        return set()
+
+
 def graph_surface_receipt(graph_db: str) -> dict[str, object]:
     counts = {name: 0 for name in GRAPH_SURFACES}
     con = _connect(graph_db)
@@ -205,6 +212,32 @@ def build_graph_projection(
     revision = graph_revision(graph_db)
     try:
         tables = _tables(con)
+        node_has_label = "label" in _columns(con, "nodes")
+        node_identity_filter = (
+            "AND LOWER(COALESCE(label,''))<>'file' " if node_has_label else ""
+        )
+        n_identity_filter = (
+            "AND LOWER(COALESCE(n.label,''))<>'file' " if node_has_label else ""
+        )
+        relation_identity_filter = (
+            "AND LOWER(COALESCE(n.label,''))<>'file' "
+            "AND LOWER(COALESCE(src.label,''))<>'file' "
+            "AND LOWER(COALESCE(dst.label,''))<>'file' "
+            if node_has_label
+            else ""
+        )
+        closure_identity_filter = (
+            "AND LOWER(COALESCE(n.label,''))<>'file' "
+            "AND LOWER(COALESCE(src.label,''))<>'file' "
+            if node_has_label
+            else ""
+        )
+        assertion_identity_filter = (
+            "AND LOWER(COALESCE(n.label,''))<>'file' "
+            "AND LOWER(COALESCE(target.label,''))<>'file' "
+            if node_has_label
+            else ""
+        )
         normalized_active_paths: list[str] = []
         for raw_path in active_paths:
             path = str(raw_path or "").strip().replace("\\", "/")
@@ -222,7 +255,10 @@ def build_graph_projection(
                     "SELECT id,file_path,name,COALESCE(start_line,0),"
                     "COALESCE(signature,''),COALESCE(language,'') FROM nodes "
                     "WHERE file_path IN (" + placeholders + ") "
-                    "AND COALESCE(is_test,0)=0 ORDER BY file_path,start_line,id LIMIT ?",
+                    "AND COALESCE(is_test,0)=0 "
+                    + node_identity_filter
+                    +
+                    "ORDER BY file_path,start_line,id LIMIT ?",
                     (*normalized_active_paths, limit),
                 ).fetchall()
                 hits["nodes"] += len(rows)
@@ -255,6 +291,7 @@ def build_graph_projection(
                     "COALESCE(n.signature,''),"
                     "snippet(nodes_fts,-1,'','',' ',12) FROM nodes_fts f "
                     "JOIN nodes n ON n.id=f.rowid WHERE nodes_fts MATCH ? "
+                    + n_identity_filter
                     + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
                     + "ORDER BY bm25(nodes_fts) LIMIT ?",
                     (query, limit),
@@ -294,6 +331,7 @@ def build_graph_projection(
                     "FROM symbol_content_fts f "
                     "JOIN nodes n ON n.id=f.rowid "
                     "WHERE symbol_content_fts MATCH ? "
+                    + n_identity_filter
                     + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
                     + "ORDER BY bm25(symbol_content_fts) LIMIT ?",
                     (query, limit),
@@ -328,6 +366,7 @@ def build_graph_projection(
                     "JOIN content_passages p ON p.passage_id=f.rowid "
                     "JOIN nodes n ON n.id=p.node_id "
                     "WHERE content_passages_fts MATCH ? "
+                    + n_identity_filter
                     + ("" if include_tests else "AND COALESCE(n.is_test,0)=0 ")
                     + "ORDER BY bm25(content_passages_fts) LIMIT ?",
                     (query, limit),
@@ -391,6 +430,8 @@ def build_graph_projection(
                     + ") OR e.target_id IN ("
                     + placeholders
                     + ")) AND e.confidence>=0.7 "
+                    + relation_identity_filter
+                    +
                     "ORDER BY COALESCE(e.confidence,0.0) DESC,e.id LIMIT ?",
                     (*seed_ids, *seed_ids, *seed_ids, limit),
                 ).fetchall()
@@ -440,6 +481,8 @@ def build_graph_projection(
                     "JOIN nodes src ON src.id=c.source_id WHERE c.source_id IN ("
                     + placeholders
                     + ") AND c.depth<=2 AND c.min_confidence>=0.5 "
+                    + closure_identity_filter
+                    +
                     "ORDER BY c.depth,COALESCE(c.min_confidence,0.0) DESC,c.target_id LIMIT ?",
                     (*seed_ids, limit),
                 ).fetchall()
@@ -526,6 +569,8 @@ def build_graph_projection(
                     "FROM assertions a JOIN nodes n ON n.id=a.test_node_id "
                     "JOIN nodes target ON target.id=a.target_node_id "
                     "WHERE a.target_node_id IN (" + placeholders + ") "
+                    + assertion_identity_filter
+                    +
                     "ORDER BY COALESCE(a.resolution_score,0.0) DESC LIMIT ?",
                     (*seed_ids, limit),
                 ).fetchall()
@@ -555,8 +600,10 @@ def build_graph_projection(
                     "0,COALESCE(e.confidence,0.0) "
                     "FROM edge_metadata em JOIN edges e ON e.id=em.edge_id "
                     "JOIN nodes n ON n.id=e.target_id "
-                    "WHERE e.source_id IN (" + placeholders + ") "
-                    "OR e.target_id IN (" + placeholders + ") LIMIT ?",
+                    "WHERE (e.source_id IN (" + placeholders + ") "
+                    "OR e.target_id IN (" + placeholders + ")) "
+                    + n_identity_filter
+                    + "LIMIT ?",
                     (*seed_ids, *seed_ids, limit),
                 ).fetchall()
                 hits["edge_metadata"] += len(rows)

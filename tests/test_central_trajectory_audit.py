@@ -147,6 +147,28 @@ def test_audit_fails_closed_on_missing_context_accounting(tmp_path):
     assert any("missing_context_fact_accounting" in item for item in report["failures"])
 
 
+def test_observed_execution_is_a_legal_delivery_origin(tmp_path):
+    _write_bundle(tmp_path)
+    receipt_path = next(tmp_path.rglob("central_receipt.json"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["guidance_deliveries"][0]["claim_metadata"] = [
+        {
+            "claim_id": "observed-check",
+            "origin": "execution_observation",
+            "authority": "observed_runtime",
+            "materiality_reason": "fresh_validation_result",
+            "source_revision": "src-1",
+        }
+    ]
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert not any(
+        "delivery_illegal_evidence_origin" in item for item in report["failures"]
+    )
+
+
 def test_audit_discovers_deepswe_trial_layout_by_task_name(tmp_path):
     for task_name in ("alpha-fix", "beta-fix"):
         trial = (

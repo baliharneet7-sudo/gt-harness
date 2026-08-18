@@ -48,6 +48,54 @@ def test_explicit_task_runtime_log_path_is_not_blocked():
         assert decision.disposition is ActionDisposition.PASS
 
 
+def test_repository_root_is_not_itself_a_forbidden_artifact_path():
+    for command in (
+        "find / -name 'python*'",
+        "find / -name extract.js",
+    ):
+        decision = convergence_preflight(
+            _proposal(command),
+            cwd="/app",
+            source_revision="source-1",
+        )
+
+        assert decision.disposition is ActionDisposition.PASS
+        assert "forbidden_benchmark_artifact_path" not in decision.reason_codes
+
+
+def test_nested_forbidden_find_selectors_return_before_execution():
+    for command in (
+        "find / -path '*/logs/verifier/*'",
+        "find / -ipath '*/solution/subdir/*'",
+        "find / -path '*/nested/reward.txt'",
+        "find / -regex '.*reward[.]txt'",
+        "find /tmp -regex '^/tmp/private/.*/reward\\.txt$'",
+        "busybox find / -iname '*solution*'",
+    ):
+        decision = convergence_preflight(
+            _proposal(command),
+            cwd="/app",
+            source_revision="source-1",
+        )
+
+        assert decision.disposition is ActionDisposition.RETURN_TO_MODEL
+        assert "forbidden_benchmark_artifact_path" in decision.reason_codes
+
+
+def test_forbidden_path_evidence_uses_neutral_task_language():
+    decision = convergence_preflight(
+        _proposal("cat /logs/verifier/output.txt"),
+        cwd="/app",
+        source_revision="source-1",
+    )
+
+    rendered = " ".join(decision.evidence).lower()
+    assert "task evidence boundary" in rendered
+    assert "benchmark" not in rendered
+    assert "harness" not in rendered
+    assert "grader" not in rendered
+
+
 def test_budget_risk_returns_only_broad_non_progress_exploration():
     broad = convergence_preflight(
         _proposal("find /app -type f"),

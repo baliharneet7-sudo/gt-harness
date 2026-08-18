@@ -434,13 +434,170 @@ def audit_provider_deliveries(
                 for item in projection.get("validation_facts") or ()
                 if isinstance(item, dict)
             }
+            impact_by_id = {
+                str(item.get("claim_id") or ""): item
+                for item in projection.get("impact_facts") or ()
+                if isinstance(item, dict) and str(item.get("claim_id") or "")
+            }
+            validation_by_id = {
+                str(item.get("claim_id") or ""): item
+                for item in projection.get("validation_facts") or ()
+                if isinstance(item, dict) and str(item.get("claim_id") or "")
+            }
+            coupled_items = tuple(
+                item
+                for item in projection.get("coupled_obligations") or ()
+                if isinstance(item, dict)
+            )
+            coupled_obligation_ids = {
+                str(item.get("claim_id") or "")
+                for item in coupled_items
+            }
             supported_ids = (
                 semantic_ids
                 | execution_ids
                 | impact_ids
                 | diagnostic_ids
                 | validation_ids
+                | coupled_obligation_ids
             ) - {""}
+            coupled_support_failures: list[str] = []
+            for item in coupled_items:
+                claim_id = str(item.get("claim_id") or "")
+                if claim_id not in row["claim_ids"]:
+                    continue
+                changed = item.get("changed") or {}
+                dependent_paths = tuple(
+                    str(path)
+                    for path in item.get("dependent_paths") or ()
+                    if str(path)
+                )
+                test_paths = tuple(
+                    str(path)
+                    for path in item.get("test_paths") or ()
+                    if str(path)
+                )
+                declared_check = str(item.get("declared_check") or "")
+                constituents = {
+                    str(value)
+                    for value in item.get("constituent_claim_ids") or ()
+                    if str(value)
+                }
+                metadata = metadata_by_claim.get(claim_id) or {}
+                metadata_constituents = {
+                    str(value)
+                    for value in metadata.get("constituent_claim_ids") or ()
+                    if str(value)
+                }
+                dependency_facts = tuple(
+                    impact_by_id[value]
+                    for value in constituents
+                    if value in impact_by_id
+                    and str(impact_by_id[value].get("kind") or "")
+                    in {"caller", "api_consumer", "re_export"}
+                )
+                test_facts = tuple(
+                    impact_by_id[value]
+                    for value in constituents
+                    if value in impact_by_id
+                    and str(impact_by_id[value].get("kind") or "") == "test"
+                )
+                validation_facts = tuple(
+                    validation_by_id[value]
+                    for value in constituents
+                    if value in validation_by_id
+                )
+                dependency_ids = {
+                    str(fact.get("claim_id") or "") for fact in dependency_facts
+                }
+                test_ids = {str(fact.get("claim_id") or "") for fact in test_facts}
+                validation_ids = {
+                    str(fact.get("claim_id") or "") for fact in validation_facts
+                }
+
+                def endpoint_matches(
+                    value: object,
+                    expected_path: str = str(changed.get("path") or ""),
+                    expected_symbol: str = str(changed.get("symbol") or ""),
+                ) -> bool:
+                    endpoint = value if isinstance(value, dict) else {}
+                    return bool(
+                        str(endpoint.get("path") or "") == expected_path
+                        and str(endpoint.get("symbol") or "")
+                        == expected_symbol
+                    )
+
+                support_valid = bool(
+                    claim_id
+                    and isinstance(changed, dict)
+                    and str(changed.get("path") or "")
+                    and str(changed.get("symbol") or "")
+                    and _positive_int(changed.get("line")) > 0
+                    and dependent_paths
+                    and test_paths
+                    and declared_check
+                    and constituents
+                    and constituents == metadata_constituents
+                    and dependency_ids
+                    and test_ids
+                    and validation_ids
+                    and constituents == dependency_ids | test_ids | validation_ids
+                    and len(dependent_paths) == len(set(dependent_paths))
+                    and len(test_paths) == len(set(test_paths))
+                    and item.get("blocking") is False
+                    and metadata.get("blocking") is False
+                    and str(metadata.get("authority") or "")
+                    == "certified_composition"
+                    and all(
+                        endpoint_matches(fact.get("target"))
+                        and str((fact.get("source") or {}).get("path") or "")
+                        in dependent_paths
+                        and bool(fact.get("provenance"))
+                        and str(fact.get("authority") or "")
+                        == "certified_structural"
+                        for fact in dependency_facts
+                    )
+                    and {
+                        str((fact.get("source") or {}).get("path") or "")
+                        for fact in dependency_facts
+                    }
+                    == set(dependent_paths)
+                    and all(
+                        endpoint_matches(fact.get("source"))
+                        and str((fact.get("target") or {}).get("path") or "")
+                        in test_paths
+                        and str(fact.get("relation") or "").upper()
+                        in {"ASSERTED_BY", "TESTED_BY"}
+                        and bool(fact.get("provenance"))
+                        and str(fact.get("authority") or "")
+                        == "certified_structural"
+                        for fact in test_facts
+                    )
+                    and {
+                        str((fact.get("target") or {}).get("path") or "")
+                        for fact in test_facts
+                    }
+                    == set(test_paths)
+                    and all(
+                        str(fact.get("command") or "") == declared_check
+                        and str(fact.get("impacted_path") or "") in test_paths
+                        and str(fact.get("authority") or "")
+                        == "declared_validation"
+                        for fact in validation_facts
+                    )
+                    and {
+                        str(fact.get("impacted_path") or "")
+                        for fact in validation_facts
+                    }
+                    <= set(test_paths)
+                )
+                if not support_valid:
+                    coupled_support_failures.append(claim_id or "missing_claim_id")
+            if coupled_support_failures:
+                failures.extend(
+                    f"{task}:repository_context_coupled_support_invalid:{index}:{claim_id}"
+                    for claim_id in coupled_support_failures
+                )
             semantic_support_valid = bool(
                 row["claim_ids"]
                 and set(row["claim_ids"]) <= supported_ids

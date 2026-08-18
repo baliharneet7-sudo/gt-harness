@@ -2901,10 +2901,13 @@ async def test_assistive_convergence_returns_forbidden_artifact_read_before_exec
 
     executed = [command for command, _ in environment.commands]
     assert "cat /logs/verifier/output.txt" not in executed
-    assert any(
-        "benchmark-harness or grader-only path" in text
-        for text in model.observed_history[1]
-    )
+    returned_view = "\n".join(model.observed_history[1]).lower()
+    assert "current task evidence:" in returned_view
+    assert "task evidence boundary" in returned_view
+    assert "benchmark" not in returned_view
+    assert "harness" not in returned_view
+    assert "grader" not in returned_view
+    assert "pre-execution check" not in returned_view
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     convergence = receipt["convergence_controller"]
     assert convergence["return_candidates"] == 1
@@ -4899,9 +4902,13 @@ async def test_shadow_submit_gate_holds_once_on_unverified_obligations(tmp_path)
     executed_submits = [command for command, _ in environment.commands if command == submit]
     assert executed_submits == [submit]
     assert len(model.observed_history) == 2
-    assert any("unverified task requirements" in item for item in model.observed_history[1])
+    assert any(
+        "required task conditions remain unresolved" in item
+        for item in model.observed_history[1]
+    )
     trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
-    assert "unverified task requirements" in trajectory
+    assert "required task conditions remain unresolved" in trajectory
+    assert "pre-execution check" not in trajectory.lower()
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
     assert receipt["metrics"]["submit_holds"] == 1
     assert receipt["metrics"]["submit_risks"] == 1

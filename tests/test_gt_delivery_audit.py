@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from gt_engine.deep_metrics import extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries
 from scripts.central_run_diff import _context_summary, _first_visible_call
@@ -336,6 +338,239 @@ def test_relational_delivery_rejects_unclaimed_or_duplicate_process_rows():
     _rows, failures, _totals = audit_provider_deliveries(receipt)
 
     assert any("relational_delivery_semantic_support_missing" in item for item in failures)
+
+
+def _coupled_receipt() -> dict:
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["repository_context"] = {
+        "deliveries": [
+            {
+                "delivery_id": "repository-context-coupled-1",
+                "claim_ids": ["coupled-1"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "req-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 48,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_metadata": [
+                    _claim_meta(
+                        "coupled-1",
+                        authority="certified_composition",
+                        materiality_reason="decision_relevant_repository_context",
+                        constituent_claim_ids=["caller-1", "test-1", "check-1"],
+                        blocking=False,
+                    )
+                ],
+                "projection": {
+                    "source_revision": "source-1",
+                    "graph_revision": "graph-1",
+                    "semantic_evidence": {"items": []},
+                    "execution_views": [],
+                    "impact_facts": [
+                        {
+                            "claim_id": "caller-1",
+                            "kind": "caller",
+                            "depth": 1,
+                            "source": {"path": "src/entry.py", "symbol": "run", "line": 1},
+                            "target": {"path": "src/core.py", "symbol": "work", "line": 1},
+                            "relation": "CALLS",
+                            "provenance": ["graph_edge:1"],
+                            "authority": "certified_structural",
+                        },
+                        {
+                            "claim_id": "test-1",
+                            "kind": "test",
+                            "depth": 1,
+                            "source": {"path": "src/core.py", "symbol": "work", "line": 1},
+                            "target": {
+                                "path": "tests/test_core.py",
+                                "symbol": "test_work",
+                                "line": 1,
+                            },
+                            "relation": "ASSERTED_BY",
+                            "provenance": ["graph_edge:2"],
+                            "authority": "certified_structural",
+                        },
+                    ],
+                    "diagnostic_facts": [],
+                    "validation_facts": [
+                        {
+                            "claim_id": "check-1",
+                            "command": "pytest tests/test_core.py -q",
+                            "impacted_path": "tests/test_core.py",
+                            "authority": "declared_validation",
+                        }
+                    ],
+                    "coupled_obligations": [
+                        {
+                            "claim_id": "coupled-1",
+                            "changed": {
+                                "path": "src/core.py",
+                                "symbol": "work",
+                                "line": 1,
+                            },
+                            "dependent_paths": ["src/entry.py"],
+                            "test_paths": ["tests/test_core.py"],
+                            "declared_check": "pytest tests/test_core.py -q",
+                            "constituent_claim_ids": [
+                                "caller-1",
+                                "test-1",
+                                "check-1",
+                            ],
+                            "blocking": False,
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    return receipt
+
+
+def test_repository_context_accepts_certified_coupled_obligation_claim():
+    _rows, failures, _totals = audit_provider_deliveries(_coupled_receipt())
+
+    assert not failures
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_failure"),
+    (
+        ("blocking", "repository_context_coupled_support_invalid"),
+        ("stale_graph", "repository_context_delivery_support_missing"),
+        ("rank_only", "repository_context_coupled_support_invalid"),
+        ("constituent_rank_only", "repository_context_coupled_support_invalid"),
+        ("foreign_constituent", "repository_context_coupled_support_invalid"),
+        (
+            "unrelated_existing_constituent",
+            "repository_context_coupled_support_invalid",
+        ),
+    ),
+)
+def test_repository_context_rejects_uncertified_coupled_obligation(
+    mutation: str, expected_failure: str
+):
+    receipt = _coupled_receipt()
+    delivery = receipt["repository_context"]["deliveries"][0]
+    coupled = delivery["projection"]["coupled_obligations"][0]
+    metadata = delivery["claim_metadata"][0]
+    if mutation == "blocking":
+        coupled["blocking"] = True
+        metadata["blocking"] = True
+    elif mutation == "stale_graph":
+        delivery["projection"]["graph_revision"] = "stale-graph"
+    elif mutation == "rank_only":
+        metadata["authority"] = "rank_only"
+    elif mutation == "constituent_rank_only":
+        delivery["projection"]["impact_facts"][0]["authority"] = "rank_only"
+    elif mutation == "unrelated_existing_constituent":
+        delivery["projection"]["impact_facts"].append(
+            {
+                "claim_id": "caller-unrelated",
+                "kind": "caller",
+                "depth": 1,
+                "source": {
+                    "path": "src/unrelated.py",
+                    "symbol": "other",
+                    "line": 1,
+                },
+                "target": {
+                    "path": "src/other.py",
+                    "symbol": "work",
+                    "line": 1,
+                },
+                "relation": "CALLS",
+                "provenance": ["graph_edge:3"],
+                "authority": "certified_structural",
+            }
+        )
+        coupled["constituent_claim_ids"].append("caller-unrelated")
+        metadata["constituent_claim_ids"].append("caller-unrelated")
+    else:
+        coupled["constituent_claim_ids"].append("foreign-claim")
+        metadata["constituent_claim_ids"].append("foreign-claim")
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(expected_failure in item for item in failures)
+
+
+def test_repository_context_rejects_coupled_claim_without_constituent_support():
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["repository_context"] = {
+        "deliveries": [
+            {
+                "delivery_id": "repository-context-coupled-invalid",
+                "claim_ids": ["coupled-invalid"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "req-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 48,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_metadata": [
+                    _claim_meta(
+                        "coupled-invalid",
+                        authority="certified_composition",
+                        materiality_reason="decision_relevant_repository_context",
+                        constituent_claim_ids=["missing-caller", "missing-test"],
+                        blocking=False,
+                    )
+                ],
+                "projection": {
+                    "source_revision": "source-1",
+                    "graph_revision": "graph-1",
+                    "semantic_evidence": {"items": []},
+                    "execution_views": [],
+                    "impact_facts": [],
+                    "diagnostic_facts": [],
+                    "validation_facts": [],
+                    "coupled_obligations": [
+                        {
+                            "claim_id": "coupled-invalid",
+                            "changed": {
+                                "path": "src/core.py",
+                                "symbol": "work",
+                                "line": 1,
+                            },
+                            "dependent_paths": ["src/entry.py"],
+                            "test_paths": ["tests/test_core.py"],
+                            "declared_check": "pytest tests/test_core.py -q",
+                            "constituent_claim_ids": [
+                                "missing-caller",
+                                "missing-test",
+                            ],
+                            "blocking": False,
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any(
+        "repository_context_coupled_support_invalid" in item for item in failures
+    )
 
 
 def test_duplicate_preemptive_delivery_is_reported():

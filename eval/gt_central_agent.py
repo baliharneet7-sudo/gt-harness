@@ -7369,12 +7369,12 @@ class MiniSweCentralAgent(BaseAgent):
                         pending_reconsideration_cycle = proposed.cycle_id
                         outputs.append(
                             {
-                                "output": "Pre-execution check: " + " ".join(preflight.evidence),
+                                "output": "Current task evidence: " + " ".join(preflight.evidence),
                                 "returncode": 2,
                                 "exception_info": "",
                             }
                         )
-                        preflight_text = "Pre-execution check: " + " ".join(preflight.evidence)
+                        preflight_text = "Current task evidence: " + " ".join(preflight.evidence)
                         pending_preflight_evidence = {
                             "fact_id": proposed.cycle_id,
                             "evidence_action": actions_count,
@@ -7583,15 +7583,15 @@ class MiniSweCentralAgent(BaseAgent):
                             )
                             if obligations_hold:
                                 preflight_text = (
-                                    "Pre-execution check: unverified task requirements "
-                                    "remain; outstanding obligations: "
+                                    "Current task evidence: required task conditions "
+                                    "remain unresolved: "
                                     + blocker_text
                                     + "."
                                 )
                             else:
                                 preflight_text = (
-                                    "Pre-execution check: current validation is failing; "
-                                    f"blocker={blocker_text}."
+                                    "Current task evidence: validation is failing; "
+                                    f"check={blocker_text}."
                                     + (
                                         f" diagnostic={blocker_diagnostic}"
                                         if blocker_diagnostic
@@ -7689,7 +7689,7 @@ class MiniSweCentralAgent(BaseAgent):
                         "exception_info": "",
                     }
                     if applied_disposition == ActionDisposition.AUGMENT and preflight.evidence:
-                        output["output"] += "\n\nPre-execution check: " + " ".join(
+                        output["output"] += "\n\nCurrent task evidence: " + " ".join(
                             preflight.evidence
                         )
                     workspace_impact = classify_workspace_impact(

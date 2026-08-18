@@ -45,6 +45,7 @@ LEGAL_EVIDENCE_ORIGINS: frozenset[str] = frozenset(
         "task_start",
         "checkout_source",
         "preexisting_repository",
+        "execution_observation",
         "observed_external",
         "external_runtime",
         "task_deliverable",

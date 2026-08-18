@@ -716,6 +716,11 @@ def _graph_structural_roles(
                 if len(line_rows) == 1:
                     rows = line_rows
             for row in rows:
+                # A synthetic File node proves that supported source exists and
+                # keeps the graph available. It is repository identity, not a
+                # symbol definition and cannot authorize callers or obligations.
+                if str(row[1]).lower() == "file":
+                    continue
                 node_id = int(row[0])
                 definition = {
                     "path": str(row[4]),

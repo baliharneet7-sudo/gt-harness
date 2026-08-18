@@ -103,6 +103,45 @@ def test_projection_preserves_fts_rank_instead_of_sorting_by_node_id(tmp_path: P
     assert fts_ids[:2] == [99, 1]
 
 
+def test_identity_only_file_node_never_becomes_a_semantic_symbol(tmp_path: Path) -> None:
+    graph = tmp_path / "graph.db"
+    connection = _base_graph(graph)
+    try:
+        connection.execute(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                1,
+                "File",
+                "start",
+                "start",
+                "vm/start.sh",
+                1,
+                2,
+                "",
+                "bash",
+                0,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO nodes_fts(rowid,name,file_path) VALUES (?,?,?)",
+            (1, "start", "vm/start.sh"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    projection = build_graph_projection(
+        str(graph),
+        _contract("Repair start behavior"),
+        limit=10,
+        active_paths=("vm/start.sh",),
+    )
+
+    assert "vm/start.sh" not in projection.files
+    assert "start" not in projection.symbols
+    assert not projection.semantic_facts
+
+
 def test_projection_emits_test_graph_neighbor_as_semantic_candidate(tmp_path: Path) -> None:
     graph = tmp_path / "graph.db"
     connection = _base_graph(graph)

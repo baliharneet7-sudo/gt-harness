@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import groundtruth._binary as binary
+import pytest
 
 import gt_engine.indexer as indexer
-from gt_engine.indexer import IndexBuildStatus, ensure_index_with_receipt
+from gt_engine.indexer import (
+    IndexBuildStatus,
+    _certify_published_graph,
+    _graph_publication_lock,
+    ensure_index_with_receipt,
+    refresh_index_files,
+)
 from gt_engine.language_registry import LANGUAGE_CAPABILITIES
 from gt_engine.repository_intelligence import (
     RepositoryApplicability,
@@ -59,6 +72,344 @@ def test_failed_index_binary_preserves_bounded_diagnostic(tmp_path, monkeypatch)
     assert receipt.error_type == "run_index_false"
     assert "SQL parser exploded" in receipt.error_diagnostic
     assert len(receipt.error_diagnostic) <= 600
+
+
+def test_incremental_refresh_rejects_mismatched_graph_manifest(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
+        connection.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)")
+        connection.execute("CREATE TABLE project_meta(key TEXT,value TEXT)")
+        connection.execute("INSERT INTO project_meta VALUES ('parse_failures','0')")
+        connection.commit()
+    finally:
+        connection.close()
+    binary_path = tmp_path / "gt-index"
+    binary_path.write_bytes(b"binary")
+    binary_sha256 = hashlib.sha256(binary_path.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "gt.graph_certification.v1",
+        "repository_root_sha256": hashlib.sha256(
+            os.path.realpath(repo).encode("utf-8", "surrogatepass")
+        ).hexdigest(),
+        "graph_sha256": "0" * 64,
+        "graph_bytes": graph.stat().st_size,
+        "sqlite_quick_check": "ok",
+        "source_revision": "s1",
+        "parser_failures": 0,
+        "path_sha256": hashlib.sha256(str(binary_path).encode("utf-8")).hexdigest(),
+        "binary_sha256": binary_sha256,
+        "binary_certified": True,
+    }
+    graph.with_suffix(".manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    monkeypatch.setattr(indexer, "_resolved_binary_path", lambda: str(binary_path))
+    monkeypatch.setattr(
+        indexer,
+        "_binary_certification",
+        lambda: {
+            "path_sha256": manifest["path_sha256"],
+            "binary_sha256": binary_sha256,
+        },
+    )
+
+    receipt = refresh_index_files(repo, graph, (), source_revision="s1")
+
+    assert receipt.status is IndexBuildStatus.INVALID_DATABASE
+    assert receipt.graph_db is None
+    assert receipt.error_type == "certification:graph_sha256_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "expected_error"),
+    (
+        ("schema", "gt.graph_certification.v0", "manifest_schema_mismatch"),
+        ("repository_root_sha256", "0" * 64, "repository_root_mismatch"),
+        ("graph_bytes", 999, "graph_bytes_mismatch"),
+        ("graph_sha256", "0" * 64, "graph_sha256_mismatch"),
+        ("source_revision", "stale", "source_revision_mismatch"),
+        ("binary_sha256", "0" * 64, "binary_identity_mismatch"),
+        ("binary_certified", False, "binary_not_certified"),
+    ),
+)
+def test_published_graph_certification_rejects_identity_mismatch(
+    tmp_path, field, bad_value, expected_error
+):
+    graph = tmp_path / "graph.db"
+    graph.write_bytes(b"certified-graph")
+    manifest_path = graph.with_suffix(".manifest.json")
+    manifest = {
+        "schema": "gt.graph_certification.v1",
+        "repository_root_sha256": hashlib.sha256(
+            os.path.realpath(tmp_path).encode("utf-8", "surrogatepass")
+        ).hexdigest(),
+        "graph_sha256": hashlib.sha256(graph.read_bytes()).hexdigest(),
+        "graph_bytes": graph.stat().st_size,
+        "source_revision": "s1",
+        "binary_sha256": "b" * 64,
+        "binary_certified": True,
+    }
+    manifest[field] = bad_value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    certified, error = _certify_published_graph(
+        graph,
+        manifest_path,
+        expected_root=tmp_path,
+        expected_source_revision="s1",
+        expected_binary_sha256="b" * 64,
+    )
+
+    assert certified is False
+    assert error == expected_error
+
+
+def test_published_graph_certification_rejects_hash_matching_invalid_sqlite(tmp_path):
+    graph = tmp_path / "graph.db"
+    graph.write_bytes(b"not-a-sqlite-database")
+    manifest_path = graph.with_suffix(".manifest.json")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "gt.graph_certification.v1",
+                "repository_root_sha256": hashlib.sha256(
+                    os.path.realpath(tmp_path).encode("utf-8", "surrogatepass")
+                ).hexdigest(),
+                "graph_sha256": hashlib.sha256(graph.read_bytes()).hexdigest(),
+                "graph_bytes": graph.stat().st_size,
+                "sqlite_quick_check": "ok",
+                "source_revision": "s1",
+                "binary_sha256": "b" * 64,
+                "binary_certified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    certified, error = _certify_published_graph(
+        graph,
+        manifest_path,
+        expected_root=tmp_path,
+        expected_source_revision="s1",
+        expected_binary_sha256="b" * 64,
+    )
+
+    assert certified is False
+    assert error.startswith("graph_schema_invalid:")
+
+
+def test_graph_pair_publication_restores_previous_pair_on_manifest_failure(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    state = tmp_path / "state"
+    root.mkdir()
+    (root / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    initial = ensure_index_with_receipt(root, state_dir=state, source_revision="s1")
+    assert initial.graph_db
+    graph = Path(initial.graph_db)
+    manifest = graph.with_suffix(".manifest.json")
+    old_graph = graph.read_bytes()
+    old_manifest = manifest.read_bytes()
+    candidate = graph.parent / "candidate.db"
+    shutil.copyfile(graph, candidate)
+    connection = sqlite3.connect(candidate)
+    try:
+        connection.execute(
+            "INSERT OR REPLACE INTO project_meta(key,value) VALUES "
+            "('manifest_failure_test','1')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    new_manifest = json.loads(old_manifest)
+    new_manifest.update(
+        {
+            "graph_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "graph_bytes": candidate.stat().st_size,
+            "source_revision": "s2",
+        }
+    )
+    new_manifest_bytes = json.dumps(
+        new_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    original_atomic_write = indexer._atomic_write
+
+    def fail_manifest_write(path: Path, payload: bytes):
+        if path == manifest and payload == new_manifest_bytes:
+            raise OSError("injected_manifest_failure")
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(indexer, "_atomic_write", fail_manifest_write)
+
+    with pytest.raises(OSError, match="injected_manifest_failure"):
+        indexer._publish_graph_pair(
+            graph,
+            candidate,
+            new_manifest_bytes,
+            expected_root=root,
+            expected_source_revision="s2",
+            expected_binary_sha256=initial.binary_sha256,
+        )
+
+    assert graph.read_bytes() == old_graph
+    assert manifest.read_bytes() == old_manifest
+
+
+def test_interrupted_graph_pair_publication_recovers_new_certified_pair(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "repo"
+    state = tmp_path / "state"
+    root.mkdir()
+    (root / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    initial = ensure_index_with_receipt(root, state_dir=state, source_revision="s1")
+    assert initial.graph_db
+    graph = Path(initial.graph_db)
+    manifest_path = graph.with_suffix(".manifest.json")
+    candidate = graph.parent / "interrupted-candidate.db"
+    shutil.copyfile(graph, candidate)
+    connection = sqlite3.connect(candidate)
+    try:
+        connection.execute(
+            "INSERT OR REPLACE INTO project_meta(key,value) VALUES "
+            "('interrupted_publication_test','1')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    new_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    new_manifest.update(
+        {
+            "graph_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "graph_bytes": candidate.stat().st_size,
+            "source_revision": "s2",
+        }
+    )
+    new_manifest_bytes = json.dumps(
+        new_manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    original_atomic_write = indexer._atomic_write
+
+    def terminate_during_manifest_swap(path: Path, payload: bytes):
+        if path == manifest_path and payload == new_manifest_bytes:
+            raise SystemExit("injected_process_termination")
+        return original_atomic_write(path, payload)
+
+    monkeypatch.setattr(indexer, "_atomic_write", terminate_during_manifest_swap)
+    with pytest.raises(SystemExit, match="injected_process_termination"):
+        indexer._publish_graph_pair(
+            graph,
+            candidate,
+            new_manifest_bytes,
+            expected_root=root,
+            expected_source_revision="s2",
+            expected_binary_sha256=initial.binary_sha256,
+        )
+    monkeypatch.setattr(indexer, "_atomic_write", original_atomic_write)
+
+    certified, error = _certify_published_graph(
+        graph,
+        manifest_path,
+        expected_root=root,
+        expected_source_revision="s2",
+        expected_binary_sha256=initial.binary_sha256,
+    )
+
+    assert certified is True, error
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["source_revision"] == "s2"
+    assert not indexer._graph_publication_journal_path(graph).exists()
+
+
+def test_graph_publication_lock_serializes_processes(tmp_path):
+    ready = tmp_path / "ready"
+    program = "\n".join(
+        (
+            "import sys, time",
+            "from pathlib import Path",
+            "from gt_engine.indexer import _graph_publication_lock",
+            "with _graph_publication_lock(Path(sys.argv[1])):",
+            "    Path(sys.argv[2]).write_text('ready', encoding='utf-8')",
+            "    time.sleep(2)",
+        )
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", program, str(tmp_path), str(ready)],
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.is_file()
+        with pytest.raises(TimeoutError, match="graph_publication_lock_timeout"):
+            with _graph_publication_lock(tmp_path, timeout=0.1):
+                pass
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+def test_graph_reader_cannot_certify_while_publication_lock_is_held(tmp_path):
+    graph = tmp_path / "graph.db"
+    graph.write_bytes(b"current-graph")
+    manifest = graph.with_suffix(".manifest.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "gt.graph_certification.v1",
+                "repository_root_sha256": hashlib.sha256(
+                    os.path.realpath(tmp_path).encode("utf-8", "surrogatepass")
+                ).hexdigest(),
+                "graph_sha256": hashlib.sha256(graph.read_bytes()).hexdigest(),
+                "graph_bytes": graph.stat().st_size,
+                "source_revision": "s1",
+                "binary_sha256": "b" * 64,
+                "binary_certified": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ready = tmp_path / "reader-ready"
+    program = "\n".join(
+        (
+            "import sys, time",
+            "from pathlib import Path",
+            "from gt_engine.indexer import _graph_publication_lock",
+            "with _graph_publication_lock(Path(sys.argv[1])):",
+            "    Path(sys.argv[2]).write_text('ready', encoding='utf-8')",
+            "    time.sleep(2)",
+        )
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", program, str(tmp_path), str(ready)],
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.is_file()
+
+        certified, error = _certify_published_graph(
+            graph,
+            manifest,
+            expected_root=tmp_path,
+            expected_source_revision="s1",
+            expected_binary_sha256="b" * 64,
+            lock_timeout=0.1,
+        )
+
+        assert certified is False
+        assert error == "publication_lock_timeout"
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 def test_source_backed_graph_failure_remains_a_hard_gate():
     evidence = RepositoryEvidence(
@@ -143,6 +494,48 @@ def test_project_checks_scope_to_nearest_changed_project(tmp_path: Path):
     ) == ("cd packages/api && npm test",)
 
 
+def test_file_anchor_is_graph_identity_not_semantic_definition(tmp_path: Path):
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,label TEXT,name TEXT,"
+            "qualified_name TEXT,file_path TEXT,start_line INTEGER,signature TEXT,"
+            "language TEXT,return_type TEXT,is_exported BOOLEAN,is_test BOOLEAN)"
+        )
+        connection.execute(
+            "INSERT INTO nodes VALUES (1,'File','start','vm/start.sh','vm/start.sh',"
+            "1,'','bash','',0,0)"
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,source_line INTEGER,resolution_method TEXT,confidence REAL,"
+            "trust_tier TEXT,candidate_count INTEGER,evidence_type TEXT)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    definitions, references, callers, properties = _graph_structural_roles(
+        str(graph),
+        (
+            {
+                "path": "vm/start.sh",
+                "line": 1,
+                "symbol": "start",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+        limit=8,
+    )
+
+    assert definitions == ()
+    assert references == ()
+    assert callers == ()
+    assert properties == ()
+
+
 def test_shipped_index_fixture_covers_every_registered_parser_language():
     result = verify_gt_index_runtime()
     expected = {
@@ -152,6 +545,39 @@ def test_shipped_index_fixture_covers_every_registered_parser_language():
     }
 
     assert expected <= set(result["language_file_counts"])
+
+
+def test_declaration_free_shell_source_builds_identity_only_graph(tmp_path: Path):
+    script = tmp_path / "vm" / "start.sh"
+    script.parent.mkdir()
+    script.write_text(
+        "#!/bin/sh\nexec qemu-system-x86_64 -nographic\n",
+        encoding="utf-8",
+    )
+
+    evidence = inspect_repository(
+        tmp_path,
+        "Create the QEMU launcher and make it start the VM.",
+        state_dir=tmp_path / ".state",
+        source_revision="shell-source-1",
+    )
+
+    assert evidence.available is False
+    assert evidence.substrate_ready is True
+    assert evidence.index_current is True
+    assert evidence.intelligence_valid is True
+    assert evidence.retrieval_disposition == "empty"
+    assert evidence.index is not None and evidence.index.graph_db
+    connection = sqlite3.connect(evidence.index.graph_db)
+    try:
+        rows = connection.execute(
+            "SELECT label,is_exported FROM nodes WHERE file_path='vm/start.sh'"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert rows == [("File", 0)]
+    assert evidence.definitions == ()
+    assert evidence.callers == ()
 
 
 def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Path):
@@ -350,6 +776,50 @@ def test_repository_session_persists_and_refreshes_captured_source(tmp_path: Pat
     assert cached.graph_revision == second.graph_revision
     assert session.refresh_log[-1]["mode"] == "revision_cache_hit"
     assert session.refresh_log[-1]["elapsed_ms"] == 0.0
+
+
+def test_incremental_refresh_holds_publication_lock_across_build(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "repo"
+    state = tmp_path / "state"
+    root.mkdir()
+    source = root / "app.py"
+    source.write_text("def value():\n    return 1\n", encoding="utf-8")
+    initial = ensure_index_with_receipt(root, state_dir=state, source_revision="s1")
+    assert initial.graph_db
+    source.write_text("def value():\n    return 2\n", encoding="utf-8")
+
+    lock_state = {"depth": 0, "provider_runs": 0}
+
+    @contextmanager
+    def tracked_lock(_directory: Path, *, timeout: float = 30.0):
+        del timeout
+        lock_state["depth"] += 1
+        try:
+            yield
+        finally:
+            lock_state["depth"] -= 1
+
+    original_run = indexer.subprocess.run
+
+    def guarded_run(*args, **kwargs):
+        assert lock_state["depth"] == 1
+        lock_state["provider_runs"] += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(indexer, "_graph_publication_lock", tracked_lock)
+    monkeypatch.setattr(indexer.subprocess, "run", guarded_run)
+
+    refreshed = refresh_index_files(
+        root,
+        initial.graph_db,
+        ("app.py",),
+        source_revision="s2",
+    )
+
+    assert refreshed.status is IndexBuildStatus.AVAILABLE
+    assert lock_state == {"depth": 0, "provider_runs": 2}
 
 
 def test_repository_session_recovers_when_source_is_created_after_initial_empty_mirror(

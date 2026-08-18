@@ -102,6 +102,7 @@ LEGAL_ORIGINS: frozenset[str] = frozenset(
         "checkout_source",
         "preexisting_repository",
         "model_authored",
+        "execution_observation",
         "observed_external",
         "external_runtime",
         "task_deliverable",

@@ -98,6 +98,7 @@ class ImpactFact:
     target: SymbolRef
     relation: str
     provenance: tuple[str, ...]
+    authority: str = "certified_structural"
 
     @property
     def rendered(self) -> str:
@@ -159,10 +160,32 @@ class ValidationFact:
     claim_id: str
     command: str
     impacted_path: str
+    authority: str = "declared_validation"
 
     @property
     def rendered(self) -> str:
         return f"- Validate impacted path {self.impacted_path} with: {self.command}"
+
+
+@dataclass(frozen=True, slots=True)
+class CoupledChangeObligation:
+    """One advisory verification surface composed from certified shared facts."""
+
+    claim_id: str
+    changed: SymbolRef
+    dependent_paths: tuple[str, ...]
+    test_paths: tuple[str, ...]
+    declared_check: str
+    constituent_claim_ids: tuple[str, ...]
+    blocking: bool = False
+
+    @property
+    def rendered(self) -> str:
+        return (
+            "- Coupled verification surface (advisory): changed "
+            f"{self.changed.rendered}; dependents={', '.join(self.dependent_paths)}; "
+            f"tests={', '.join(self.test_paths)}; declared check={self.declared_check}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +201,7 @@ class RepositoryContextProjection:
     impact_facts: tuple[ImpactFact, ...] = ()
     diagnostic_facts: tuple[DiagnosticFact, ...] = ()
     validation_facts: tuple[ValidationFact, ...] = ()
+    coupled_obligations: tuple[CoupledChangeObligation, ...] = ()
     semantic_evidence: SemanticEvidenceResult | None = None
     token_count: int = 0
     truncated_count: int = 0
@@ -191,6 +215,9 @@ class RepositoryContextProjection:
         row["impact_facts"] = [asdict(item) for item in self.impact_facts]
         row["diagnostic_facts"] = [asdict(item) for item in self.diagnostic_facts]
         row["validation_facts"] = [asdict(item) for item in self.validation_facts]
+        row["coupled_obligations"] = [
+            asdict(item) for item in self.coupled_obligations
+        ]
         row["semantic_evidence"] = (
             self.semantic_evidence.as_dict() if self.semantic_evidence is not None else None
         )
@@ -537,6 +564,8 @@ class RepositoryContextEngine:
     def _preexisting_semantic_evidence(
         evidence: RepositoryEvidence,
         path_origins: tuple[tuple[str, str], ...],
+        anchor_paths: frozenset[str] = frozenset(),
+        anchor_symbols: frozenset[str] = frozenset(),
     ) -> RepositoryEvidence:
         """Keep provider-visible semantic rows on task-start source only.
 
@@ -553,11 +582,24 @@ class RepositoryContextEngine:
                 == EvidenceOrigin.PREEXISTING_REPOSITORY.value
             )
 
+        def matches_anchor(path: Any, symbol: Any) -> bool:
+            normalized_path = _path(path or "")
+            normalized_symbol = str(symbol or "").strip()
+            if anchor_paths and normalized_path not in anchor_paths:
+                return False
+            if anchor_symbols and normalized_symbol not in anchor_symbols:
+                return False
+            return bool(anchor_paths or anchor_symbols)
+
         def keep(rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
             return tuple(
                 row
                 for row in rows
                 if preexisting(row.get("path"))
+                and (
+                    not (anchor_paths or anchor_symbols)
+                    or matches_anchor(row.get("path"), row.get("symbol"))
+                )
             )
 
         def keep_calls(rows: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
@@ -566,6 +608,10 @@ class RepositoryContextEngine:
                 for row in rows
                 if preexisting(row.get("caller_path"))
                 and preexisting(row.get("target_path"))
+                and (
+                    not (anchor_paths or anchor_symbols)
+                    or matches_anchor(row.get("target_path"), row.get("target"))
+                )
             )
 
         def keep_references(
@@ -576,6 +622,10 @@ class RepositoryContextEngine:
                 for row in rows
                 if preexisting(row.get("path"))
                 and preexisting(row.get("target_path"))
+                and (
+                    not (anchor_paths or anchor_symbols)
+                    or matches_anchor(row.get("target_path"), row.get("target"))
+                )
             )
 
         return replace(
@@ -639,6 +689,81 @@ class RepositoryContextEngine:
                 break
         return tuple(facts.values())
 
+    @staticmethod
+    def _coupled_obligations(
+        impact: tuple[ImpactFact, ...],
+        validation: tuple[ValidationFact, ...],
+        anchor_paths: frozenset[str],
+        anchor_symbols: frozenset[str],
+    ) -> tuple[CoupledChangeObligation, ...]:
+        dependencies = tuple(
+            fact
+            for fact in impact
+            if fact.kind in {"caller", "api_consumer", "re_export"}
+        )
+        tests = tuple(fact for fact in impact if fact.kind == "test")
+        if not dependencies or not tests or not validation:
+            return ()
+
+        candidates = tuple(
+            dict.fromkeys(
+                (
+                    *(fact.target for fact in dependencies),
+                    *(fact.source for fact in tests),
+                )
+            )
+        )
+        for changed in sorted(candidates):
+            if anchor_paths and changed.path not in anchor_paths:
+                continue
+            if anchor_symbols and changed.symbol not in anchor_symbols:
+                continue
+            related_dependencies = tuple(
+                fact for fact in dependencies if fact.target == changed
+            )
+            related_tests = tuple(fact for fact in tests if fact.source == changed)
+            if not related_dependencies or not related_tests:
+                continue
+            test_paths = tuple(
+                dict.fromkeys(fact.target.path for fact in related_tests)
+            )
+            selected_validation = next(
+                (fact for fact in validation if fact.impacted_path in test_paths),
+                None,
+            )
+            if selected_validation is None:
+                continue
+            dependent_paths = tuple(
+                dict.fromkeys(fact.source.path for fact in related_dependencies)
+            )
+            constituents = tuple(
+                dict.fromkeys(
+                    (
+                        *(fact.claim_id for fact in related_dependencies),
+                        *(fact.claim_id for fact in related_tests),
+                        selected_validation.claim_id,
+                    )
+                )
+            )
+            claim_id = _stable_id(
+                "gt-coupled-obligation-",
+                changed.rendered,
+                *dependent_paths,
+                *test_paths,
+                selected_validation.command,
+            )
+            return (
+                CoupledChangeObligation(
+                    claim_id=claim_id,
+                    changed=changed,
+                    dependent_paths=dependent_paths,
+                    test_paths=test_paths,
+                    declared_check=selected_validation.command,
+                    constituent_claim_ids=constituents,
+                ),
+            )
+        return ()
+
     def _abstain(
         self,
         opportunity: DecisionOpportunity,
@@ -694,6 +819,8 @@ class RepositoryContextEngine:
         semantic_evidence = self._preexisting_semantic_evidence(
             snapshot.repository_evidence,
             snapshot.path_origins,
+            anchor_paths,
+            anchor_symbols,
         )
         semantic = self._semantic.compose(
             semantic_evidence,
@@ -714,6 +841,17 @@ class RepositoryContextEngine:
             snapshot.validation_checks,
             snapshot.represented_checks,
         )
+        coupled = self._coupled_obligations(
+            impact,
+            validation,
+            anchor_paths,
+            anchor_symbols,
+        )
+        coupled_constituents = {
+            claim_id
+            for item in coupled
+            for claim_id in item.constituent_claim_ids
+        }
 
         lines: list[tuple[str, str]] = []
         if semantic.status is SemanticEvidenceStatus.DELIVER:
@@ -725,9 +863,18 @@ class RepositoryContextEngine:
                     f"- Execution (lower bound; {view.entry_kind}): {view.rendered}",
                 )
             )
-        lines.extend((fact.claim_id, f"- Impact {fact.rendered}") for fact in impact)
+        lines.extend((item.claim_id, item.rendered) for item in coupled)
+        lines.extend(
+            (fact.claim_id, f"- Impact {fact.rendered}")
+            for fact in impact
+            if fact.claim_id not in coupled_constituents
+        )
         lines.extend((fact.claim_id, fact.rendered) for fact in diagnostics)
-        lines.extend((fact.claim_id, fact.rendered) for fact in validation)
+        lines.extend(
+            (fact.claim_id, fact.rendered)
+            for fact in validation
+            if fact.claim_id not in coupled_constituents
+        )
         lines = [(claim, line) for claim, line in lines if claim not in delivered_claim_ids]
         if not lines:
             reasons = ["no_certified_repository_context"]
@@ -810,6 +957,7 @@ class RepositoryContextEngine:
         impact_claims = {fact.claim_id for fact in impact}
         diagnostic_claims = {fact.claim_id for fact in diagnostics}
         validation_claims = {fact.claim_id for fact in validation}
+        coupled_claims = {item.claim_id for item in coupled}
         claim_metadata = tuple(
             {
                 "claim_id": claim,
@@ -823,6 +971,8 @@ class RepositoryContextEngine:
                     if claim in diagnostic_claims
                     else "certified_structural"
                     if claim in execution_claims or claim in impact_claims
+                    else "certified_composition"
+                    if claim in coupled_claims
                     else "compiler_semantic"
                     if claim in semantic_claims
                     else "declared_validation"
@@ -838,6 +988,23 @@ class RepositoryContextEngine:
                 ),
                 "source_revision": opportunity.source_revision,
                 "graph_revision": opportunity.graph_revision,
+                **(
+                    {
+                        "constituent_claim_ids": list(item.constituent_claim_ids),
+                        "blocking": item.blocking,
+                    }
+                    if (
+                        item := next(
+                            (
+                                candidate
+                                for candidate in coupled
+                                if candidate.claim_id == claim
+                            ),
+                            None,
+                        )
+                    )
+                    else {}
+                ),
             }
             for claim in claims
         )
@@ -865,13 +1032,30 @@ class RepositoryContextEngine:
                 view for view in execution_views if view.view_id in selected_claims
             ),
             impact_facts=tuple(
-                fact for fact in impact if fact.claim_id in selected_claims
+                fact
+                for fact in impact
+                if fact.claim_id in selected_claims
+                or any(
+                    item.claim_id in selected_claims
+                    and fact.claim_id in item.constituent_claim_ids
+                    for item in coupled
+                )
             ),
             diagnostic_facts=tuple(
                 fact for fact in diagnostics if fact.claim_id in selected_claims
             ),
             validation_facts=tuple(
-                fact for fact in validation if fact.claim_id in selected_claims
+                fact
+                for fact in validation
+                if fact.claim_id in selected_claims
+                or any(
+                    item.claim_id in selected_claims
+                    and fact.claim_id in item.constituent_claim_ids
+                    for item in coupled
+                )
+            ),
+            coupled_obligations=tuple(
+                item for item in coupled if item.claim_id in selected_claims
             ),
             semantic_evidence=semantic,
             token_count=_tokens(rendered),
@@ -881,6 +1065,7 @@ class RepositoryContextEngine:
 
 
 __all__ = [
+    "CoupledChangeObligation",
     "DecisionOpportunity",
     "DiagnosticFact",
     "DirectedExecutionStep",

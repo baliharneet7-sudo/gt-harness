@@ -8,6 +8,7 @@ from gt_engine.repository_context import (
     RepositoryContextEngine,
     RepositoryContextStatus,
     RepositorySnapshot,
+    SymbolRef,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence
 
@@ -125,6 +126,51 @@ def test_semantic_call_evidence_requires_preexisting_source_and_target() -> None
     assert len(accepted.references) == 1
     assert rejected.callers == ()
     assert rejected.references == ()
+
+
+def test_semantic_filter_supports_independent_path_and_symbol_anchors() -> None:
+    evidence = replace(
+        _evidence(),
+        definitions=(
+            *_evidence().definitions,
+            {
+                "path": "src/core.py",
+                "line": 8,
+                "symbol": "other",
+                "signature": "def other() -> int",
+            },
+            {
+                "path": "src/secondary.py",
+                "line": 1,
+                "symbol": "work",
+                "signature": "def work() -> int",
+            },
+        ),
+    )
+    origins = (
+        ("src/core.py", "preexisting_repository"),
+        ("src/secondary.py", "preexisting_repository"),
+    )
+
+    path_only = RepositoryContextEngine._preexisting_semantic_evidence(
+        evidence,
+        origins,
+        anchor_paths=frozenset({"src/core.py"}),
+    )
+    symbol_only = RepositoryContextEngine._preexisting_semantic_evidence(
+        evidence,
+        origins,
+        anchor_symbols=frozenset({"work"}),
+    )
+
+    assert {(row["path"], row["symbol"]) for row in path_only.definitions} == {
+        ("src/core.py", "work"),
+        ("src/core.py", "other"),
+    }
+    assert {(row["path"], row["symbol"]) for row in symbol_only.definitions} == {
+        ("src/core.py", "work"),
+        ("src/secondary.py", "work"),
+    }
 
 
 def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> None:
@@ -383,6 +429,56 @@ def test_project_binds_changed_path_to_exact_symbols_and_selects_impacted_check(
     assert "pytest tests/test_core.py -q" in result.rendered_text
 
 
+def test_changed_symbol_composes_advisory_caller_test_and_declared_check() -> None:
+    evidence = replace(
+        _evidence(), project_checks=("pytest tests/test_core.py -q",)
+    )
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_mutation",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        RepositorySnapshot(
+            source_revision="source-1",
+            graph_revision="graph-1",
+            repository_evidence=evidence,
+            structural_links=(
+                _link("src/entry.py", "src/core.py", "CALLS", "run", "work"),
+                _link(
+                    "src/core.py",
+                    "tests/test_core.py",
+                    "ASSERTED_BY",
+                    "work",
+                    "test_work",
+                ),
+            ),
+            validation_checks=evidence.project_checks,
+        ),
+    )
+
+    assert len(result.coupled_obligations) == 1
+    coupled = result.coupled_obligations[0]
+    assert coupled.blocking is False
+    assert coupled.changed == SymbolRef("src/core.py", "work", 1)
+    assert coupled.dependent_paths == ("src/entry.py",)
+    assert coupled.test_paths == ("tests/test_core.py",)
+    assert coupled.declared_check == "pytest tests/test_core.py -q"
+    projected_constituents = {
+        *(fact.claim_id for fact in result.impact_facts),
+        *(fact.claim_id for fact in result.validation_facts),
+    }
+    assert set(coupled.constituent_claim_ids) <= projected_constituents
+    assert "Coupled verification surface" in result.rendered_text
+    assert "must edit" not in result.rendered_text.lower()
+    assert "Impact caller" not in result.rendered_text
+    assert "Validate impacted path" not in result.rendered_text
+
+
 def test_project_delivers_only_concrete_observed_diagnostic_for_current_anchor() -> None:
     result = RepositoryContextEngine(max_tokens=256).project(
         DecisionOpportunity(
@@ -541,6 +637,51 @@ def test_exact_changed_symbol_does_not_seed_unrelated_nodes_in_same_file() -> No
 
     assert "use_work" in result.rendered_text
     assert "use_other" not in result.rendered_text
+
+
+def test_post_mutation_semantics_exclude_unrelated_catalog_rows() -> None:
+    evidence = replace(
+        _evidence(),
+        definitions=(
+            {
+                "path": "src/aaa.py",
+                "line": 1,
+                "symbol": "unrelated",
+                "signature": "def unrelated()",
+                "origin": "program",
+                "resolution_outcome": "exact",
+                "provenance": ("graph_node:2", "checkout_source"),
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+            *_evidence().definitions,
+        ),
+    )
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_mutation",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        RepositorySnapshot(
+            source_revision="source-1",
+            graph_revision="graph-1",
+            repository_evidence=evidence,
+            structural_links=(),
+            path_origins=(
+                ("src/aaa.py", "preexisting_repository"),
+                ("src/core.py", "preexisting_repository"),
+            ),
+        ),
+    )
+
+    assert result.status is RepositoryContextStatus.DELIVER
+    assert "src/core.py" in result.rendered_text
+    assert "unrelated" not in result.rendered_text
 
 
 def test_validation_selects_broad_discovered_check_and_dedupes_observed_check() -> None:

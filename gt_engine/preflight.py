@@ -748,6 +748,39 @@ _SHELL_CONTROL_ONLY = frozenset({"fi", "done", "esac", "{", "}"})
 _SHELL_COMPLEX_CONTROL = frozenset({"for", "select", "case", "function"})
 
 
+def _search_selector_evidence(words: tuple[str, ...]) -> tuple[str, ...]:
+    """Preserve exact find selectors without treating them as filesystem paths."""
+
+    find_index = next(
+        (
+            index
+            for index, word in enumerate(words[:3])
+            if word.rsplit("/", 1)[-1].lower() == "find"
+        ),
+        None,
+    )
+    if find_index is None:
+        return ()
+    selectors: list[str] = []
+    selector_options = {
+        "-name",
+        "-iname",
+        "-path",
+        "-ipath",
+        "-wholename",
+        "-iwholename",
+        "-regex",
+        "-iregex",
+    }
+    for index, token in enumerate(words[find_index:-1], start=find_index):
+        if token.lower() not in selector_options:
+            continue
+        value = words[index + 1].strip("'\"")
+        if value:
+            selectors.append(f"search_selector:{token.lower()}:{value}")
+    return tuple(dict.fromkeys(selectors))
+
+
 def _resolve_segment_path(value: str, cwd: str) -> str:
     cleaned = value.strip("'\"").replace("\\", "/")
     if not cleaned or cleaned in _NON_TARGET_TOKENS:
@@ -994,6 +1027,7 @@ def _classify_operations(
         evidence = (
             f"head:{head or 'unknown'}",
             f"segment:{segment_index}",
+            *_search_selector_evidence(semantic_words),
             *(
                 (f"shell_control:{original_head}",)
                 if original_head in _SHELL_CONTROL_PREFIXES

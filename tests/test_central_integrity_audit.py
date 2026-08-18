@@ -46,7 +46,12 @@ def test_grader_markers_are_specific_to_hidden_artifacts():
 
 def test_legal_evidence_origins_are_closed_over_the_three_sources():
     # Legal origins map to instruction / checkout source / observed execution.
-    assert {"task_start", "preexisting_repository", "observed_external"} <= LEGAL_EVIDENCE_ORIGINS
+    assert {
+        "task_start",
+        "preexisting_repository",
+        "execution_observation",
+        "observed_external",
+    } <= LEGAL_EVIDENCE_ORIGINS
     # No grader-derived origin may be legal.
     assert "grader" not in LEGAL_EVIDENCE_ORIGINS
     assert "reference_solution" not in LEGAL_EVIDENCE_ORIGINS

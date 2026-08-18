@@ -15,6 +15,8 @@ tasks (no harm, no noise).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import io
 import json
@@ -24,7 +26,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -302,10 +304,46 @@ def _atomic_write(path: Path, payload: bytes) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     try:
-        os.replace(temporary, path)
+        _durable_replace(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _fsync_file(path: Path) -> None:
+    with open(path, "r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Atomically replace a path and durably order the metadata update."""
+
+    if os.name == "nt":
+        import ctypes
+
+        movefile_replace_existing = 0x1
+        movefile_write_through = 0x8
+        moved = ctypes.windll.kernel32.MoveFileExW(  # type: ignore[attr-defined]
+            str(source),
+            str(destination),
+            movefile_replace_existing | movefile_write_through,
+        )
+        if not moved:
+            raise ctypes.WinError()
+        return
+    os.replace(source, destination)
+    _fsync_directory(destination.parent)
 
 
 def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], str]:
@@ -354,6 +392,318 @@ def _graph_parser_failures(path: Path) -> int:
             connection.close()
     except (sqlite3.Error, OSError, TypeError, ValueError):
         return -1
+
+
+def _graph_publication_journal_path(database: Path) -> Path:
+    return database.parent / f".{database.name}.publication.json"
+
+
+def _publication_payload(value: bytes | None) -> str:
+    return base64.b64encode(value or b"").decode("ascii")
+
+
+def _publication_bytes(value: object) -> bytes:
+    return base64.b64decode(str(value or ""), validate=True)
+
+
+def _cleanup_graph_publication_journal(database: Path, journal: dict[str, object]) -> None:
+    for key in ("backup_name", "candidate_name"):
+        name = str(journal.get(key) or "")
+        if name and Path(name).name == name:
+            (database.parent / name).unlink(missing_ok=True)
+    _graph_publication_journal_path(database).unlink(missing_ok=True)
+    _fsync_directory(database.parent)
+
+
+def _recover_interrupted_graph_publication(
+    database: Path, manifest_path: Path
+) -> tuple[bool, str]:
+    """Complete or roll back a durable two-file publication transaction."""
+
+    journal_path = _graph_publication_journal_path(database)
+    if not journal_path.is_file():
+        return True, ""
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        if (
+            journal.get("schema") != "gt.graph_publication_journal.v1"
+            or str(journal.get("database_name") or "") != database.name
+            or str(journal.get("manifest_name") or "") != manifest_path.name
+        ):
+            return False, "publication_journal_identity_invalid"
+        new_hash = str(journal.get("new_graph_sha256") or "")
+        previous_hash = str(journal.get("previous_graph_sha256") or "")
+        new_manifest = _publication_bytes(journal.get("new_manifest_b64"))
+        previous_manifest = _publication_bytes(journal.get("previous_manifest_b64"))
+        backup_name = str(journal.get("backup_name") or "")
+        candidate_name = str(journal.get("candidate_name") or "")
+        if backup_name and Path(backup_name).name != backup_name:
+            return False, "publication_journal_backup_unsafe"
+        if candidate_name and Path(candidate_name).name != candidate_name:
+            return False, "publication_journal_candidate_unsafe"
+        backup = database.parent / backup_name if backup_name else None
+        candidate = database.parent / candidate_name if candidate_name else None
+
+        actual_hash = (
+            hashlib.sha256(database.read_bytes()).hexdigest()
+            if database.is_file()
+            else ""
+        )
+        if actual_hash and actual_hash == new_hash:
+            _atomic_write(manifest_path, new_manifest)
+        elif actual_hash and previous_hash and actual_hash == previous_hash:
+            if previous_manifest:
+                _atomic_write(manifest_path, previous_manifest)
+            else:
+                manifest_path.unlink(missing_ok=True)
+        elif backup is not None and backup.is_file() and previous_hash:
+            if hashlib.sha256(backup.read_bytes()).hexdigest() != previous_hash:
+                return False, "publication_journal_backup_hash_mismatch"
+            _durable_replace(backup, database)
+            if previous_manifest:
+                _atomic_write(manifest_path, previous_manifest)
+            else:
+                manifest_path.unlink(missing_ok=True)
+        elif candidate is not None and candidate.is_file() and new_hash:
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() != new_hash:
+                return False, "publication_journal_candidate_hash_mismatch"
+            _durable_replace(candidate, database)
+            _atomic_write(manifest_path, new_manifest)
+        else:
+            return False, "publication_journal_unrecoverable"
+        _cleanup_graph_publication_journal(database, journal)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        binascii.Error,
+    ):
+        return False, "publication_journal_unreadable"
+    return True, ""
+
+
+def _certify_published_graph(
+    database: Path,
+    manifest_path: Path,
+    *,
+    expected_root: str | os.PathLike[str],
+    expected_source_revision: str = "",
+    expected_binary_sha256: str = "",
+    lock_timeout: float = 30.0,
+    _lock_held: bool = False,
+    _recover_pending: bool = True,
+) -> tuple[bool, str]:
+    """Prove that the published database and manifest are one current identity."""
+
+    if not _lock_held:
+        try:
+            with _graph_publication_lock(database.parent, timeout=lock_timeout):
+                return _certify_published_graph(
+                    database,
+                    manifest_path,
+                    expected_root=expected_root,
+                    expected_source_revision=expected_source_revision,
+                    expected_binary_sha256=expected_binary_sha256,
+                    lock_timeout=lock_timeout,
+                    _lock_held=True,
+                    _recover_pending=_recover_pending,
+                )
+        except TimeoutError:
+            return False, "publication_lock_timeout"
+
+    if _recover_pending:
+        recovered, recovery_error = _recover_interrupted_graph_publication(
+            database, manifest_path
+        )
+        if not recovered:
+            return False, recovery_error
+    if not database.is_file() or not manifest_path.is_file():
+        return False, "missing_graph_or_manifest"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema") != "gt.graph_certification.v1":
+            return False, "manifest_schema_mismatch"
+        expected_root_hash = hashlib.sha256(
+            os.path.realpath(expected_root).encode("utf-8", "surrogatepass")
+        ).hexdigest()
+        if str(manifest.get("repository_root_sha256") or "") != expected_root_hash:
+            return False, "repository_root_mismatch"
+        graph_bytes = database.read_bytes()
+        if int(manifest.get("graph_bytes") or -1) != len(graph_bytes):
+            return False, "graph_bytes_mismatch"
+        if str(manifest.get("graph_sha256") or "") != hashlib.sha256(
+            graph_bytes
+        ).hexdigest():
+            return False, "graph_sha256_mismatch"
+        if expected_source_revision and str(
+            manifest.get("source_revision") or ""
+        ) != str(expected_source_revision):
+            return False, "source_revision_mismatch"
+        if expected_binary_sha256 and str(
+            manifest.get("binary_sha256") or ""
+        ) != expected_binary_sha256:
+            return False, "binary_identity_mismatch"
+        if not bool(manifest.get("binary_certified")):
+            return False, "binary_not_certified"
+        if str(manifest.get("sqlite_quick_check") or "").lower() != "ok":
+            return False, "manifest_sqlite_quick_check_invalid"
+        schema_valid, _nodes, _edges, _fts, schema_detail = _graph_schema_receipt(
+            database
+        )
+        if not schema_valid:
+            return False, "graph_schema_invalid:" + schema_detail[:80]
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False, "manifest_unreadable"
+    return True, ""
+
+
+@contextmanager
+def _graph_publication_lock(directory: Path, *, timeout: float = 30.0):
+    """Serialize graph/manifest publication across host processes."""
+
+    lock_path = directory / ".graph.publish.lock"
+    handle = open(lock_path, "a+b")
+    if lock_path.stat().st_size == 0:
+        handle.write(b"\0")
+        handle.flush()
+    deadline = time.monotonic() + max(0.05, float(timeout))
+    acquired = False
+    try:
+        while not acquired:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("graph_publication_lock_timeout") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        if acquired:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _publish_graph_pair(
+    database: Path,
+    candidate: Path,
+    manifest_bytes: bytes,
+    *,
+    expected_root: str | os.PathLike[str],
+    expected_source_revision: str,
+    expected_binary_sha256: str,
+    _lock_held: bool = False,
+) -> None:
+    """Publish and certify one DB/manifest pair, rolling both back together."""
+
+    if not _lock_held:
+        with _graph_publication_lock(database.parent):
+            return _publish_graph_pair(
+                database,
+                candidate,
+                manifest_bytes,
+                expected_root=expected_root,
+                expected_source_revision=expected_source_revision,
+                expected_binary_sha256=expected_binary_sha256,
+                _lock_held=True,
+            )
+
+    manifest_path = database.with_suffix(".manifest.json")
+    recovered, recovery_error = _recover_interrupted_graph_publication(
+        database, manifest_path
+    )
+    if not recovered:
+        raise OSError("graph_publication_recovery_" + recovery_error)
+    previous_manifest = manifest_path.read_bytes() if manifest_path.is_file() else None
+    had_previous = database.is_file()
+    backup: Path | None = None
+    previous_hash = ""
+    if had_previous:
+        previous_hash = hashlib.sha256(database.read_bytes()).hexdigest()
+        with tempfile.NamedTemporaryFile(
+            dir=database.parent,
+            prefix=".graph.previous.",
+            suffix=".db",
+            delete=False,
+        ) as handle:
+            backup = Path(handle.name)
+        shutil.copyfile(database, backup)
+        _fsync_file(backup)
+    try:
+        new_manifest = json.loads(manifest_bytes.decode("utf-8"))
+        new_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if (
+            str(new_manifest.get("graph_sha256") or "") != new_hash
+            or int(new_manifest.get("graph_bytes") or -1) != candidate.stat().st_size
+        ):
+            raise OSError("publication_candidate_manifest_mismatch")
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+        raise OSError("publication_manifest_invalid") from exc
+
+    journal = {
+        "schema": "gt.graph_publication_journal.v1",
+        "database_name": database.name,
+        "manifest_name": manifest_path.name,
+        "candidate_name": candidate.name,
+        "backup_name": backup.name if backup is not None else "",
+        "new_graph_sha256": new_hash,
+        "previous_graph_sha256": previous_hash,
+        "new_manifest_b64": _publication_payload(manifest_bytes),
+        "previous_manifest_b64": _publication_payload(previous_manifest),
+    }
+    journal_bytes = json.dumps(
+        journal, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    try:
+        _fsync_file(candidate)
+        _atomic_write(_graph_publication_journal_path(database), journal_bytes)
+        _durable_replace(candidate, database)
+        _atomic_write(manifest_path, manifest_bytes)
+        certified, certification_error = _certify_published_graph(
+            database,
+            manifest_path,
+            expected_root=expected_root,
+            expected_source_revision=expected_source_revision,
+            expected_binary_sha256=expected_binary_sha256,
+            _lock_held=True,
+            _recover_pending=False,
+        )
+        if not certified:
+            raise OSError("published_graph_" + certification_error)
+    except Exception:
+        if had_previous and backup is not None and backup.is_file():
+            _durable_replace(backup, database)
+            if previous_manifest is None:
+                manifest_path.unlink(missing_ok=True)
+            else:
+                _atomic_write(manifest_path, previous_manifest)
+        else:
+            database.unlink(missing_ok=True)
+            manifest_path.unlink(missing_ok=True)
+        _cleanup_graph_publication_journal(database, journal)
+        raise
+    else:
+        _cleanup_graph_publication_journal(database, journal)
 
 
 def ensure_index_with_receipt(
@@ -503,24 +853,17 @@ def ensure_index_with_receipt(
         manifest_bytes = json.dumps(
             manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        backup = gt_dir / ".graph.previous.db"
-        had_previous = db.is_file()
-        if had_previous:
-            shutil.copyfile(db, backup)
         try:
-            # The database itself is published in one atomic filesystem swap.
-            os.replace(candidate, db)
-            _atomic_write(db.with_suffix(".manifest.json"), manifest_bytes)
-        except Exception:
-            if had_previous and backup.is_file():
-                os.replace(backup, db)
-            else:
-                db.unlink(missing_ok=True)
-                db.with_suffix(".manifest.json").unlink(missing_ok=True)
-            raise
+            _publish_graph_pair(
+                db,
+                candidate,
+                manifest_bytes,
+                expected_root=root_text,
+                expected_source_revision=source_revision,
+                expected_binary_sha256=str(manifest["binary_sha256"]),
+            )
         finally:
             candidate.unlink(missing_ok=True)
-            backup.unlink(missing_ok=True)
         return receipt(
             coverage.status,
             graph_db=str(db),
@@ -554,10 +897,12 @@ def refresh_index_files(
     *,
     timeout: float = 30.0,
     source_revision: str = "",
+    _lock_held: bool = False,
+    _started: float | None = None,
 ) -> IndexBuildReceipt:
     """Atomically refresh changed indexable files in an existing graph."""
 
-    started = time.perf_counter()
+    started = _started if _started is not None else time.perf_counter()
     coverage = inspect_source_coverage(root)
     certification = _binary_certification()
 
@@ -601,6 +946,36 @@ def refresh_index_files(
         return result(IndexBuildStatus.BUILD_FAILED, error_type="invalid_incremental_root")
     if not binary or not Path(binary).is_file():
         return result(IndexBuildStatus.MISSING_BINARY)
+    if not _lock_held:
+        try:
+            with _graph_publication_lock(database.parent, timeout=timeout):
+                return refresh_index_files(
+                    root,
+                    graph_db,
+                    changed_paths,
+                    timeout=timeout,
+                    source_revision=source_revision,
+                    _lock_held=True,
+                    _started=started,
+                )
+        except TimeoutError:
+            return result(
+                IndexBuildStatus.BUILD_FAILED,
+                error_type="graph_publication_lock_timeout",
+            )
+    manifest_path = database.with_suffix(".manifest.json")
+    published, publication_error = _certify_published_graph(
+        database,
+        manifest_path,
+        expected_root=root_path,
+        expected_binary_sha256=certification["binary_sha256"],
+        _lock_held=True,
+    )
+    if not published:
+        return result(
+            IndexBuildStatus.INVALID_DATABASE,
+            error_type="certification:" + publication_error,
+        )
     selected: list[str] = []
     for raw in changed_paths:
         normalized = str(raw or "").replace("\\", "/").lstrip("./")
@@ -616,6 +991,19 @@ def refresh_index_files(
         if normalized not in selected:
             selected.append(normalized)
     if not selected:
+        current, current_error = _certify_published_graph(
+            database,
+            manifest_path,
+            expected_root=root_path,
+            expected_source_revision=source_revision,
+            expected_binary_sha256=certification["binary_sha256"],
+            _lock_held=True,
+        )
+        if not current:
+            return result(
+                IndexBuildStatus.INVALID_DATABASE,
+                error_type="certification:" + current_error,
+            )
         schema_valid, nodes, edges, fts, check = _graph_schema_receipt(database)
         return result(
             coverage.status if schema_valid else IndexBuildStatus.INVALID_DATABASE,
@@ -688,7 +1076,6 @@ def refresh_index_files(
                 error_type=f"schema:{check[:80]}",
             )
         graph_revision = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        manifest_path = database.with_suffix(".manifest.json")
         manifest = {
             "schema": "gt.graph_certification.v1",
             "repository_root_sha256": hashlib.sha256(
@@ -707,27 +1094,15 @@ def refresh_index_files(
         manifest_bytes = json.dumps(
             manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        with tempfile.NamedTemporaryFile(
-            dir=database.parent,
-            prefix=".graph.incremental.previous.",
-            suffix=".db",
-            delete=False,
-        ) as handle:
-            backup = Path(handle.name)
-        previous_manifest = manifest_path.read_bytes() if manifest_path.is_file() else None
-        shutil.copyfile(database, backup)
-        try:
-            os.replace(candidate, database)
-            _atomic_write(manifest_path, manifest_bytes)
-        except Exception:
-            os.replace(backup, database)
-            if previous_manifest is None:
-                manifest_path.unlink(missing_ok=True)
-            else:
-                _atomic_write(manifest_path, previous_manifest)
-            raise
-        finally:
-            backup.unlink(missing_ok=True)
+        _publish_graph_pair(
+            database,
+            candidate,
+            manifest_bytes,
+            expected_root=root_path,
+            expected_source_revision=source_revision,
+            expected_binary_sha256=certification["binary_sha256"],
+            _lock_held=True,
+        )
         return result(
             coverage.status,
             graph_revision=graph_revision,
