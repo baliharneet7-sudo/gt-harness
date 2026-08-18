@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import posixpath
 import re
@@ -21,6 +20,15 @@ _FORBIDDEN_LOWERCASE_BASENAMES = frozenset(
     {"reward" + ".txt", "ctrf" + ".json", "test_outputs" + ".py"}
 )
 _RISK_STATES = frozenset({"STALLED", "CONTRADICTED", "BUDGET_RISK"})
+_ACTIONABLE_PATH_ANCHOR = re.compile(
+    r"^(?:/?[A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.-]+)*$"
+)
+_ACTIONABLE_CHECK_ANCHOR = re.compile(
+    r"^(?:pytest|py\.test|ctest|go\s+test|cargo\s+test|npm\s+(?:test|run\s+test)|"
+    r"pnpm\s+(?:test|run\s+test)|yarn\s+test|make\s+(?:test|check)|"
+    r"python(?:3(?:\.\d+)?)?\s+-m\s+(?:pytest|unittest)|Rscript)\b",
+    re.IGNORECASE,
+)
 
 
 def _paths(proposed: ProposedAction) -> tuple[str, ...]:
@@ -45,77 +53,35 @@ def _forbidden_path(path: str) -> bool:
 
 
 def _forbidden_search_selectors(proposed: ProposedAction) -> tuple[str, ...]:
-    forbidden_names = ("logs", "solution", "REF", *_FORBIDDEN_LOWERCASE_BASENAMES)
-
     def targets_forbidden(option: str, selector: str) -> bool:
-        pattern = selector.replace("\\/", "/").replace("\\.", ".")
         lowered_option = option.lower()
-        root_names = tuple(root.lstrip("/") for root in _FORBIDDEN_ROOTS)
-        basename_names = ("REF", *_FORBIDDEN_LOWERCASE_BASENAMES)
-        path_samples = tuple(
-            sample
-            for root in root_names
-            for sample in (root, f"{root}/sentinel", f"x/{root}/sentinel")
-        ) + tuple(f"x/{name}" for name in basename_names)
-        if lowered_option in {"-regex", "-iregex"}:
-            literal_selector = (
-                selector.replace("\\", "").replace("[", "").replace("]", "")
-            )
-            comparable = (
-                literal_selector.lower()
-                if lowered_option == "-iregex"
-                else literal_selector
-            )
-            comparable_names = (
-                tuple(name.lower() for name in basename_names)
-                if lowered_option == "-iregex"
-                else basename_names
-            )
-            comparable_roots = (
-                tuple(root.lower() for root in root_names)
-                if lowered_option == "-iregex"
-                else root_names
-            )
-            if any(name in comparable for name in comparable_names) or any(
-                f"/{root}" in comparable or f"{root}/" in comparable
-                for root in comparable_roots
+        ignore_case = lowered_option.startswith("-i")
+        # A search selector is an integrity blocker only when it explicitly
+        # names a forbidden root or basename.  Merely being broad enough to
+        # match one (for example ``*.py`` or ``*.json``) is not evidence that
+        # the selected action targets grader state.
+        literal = (
+            selector.replace("\\/", "/")
+            .replace("\\.", ".")
+            .replace("[.]", ".")
+        )
+        comparable = literal.lower() if ignore_case else literal
+        basename_names = (
+            ("ref", *_FORBIDDEN_LOWERCASE_BASENAMES)
+            if ignore_case
+            else ("REF", *_FORBIDDEN_LOWERCASE_BASENAMES)
+        )
+        for name in basename_names:
+            if re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(name)}(?![A-Za-z0-9_.-])",
+                comparable,
             ):
                 return True
-            flags = re.IGNORECASE if lowered_option == "-iregex" else 0
-            try:
-                compiled = re.compile(selector, flags)
-            except re.error:
-                compiled = None
-            samples = tuple("/" + sample for sample in path_samples)
-            if compiled is not None and any(
-                compiled.fullmatch(sample) or compiled.search(sample)
-                for sample in samples
-            ):
-                return True
-
-        if lowered_option in {"-path", "-ipath", "-wholename", "-iwholename"}:
-            candidate_pattern = pattern.lower() if lowered_option.startswith("-i") else pattern
-            samples = (
-                tuple(sample.lower() for sample in path_samples)
-                if lowered_option.startswith("-i")
-                else path_samples
+        return bool(
+            re.search(
+                r"(?<![A-Za-z0-9_])(?:logs|solution)(?![A-Za-z0-9_])",
+                comparable.lower(),
             )
-            if any(fnmatch.fnmatchcase(sample, candidate_pattern) for sample in samples):
-                return True
-
-        basename_pattern = posixpath.basename(pattern)
-        if lowered_option in {"-iname", "-ipath", "-iwholename", "-iregex"}:
-            basename_pattern = basename_pattern.lower()
-        for name in forbidden_names:
-            candidate = name.lower() if lowered_option.startswith("-i") else name
-            if fnmatch.fnmatchcase(candidate, basename_pattern):
-                return True
-
-        components = tuple(part for part in pattern.split("/") if part)
-        return any(
-            fnmatch.fnmatchcase(root, component.lower())
-            for component in components
-            for root in ("logs", "solution")
         )
 
     forbidden: list[str] = []
@@ -132,6 +98,20 @@ def _forbidden_search_selectors(proposed: ProposedAction) -> tuple[str, ...]:
             if targets_forbidden(option, selector) and selector not in forbidden:
                 forbidden.append(selector)
     return tuple(forbidden)
+
+
+def _actionable_anchor(value: str) -> bool:
+    anchor = str(value or "").strip().strip("'\"")
+    return bool(
+        anchor
+        and (
+            (
+                _ACTIONABLE_PATH_ANCHOR.fullmatch(anchor)
+                and ("/" in anchor or "." in anchor)
+            )
+            or _ACTIONABLE_CHECK_ANCHOR.match(anchor)
+        )
+    )
 
 
 def _decision(
@@ -183,12 +163,22 @@ def convergence_preflight(
         )
 
     root = posixpath.normpath(str(cwd or "/"))
+    pure_search = bool(proposed.operations) and all(
+        operation.operation is ActionOperation.SEARCH
+        for operation in proposed.operations
+    )
     broad_search = bool(
-        proposed.operation is ActionOperation.SEARCH
+        pure_search
         and any(posixpath.normpath(path) in {"/", root} for path in paths)
     )
-    if str(progress_state or "").upper() in _RISK_STATES and broad_search:
-        anchors = tuple(str(item) for item in unresolved_anchors if str(item))[:2]
+    anchors = tuple(
+        str(item) for item in unresolved_anchors if _actionable_anchor(str(item))
+    )[:2]
+    if (
+        str(progress_state or "").upper() in _RISK_STATES
+        and broad_search
+        and anchors
+    ):
         suffix = (
             " Resolve or run: " + ", ".join(anchors) + "."
             if anchors

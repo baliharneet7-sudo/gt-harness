@@ -2648,7 +2648,7 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
     original = "rm src/greeter.py"
     revised = "rm -f src/greeter.py"
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-    model = _ScriptedModel([original, revised, submit, submit])
+    model = _ScriptedModel([original, revised, submit])
     environment = TransferEnvironment()
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -2668,10 +2668,11 @@ async def test_action_conditioned_missing_evidence_returns_before_mutation_once(
     executed = [command for command, _env in environment.commands]
     assert original in executed
     assert revised in executed
-    assert len(model.observed_history) == 4
+    assert len(model.observed_history) == 3
     assert executed.count(submit) == 1
     assert "[GT certified evidence: src/greeter.py:" not in "\n".join(model.observed_history[1])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["submit_holds"] == 0
     decisions = receipt["decision_sufficiency"]["decisions"]
     assert decisions[0]["disposition"] == "pass"
     assert decisions[0]["applied_disposition"] == "pass"
@@ -4922,6 +4923,47 @@ async def test_shadow_submit_gate_holds_once_on_unverified_obligations(tmp_path)
     )
     assert red["payload"]["blockers"]
     assert "unverified" in red["payload"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_assistive_safe_does_not_hold_on_unverified_prose_obligations(tmp_path):
+    class CheckEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if "COMPLETE_TASK" in command:
+                return ExecResult(
+                    stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0
+                )
+            raise AssertionError(command)
+
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+    environment = CheckEnvironment()
+    model = _ScriptedModel([submit, submit])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        preflight_mode="assistive_safe",
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Implement the algorithm correctly and match the stated behavior.",
+        environment,
+        AgentContext(),
+    )
+
+    executed_submits = [command for command, _ in environment.commands if command == submit]
+    assert executed_submits == [submit]
+    assert len(model.observed_history) == 1
+    trajectory = (tmp_path / "miniswe_trajectory.json").read_text(encoding="utf-8")
+    assert "required task conditions remain unresolved" not in trajectory
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["submit_holds"] == 0
 
 
 @pytest.mark.asyncio

@@ -189,6 +189,20 @@ def test_failed_grounded_check_holds_once_then_fails_open():
     assert second.decision == InterventionDecision.PASS
 
 
+def test_unverified_prose_requirements_fail_open_when_hold_is_not_authorized():
+    ledger = EvidenceLedger(max_holds=1)
+
+    for revision in ("r1", "r2"):
+        decision = ledger.submit_decision(
+            revision,
+            plan_partial=True,
+            uncovered_obligations=("Implement the algorithm correctly.",),
+            validating_evidence_present=False,
+            allow_unverified_obligation_hold=False,
+        )
+        assert decision.decision == InterventionDecision.PASS
+
+
 def test_passing_rerun_clears_failure_without_revision_change():
     ledger = EvidenceLedger(max_holds=1)
     ledger.record_check("pytest -q", returncode=1, revision="r1", grounded=True)

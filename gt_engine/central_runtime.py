@@ -1307,7 +1307,14 @@ class EvidenceLedger:
         plan_partial: bool = False,
         uncovered_obligations: tuple[str, ...] = (),
         validating_evidence_present: bool = True,
+        allow_unverified_obligation_hold: bool = True,
     ) -> SubmitDecision:
+        """Evaluate submission blockers without treating unknown prose as false.
+
+        ``allow_unverified_obligation_hold`` preserves the separately authorized
+        shadow diagnostic.  Active assistive policy must set it false and may
+        block only on fresh grounded check evidence.
+        """
         if not sensor_healthy:
             return SubmitDecision(InterventionDecision.PASS, reason="sensor degraded")
         blockers = tuple(
@@ -1319,6 +1326,7 @@ class EvidenceLedger:
         )
         if (
             not blockers
+            and allow_unverified_obligation_hold
             and plan_partial
             and uncovered_obligations
             and not validating_evidence_present

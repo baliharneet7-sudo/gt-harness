@@ -63,6 +63,30 @@ def test_repository_root_is_not_itself_a_forbidden_artifact_path():
         assert "forbidden_benchmark_artifact_path" not in decision.reason_codes
 
 
+def test_broad_find_selectors_do_not_imply_grader_artifact_intent():
+    for command in (
+        'find /app -type f -name "*.py"',
+        'find / -maxdepth 3 -name "*.js" -o -name "*.json"',
+        'find . -iname "*.txt"',
+        'find / -maxdepth 4 -type d -name "*test*"',
+        'find / -name "*.json" -path "*report*"',
+        'find . -name "*.jsonl" -o -name "*.json"',
+        'find / -name "*terminal*" -o -name "*test*"',
+        'find / -name "*.py" -path "*test*"',
+        'find . -name "*.py" -o -name "*.sh" | grep -i test',
+        'find / -maxdepth 3 -name "*test*" -o -name "*grade*" -o -name "*eval*"',
+        'find . -iname "*.txt" -o -iname "*.doc"',
+    ):
+        decision = convergence_preflight(
+            _proposal(command),
+            cwd="/app",
+            source_revision="source-1",
+        )
+
+        assert decision.disposition is ActionDisposition.PASS
+        assert "forbidden_benchmark_artifact_path" not in decision.reason_codes
+
+
 def test_nested_forbidden_find_selectors_return_before_execution():
     for command in (
         "find / -path '*/logs/verifier/*'",
@@ -116,3 +140,38 @@ def test_budget_risk_returns_only_broad_non_progress_exploration():
     assert "convergence_budget_requires_verification" in broad.reason_codes
     assert "pytest -q" in " ".join(broad.evidence)
     assert focused.disposition is ActionDisposition.PASS
+
+
+def test_budget_risk_does_not_return_mixed_result_checks_or_prose_anchors():
+    mixed_check = convergence_preflight(
+        _proposal(
+            'grep "Posterior mean" /tmp/final_run.log; '
+            'cat posterior_alpha_mean.txt; ls -la /app'
+        ),
+        cwd="/app",
+        source_revision="source-1",
+        progress_state="BUDGET_RISK",
+        unresolved_anchors=(
+            "Install the required package and load the dataset from /app/data.csv.",
+        ),
+    )
+    prose_only_search = convergence_preflight(
+        _proposal("find /app -type f"),
+        cwd="/app",
+        source_revision="source-1",
+        progress_state="BUDGET_RISK",
+        unresolved_anchors=(
+            "Figure out how to detect the jump and output the exact TOML structure.",
+        ),
+    )
+    one_word_prose = convergence_preflight(
+        _proposal("find /app -type f"),
+        cwd="/app",
+        source_revision="source-1",
+        progress_state="BUDGET_RISK",
+        unresolved_anchors=("Optimize",),
+    )
+
+    assert mixed_check.disposition is ActionDisposition.PASS
+    assert prose_only_search.disposition is ActionDisposition.PASS
+    assert one_word_prose.disposition is ActionDisposition.PASS

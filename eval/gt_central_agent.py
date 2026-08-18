@@ -7513,6 +7513,10 @@ class MiniSweCentralAgent(BaseAgent):
                             plan_partial=completion_plan.status is CompletionStatus.PARTIAL,
                             uncovered_obligations=completion_plan.uncovered_obligation_texts,
                             validating_evidence_present=certificate_validating > 0,
+                            allow_unverified_obligation_hold=(
+                                self.preflight_mode is PreflightMode.SHADOW
+                                and self.enable_shadow_submit_gate
+                            ),
                         )
                         readiness_evidence = self._ledger.readiness_evidence(source_revision)
                         readiness_kwargs = {
