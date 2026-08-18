@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -724,13 +726,12 @@ def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch)
 # --------------------------------------------------------------------------- #
 # bridge: the full production sequence against a real graph.db
 # --------------------------------------------------------------------------- #
-@pytest.fixture
-def indexed_repo(tmp_path, monkeypatch):
+@pytest.fixture(scope="session")
+def _indexed_repo_template(tmp_path_factory):
     if not HAVE_GT:
         pytest.skip("groundtruth not installed")
-    monkeypatch.setenv("GT_GATEWAY", "1")
-    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
-    pkg = tmp_path / "pkg"
+    root = tmp_path_factory.mktemp("indexed-repo-template")
+    pkg = root / "pkg"
     pkg.mkdir()
     (pkg / "alpha.py").write_text(
         "def helper(x, y):\n    return x + y\n\n\n"
@@ -738,14 +739,39 @@ def indexed_repo(tmp_path, monkeypatch):
     (pkg / "beta.py").write_text(
         "def helper(a, b, c):\n    return a * b * c\n\n\n"
         "def caller_b(v):\n    return helper(v, 2, 3)\n", encoding="utf-8")
-    (tmp_path / "main.py").write_text(
+    (root / "main.py").write_text(
         "from pkg.alpha import caller_a\n\n\ndef run():\n"
         "    return caller_a(1)\n", encoding="utf-8")
-    db = ensure_index(str(tmp_path))
+    saved = {key: value for key, value in os.environ.items() if key.startswith("GT_")}
+    try:
+        for key in saved:
+            del os.environ[key]
+        db = ensure_index(str(root))
+    finally:
+        for key in [key for key in os.environ if key.startswith("GT_")]:
+            del os.environ[key]
+        os.environ.update(saved)
     if db is None:
         pytest.skip("gt-index binary unavailable")
+    template_db = root / ".gt" / "graph.db"
+    if Path(db).resolve() != template_db.resolve():
+        template_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(db, template_db)
+    return root
+
+
+@pytest.fixture
+def indexed_repo(_indexed_repo_template, tmp_path, monkeypatch):
+    monkeypatch.setenv("GT_GATEWAY", "1")
+    monkeypatch.setenv("GT_GATEWAY_NATIVE", "1")
+    for source in _indexed_repo_template.iterdir():
+        target = tmp_path / source.name
+        if source.is_dir():
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(source, target)
     from gt_engine.bridge import GTBridge
-    return GTBridge(repo_root=str(tmp_path), graph_db=db)
+    return GTBridge(repo_root=str(tmp_path), graph_db=str(tmp_path / ".gt" / "graph.db"))
 
 
 _AMBIGUOUS_GREP = "grep -rn helper ."
@@ -1511,7 +1537,8 @@ def test_submit_blocks_positive_numpy2_removed_alias(indexed_repo, tmp_path):
 # --------------------------------------------------------------------------- #
 @requires_gt
 def test_task_start_capsule_fires_and_seals(indexed_repo):
-    pytest.importorskip("numpy")  # v1r brief hard-requires numpy upstream
+    if importlib.util.find_spec("numpy") is None:
+        pytest.skip("v1r brief hard-requires numpy upstream")
     apply_profile_env()  # profile-2: native/minimal brief form
     b = indexed_repo
     b.issue_text = ("helper in pkg/alpha.py returns the wrong sum; "

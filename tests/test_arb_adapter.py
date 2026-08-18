@@ -161,7 +161,8 @@ def test_run_probe_uses_hybrid_result_and_persists_channel_receipts(
         )
         connection.execute(
             "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
-            "type TEXT,confidence REAL,trust_tier TEXT)"
+            "type TEXT,confidence REAL,trust_tier TEXT,resolution_method TEXT,"
+            "candidate_count INTEGER,evidence_type TEXT,verification_status TEXT)"
         )
         connection.executemany(
             "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)",
@@ -196,7 +197,10 @@ def test_run_probe_uses_hybrid_result_and_persists_channel_receipts(
                 (2, "test_allocate", "tests/test_allocator.py"),
             ),
         )
-        connection.execute("INSERT INTO edges VALUES (1,1,2,'TESTED_BY',0.99,'CERTIFIED')")
+        connection.execute(
+            "INSERT INTO edges VALUES "
+            "(1,1,2,'TESTED_BY',0.99,'CERTIFIED','lsp_verified',1,'semantic','verified')"
+        )
         connection.commit()
     finally:
         connection.close()

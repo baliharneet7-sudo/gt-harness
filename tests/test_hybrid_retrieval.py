@@ -84,6 +84,15 @@ class BrokenDenseBackend:
         raise AssertionError("query failure should short-circuit")
 
 
+class CountingDenseBackend(FakeDenseBackend):
+    def __init__(self) -> None:
+        self.query_calls = 0
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        self.query_calls += 1
+        return super().embed_query(text)
+
+
 def test_typed_state_builds_trajectory_conditioned_query_without_gold_fields():
     state = _state(
         task_text="repair allocator cleanup",
@@ -957,6 +966,117 @@ def test_absent_dense_backend_is_a_clean_abstaining_channel_not_an_error():
     assert dense_receipt.failed is False
     assert dense_receipt.available is False
     assert dense_receipt.reason == "backend_unavailable"
+
+
+def test_all_channels_run_when_non_dense_evidence_is_deliverable():
+    backend = CountingDenseBackend()
+    documents = (
+        RepositoryDocument(
+            "src/entry.py",
+            "def run(): pass",
+            symbol="run",
+        ),
+        RepositoryDocument(
+            "src/allocator.py",
+            "def cleanup_allocator(): pass",
+            symbol="cleanup_allocator",
+        ),
+    )
+
+    result = HybridRetriever(
+        documents,
+        structural_links=(
+            StructuralLink(
+                "src/entry.py",
+                "src/allocator.py",
+                "calls",
+                certified=True,
+                source_symbol="run",
+                target_symbol="cleanup_allocator",
+            ),
+        ),
+        dense_backend=backend,
+        dense_fallback_only=True,
+    ).retrieve(
+        _state(task_text="Fix allocator cleanup", active_paths=("src/entry.py",)),
+        token_budget=200,
+    )
+
+    assert result.selected_context
+    assert backend.query_calls == 1
+    dense_receipt = next(
+        row for row in result.channel_receipts if row.channel is RetrievalChannel.DENSE
+    )
+    assert dense_receipt.failed is False
+    assert dense_receipt.available is True
+    assert dense_receipt.reason == ""
+
+
+def test_sparse_first_uses_dense_when_sparse_evidence_is_not_deliverable():
+    class WeakLexicalChannel:
+        channel = RetrievalChannel.LEXICAL
+
+        def retrieve(
+            self, state: RetrievalState, *, limit: int
+        ) -> tuple[RetrievalCandidate, ...]:
+            del state, limit
+            return (_candidate("src/weak.py", RetrievalChannel.LEXICAL, 1),)
+
+    backend = CountingDenseBackend()
+    dense = DenseRetrievalChannel(
+        (RepositoryDocument("src/dense.py", "releases reserved storage"),),
+        backend,
+    )
+
+    result = HybridRetriever(
+        (),
+        channels=(WeakLexicalChannel(), dense),
+        dense_fallback_only=True,
+    ).retrieve(_state(task_text="semantic allocator behavior"), token_budget=200)
+
+    assert backend.query_calls == 1
+    dense_receipt = next(
+        row for row in result.channel_receipts if row.channel is RetrievalChannel.DENSE
+    )
+    assert dense_receipt.reason == ""
+
+
+def test_all_channels_run_independent_of_caller_registration_order():
+    backend = CountingDenseBackend()
+    documents = (
+        RepositoryDocument("src/entry.py", "def run(): pass", symbol="run"),
+        RepositoryDocument("src/core.py", "def work(): pass", symbol="work"),
+    )
+    links = (
+        StructuralLink(
+            "src/entry.py",
+            "src/core.py",
+            "calls",
+            certified=True,
+            source_symbol="run",
+            target_symbol="work",
+        ),
+    )
+
+    result = HybridRetriever(
+        documents,
+        channels=(
+            DenseRetrievalChannel(documents, backend),
+            ExactRetrievalChannel(documents),
+            StructuralRetrievalChannel(documents, links),
+        ),
+        dense_fallback_only=True,
+    ).retrieve(
+        _state(task_text="Inspect src/entry.py", active_paths=("src/entry.py",)),
+        token_budget=200,
+    )
+
+    assert result.selected_context
+    assert backend.query_calls == 1
+    dense_receipt = next(
+        row for row in result.channel_receipts if row.channel is RetrievalChannel.DENSE
+    )
+    assert dense_receipt.reason == ""
 
 
 def test_selection_requires_certified_or_multi_channel_support():

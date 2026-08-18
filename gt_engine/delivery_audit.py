@@ -22,6 +22,9 @@ from gt_engine.thin_compiler import (
 SURFACE_PATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("task_semantic_substrate", ("task_semantic_substrate", "deliveries")),
     ("preemptive_retrieval", ("preemptive_retrieval", "deliveries")),
+    ("semantic_evidence", ("semantic_evidence", "deliveries")),
+    ("repository_context", ("repository_context", "deliveries")),
+    ("relational_context", ("relational_context", "deliveries")),
     ("persistent_execution_state", ("persistent_execution_state", "deliveries")),
     ("guidance", ("guidance_deliveries",)),
     ("repository_frontier", ("repository_intelligence", "frontier_deliveries")),
@@ -53,6 +56,14 @@ def _path_value(receipt: dict[str, Any], path: tuple[str, ...]) -> Any:
             return ()
         value = value.get(key)
     return value if isinstance(value, list) else ()
+
+
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _first(row: dict[str, Any], *keys: str) -> Any:
@@ -284,6 +295,110 @@ def audit_provider_deliveries(
             if not semantic_support_valid:
                 failures.append(
                     f"{task}:preemptive_delivery_semantic_support_missing:{index}"
+                )
+        elif row["surface"] == "relational_context":
+            raw = row["raw"]
+            processes = tuple(
+                item for item in raw.get("processes") or () if isinstance(item, dict)
+            )
+            process_id_rows = tuple(
+                str(item.get("process_id") or "") for item in processes
+            )
+            claim_ids = tuple(row["claim_ids"])
+            semantic_support_valid = bool(
+                processes
+                and claim_ids
+                and all(process_id_rows)
+                and len(process_id_rows) == len(set(process_id_rows))
+                and len(claim_ids) == len(set(claim_ids))
+                and set(process_id_rows) == set(claim_ids)
+            )
+            semantic_support_valid = bool(
+                semantic_support_valid
+                and str(raw.get("epistemic_status") or "") == "lower_bound"
+                and str(raw.get("source_revision") or "")
+                and str(raw.get("graph_revision") or "")
+                and all(str(item.get("rendered") or "").strip() for item in processes)
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:relational_delivery_semantic_support_missing:{index}"
+                )
+        elif row["surface"] == "semantic_evidence":
+            raw = row["raw"]
+            items = tuple(item for item in raw.get("items") or () if isinstance(item, dict))
+            item_claim_ids = tuple(str(item.get("claim_id") or "") for item in items)
+            semantic_support_valid = bool(
+                items
+                and row["claim_ids"]
+                and all(item_claim_ids)
+                and len(item_claim_ids) == len(set(item_claim_ids))
+                and set(item_claim_ids) == set(row["claim_ids"])
+                and str(raw.get("source_revision") or "")
+                and str(raw.get("graph_revision") or "")
+                and all(
+                    str(item.get("path") or "").strip()
+                    and _positive_int(item.get("line")) > 0
+                    and str(item.get("kind") or "")
+                    in {"definition", "property", "caller", "reference", "test"}
+                    and str(item.get("source_revision") or "")
+                    == str(raw.get("source_revision") or "")
+                    for item in items
+                )
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:semantic_evidence_delivery_support_missing:{index}"
+                )
+        elif row["surface"] == "repository_context":
+            raw = row["raw"]
+            projection = raw.get("projection") or {}
+            semantic = projection.get("semantic_evidence") or {}
+            semantic_ids = {
+                str(item.get("claim_id") or "")
+                for item in semantic.get("items") or ()
+                if isinstance(item, dict)
+            }
+            execution_ids = {
+                str(item.get("view_id") or "")
+                for item in projection.get("execution_views") or ()
+                if isinstance(item, dict)
+            }
+            impact_ids = {
+                str(item.get("claim_id") or "")
+                for item in projection.get("impact_facts") or ()
+                if isinstance(item, dict)
+            }
+            diagnostic_ids = {
+                str(item.get("claim_id") or "")
+                for item in projection.get("diagnostic_facts") or ()
+                if isinstance(item, dict)
+            }
+            validation_ids = {
+                str(item.get("claim_id") or "")
+                for item in projection.get("validation_facts") or ()
+                if isinstance(item, dict)
+            }
+            supported_ids = (
+                semantic_ids
+                | execution_ids
+                | impact_ids
+                | diagnostic_ids
+                | validation_ids
+            ) - {""}
+            semantic_support_valid = bool(
+                row["claim_ids"]
+                and set(row["claim_ids"]) <= supported_ids
+                and str(raw.get("source_revision") or "")
+                and str(raw.get("graph_revision") or "")
+                and str(projection.get("source_revision") or "")
+                == str(raw.get("source_revision") or "")
+                and str(projection.get("graph_revision") or "")
+                == str(raw.get("graph_revision") or "")
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:repository_context_delivery_support_missing:{index}"
                 )
         elif row["surface"] == "persistent_execution_state":
             claim_metadata = row["claim_metadata"]

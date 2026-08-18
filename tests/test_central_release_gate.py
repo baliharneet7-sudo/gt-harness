@@ -290,6 +290,229 @@ def _off() -> dict:
     return receipt
 
 
+def _relational_treatment() -> dict:
+    receipt = _treatment()
+    receipt["treatment_profile"] = "central_relational_v2"
+    receipt["component_configuration"].update(
+        {
+            "persistent_execution_state": True,
+            "relational_context": True,
+            "semantic_evidence": True,
+            "dense_fallback_only": True,
+        }
+    )
+    receipt["preemptive_retrieval"]["decisions"] = [
+        {
+            "status": "abstained",
+            "opportunity_kind": "post_read_search",
+            "reason_codes": ["no_supported_context"],
+            "cache_hit": False,
+            "channel_receipts": [
+                {
+                    "channel": "dense",
+                    "candidate_count": 0,
+                    "failed": False,
+                    "available": False,
+                    "reason": "sparse_supported_dense_skipped",
+                    "latency_ms": 0.0,
+                }
+            ],
+        }
+    ]
+    receipt["preemptive_retrieval"]["opportunity_accounting"] = {
+        "schema": "gt.retrieval_opportunity_accounting.v1",
+        "opportunities": 1,
+    }
+    receipt["metrics"].update(
+        {
+            "relational_context_opportunities": 1,
+            "relational_context_deliveries": 1,
+            "semantic_evidence_deliveries": 1,
+            "repository_context_deliveries": 1,
+        }
+    )
+    receipt["relational_context"] = {
+        "schema": "gt.relational_context_runtime.v1",
+        "enabled": True,
+        "decisions": [
+            {
+                "call": 1,
+                "status": "delivered",
+                "opportunity_kind": "post_read_search",
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["process-1"],
+                "reason_codes": ["certified_lower_bound"],
+            }
+        ],
+        "deliveries": [
+            {
+                "delivery_id": "relational-context-1",
+                "call": 1,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["process-1"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "request-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 40,
+                "tokens": 12,
+                "epistemic_status": "lower_bound",
+                "processes": [
+                    {
+                        "process_id": "process-1",
+                        "anchor": "src/a.py",
+                        "rendered": "src/a.py --calls--> src/b.py",
+                        "truncated": False,
+                        "cycle_terminated": False,
+                    }
+                ],
+            }
+        ],
+        "delivered_claim_ids": ["process-1"],
+    }
+    receipt["semantic_evidence"] = {
+        "schema": "gt.semantic_evidence_runtime.v1",
+        "enabled": True,
+        "decisions": [
+            {
+                "call": 1,
+                "status": "delivered",
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["semantic-1"],
+                "reason_codes": [],
+            }
+        ],
+        "deliveries": [
+            {
+                "delivery_id": "semantic-evidence-1",
+                "call": 1,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["semantic-1"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "request-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 35,
+                "tokens": 10,
+                "items": [
+                    {
+                        "kind": "definition",
+                        "path": "src/a.py",
+                        "line": 1,
+                        "claim_id": "semantic-1",
+                        "source_revision": "source-1",
+                    }
+                ],
+            }
+        ],
+        "delivered_claim_ids": ["semantic-1"],
+    }
+    receipt["repository_context"] = {
+        "schema": "gt.repository_context_runtime.v1",
+        "enabled": True,
+        "decisions": [
+            {
+                "call": 1,
+                "status": "delivered",
+                "opportunity_kind": "post_read_search",
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["semantic-1", "process-1"],
+                "reason_codes": [],
+            }
+        ],
+        "deliveries": [
+            {
+                "delivery_id": "repository-context-1",
+                "call": 1,
+                "source_revision": "source-1",
+                "graph_revision": "graph-1",
+                "claim_ids": ["semantic-1", "process-1"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "request-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 70,
+                "tokens": 20,
+                "projection": {
+                    "status": "deliver",
+                    "source_revision": "source-1",
+                    "graph_revision": "graph-1",
+                    "claim_ids": ["semantic-1", "process-1"],
+                    "semantic_evidence": {
+                        "items": [{"claim_id": "semantic-1"}],
+                    },
+                    "execution_views": [{"view_id": "process-1"}],
+                    "impact_facts": [],
+                },
+            }
+        ],
+        "delivered_claim_ids": ["semantic-1", "process-1"],
+    }
+    # The strengthened profile composes semantic and relational evidence into
+    # one provider surface. The legacy surfaces remain configured for receipt
+    # compatibility but do not independently deliver duplicate claims.
+    receipt["relational_context"]["deliveries"] = []
+    receipt["relational_context"]["delivered_claim_ids"] = []
+    receipt["semantic_evidence"]["deliveries"] = []
+    receipt["semantic_evidence"]["delivered_claim_ids"] = []
+    receipt["metrics"]["relational_context_deliveries"] = 0
+    receipt["metrics"]["semantic_evidence_deliveries"] = 0
+    receipt["contribution_compiler"]["calls"][0].update(
+        {
+            "candidate_count": 2,
+            "accounted_count": 2,
+            "payload_tokens": 40,
+            "selected_surfaces": [
+                "persistent_execution_state",
+                "repository_context",
+            ],
+        }
+    )
+    receipt["model_call_contexts"][0].update(
+        {
+            "relational_context": {
+                "status": "deliver",
+                "claim_ids": ["process-1"],
+                "reason_codes": ["certified_lower_bound"],
+            },
+            "relational_context_delivered": False,
+            "semantic_evidence": {
+                "status": "deliver",
+                "claim_ids": ["semantic-1"],
+                "reason_codes": [],
+            },
+            "semantic_evidence_delivered": False,
+            "repository_context": {
+                "status": "deliver",
+                "claim_ids": ["semantic-1", "process-1"],
+                "reason_codes": [],
+            },
+            "repository_context_delivered": True,
+        }
+    )
+    return receipt
+
+
 def test_treatment_gate_rejects_unified_contribution_budget_expansion():
     receipt = _treatment()
     receipt["contribution_compiler"]["calls"][0]["payload_tokens"] = 1201
@@ -301,12 +524,114 @@ def test_treatment_gate_rejects_unified_contribution_budget_expansion():
 
 
 def test_release_gate_accepts_complete_evidence_contract():
-    report = audit_release([_treatment()], static_evidence=STATIC, off_receipts=[_off()])
+    report = audit_release(
+        [_relational_treatment()], static_evidence=STATIC, off_receipts=[_off()]
+    )
 
     assert report.passed is True
     assert report.status == "READY"
     assert report.schema == "gt.release_gate.v1"
     assert report.summary["checks_passed"] == report.summary["checks_total"]
+
+
+def test_release_gate_accepts_relational_profile_as_additive_persistent_capability():
+    report = audit_release(
+        [_relational_treatment()], static_evidence=STATIC, off_receipts=[_off()]
+    )
+
+    assert report.passed is True
+    assert not any("persistent_" in failure for failure in report.failures)
+    assert not any("dense_backend_receipt_missing" in failure for failure in report.failures)
+
+
+def test_strengthened_release_rejects_legacy_profile_receipt() -> None:
+    report = audit_release([_treatment()], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:required_treatment_profile_mismatch" in report.failures
+
+
+def test_relational_profile_requires_dense_backend_when_fallback_was_attempted():
+    receipt = _relational_treatment()
+    receipt["preemptive_retrieval"]["dense_backend"] = None
+    receipt["preemptive_retrieval"]["decisions"] = [
+        {
+            "opportunity_kind": "post_read_search",
+            "reason_codes": [],
+            "cache_hit": False,
+            "channel_receipts": [
+                {
+                    "channel": "dense",
+                    "failed": False,
+                    "available": False,
+                    "reason": "backend_unavailable",
+                }
+            ]
+        }
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:dense_backend_receipt_missing" in report.failures
+
+
+def test_relational_profile_requires_provisioned_dense_backend_even_when_skipped():
+    receipt = _relational_treatment()
+    receipt["preemptive_retrieval"]["dense_backend"] = None
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:dense_backend_receipt_missing" in report.failures
+
+
+def test_relational_profile_accepts_fully_accounted_correct_abstention():
+    receipt = _relational_treatment()
+    receipt["repository_context"]["decisions"][0].update(
+        {
+            "status": "abstain",
+            "claim_ids": [],
+            "reason_codes": ["no_certified_repository_context"],
+        }
+    )
+    receipt["repository_context"]["deliveries"] = []
+    receipt["repository_context"]["delivered_claim_ids"] = []
+    receipt["metrics"]["repository_context_deliveries"] = 0
+    receipt["contribution_compiler"]["calls"][0].update(
+        {
+            "candidate_count": 1,
+            "accounted_count": 1,
+            "payload_tokens": 20,
+            "selected_surfaces": ["persistent_execution_state"],
+        }
+    )
+    receipt["model_call_contexts"][0].update(
+        {
+            "provider_view_changed": False,
+            "stock_provider_messages_sha256": "provider-1",
+            "provider_changed_message_indices": [],
+            "repository_context": {
+                "status": "abstain",
+                "claim_ids": [],
+                "reason_codes": ["no_certified_repository_context"],
+            },
+            "repository_context_delivered": False,
+        }
+    )
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    check = next(
+        row
+        for row in report.checks
+        if row.name == "repository_context_integrated_consequence"
+    )
+    assert check.passed is True
+    assert "repository_context_no_integrated_delivery" not in report.failures
+    assert check.details["deliveries"] == 0
+    assert check.details["opportunities"] == 1
+    assert check.details["correct_abstentions_allowed"] is True
 
 
 def test_release_gate_rejects_legacy_17_only_product_accounting():
@@ -348,7 +673,7 @@ def test_release_gate_rejects_one_time_persistent_state_initialization():
 
 
 def test_release_gate_accepts_content_hashed_runtime_dense_identity():
-    receipt = _treatment()
+    receipt = _relational_treatment()
     receipt["preemptive_retrieval"]["dense_backend"] = {
         "available": True,
         "backend": "snowflake_onnx",
@@ -413,7 +738,7 @@ def test_release_gate_rejects_repeated_or_diagnostic_free_project_probe():
 
 
 def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
-    receipt = _treatment()
+    receipt = _relational_treatment()
     receipt["repository_intelligence"] = {
         "status": "not_applicable",
         "applicability": "not_applicable_no_supported_source",
@@ -563,7 +888,7 @@ def test_release_gate_rejects_any_provider_query_marker_failure():
 
 
 def test_release_gate_accepts_materiality_accounted_persistent_abstention():
-    receipt = _treatment()
+    receipt = _relational_treatment()
     receipt["executor_calls"] = 2
     receipt["calls"] = 3
     receipt["persistent_execution_state"]["metrics"]["context_compilations"] = 2
@@ -908,7 +1233,9 @@ def test_release_gate_fails_closed_when_static_evidence_is_missing():
 
 
 def test_release_gate_report_is_json_serializable_and_machine_readable():
-    report = audit_release([_treatment()], static_evidence=STATIC, off_receipts=[_off()])
+    report = audit_release(
+        [_relational_treatment()], static_evidence=STATIC, off_receipts=[_off()]
+    )
     payload = report.as_dict()
 
     assert payload["schema"] == "gt.release_gate.v1"
@@ -923,6 +1250,8 @@ def test_static_gate_accepts_machine_readable_outputs_from_existing_gates():
         "central_readiness": {"status": "READY"},
         "pre_smoke_approved": {"status": "SMOKE_APPROVED"},
     }
-    report = audit_release([_treatment()], static_evidence=static, off_receipts=[_off()])
+    report = audit_release(
+        [_relational_treatment()], static_evidence=static, off_receipts=[_off()]
+    )
 
     assert report.passed is True

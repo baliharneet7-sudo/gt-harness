@@ -7,6 +7,8 @@ reported and returned fail-open rather than fabricated.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -89,6 +91,107 @@ _DEFAULT_BUILD_LIMITS = RepositoryBuildLimits()
 # node, and source revision; only its body is partial. All other build reasons
 # remain fail-closed because they can remove or falsify repository evidence.
 _NON_FATAL_BUILD_REASONS = frozenset({"chunk_character_limit"})
+
+_EXTERNAL_EVIDENCE_MARKERS = frozenset(
+    {"builtin", "stdlib", "third_party", "third-party", "external", "framework"}
+)
+_AMBIGUOUS_RESOLUTION_MARKERS = frozenset(
+    {"ambiguous", "multiple", "global_fallback", "global_unique", "workspace_unique"}
+)
+
+
+def _parse_edge_metadata(value: object) -> dict[str, str]:
+    """Parse the indexer's JSON or semicolon key/value metadata, quietly."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, Mapping):
+            return {
+                str(key).strip(): str(item).strip()
+                for key, item in decoded.items()
+                if str(key).strip() and item is not None
+            }
+    parsed: dict[str, str] = {}
+    for segment in raw.split(";"):
+        key, separator, item = segment.partition("=")
+        if separator and key.strip():
+            parsed[key.strip()] = item.strip()
+    return parsed
+
+
+def _edge_resolution_provenance(
+    *,
+    resolution_method: object,
+    candidate_count: object,
+    evidence_type: object,
+    verification_status: object,
+    metadata: object,
+    provenance_available: bool,
+) -> tuple[str, str, int | None]:
+    """Classify an edge without upgrading missing graph evidence.
+
+    Endpoints in the local graph establish only that both symbols are present in
+    the checkout.  They do not establish a unique semantic resolution.  Exact
+    status therefore requires the graph's resolution provenance and a single
+    candidate; old schemas remain usable for ranking but are not certified.
+    """
+
+    method = str(resolution_method or "").strip().lower()
+    evidence = str(evidence_type or "").strip().lower()
+    verification = str(verification_status or "").strip().lower()
+    meta = str(metadata or "").strip().lower()
+    try:
+        candidates = int(candidate_count) if candidate_count is not None else None
+    except (TypeError, ValueError, OverflowError):
+        candidates = None
+
+    if not provenance_available:
+        return "unknown", "unknown", candidates
+
+    combined = " ".join((method, evidence, verification, meta))
+    normalized_combined = "".join(char for char in combined if char.isalnum())
+    external_marker = next(
+        (marker for marker in _EXTERNAL_EVIDENCE_MARKERS if marker in combined), None
+    )
+    if external_marker:
+        origin = external_marker.replace("-", "_")
+        if origin not in {"builtin", "stdlib", "third_party", "framework"}:
+            origin = "external"
+        return origin, "external", candidates
+
+    origin = "program"
+    if candidates is not None and candidates > 1:
+        return origin, "ambiguous", candidates
+    if any(marker in combined for marker in _AMBIGUOUS_RESOLUTION_MARKERS):
+        return origin, "ambiguous", candidates
+    if "unresolved" in combined or candidates == 0:
+        return origin, "unresolved", candidates
+    if "dynamic" in combined:
+        return origin, "dynamic", candidates
+    if method in {
+        "global_name",
+        "impl_method",
+        "name_match",
+        "unique_method",
+        "verified_unique",
+    }:
+        return origin, "heuristic", candidates
+    if "reexport" in normalized_combined and verification not in {
+        "verified",
+        "lsp_verified",
+    }:
+        return origin, "reexport_unproven", candidates
+    if not method or candidates != 1:
+        return origin, "unknown", candidates
+    if any(marker in combined for marker in ("heuristic", "cochange", "similarity")):
+        return origin, "heuristic", candidates
+    return origin, "exact", candidates
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -244,13 +347,25 @@ def build_hybrid_repository(
         provenance: tuple[str, ...],
         *,
         certified: bool = False,
+        origin: str = "unknown",
+        resolution_outcome: str = "unknown",
         source_document: RepositoryDocument | None = None,
         target_document: RepositoryDocument | None = None,
+        resolution_method: str = "",
+        candidate_count: int | None = None,
+        evidence_type: str = "",
+        verification_status: str = "",
+        receiver_type: str = "",
+        route: str = "",
+        http_method: str = "",
+        source_kind: str = "",
+        target_kind: str = "",
+        source_return_type: str = "",
+        target_return_type: str = "",
     ) -> None:
         if (
             not source_path
             or not target_path
-            or source_path == target_path
             or len(links) >= limits.max_links
         ):
             if len(links) >= limits.max_links:
@@ -276,6 +391,39 @@ def build_hybrid_repository(
                 target_start_line=(
                     target_document.start_line if target_document else None
                 ),
+                source_content_sha256=(
+                    hashlib.sha256(source_document.text.encode("utf-8")).hexdigest()
+                    if source_document is not None
+                    else ""
+                ),
+                target_content_sha256=(
+                    hashlib.sha256(target_document.text.encode("utf-8")).hexdigest()
+                    if target_document is not None
+                    else ""
+                ),
+                source_evidence_origin=(
+                    source_document.origin.value
+                    if source_document is not None
+                    else "unknown"
+                ),
+                target_evidence_origin=(
+                    target_document.origin.value
+                    if target_document is not None
+                    else "unknown"
+                ),
+                origin=origin,
+                resolution_outcome=resolution_outcome,
+                resolution_method=resolution_method,
+                candidate_count=candidate_count,
+                evidence_type=evidence_type,
+                verification_status=verification_status,
+                receiver_type=receiver_type,
+                route=route,
+                http_method=http_method,
+                source_kind=source_kind,
+                target_kind=target_kind,
+                source_return_type=source_return_type,
+                target_return_type=target_return_type,
             )
         )
 
@@ -293,6 +441,10 @@ def build_hybrid_repository(
                 document_chars=0,
             )
         signature = "COALESCE(signature,'')" if "signature" in node_columns else "''"
+        label = "COALESCE(label,'')" if "label" in node_columns else "''"
+        return_type = (
+            "COALESCE(return_type,'')" if "return_type" in node_columns else "''"
+        )
         canonical_include_paths = tuple(
             dict.fromkeys(
                 path
@@ -335,7 +487,7 @@ def build_hybrid_repository(
             path_parameters = canonical_include_paths
         node_query = (
             "SELECT id,name,file_path,start_line,end_line,"
-            + f"{signature} FROM nodes "
+            + f"{signature},{label},{return_type} FROM nodes "
             + path_clause
             + "ORDER BY lower(file_path),start_line,id LIMIT ?"
         )
@@ -352,7 +504,17 @@ def build_hybrid_repository(
         seen_spans: set[tuple[str, int, int, str]] = set()
         loaded_node_paths: dict[int, str] = {}
         loaded_node_documents: dict[int, RepositoryDocument] = {}
-        for raw_id, raw_name, raw_path, raw_start, raw_end, raw_signature in node_rows:
+        loaded_node_attributes: dict[int, tuple[str, str]] = {}
+        for (
+            raw_id,
+            raw_name,
+            raw_path,
+            raw_start,
+            raw_end,
+            raw_signature,
+            raw_label,
+            raw_return_type,
+        ) in node_rows:
             path = _canonical_repo_path(root, str(raw_path or ""))
             start = max(1, int(raw_start or 1))
             end = max(start, int(raw_end or start))
@@ -360,8 +522,12 @@ def build_hybrid_repository(
             if path is None:
                 reasons.append("unsafe_source_path")
                 continue
-            key = (path.lower(), start, end, str(name or "").lower())
+            key = (path, start, end, str(name or ""))
             loaded_node_paths[int(raw_id)] = path
+            loaded_node_attributes[int(raw_id)] = (
+                str(raw_label or ""),
+                str(raw_return_type or ""),
+            )
             if not path or key in seen_spans:
                 continue
             seen_spans.add(key)
@@ -411,6 +577,27 @@ def build_hybrid_repository(
         if required_edges <= edge_columns:
             confidence = "COALESCE(confidence,0.0)" if "confidence" in edge_columns else "0.0"
             trust_tier = "COALESCE(trust_tier,'')" if "trust_tier" in edge_columns else "''"
+            resolution_method = (
+                "COALESCE(resolution_method,'')"
+                if "resolution_method" in edge_columns
+                else "''"
+            )
+            candidate_count = (
+                "candidate_count" if "candidate_count" in edge_columns else "NULL"
+            )
+            evidence_type = (
+                "COALESCE(evidence_type,'')" if "evidence_type" in edge_columns else "''"
+            )
+            verification_status = (
+                "COALESCE(verification_status,'')"
+                if "verification_status" in edge_columns
+                else "''"
+            )
+            metadata = "COALESCE(metadata,'')" if "metadata" in edge_columns else "''"
+            provenance_available = {
+                "resolution_method",
+                "candidate_count",
+            } <= edge_columns
             loaded_ids = tuple(loaded_node_paths)
             relation_clause = ""
             relation_parameters: tuple[object, ...] = ()
@@ -422,7 +609,10 @@ def build_hybrid_repository(
                 relation_parameters = (*loaded_ids, *loaded_ids)
             edge_query = (
                 "SELECT id,source_id,target_id,type,"
-                f"{confidence},{trust_tier} FROM edges " + relation_clause + "ORDER BY id LIMIT ?"
+                f"{confidence},{trust_tier},{resolution_method},{candidate_count},"
+                f"{evidence_type},{verification_status},{metadata} FROM edges "
+                + relation_clause
+                + "ORDER BY id LIMIT ?"
             )
             edge_rows = tuple(
                 connection.execute(
@@ -433,11 +623,40 @@ def build_hybrid_repository(
             if len(edge_rows) > limits.max_links:
                 reasons.append("link_limit")
                 edge_rows = edge_rows[: limits.max_links]
-            for edge_id, source_id, target_id, relation, confidence_value, trust in edge_rows:
+            for (
+                edge_id,
+                source_id,
+                target_id,
+                relation,
+                confidence_value,
+                trust,
+                method,
+                candidates,
+                edge_evidence_type,
+                edge_verification_status,
+                edge_metadata,
+            ) in edge_rows:
                 source_path = loaded_node_paths.get(int(source_id))
                 target_path = loaded_node_paths.get(int(target_id))
-                if not source_path or not target_path or source_path == target_path:
+                if not source_path or not target_path:
                     continue
+                origin, resolution_outcome, normalized_candidates = (
+                    _edge_resolution_provenance(
+                        resolution_method=method,
+                        candidate_count=candidates,
+                        evidence_type=edge_evidence_type,
+                        verification_status=edge_verification_status,
+                        metadata=edge_metadata,
+                        provenance_available=provenance_available,
+                    )
+                )
+                normalized_metadata = _parse_edge_metadata(edge_metadata)
+                source_kind, source_return_type = loaded_node_attributes.get(
+                    int(source_id), ("", "")
+                )
+                target_kind, target_return_type = loaded_node_attributes.get(
+                    int(target_id), ("", "")
+                )
                 append_link(
                     source_path,
                     target_path,
@@ -446,13 +665,37 @@ def build_hybrid_repository(
                     (
                         f"graph_edge:{int(edge_id)}",
                         f"trust:{str(trust or 'unknown')}",
+                        f"resolution_method:{str(method or 'unknown')}",
+                        "candidate_count:"
+                        + (
+                            str(normalized_candidates)
+                            if normalized_candidates is not None
+                            else "unknown"
+                        ),
+                        f"evidence_type:{str(edge_evidence_type or 'unknown')}",
+                        f"verification_status:{str(edge_verification_status or 'unknown')}",
                     ),
                     certified=(
                         str(trust or "").upper() == "CERTIFIED"
                         and float(confidence_value or 0.0) >= 0.95
+                        and origin == "program"
+                        and resolution_outcome == "exact"
                     ),
+                    origin=origin,
+                    resolution_outcome=resolution_outcome,
                     source_document=loaded_node_documents.get(int(source_id)),
                     target_document=loaded_node_documents.get(int(target_id)),
+                    resolution_method=str(method or ""),
+                    candidate_count=normalized_candidates,
+                    evidence_type=str(edge_evidence_type or ""),
+                    verification_status=str(edge_verification_status or ""),
+                    receiver_type=normalized_metadata.get("receiver_type", ""),
+                    route=normalized_metadata.get("route", ""),
+                    http_method=normalized_metadata.get("method", ""),
+                    source_kind=source_kind,
+                    target_kind=target_kind,
+                    source_return_type=source_return_type,
+                    target_return_type=target_return_type,
                 )
 
         assertion_columns = _columns(connection, "assertions")
@@ -485,6 +728,8 @@ def build_hybrid_repository(
                     float(score or 0.0),
                     (f"graph_assertion:{int(assertion_id)}", "test_assertion"),
                     certified=float(score or 0.0) >= 0.95,
+                    origin="program",
+                    resolution_outcome="exact",
                     source_document=loaded_node_documents.get(int(target_id or 0)),
                     target_document=loaded_node_documents.get(int(test_id or 0)),
                 )
@@ -518,6 +763,8 @@ def build_hybrid_repository(
                     float(confidence_value or 0.0),
                     (f"graph_closure:depth={int(depth or 0)}", "verified_closure"),
                     certified=float(confidence_value or 0.0) >= 0.95,
+                    origin="program",
+                    resolution_outcome="exact",
                     source_document=loaded_node_documents.get(int(source_id or 0)),
                     target_document=loaded_node_documents.get(int(target_id or 0)),
                 )
@@ -545,6 +792,8 @@ def build_hybrid_repository(
                     "COCHANGE",
                     (max(0, int(count or 0)) / (max(0, int(count or 0)) + 1.0)),
                     (f"graph_cochange:count={int(count or 0)}", "git_cochange"),
+                    origin="program",
+                    resolution_outcome="heuristic",
                 )
 
         cochange_set_columns = _columns(connection, "cochange_sets")
@@ -581,6 +830,8 @@ def build_hybrid_repository(
                                 f"graph_cochange_set:{commit_hash}",
                                 "git_commit_membership",
                             ),
+                            origin="program",
+                            resolution_outcome="heuristic",
                         )
     except (OSError, sqlite3.Error, TypeError, ValueError):
         reasons.append("graph_query_failed")

@@ -1,0 +1,128 @@
+{
+  "schema": "gt.historical_replay_prediction.v2",
+  "frozen_at": "2026-08-17",
+  "runtime_rules_may_match_task_ids": false,
+  "artifact_root": ".research/historical-replay-source",
+  "predictions": [
+    {
+      "task": "extract-elf", "class": "negative_flip", "source_run": "31355487270",
+      "receipt_sha256": "102d152c70ad6955602b7bd80540484abd95aaa2e1f73c54c35317527203ccd4",
+      "trajectory_sha256": "8a200eba10dbd9fa4d32dae71bc4188dd10a5900bd98297e4aefd60c41c88d04",
+      "observed_decision": "Submitted a flat ELF memory map after validating only the provided binary.",
+      "frozen_response": "",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "regex-chess", "class": "negative_flip", "source_run": "31355487270",
+      "receipt_sha256": "1867bb90e9fe10623f7543c2c63a37c3b4f63a4b40f7ac03549a68b02716fadb",
+      "trajectory_sha256": "5b01b34ac1fb9eabc371dad7ab80e044b40edb1ac8bb10b4ea7d900aa0ca94c4",
+      "observed_decision": "Reached the 100-step cap while repeatedly inspecting model-authored regex generation.",
+      "frozen_response": "Abstain from model-authored self-echo; emit only new pre-existing certified dependencies.",
+      "prediction": "reduce_interference", "confidence": "moderate"
+    },
+    {
+      "task": "torch-tensor-parallelism", "class": "negative_flip", "source_run": "31355487270",
+      "receipt_sha256": "bf004fc71aca028aa3c4476743e50db28b669e53d55546368ed8dd37f73fc309",
+      "trajectory_sha256": "2bab6a515d719736f94ea104ec75324f9ebed6d2c1276ab81d014bf9d1fb880d",
+      "observed_decision": "Submitted after local verification despite an official behavioral mismatch.",
+      "frozen_response": "Show exact changed symbols, certified callers, and impacted declared checks; otherwise abstain.",
+      "prediction": "possible_recovery", "confidence": "low"
+    },
+    {
+      "task": "video-processing", "class": "negative_flip", "source_run": "31355487270",
+      "receipt_sha256": "31b7a8ab92eb43ca565a053528e261574b82d4b6d85735093effc623523e25af",
+      "trajectory_sha256": "b0215caeb81f8383c0c476fa063a9942891fcc0f1ee78b8bab7be3ec3f59725a",
+      "observed_decision": "Submitted a video heuristic that passed self-authored checks but did not generalize.",
+      "frozen_response": "",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "winning-avg-corewars", "class": "negative_flip", "source_run": "31355487270",
+      "receipt_sha256": "20162510b4194c785d2be5b6fbc9a877a4667de204cb5a871adbf356eef26a01",
+      "trajectory_sha256": "2c9ef3f19e2045234eedf4d891a5dacd484564f2e100463089db717de96166ca",
+      "observed_decision": "Reached the 100-step cap iterating warrior constants and simulations.",
+      "frozen_response": "Deliver the pre-existing opponent dependency/process surface once, then deduplicate it.",
+      "prediction": "reduce_exploration", "confidence": "moderate"
+    },
+    {
+      "task": "caffe-cifar-10", "class": "both_fail", "source_run": "31355487270",
+      "receipt_sha256": "8add63e774fd40441302dc81518274463c8014b05620bdcd015770e0e0c6e310",
+      "trajectory_sha256": "39a2e9e84534ce3cd1ecc13256a55d068d0a317f09d2e5723681b989e8a1a897",
+      "observed_decision": "Reached deadline reserve during installation, data repair, and training.",
+      "frozen_response": "Show required deliverable/check state only; repository graph abstains while source-less.",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "db-wal-recovery", "class": "both_fail", "source_run": "31355487270",
+      "receipt_sha256": "c1198c40a914a12803fed6cd403a4f5fc58c06fbf5421ead2246ee3753c7a221",
+      "trajectory_sha256": "58506cd9800b453a424c8902ef70a260fb5aeabde7cb5abf25f557d9fcc28c2b",
+      "observed_decision": "Submitted eleven reconstructed records that did not match the verifier data.",
+      "frozen_response": "Only concrete observed SQLite diagnostics; never infer hidden record values.",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "gpt2-codegolf", "class": "both_fail", "source_run": "31355487270",
+      "receipt_sha256": "d9f75c7f51aa13ab47394f019b3eae68f295790a934b7351ef566605717a0177",
+      "trajectory_sha256": "85ac81f230815be6f386b98e44ec8435fb4ca50d5781f6af2d56f5479334517f",
+      "observed_decision": "Reached deadline while implementing and golfing despite already observing the 5 KB bound.",
+      "frozen_response": "Do not repeat the represented size/check fact.",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "model-extraction-relu-logits", "class": "both_fail", "source_run": "31355487270",
+      "receipt_sha256": "3a00ef13c383f7b5bde458a836b48b128aad2b75c504965f33a83c084dcf3304",
+      "trajectory_sha256": "67a06c0acde008ee6f7904086f383528dfa4af55e64cdf4c762b7192abc6a343",
+      "observed_decision": "Reached deadline during numerical extraction experiments after opening forward.py first.",
+      "frozen_response": "Show the exact forward.py signature once only if it is absent from retained history.",
+      "prediction": "little_or_no_effect", "confidence": "high"
+    },
+    {
+      "task": "train-fasttext", "class": "both_fail", "source_run": "31355487270",
+      "receipt_sha256": "6d71fd56f99936a6f06829a4a639c1dc4579d1b15de1d28fe757f32766ca5d43",
+      "trajectory_sha256": "40f2ed1dbfb194290d1faef0998ff35508ca37e3f0cecf7b5bfe9d3d67993ca7",
+      "observed_decision": "Reached the 100-step cap tuning training experiments.",
+      "frozen_response": "Show deliverable and observed check state only.",
+      "prediction": "no_effect", "confidence": "high"
+    },
+    {
+      "task": "count-dataset-tokens", "class": "gain", "source_run": "31355487270",
+      "receipt_sha256": "41bfd46993f187225eecb945cb66262524cf0ed80bebccc91a2c82549c1426af",
+      "trajectory_sha256": "2d0e1032051f5dc812e9923c0d6f21d9587420c57fe6030dc000632df73082d5",
+      "observed_decision": "Resolved with a one-node, zero-edge graph.",
+      "frozen_response": "",
+      "prediction": "preserve", "confidence": "high"
+    },
+    {
+      "task": "largest-eigenval", "class": "gain", "source_run": "31355487270",
+      "receipt_sha256": "2cd2b56f4c147a65f355c57b05050835580a88a2521f1854bca56be149751b8b",
+      "trajectory_sha256": "522f289d3d07383cc3f49147e7882f2856c94b7c0560acdc5f97f2c8129de7c6",
+      "observed_decision": "Resolved after reading eigen.py and eval.py.",
+      "frozen_response": "Show the exact target signature and certified check/caller once if absent from history.",
+      "prediction": "preserve", "confidence": "moderate"
+    },
+    {
+      "task": "protein-assembly", "class": "gain", "source_run": "31355487270",
+      "receipt_sha256": "9eb95ac9b8bca9f3f05f4885df5e750b9c0b53f4064a3b9e9c8666fec99cacba",
+      "trajectory_sha256": "1d0ff4b49c824f0eee915f97ce4168402c062b17b3810cf3d46179c99d141234",
+      "observed_decision": "Resolved with no graph nodes.",
+      "frozen_response": "",
+      "prediction": "preserve", "confidence": "high"
+    },
+    {
+      "task": "torch-pipeline-parallelism", "class": "gain", "source_run": "31355487270",
+      "receipt_sha256": "aec93582f972dc47cb2c43bf96a5904f131aec82defdf6d8cb50131bbb4592e9",
+      "trajectory_sha256": "ad728380b3e025ab4f2d060edbd74010bdb649660388ca2c9cde21e5db2b6036",
+      "observed_decision": "Resolved in the strict run with a three-node, four-edge graph.",
+      "frozen_response": "Show the exact pipeline call/check surface once.",
+      "prediction": "preserve", "confidence": "moderate"
+    },
+    {
+      "task": "kozea__weasyprint-2300", "class": "gain", "source_run": "25980298038",
+      "source_report": "D:/Groundtruth/LOCALIZATION_REPORT.md:53",
+      "source_report_sha256": "dd8026bc5554d3fd2b46db0f702436d8bae9737068493f5791846902a6c733bd",
+      "observed_decision": "Edited block.py after cross-file caller evidence; reproduced in one of two attempts.",
+      "frozen_response": "Show block.py callers from column.py and table.py before the edit.",
+      "prediction": "plausible_localization_help", "confidence": "moderate"
+    }
+  ]
+}

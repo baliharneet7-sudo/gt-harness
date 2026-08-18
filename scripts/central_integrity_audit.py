@@ -29,8 +29,11 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
+import hashlib
 import json
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +153,24 @@ def _path_literal(ast_node: ast.AST) -> str | None:
     return None
 
 
-def _static_source_boundary() -> dict[str, object]:
+def _runtime_source_fingerprint() -> str:
+    """Hash the exact active runtime bytes used by the static audit."""
+
+    digest = hashlib.sha256()
+    for path in _runtime_paths():
+        try:
+            relative = str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            payload = path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        digest.update(relative.encode("utf-8", "surrogatepass"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(payload).digest())
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=4)
+def _static_source_boundary_cached(_source_fingerprint: str) -> dict[str, object]:
     """Scan active runtime for grader-only read sources and instruction-only
     completion compilation."""
 
@@ -232,6 +252,17 @@ def _static_source_boundary() -> dict[str, object]:
         "violations": violations,
         "source_boundary_proven": bool(checked_files) and not violations,
     }
+
+
+def _static_source_boundary() -> dict[str, object]:
+    fingerprint = _runtime_source_fingerprint()
+    return copy.deepcopy(_static_source_boundary_cached(fingerprint))
+
+
+def clear_static_source_boundary_cache() -> None:
+    """Clear process-local audit memoization for tests and source reloads."""
+
+    _static_source_boundary_cached.cache_clear()
 
 
 def _trajectory_observed_markers(trajectory: dict) -> int:

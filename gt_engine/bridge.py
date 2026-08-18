@@ -436,6 +436,57 @@ def _edit_bridges_on() -> bool:
         "", "0", "false", "no", "off")
 
 
+_TRANSIENT_INDEX_ERROR_TYPES = frozenset(
+    {
+        "blockingioerror",
+        "permissionerror",
+        "timeouterror",
+    }
+)
+_TRANSIENT_INDEX_DIAGNOSTICS = (
+    "database is locked",
+    "resource temporarily unavailable",
+    "sharing violation",
+    "temporarily unavailable",
+)
+
+
+def _index_receipt_payload(receipt: Any, *, attempt: int) -> dict[str, Any]:
+    """Return the content-safe index facts needed to diagnose graph refresh."""
+
+    status = getattr(receipt, "status", "unknown")
+    return {
+        "attempt": max(1, int(attempt)),
+        "status": str(getattr(status, "value", status) or "unknown"),
+        "available": bool(getattr(receipt, "available", False)),
+        "graph_revision": str(getattr(receipt, "graph_revision", "") or ""),
+        "binary_sha256": str(getattr(receipt, "binary_sha256", "") or ""),
+        "elapsed_ms": float(getattr(receipt, "elapsed_ms", 0.0) or 0.0),
+        "error_type": str(getattr(receipt, "error_type", "") or ""),
+        "error_diagnostic": " ".join(
+            str(getattr(receipt, "error_diagnostic", "") or "").split()
+        )[:600],
+        "source_files": int(getattr(receipt, "source_files", 0) or 0),
+        "indexable_files": int(getattr(receipt, "indexable_files", 0) or 0),
+        "parser_failures": int(getattr(receipt, "parser_failures", 0) or 0),
+        "schema_valid": bool(getattr(receipt, "schema_valid", False)),
+        "node_count": int(getattr(receipt, "node_count", 0) or 0),
+        "edge_count": int(getattr(receipt, "edge_count", 0) or 0),
+    }
+
+
+def _transient_index_failure(receipt: Any) -> bool:
+    """Classify only mechanical failures that are safe to retry exactly once."""
+
+    error_type = str(getattr(receipt, "error_type", "") or "").strip().lower()
+    diagnostic = str(
+        getattr(receipt, "error_diagnostic", "") or ""
+    ).strip().lower()
+    return error_type in _TRANSIENT_INDEX_ERROR_TYPES or any(
+        marker in diagnostic for marker in _TRANSIENT_INDEX_DIAGNOSTICS
+    )
+
+
 @dataclass
 class DeliveredSpan:
     """One delivered evidence suffix, tracked for evidence-aware truncation."""
@@ -480,6 +531,7 @@ class GTBridge:
         self._delivery_exposures: dict[str, int] = {}
         self._expired_delivery_ids: set[str] = set()
         self._last_context_receipt: dict[str, Any] = {}
+        self._last_graph_refresh_receipt: dict[str, Any] = {}
         self._active_boundary = "task_start"
         from gt_engine.progress import ProgressLedger
 
@@ -1911,33 +1963,51 @@ class GTBridge:
         see this observation, so post-edit evidence reads the post-edit graph
         (the contract-DRIFT ordering _binary.run_incremental_index documents).
         Gated by GT_L6_FRESH == "1" (production's exact read, rl_profile:207;
-        Profile-2 fans it to "1"). Correct-or-quiet: any fault keeps the prior
-        graph (stale beats broken; producers still abstain on a bad db)."""
+        Profile-2 fans it to "1"). A source edit invalidates the prior graph;
+        any refresh fault therefore leaves graph-backed producers unavailable
+        until a complete current graph is published."""
         if os.environ.get("GT_L6_FRESH", "").strip() != "1":
             return
         if not any(_has_source_ext(c) for c in changed):
             return  # bounded: only a source-file edit can move the graph
         prior_db = self.graph_db or ""
-        prior_projection = self._graph_projection
         prior_router = self._evidence_router
-        prior_graph_evidence = self._graph_evidence
+        index_receipts: list[dict[str, Any]] = []
+        transient_retry = False
         try:
             from gt_engine.graph_context import (
                 build_graph_projection,
                 graph_revision,
             )
-            from gt_engine.indexer import ensure_index
+            from gt_engine.indexer import ensure_index_with_receipt
 
             prior_revision = graph_revision(prior_db)
-            db = ensure_index(self.repo_root)
+            self.graph_db = None
+            self._graph_projection = None
+            self._evidence_router = None
+            self._graph_evidence = ()
+            index_receipt = ensure_index_with_receipt(self.repo_root)
+            index_receipts.append(_index_receipt_payload(index_receipt, attempt=1))
+            if not index_receipt.available and _transient_index_failure(index_receipt):
+                transient_retry = True
+                index_receipt = ensure_index_with_receipt(self.repo_root)
+                index_receipts.append(_index_receipt_payload(index_receipt, attempt=2))
+            self._last_graph_refresh_receipt = {
+                "attempts": tuple(index_receipts),
+                "transient_retry": transient_retry,
+            }
+            db = index_receipt.graph_db if index_receipt.available else None
             if not db:
                 self._trace_record(
                     "graph.context_refresh_failed",
                     "post_edit",
                     {
-                        "reason": "index_unavailable",
+                        "reason": "index_build_failed",
                         "changed_file_count": len(changed),
                         "prior_revision": prior_revision,
+                        "index_attempts": len(index_receipts),
+                        "index_receipts": index_receipts,
+                        "transient_retry": transient_retry,
                     },
                 )
                 return
@@ -1969,6 +2039,9 @@ class GTBridge:
                 "prior_revision": prior_revision,
                 "revision": revision,
                 "changed_file_count": len(changed),
+                "index_attempts": len(index_receipts),
+                "index_receipts": index_receipts,
+                "transient_retry": transient_retry,
                 "projection_rebuilt": projection is not None,
                 "router_rebuilt": router is not None,
                 "file_count": len(projection.files) if projection else 0,
@@ -1991,13 +2064,12 @@ class GTBridge:
                 "graph.task_projection", "post_edit", payload
             )
         except Exception as exc:  # noqa: BLE001 - refresh is correct-or-quiet
-            # No partial in-memory publication occurred.  Reassert the prior
-            # objects explicitly so future refactors cannot accidentally leave
-            # a mixed snapshot.
-            self.graph_db = prior_db or None
-            self._graph_projection = prior_projection
-            self._evidence_router = prior_router
-            self._graph_evidence = prior_graph_evidence
+            # A changed checkout can never reuse the pre-edit graph. Keep all
+            # graph-backed surfaces unavailable until a later complete build.
+            self.graph_db = None
+            self._graph_projection = None
+            self._evidence_router = None
+            self._graph_evidence = ()
             self._trace_record(
                 "graph.context_refresh_failed",
                 "post_edit",
@@ -2005,6 +2077,9 @@ class GTBridge:
                     "reason": "context_rebuild_fault",
                     "fault_type": type(exc).__name__,
                     "changed_file_count": len(changed),
+                    "index_attempts": len(index_receipts),
+                    "index_receipts": index_receipts,
+                    "transient_retry": transient_retry,
                 },
             )
             # The failed graph is never used as proof.  Record an explicit

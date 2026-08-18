@@ -18,6 +18,8 @@ class ProviderEvidenceSurface(StrEnum):
     PERSISTENT_EXECUTION_STATE = "persistent_execution_state"
     OBSERVED_EXECUTION = "observed_execution"
     TASK_SEMANTIC_SUBSTRATE = "task_semantic_substrate"
+    SEMANTIC_EVIDENCE = "semantic_evidence"
+    REPOSITORY_CONTEXT = "repository_context"
 
 
 class ProviderEvidenceDisposition(StrEnum):

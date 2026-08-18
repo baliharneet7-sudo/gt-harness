@@ -23,6 +23,7 @@ def test_registry_covers_every_active_gt_subsystem_and_all_17_features():
         "context_compactor",
         "replay_capture",
         "persistent_execution_state",
+        "repository_context_engine",
     } <= set(ACTIVE_GT_COMPONENTS)
 
 

@@ -18,3 +18,10 @@ textstats.py
 test_textstats.py
 .agent-handoff/
 skills.md
+
+# local source-indexer builds and scratch databases
+/vendor/gt-index-src/gt-index*.exe
+/vendor/gt-index-src/graph.db*
+
+# downloaded read-only historical replay inputs
+/.research/historical-replay-source/

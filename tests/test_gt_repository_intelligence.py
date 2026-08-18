@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from gt_engine.repository_intelligence import (
     RepositoryIntelligenceStatus,
     RepositorySession,
     RepositorySubstrateStatus,
+    _graph_structural_roles,
     classify_repository_applicability,
     discover_project_checks,
     graph_gate_failures,
@@ -177,6 +179,115 @@ def test_repository_intelligence_returns_task_linked_source_anchor(tmp_path: Pat
     assert evidence.index.schema_valid is True
     assert evidence.index.node_count > 0
     assert "nodes_fts" in evidence.index.fts_tables
+
+
+def test_structural_roles_preserve_node_types_and_property_provenance(tmp_path: Path):
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,label TEXT,name TEXT,qualified_name TEXT,"
+            "file_path TEXT,start_line INTEGER,signature TEXT,language TEXT,return_type TEXT,"
+            "is_exported BOOLEAN,is_test BOOLEAN)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                (1, "Function", "load_user", "service.load_user", "src/service.py", 3,
+                 "def load_user(id: int) -> User", "python", "User", 1, 0),
+                (2, "Function", "handle", "api.handle", "src/api.py", 8,
+                 "def handle()", "python", "", 0, 0),
+                (3, "Function", "guess", "other.guess", "src/other.py", 5,
+                 "def guess()", "python", "", 0, 0),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,source_line INTEGER,resolution_method TEXT,confidence REAL,"
+            "trust_tier TEXT,candidate_count INTEGER,evidence_type TEXT)"
+        )
+        connection.execute(
+            "CREATE TABLE properties (id INTEGER PRIMARY KEY,node_id INTEGER,kind TEXT,value TEXT,"
+            "line INTEGER,confidence REAL,trust_tier TEXT,evidence_method TEXT,"
+            "verification_status TEXT,property_id TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO properties VALUES (1,1,'param','id: int [required]',3,1.0,"
+            "'CERTIFIED','tree_sitter_exact','verified','prop-1')"
+        )
+        connection.executemany(
+            "INSERT INTO edges VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                (1, 2, 1, "CALLS", 8, "lsp_verified", 1.0, "CERTIFIED", 1, "lsp"),
+                (2, 3, 1, "CALLS", 5, "verified_unique", 1.0, "CERTIFIED", 1, "static"),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    definitions, references, callers, properties = _graph_structural_roles(
+        str(graph),
+        (
+            {
+                "path": "src/service.py",
+                "line": 3,
+                "symbol": "load_user",
+                "semantic_certainty": 1.0,
+                "retrieval_relevance": 1.0,
+            },
+        ),
+        limit=8,
+    )
+
+    assert definitions[0]["return_type"] == "User"
+    assert definitions[0]["is_exported"] is True
+    assert definitions[0]["origin"] == "program"
+    assert properties[0]["evidence_method"] == "tree_sitter_exact"
+    assert properties[0]["property_id"] == "prop-1"
+    assert [item["caller"] for item in callers] == ["handle"]
+    assert references[0]["origin"] == "program"
+    assert references[0]["target_path"] == "src/service.py"
+    assert "resolution_method:lsp_verified" in references[0]["provenance"]
+
+
+def test_structural_roles_abstain_on_ambiguous_same_file_symbol(tmp_path: Path):
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,label TEXT,name TEXT,"
+            "qualified_name TEXT,file_path TEXT,start_line INTEGER,signature TEXT,"
+            "language TEXT,return_type TEXT,is_exported BOOLEAN,is_test BOOLEAN)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                (1, "Function", "run", "First.run", "src/app.py", 3,
+                 "def run()", "python", "", 0, 0),
+                (2, "Function", "run", "Second.run", "src/app.py", 13,
+                 "def run()", "python", "", 0, 0),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,"
+            "target_id INTEGER,type TEXT,source_line INTEGER,resolution_method TEXT,"
+            "confidence REAL,trust_tier TEXT,candidate_count INTEGER,evidence_type TEXT)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    definitions, references, callers, properties = _graph_structural_roles(
+        str(graph),
+        ({"path": "src/app.py", "line": 0, "symbol": "run"},),
+        limit=8,
+    )
+
+    assert definitions == ()
+    assert references == ()
+    assert callers == ()
+    assert properties == ()
 
 
 def test_non_code_repository_has_explicit_index_abstention(tmp_path: Path):

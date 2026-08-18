@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
+
+import pytest
 
 import gt_engine.hybrid_repository as hybrid_repository
 from gt_engine.graph_context import GraphProjection, GraphSemanticFact
@@ -102,6 +105,227 @@ def test_builder_uses_exact_indexed_spans_and_directed_graph_links(tmp_path):
     assert repository.structural_links[0].source_start_line == 1
     assert repository.structural_links[0].target_symbol == "test_allocate"
     assert repository.structural_links[0].target_start_line == 1
+
+
+def test_builder_propagates_resolution_provenance_and_refuses_ambiguous_edges(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "caller.py").write_text(
+        "def caller():\n    return target()\n", encoding="utf-8"
+    )
+    (tmp_path / "src" / "target.py").write_text(
+        "def target():\n    return 1\n", encoding="utf-8"
+    )
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?)",
+            (
+                (1, "caller", "src/caller.py", 1, 2, "def caller()"),
+                (2, "target", "src/target.py", 1, 2, "def target()"),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,resolution_method TEXT,confidence REAL,trust_tier TEXT,"
+            "candidate_count INTEGER,evidence_type TEXT,verification_status TEXT,metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES (1,1,2,'CALLS','global_name',0.99,'CERTIFIED',2,"
+            "'static_resolution','unverified','')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = build_hybrid_repository(tmp_path, graph, source_revision="source-1")
+
+    assert len(repository.structural_links) == 1
+    link = repository.structural_links[0]
+    assert link.origin == "program"
+    assert link.resolution_outcome == "ambiguous"
+    assert link.certified is False
+    assert "resolution_method:global_name" in link.provenance
+    assert "candidate_count:2" in link.provenance
+
+
+def test_builder_keeps_same_file_calls_and_typed_receiver_provenance(tmp_path):
+    source = (
+        "class Service:\n"
+        "    def run(self) -> int:\n"
+        "        return self.helper()\n"
+        "    def helper(self) -> int:\n"
+        "        return 1\n"
+    )
+    (tmp_path / "service.py").write_text(source, encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,label TEXT,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT,return_type TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)",
+            (
+                (1, "Method", "run", "service.py", 2, 3, "def run(self) -> int", "int"),
+                (2, "Method", "helper", "service.py", 4, 5, "def helper(self) -> int", "int"),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,resolution_method TEXT,confidence REAL,trust_tier TEXT,"
+            "candidate_count INTEGER,evidence_type TEXT,verification_status TEXT,metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES (1,1,2,'CALLS','lsp_verified',1.0,'CERTIFIED',1,"
+            "'receiver_type','lsp_verified','receiver_type=Service')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = build_hybrid_repository(tmp_path, graph, source_revision="source-1")
+
+    assert len(repository.structural_links) == 1
+    link = repository.structural_links[0]
+    assert link.source_path == link.target_path == "service.py"
+    assert link.source_symbol == "run"
+    assert link.target_symbol == "helper"
+    assert link.receiver_type == "Service"
+    assert link.resolution_method == "lsp_verified"
+    assert link.source_return_type == link.target_return_type == "int"
+    assert link.certified is True
+
+
+def test_builder_preserves_certified_route_metadata_from_graph(tmp_path):
+    (tmp_path / "routes.py").write_text(
+        '@app.get("/users/{id}")\ndef get_user(id: int):\n    return id\n',
+        encoding="utf-8",
+    )
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,label TEXT,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?,?)",
+            (1, "Function", "get_user", "routes.py", 2, 3, "def get_user(id: int)"),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,resolution_method TEXT,confidence REAL,trust_tier TEXT,"
+            "candidate_count INTEGER,evidence_type TEXT,verification_status TEXT,metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO edges VALUES (1,1,1,'HANDLES_ROUTE','decorator_route',0.95,"
+            "'CERTIFIED',1,'decorator_route','verified','route=/users/{id}')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    repository = build_hybrid_repository(tmp_path, graph, source_revision="source-1")
+
+    assert len(repository.structural_links) == 1
+    link = repository.structural_links[0]
+    assert link.relation == "HANDLES_ROUTE"
+    assert link.route == "/users/{id}"
+    assert link.certified is True
+
+
+def test_source_indexer_persists_route_path_on_handles_route_edge() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "vendor"
+        / "gt-index-src"
+        / "internal"
+        / "resolver"
+        / "relationships.go"
+    ).read_text(encoding="utf-8")
+
+    assert '"route="+pendingRoutePath' in source
+    assert 'funcID, funcID, "HANDLES_ROUTE"' in source
+    assert 'sourceID == targetID && edgeType != "HANDLES_ROUTE"' in source
+    assert "Metadata:           metadataValue" in source
+
+
+@pytest.mark.parametrize(
+    ("method", "candidates", "evidence", "verification", "metadata", "origin", "outcome"),
+    (
+        ("builtin", 1, "builtin", "verified", "", "builtin", "external"),
+        ("stdlib", 1, "stdlib", "verified", "", "stdlib", "external"),
+        ("import", 1, "third_party", "verified", "", "third_party", "external"),
+        ("framework", 1, "framework", "verified", "", "framework", "external"),
+        ("global_name", 2, "static", "unverified", "", "program", "ambiguous"),
+        ("unresolved", 0, "static", "unverified", "", "program", "unresolved"),
+        ("dynamic", 1, "dynamic", "unverified", "", "program", "dynamic"),
+        ("verified_unique", 1, "static", "verified", "", "program", "heuristic"),
+        ("unique_method", 1, "static", "verified", "", "program", "heuristic"),
+        ("re_export", 1, "re_export", "unverified", "", "program", "reexport_unproven"),
+    ),
+)
+def test_resolution_origin_and_unknown_policy_is_terminal(
+    method, candidates, evidence, verification, metadata, origin, outcome
+):
+    assert hybrid_repository._edge_resolution_provenance(
+        resolution_method=method,
+        candidate_count=candidates,
+        evidence_type=evidence,
+        verification_status=verification,
+        metadata=metadata,
+        provenance_available=True,
+    ) == (origin, outcome, candidates)
+
+
+def test_verified_reexport_is_exact_program_evidence() -> None:
+    assert hybrid_repository._edge_resolution_provenance(
+        resolution_method="re_export",
+        candidate_count=1,
+        evidence_type="re_export",
+        verification_status="verified",
+        metadata="",
+        provenance_available=True,
+    ) == ("program", "exact", 1)
+
+
+def test_builder_treats_missing_edge_provenance_as_unknown(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("def a():\n    return b()\n", encoding="utf-8")
+    (tmp_path / "src" / "b.py").write_text("def b():\n    return 1\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY,name TEXT,file_path TEXT,"
+            "start_line INTEGER,end_line INTEGER,signature TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO nodes VALUES (?,?,?,?,?,?)",
+            ((1, "a", "src/a.py", 1, 2, "def a()"), (2, "b", "src/b.py", 1, 2, "def b()")),
+        )
+        connection.execute(
+            "CREATE TABLE edges (id INTEGER PRIMARY KEY,source_id INTEGER,target_id INTEGER,"
+            "type TEXT,confidence REAL,trust_tier TEXT)"
+        )
+        connection.execute("INSERT INTO edges VALUES (1,1,2,'CALLS',1.0,'CERTIFIED')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    link = build_hybrid_repository(
+        tmp_path, graph, source_revision="source-1"
+    ).structural_links[0]
+
+    assert link.origin == "unknown"
+    assert link.resolution_outcome == "unknown"
+    assert link.certified is False
 
 
 def test_builder_is_bounded_deterministically_and_reports_incomplete(tmp_path):
@@ -253,6 +477,11 @@ def test_builder_exposes_assertion_closure_and_cochange_relations(tmp_path):
     }
     assert links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].confidence == 0.99
     assert links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].certified is True
+    assert links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].origin == "program"
+    assert (
+        links[("src/service.py", "tests/test_service.py", "ASSERTED_BY")].resolution_outcome
+        == "exact"
+    )
     assert links[("src/service.py", "src/helper.py", "CALLS_TRANSITIVE")].confidence == 0.97
     assert links[("src/service.py", "src/helper.py", "CALLS_TRANSITIVE")].certified is True
     assert links[("src/service.py", "src/helper.py", "COCHANGE")].certified is False

@@ -88,6 +88,7 @@ class RepositoryEvidence:
     definitions: tuple[dict[str, Any], ...] = ()
     references: tuple[dict[str, Any], ...] = ()
     callers: tuple[dict[str, Any], ...] = ()
+    semantic_properties: tuple[dict[str, Any], ...] = ()
     project_checks: tuple[str, ...] = ()
     status: str = "unavailable"
     index: IndexBuildReceipt | None = None
@@ -637,6 +638,20 @@ def inspect_index(
     )
 
 
+_CERTIFIED_CALL_RESOLUTION_METHODS = frozenset(
+    {
+        "import",
+        "import_type",
+        "inherited",
+        "lsp",
+        "lsp_verified",
+        "return_type",
+        "same_file",
+        "type_flow",
+    }
+)
+
+
 def _graph_structural_roles(
     graph_db: str,
     anchors: tuple[dict[str, Any], ...],
@@ -646,30 +661,60 @@ def _graph_structural_roles(
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
 ]:
-    """Resolve definitions, call references, and direct callers from graph identity."""
+    """Resolve certified semantic rows from graph identity, correct-or-quiet."""
 
     definitions: list[dict[str, Any]] = []
     references: list[dict[str, Any]] = []
     callers: list[dict[str, Any]] = []
+    semantic_properties: list[dict[str, Any]] = []
     target_ids: list[int] = []
     target_scores: dict[int, tuple[float, float]] = {}
     connection = sqlite3.connect(f"file:{Path(graph_db).resolve().as_posix()}?mode=ro", uri=True)
     try:
+        node_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(nodes)")
+        }
+        return_type_sql = (
+            "COALESCE(return_type,'')" if "return_type" in node_columns else "''"
+        )
+        exported_sql = "COALESCE(is_exported,0)" if "is_exported" in node_columns else "0"
+        test_sql = "COALESCE(is_test,0)" if "is_test" in node_columns else "0"
+        property_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(properties)")
+        }
         for anchor in anchors:
             path = str(anchor.get("path") or "")
             symbol = str(anchor.get("symbol") or "")
             line = int(anchor.get("line") or 0)
             if not path:
                 continue
-            rows = connection.execute(
+            candidate_rows = connection.execute(
                 "SELECT id,label,name,COALESCE(qualified_name,''),file_path,"
-                "COALESCE(start_line,0),COALESCE(signature,''),language "
+                "COALESCE(start_line,0),COALESCE(signature,''),language,"
+                f"{return_type_sql},{exported_sql},{test_sql} "
                 "FROM nodes WHERE file_path=? AND "
                 "((?<>'' AND name=?) OR (? > 0 AND start_line=?)) "
                 "ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END,start_line,id LIMIT 4",
                 (path, symbol, symbol, line, line, symbol),
             ).fetchall()
+            rows: list[tuple[Any, ...]] = []
+            if symbol:
+                named_rows = [row for row in candidate_rows if str(row[2]) == symbol]
+                line_named_rows = (
+                    [row for row in named_rows if int(row[5]) == line]
+                    if line > 0
+                    else []
+                )
+                if len(line_named_rows) == 1:
+                    rows = line_named_rows
+                elif len(named_rows) == 1:
+                    rows = named_rows
+            elif line > 0:
+                line_rows = [row for row in candidate_rows if int(row[5]) == line]
+                if len(line_rows) == 1:
+                    rows = line_rows
             for row in rows:
                 node_id = int(row[0])
                 definition = {
@@ -680,6 +725,12 @@ def _graph_structural_roles(
                     "kind": str(row[1]),
                     "signature": str(row[6]),
                     "language": str(row[7]),
+                    "return_type": str(row[8]),
+                    "is_exported": bool(row[9]),
+                    "is_test": bool(row[10]),
+                    "origin": "program",
+                    "resolution_outcome": "exact",
+                    "provenance": (f"graph_node:{node_id}", "checkout_source"),
                     "semantics": "graph_definition",
                     "semantic_certainty": float(
                         anchor.get("semantic_certainty") or 0.0
@@ -698,6 +749,52 @@ def _graph_structural_roles(
                         float(anchor.get("semantic_certainty") or 0.0),
                         float(anchor.get("retrieval_relevance") or 0.0),
                     )
+                    if {
+                        "node_id",
+                        "id",
+                        "kind",
+                        "value",
+                        "line",
+                        "confidence",
+                        "trust_tier",
+                        "evidence_method",
+                        "verification_status",
+                        "property_id",
+                    } <= property_columns:
+                        property_rows = connection.execute(
+                            "SELECT kind,value,COALESCE(line,0),COALESCE(confidence,0),"
+                            "COALESCE(trust_tier,''),COALESCE(evidence_method,''),"
+                            "COALESCE(verification_status,''),COALESCE(property_id,'') "
+                            "FROM properties WHERE node_id=? "
+                            "AND COALESCE(confidence,0)>=0.95 "
+                            "AND COALESCE(trust_tier,'')='CERTIFIED' "
+                            "ORDER BY kind,line,id LIMIT ?",
+                            (node_id, limit),
+                        ).fetchall()
+                        for prop in property_rows:
+                            property_row = {
+                                "path": str(row[4]),
+                                "symbol": str(row[2]),
+                                "line": int(prop[2] or row[5]),
+                                "kind": str(prop[0]),
+                                "value": str(prop[1]),
+                                "confidence": float(prop[3]),
+                                "trust_tier": str(prop[4]),
+                                "evidence_method": str(prop[5]),
+                                "verification_status": str(prop[6]),
+                                "property_id": str(prop[7]),
+                                "origin": "program",
+                                "resolution_outcome": "exact",
+                                "semantic_certainty": min(
+                                    float(anchor.get("semantic_certainty") or 0.0),
+                                    float(prop[3]),
+                                ),
+                                "retrieval_relevance": float(
+                                    anchor.get("retrieval_relevance") or 0.0
+                                ),
+                            }
+                            if property_row not in semantic_properties:
+                                semantic_properties.append(property_row)
                 if len(definitions) >= limit:
                     break
             if len(definitions) >= limit:
@@ -722,14 +819,25 @@ def _graph_structural_roles(
                 (target_id, limit),
             ).fetchall()
             for row in rows:
+                if str(row[5]) not in _CERTIFIED_CALL_RESOLUTION_METHODS:
+                    continue
                 reference = {
                     "path": str(row[1]),
                     "line": int(row[2]),
                     "symbol": str(row[3]),
+                    "target": str(row[3]),
+                    "target_path": str(row[4]),
                     "semantics": "graph_call_reference",
                     "semantic_certainty": min(target_certainty, float(row[6])),
                     "retrieval_relevance": target_relevance,
                     "language": str(row[10]),
+                    "origin": "program",
+                    "resolution_outcome": "exact",
+                    "provenance": (
+                        f"resolution_method:{str(row[5])}",
+                        f"candidate_count:{int(row[8])}",
+                        f"evidence_type:{str(row[9])}",
+                    ),
                 }
                 caller = {
                     "caller": str(row[0]),
@@ -747,6 +855,8 @@ def _graph_structural_roles(
                     "retrieval_relevance": target_relevance,
                     "language": str(row[10]),
                     "target_language": str(row[11]),
+                    "origin": "program",
+                    "resolution_outcome": "exact",
                 }
                 if reference not in references:
                     references.append(reference)
@@ -758,7 +868,12 @@ def _graph_structural_roles(
                 break
     finally:
         connection.close()
-    return tuple(definitions), tuple(references), tuple(callers)
+    return (
+        tuple(definitions),
+        tuple(references),
+        tuple(callers),
+        tuple(semantic_properties),
+    )
 
 
 def inspect_repository(
@@ -905,7 +1020,7 @@ def inspect_repository(
                 substrate_status=RepositorySubstrateStatus.HEALTHY_CURRENT.value,
                 retrieval_disposition=RetrievalDisposition.EMPTY.value,
             )
-        definitions, references, callers = _graph_structural_roles(
+        definitions, references, callers, semantic_properties = _graph_structural_roles(
             graph_db,
             tuple(anchors),
             limit=max(1, limit),
@@ -917,6 +1032,7 @@ def inspect_repository(
             definitions=definitions,
             references=references,
             callers=callers,
+            semantic_properties=semantic_properties,
             project_checks=checks,
             status=RepositoryIntelligenceStatus.HEALTHY_CURRENT.value,
             index=index_receipt,

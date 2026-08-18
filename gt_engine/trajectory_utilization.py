@@ -9,7 +9,6 @@ response or later before the evidence became stale?
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -70,18 +69,6 @@ def _anchor_paths(delivery: dict[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(p for p in (_normal_path(v) for v in values) if p))
 
 
-def _anchor_symbols(delivery: dict[str, Any]) -> tuple[str, ...]:
-    values: list[str] = []
-    for fact in delivery.get("facts") or ():
-        if isinstance(fact, dict) and fact.get("symbol"):
-            values.append(str(fact["symbol"]).strip())
-    for anchor in delivery.get("claim_anchors") or ():
-        text = str(anchor or "")
-        if ":" in text and " " not in text:
-            values.append(text.rsplit(":", 1)[-1].strip())
-    return tuple(dict.fromkeys(v for v in values if v))
-
-
 def _target_paths(action: ProposedAction) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
@@ -115,10 +102,9 @@ def match_delivery_actions(
 ) -> SemanticMatch | None:
     """Match evidence to typed actions without declaring internal model use.
 
-    A path target is the high-confidence signal.  Symbol-only matches are
-    accepted only for a known operation and are explicitly marked as a
-    weaker reason.  No raw diagnostic or heredoc text is scanned into a
-    target.
+    A typed path target is the only accepted utilization signal. Raw command,
+    diagnostic, and heredoc text are not scanned for symbol-name occurrences;
+    doing so would reproduce the historical naive-utilization error.
     """
 
     # ``revision`` on legacy guidance rows is the workspace revision.  Semantic
@@ -137,7 +123,6 @@ def match_delivery_actions(
             reason_codes=("source_revision_changed_before_use",),
         )
     paths = _anchor_paths(delivery)
-    symbols = _anchor_symbols(delivery)
     for index, action in enumerate(actions):
         targets = _target_paths(action)
         matched_paths = tuple(
@@ -160,28 +145,6 @@ def match_delivery_actions(
                 matched_paths,
                 ("typed_target_path", action.operation.value),
             )
-        if symbols and _known_operation(action):
-            command = str(action.raw_command or "")
-            matched_symbols = tuple(
-                symbol
-                for symbol in symbols
-                if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", command)
-            )
-            if matched_symbols:
-                classification = (
-                    SemanticUse.SAME_RESPONSE
-                    if observed_call == delivery_call
-                    else SemanticUse.DEFERRED
-                )
-                return SemanticMatch(
-                    classification,
-                    observed_call,
-                    action.action_id,
-                    action.batch_index,
-                    action_offset + index,
-                    (),
-                    ("typed_operation_symbol_reference", action.operation.value),
-                )
     return None
 
 
@@ -204,6 +167,9 @@ class SemanticUtilizationTracker:
         delivery.setdefault("semantic_use_reason_codes", [])
         delivery.setdefault("semantic_use_window_calls", 0)
         delivery.setdefault("semantic_use_window_actions", 0)
+        delivery.setdefault("exploration_actions_before_use", 0)
+        delivery.setdefault("exploration_relationship", "pending")
+        delivery.setdefault("first_followup_operation", "")
         self._active.append(
             {
                 "delivery": delivery,
@@ -228,6 +194,8 @@ class SemanticUtilizationTracker:
                 continue
             delivery["semantic_use_window_calls"] += 1
             delivery["semantic_use_window_actions"] += len(actions)
+            if not delivery["first_followup_operation"] and actions:
+                delivery["first_followup_operation"] = actions[0].operation.value
             match = match_delivery_actions(
                 delivery,
                 actions,
@@ -244,14 +212,43 @@ class SemanticUtilizationTracker:
                 delivery["semantic_use_distance_actions"] = match.distance_actions
                 delivery["semantic_use_matched_paths"] = list(match.matched_paths)
                 delivery["semantic_use_reason_codes"] = list(match.reason_codes)
+                matched_position, matched_operation = next(
+                    (
+                        (index, action.operation)
+                        for index, action in enumerate(actions)
+                        if action.action_id == match.action_id
+                    ),
+                    (len(actions), ActionOperation.OTHER),
+                )
+                delivery["exploration_actions_before_use"] += sum(
+                    action.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+                    for action in actions[:matched_position]
+                )
+                if matched_operation in {ActionOperation.READ, ActionOperation.SEARCH}:
+                    delivery["exploration_relationship"] = "context_accompanied_exploration"
+                elif int(delivery["exploration_actions_before_use"] or 0) == 0:
+                    delivery["exploration_relationship"] = (
+                        "context_used_without_prior_exploration"
+                    )
+                else:
+                    delivery["exploration_relationship"] = "context_followed_exploration"
                 self._completed.append(delivery)
                 continue
+            delivery["exploration_actions_before_use"] += sum(
+                action.operation in {ActionOperation.READ, ActionOperation.SEARCH}
+                for action in actions
+            )
             if (
                 call - delivery_call + 1 >= self.max_calls
                 or delivery["semantic_use_window_actions"] >= self.max_actions
             ):
                 delivery["semantic_utilization"] = SemanticUse.NO_MATCH.value
                 delivery["semantic_use_reason_codes"] = ["bounded_window_expired"]
+                delivery["exploration_relationship"] = (
+                    "context_unmatched_after_exploration"
+                    if int(delivery["exploration_actions_before_use"] or 0) > 0
+                    else "context_unmatched"
+                )
                 self._completed.append(delivery)
                 continue
             remaining.append(item)
@@ -262,6 +259,11 @@ class SemanticUtilizationTracker:
             delivery = item["delivery"]
             delivery["semantic_utilization"] = SemanticUse.NO_MATCH.value
             delivery["semantic_use_reason_codes"] = ["task_terminated_before_match"]
+            delivery["exploration_relationship"] = (
+                "context_unmatched_after_exploration"
+                if int(delivery["exploration_actions_before_use"] or 0) > 0
+                else "context_unmatched"
+            )
             self._completed.append(delivery)
         self._active = []
 
@@ -274,6 +276,17 @@ class SemanticUtilizationTracker:
             SemanticUse.DEFERRED.value
         ]
         counts["deliveries"] = len(self._completed)
+        for outcome in (
+            "context_used_without_prior_exploration",
+            "context_accompanied_exploration",
+            "context_followed_exploration",
+            "context_unmatched_after_exploration",
+            "context_unmatched",
+        ):
+            counts[outcome] = sum(
+                delivery.get("exploration_relationship") == outcome
+                for delivery in self._completed
+            )
         return counts
 
 

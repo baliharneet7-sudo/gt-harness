@@ -136,6 +136,13 @@ ACTIVE_GT_COMPONENTS: dict[str, ComponentContract] = {
             DefaultVisibility.CONDITIONAL_PROVIDER,
             "graph-first bootstrap plus materiality and delivery audits",
         ),
+        ComponentContract(
+            "repository_context_engine",
+            ComponentStage.PROVIDER_BOUNDARY,
+            "semantic, directed execution, and diff-impact composition over certified evidence",
+            DefaultVisibility.CONDITIONAL_PROVIDER,
+            "revision, uncertainty, direction, deduplication, delivery, and release audits",
+        ),
     )
 }
 

@@ -59,8 +59,16 @@ python -m scripts.central_feature_census   # all 17 feature paths proven
 python scripts/central_readiness_audit.py  # prints READY
 ```
 
-Architecture and behavioral contract:
-[`docs/architecture.md`](docs/architecture.md). All credit for the base agent —
+Architecture and behavioral references:
+[strengthened repository-context design](docs/CENTRAL_RELATIONAL_V2_DESIGN.md),
+[runtime reference](docs/CENTRAL_RELATIONAL_V2_REFERENCE.md),
+[evaluation procedure](docs/HOW_TO_EVALUATE_CENTRAL_RELATIONAL_V2.md), and
+[final build TODO](docs/GT_GITNEXUS_MASTER_TODO.md). GitNexus source research informs the design but
+is not a benchmark arm. P0-P2 implementation scope, evidence boundaries, regression closure, and
+frozen replay predictions are in the
+[P0-P2 closeout](docs/GT_P0_P2_IMPLEMENTATION_CLOSEOUT_2026-08-17.md).
+
+All credit for the base agent —
 the Mini-SWE loop, tools, providers, prompts, and the Terminal-Bench adapter —
 belongs to the `mini-swe-agent` project. The nano-harness section below is the
 repo's historical predecessor and is preserved for provenance.

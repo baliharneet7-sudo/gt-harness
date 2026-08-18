@@ -4604,7 +4604,10 @@ func ChainReExports(
 func resolveReExportTargets(re parser.ReExportRef, fm map[string][]string) []string {
 	sourceFiles := resolveModulePath(re.SourceModule, fm)
 	if len(sourceFiles) > 0 {
-		return sourceFiles
+		if len(sourceFiles) == 1 {
+			return sourceFiles
+		}
+		return nil
 	}
 	// Relative resolution from the re-exporting file's directory.
 	dir := filepath.ToSlash(filepath.Dir(re.File))
@@ -4651,7 +4654,10 @@ func resolveReExportTargets(re parser.ReExportRef, fm map[string][]string) []str
 	for _, ext := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
 		"/index.ts", "/index.js", "/index.tsx", "/index.jsx", "/index.mjs", "/index.cjs", "/mod.rs"} {
 		if files, ok := fm[base+ext]; ok {
-			return files
+			if len(files) == 1 {
+				return files
+			}
+			return nil
 		}
 	}
 	return nil
@@ -4705,7 +4711,7 @@ func ResolveReExports(db *store.DB, reExports []parser.ReExportRef, fm map[strin
 				TrustTier:          tierFor(1.0),
 				CandidateCount:     1,
 				EvidenceType:       "re_export",
-				VerificationStatus: "unverified",
+				VerificationStatus: "verified",
 			})
 		}
 	}

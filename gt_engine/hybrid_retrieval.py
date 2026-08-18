@@ -569,6 +569,23 @@ class StructuralLink:
     source_start_line: int | None = None
     target_symbol: str | None = None
     target_start_line: int | None = None
+    source_content_sha256: str = ""
+    target_content_sha256: str = ""
+    source_evidence_origin: str = "unknown"
+    target_evidence_origin: str = "unknown"
+    origin: str = "unknown"
+    resolution_outcome: str = "unknown"
+    resolution_method: str = ""
+    candidate_count: int | None = None
+    evidence_type: str = ""
+    verification_status: str = ""
+    receiver_type: str = ""
+    route: str = ""
+    http_method: str = ""
+    source_kind: str = ""
+    target_kind: str = ""
+    source_return_type: str = ""
+    target_return_type: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_path", _normalize_path(self.source_path))
@@ -577,6 +594,67 @@ class StructuralLink:
             raise ValueError("structural link paths must not be empty")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError("structural link confidence must be between zero and one")
+        for field_name in ("source_content_sha256", "target_content_sha256"):
+            value = str(getattr(self, field_name) or "").strip().lower()
+            if value and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"{field_name} must be empty or a SHA-256 digest")
+            object.__setattr__(self, field_name, value)
+        allowed_evidence_origins = {
+            origin.value for origin in EvidenceOrigin
+        } | {"unknown"}
+        for field_name in ("source_evidence_origin", "target_evidence_origin"):
+            value = str(getattr(self, field_name) or "unknown").strip().lower()
+            if value not in allowed_evidence_origins:
+                raise ValueError(f"unsupported endpoint evidence origin: {value}")
+            object.__setattr__(self, field_name, value)
+        origin = str(self.origin or "unknown").strip().lower()
+        if origin not in {
+            "program",
+            "builtin",
+            "stdlib",
+            "third_party",
+            "framework",
+            "external",
+            "unknown",
+        }:
+            raise ValueError(f"unsupported structural link origin: {origin}")
+        outcome = str(self.resolution_outcome or "unknown").strip().lower()
+        if outcome not in {
+            "exact",
+            "ambiguous",
+            "unresolved",
+            "external",
+            "heuristic",
+            "dynamic",
+            "global_fallback",
+            "reexport_unproven",
+            "unknown",
+        }:
+            raise ValueError(f"unsupported structural resolution outcome: {outcome}")
+        object.__setattr__(self, "origin", origin)
+        object.__setattr__(self, "resolution_outcome", outcome)
+        candidates = self.candidate_count
+        if candidates is not None:
+            try:
+                candidates = int(candidates)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("candidate_count must be an integer or None") from exc
+            if candidates < 0:
+                raise ValueError("candidate_count must not be negative")
+        object.__setattr__(self, "candidate_count", candidates)
+        for field_name in (
+            "resolution_method",
+            "evidence_type",
+            "verification_status",
+            "receiver_type",
+            "route",
+            "http_method",
+            "source_kind",
+            "target_kind",
+            "source_return_type",
+            "target_return_type",
+        ):
+            object.__setattr__(self, field_name, str(getattr(self, field_name) or "").strip())
 
 
 @dataclass(frozen=True)
@@ -1490,9 +1568,10 @@ class HybridRetriever:
         token_counter: Callable[[str], int] = _default_token_counter,
         rrf_k: int = 60,
         dense_candidate_limit: int | None = None,
+        dense_fallback_only: bool = False,
     ) -> None:
         documents = tuple(documents)
-        self._channels: tuple[RetrievalChannelBackend, ...] = (
+        registered_channels: tuple[RetrievalChannelBackend, ...] = (
             tuple(channels)
             if channels is not None
             else (
@@ -1503,7 +1582,18 @@ class HybridRetriever:
                 DenseRetrievalChannel(documents, dense_backend),
             )
         )
-        present = [channel.channel for channel in self._channels]
+        if dense_fallback_only:
+            registered_channels = tuple(
+                channel
+                for channel in registered_channels
+                if not isinstance(channel, DenseRetrievalChannel)
+            ) + tuple(
+                channel
+                for channel in registered_channels
+                if isinstance(channel, DenseRetrievalChannel)
+            )
+        self._channels = registered_channels
+        present = [channel.channel for channel in registered_channels]
         if len(present) != len(set(present)):
             raise ValueError("each retrieval channel may be registered at most once")
         self._token_counter = token_counter
@@ -1511,6 +1601,7 @@ class HybridRetriever:
         self._dense_candidate_limit = (
             None if dense_candidate_limit is None else max(1, int(dense_candidate_limit))
         )
+        self._dense_fallback_only = bool(dense_fallback_only)
         self._dense_channel = next(
             (channel for channel in self._channels if isinstance(channel, DenseRetrievalChannel)),
             None,

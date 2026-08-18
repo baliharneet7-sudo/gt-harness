@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import scripts.central_integrity_audit as integrity_audit
 from scripts.central_integrity_audit import (
     GRADER_ONLY_MARKERS,
     audit_run_root,
@@ -56,6 +57,43 @@ def test_static_source_boundary_passes_on_clean_runtime():
     assert report["static"]["source_boundary_proven"] is True
     assert report["static"]["violations"] == []
     assert report["static"]["checked_files"], "static audit scanned no runtime files"
+
+
+def test_static_source_boundary_reuses_exact_source_fingerprint(
+    tmp_path,
+    monkeypatch,
+):
+    runtime = tmp_path / "gt_engine"
+    runtime.mkdir()
+    source = runtime / "runtime.py"
+    source.write_text(
+        '"""Compile all mechanically equivalent predicates."""\n'
+        "def compile_completion_plan():\n    return ()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(integrity_audit, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(integrity_audit, "RUNTIME_DIRS", ("gt_engine",))
+    monkeypatch.setattr(integrity_audit, "RUNTIME_FILES", ())
+    integrity_audit.clear_static_source_boundary_cache()
+    parse_calls = 0
+    original_parse = integrity_audit.ast.parse
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(integrity_audit.ast, "parse", counted_parse)
+
+    first = audit_run_root(tmp_path / "receipts")
+    second = audit_run_root(tmp_path / "receipts")
+
+    assert first["static"] == second["static"]
+    assert parse_calls == 1
+
+    source.write_text(source.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    audit_run_root(tmp_path / "receipts")
+    assert parse_calls == 2
 
 
 def _write_bundle(root: Path, *, facts_path: str = "app.py", origin: str | None = None) -> Path:

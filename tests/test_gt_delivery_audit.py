@@ -75,6 +75,40 @@ def _legacy(*, request: str = "req-1", call: int = 1) -> dict:
     }
 
 
+def _relational(*, extra_process: bool = False) -> dict:
+    processes = [
+        {
+            "process_id": "process-1",
+            "rendered": "src/a.py --calls--> src/b.py",
+        }
+    ]
+    if extra_process:
+        processes.append(
+            {
+                "process_id": "process-unclaimed",
+                "rendered": "src/b.py --calls--> src/c.py",
+            }
+        )
+    return {
+        "delivery_id": "relational-1",
+        "claim_ids": ["process-1"],
+        "evidence_action": 0,
+        "first_eligible_call": 1,
+        "delivered_before_call": 1,
+        "delivered_before_model_query": True,
+        "not_predictive": True,
+        "one_step_late": False,
+        "request_payload_sha256": "req-1",
+        "provider_messages_sha256": "provider-1",
+        "message_index": 1,
+        "chars": 40,
+        "source_revision": "source-1",
+        "graph_revision": "graph-1",
+        "epistemic_status": "lower_bound",
+        "processes": processes,
+    }
+
+
 def _claim_meta(claim_id: str, **overrides: object) -> dict:
     value = {
         "claim_id": claim_id,
@@ -221,6 +255,17 @@ def test_duplicate_claim_across_visible_surfaces_is_rejected():
 
     assert any("duplicate_provider_claim" in item for item in failures)
     assert totals["duplicate_count"] == 1
+
+
+def test_relational_delivery_rejects_unclaimed_or_duplicate_process_rows():
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["relational_context"] = {"deliveries": [_relational(extra_process=True)]}
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any("relational_delivery_semantic_support_missing" in item for item in failures)
 
 
 def test_duplicate_preemptive_delivery_is_reported():

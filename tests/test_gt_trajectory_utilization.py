@@ -98,3 +98,60 @@ def test_semantic_tracker_marks_unmatched_without_calling_it_ignored():
     tracker.observe(call=2, actions=(_action("echo done", 2),), source_revision="rev-1")
     assert delivery["semantic_utilization"] == SemanticUse.NO_MATCH.value
     assert "bounded_window_expired" in delivery["semantic_use_reason_codes"]
+
+
+def test_tracker_records_use_without_claiming_counterfactual_replacement() -> None:
+    delivery = {
+        "delivery_id": "repository-context-1",
+        "facts": [{"path": "src/models.py", "symbol": "Model"}],
+        "source_revision": "rev-1",
+    }
+    tracker = SemanticUtilizationTracker()
+    tracker.register(delivery, call=1, source_revision="rev-1")
+    tracker.observe(
+        call=1,
+        actions=(_action("sed -i 's/Old/New/' src/models.py", 1),),
+        source_revision="rev-1",
+    )
+
+    assert delivery["exploration_relationship"] == "context_used_without_prior_exploration"
+    assert tracker.summary()["context_used_without_prior_exploration"] == 1
+
+
+def test_tracker_records_when_context_is_followed_by_more_exploration() -> None:
+    delivery = {
+        "delivery_id": "repository-context-2",
+        "facts": [{"path": "src/models.py", "symbol": "Model"}],
+        "source_revision": "rev-1",
+    }
+    tracker = SemanticUtilizationTracker()
+    tracker.register(delivery, call=1, source_revision="rev-1")
+    tracker.observe(
+        call=1,
+        actions=(_action("cat src/models.py", 1),),
+        source_revision="rev-1",
+    )
+
+    assert delivery["exploration_relationship"] == "context_accompanied_exploration"
+    assert tracker.summary()["context_accompanied_exploration"] == 1
+
+
+def test_tracker_counts_exploration_before_later_mutation_in_same_batch() -> None:
+    delivery = {
+        "delivery_id": "repository-context-3",
+        "facts": [{"path": "src/models.py", "symbol": "Model"}],
+        "source_revision": "rev-1",
+    }
+    tracker = SemanticUtilizationTracker()
+    tracker.register(delivery, call=1, source_revision="rev-1")
+    tracker.observe(
+        call=1,
+        actions=(
+            _action("cat src/other.py", 1, 0, 2),
+            _action("sed -i 's/Old/New/' src/models.py", 1, 1, 2),
+        ),
+        source_revision="rev-1",
+    )
+
+    assert delivery["exploration_actions_before_use"] == 1
+    assert delivery["exploration_relationship"] == "context_followed_exploration"

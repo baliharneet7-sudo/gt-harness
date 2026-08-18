@@ -48,6 +48,10 @@ from minisweagent.exceptions import InterruptAgentFlow
 from minisweagent.models import GLOBAL_MODEL_STATS
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
+from gt_engine.benchmark_parity import (
+    RUNTIME_FIELD_ORIGINS,
+    runtime_observation_hash,
+)
 from gt_engine.central_runtime import (
     CENTRAL_FEATURE_IDS,
     CentralFeatureRuntime,
@@ -184,7 +188,22 @@ from gt_engine.provider_view import (
     provider_compaction_target_chars,
     provider_request_budget,
 )
+from gt_engine.relational_context import (
+    FINAL_RELATIONAL_CONTEXT_PROFILE,
+    ContextOpportunity,
+    EvidenceSnapshot,
+    RelationalContextComposer,
+    RelationalContextResult,
+    RelationalContextStatus,
+)
 from gt_engine.replay_bundle import ReplayBundleWriter
+from gt_engine.repository_context import (
+    DecisionOpportunity,
+    RepositoryContextEngine,
+    RepositoryContextProjection,
+    RepositoryContextStatus,
+    RepositorySnapshot,
+)
 from gt_engine.repository_intelligence import (
     RepositoryEvidence,
     RepositoryIntelligenceStatus,
@@ -194,6 +213,12 @@ from gt_engine.repository_intelligence import (
 )
 from gt_engine.repository_mirror import SourceMirrorPlan, plan_source_mirror
 from gt_engine.retrieval_profile import FINAL_RETRIEVAL_PROFILE
+from gt_engine.semantic_evidence import (
+    FINAL_SEMANTIC_EVIDENCE_PROFILE,
+    SemanticEvidenceBridge,
+    SemanticEvidenceResult,
+    SemanticEvidenceStatus,
+)
 from gt_engine.snowflake_onnx import SnowflakeOnnxDenseBackend
 from gt_engine.task_contract import task_external_paths, task_shebang_paths
 from gt_engine.task_semantic_substrate import TaskSemanticSubstrate
@@ -243,6 +268,8 @@ def _account_preemptive_contribution_result(
 # surface; otherwise a large retrieval can make the living state disappear.
 PERSISTENT_STATE_CONTRIBUTION_PRIORITY = 0
 PERSISTENT_EXECUTION_STATE_MECHANISM_ID = "persistent_execution_state"
+RELATIONAL_CONTEXT_STATE_MECHANISM_ID = "relational_context_state"
+SEMANTIC_EVIDENCE_STATE_MECHANISM_ID = "semantic_evidence_state"
 PRODUCT_MECHANISM_IDS = (
     *CENTRAL_FEATURE_IDS,
     PERSISTENT_EXECUTION_STATE_MECHANISM_ID,
@@ -1445,6 +1472,106 @@ class MiniSweCentralAgent(BaseAgent):
     runtime_mode = "treatment"
     SUPPORTS_ATIF = True
 
+    def _observed_benchmark_runtime_contract(self) -> dict[str, Any] | None:
+        """Report runtime-owned parity facts without copying declared values."""
+
+        identity = self.benchmark_identity
+        if not isinstance(identity, dict):
+            return None
+        treatment = identity.get("treatment")
+        expected_kwargs = (
+            treatment.get("agent_kwargs") if isinstance(treatment, dict) else None
+        )
+        if not isinstance(expected_kwargs, dict):
+            expected_kwargs = {}
+        actual_values: dict[str, Any] = {
+            "integration_mode": self.integration_mode.value,
+            "treatment_profile": self.treatment_profile,
+            "enable_persistent_execution_state": (
+                self.enable_persistent_execution_state
+            ),
+            "enable_preemptive_retrieval": self.enable_preemptive_retrieval,
+            "enable_relational_context": self.enable_relational_context,
+            "enable_semantic_evidence": self.enable_semantic_evidence,
+            "dense_fallback_only": self.dense_fallback_only,
+            "relational_context_max_depth": self.relational_context_max_depth,
+            "relational_context_max_branching": (
+                self.relational_context_max_branching
+            ),
+            "relational_context_max_processes": self.relational_context_max_processes,
+            "relational_context_max_tokens": self.relational_context_max_tokens,
+        }
+        observed_kwargs = {
+            key: actual_values.get(key, {"unobserved_runtime_key": key})
+            for key in expected_kwargs
+        }
+        supplied = self.runtime_observation
+        supplied_execution = (
+            supplied.get("execution_contract") if isinstance(supplied, dict) else None
+        )
+        supplied_sources = (
+            supplied.get("field_sources") if isinstance(supplied, dict) else None
+        )
+        accepts_runner_observation = bool(
+            isinstance(supplied, dict)
+            and supplied.get("schema")
+            == "gt.benchmark_runtime_execution_observation.v1"
+            and isinstance(supplied_execution, dict)
+            and isinstance(supplied_sources, dict)
+        )
+        execution_contract: dict[str, Any] = {}
+        field_sources: dict[str, dict[str, str]] = {}
+        if accepts_runner_observation:
+            for field, allowed_origins in RUNTIME_FIELD_ORIGINS.items():
+                source = supplied_sources.get(field)
+                value = supplied_execution.get(field)
+                if not isinstance(source, dict):
+                    continue
+                origin = str(source.get("origin") or "")
+                if origin not in allowed_origins:
+                    continue
+                if source.get("value_sha256") != runtime_observation_hash(value):
+                    continue
+                execution_contract[field] = copy.deepcopy(value)
+                field_sources[field] = {
+                    "origin": origin,
+                    "value_sha256": runtime_observation_hash(value),
+                }
+
+        # These two values are owned by the live agent/provider envelope. They
+        # replace any runner observation and are never copied from the manifest.
+        execution_contract["provider_identity"] = self.model_name
+        field_sources["provider_identity"] = {
+            "origin": "provider_request",
+            "value_sha256": runtime_observation_hash(self.model_name),
+        }
+        execution_contract["temperature"] = float(self.temperature)
+        field_sources["temperature"] = {
+            "origin": "agent_instance",
+            "value_sha256": runtime_observation_hash(float(self.temperature)),
+        }
+        unobserved_fields = sorted(
+            set(RUNTIME_FIELD_ORIGINS) - set(execution_contract)
+        )
+        return {
+            "schema": (
+                "gt.benchmark_runtime_observation.v1"
+                if not unobserved_fields
+                else "gt.agent_runtime_observation.partial.v1"
+            ),
+            "model_id": self.model_name,
+            "max_steps": self.step_limit,
+            "treatment_id": (
+                str(treatment.get("treatment_id") or "")
+                if isinstance(treatment, dict)
+                else ""
+            ),
+            "agent_kwargs": observed_kwargs,
+            "execution_contract": execution_contract,
+            "field_sources": field_sources,
+            "unobserved_fields": unobserved_fields,
+        }
+
     @staticmethod
     def _prepare_preemptive_retrieval_request(
         messages: list[dict[str, Any]],
@@ -1570,11 +1697,83 @@ class MiniSweCentralAgent(BaseAgent):
         enable_replay_capture: bool = False,
         replay_capture_max_call_chars: int = 500_000,
         replay_capture_max_bundle_bytes: int = 25_000_000,
+        treatment_profile: str = "central_pes_v1",
+        enable_relational_context: bool | None = None,
+        enable_semantic_evidence: bool | None = None,
+        semantic_evidence_max_items: int | None = None,
+        semantic_evidence_max_tokens: int | None = None,
+        benchmark_identity: dict[str, Any] | None = None,
+        observed_execution_contract: dict[str, Any] | None = None,
+        runtime_observation: dict[str, Any] | None = None,
+        runtime_observation_path: str | Path | None = None,
+        dense_fallback_only: bool | None = None,
+        relational_context_max_depth: int | None = None,
+        relational_context_max_branching: int | None = None,
+        relational_context_max_processes: int | None = None,
+        relational_context_max_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir, model_name, **kwargs)
         if not model_name:
             raise ValueError("model_name is required")
+        normalized_treatment_profile = str(treatment_profile or "").strip().lower()
+        if normalized_treatment_profile not in {
+            "central_pes_v1",
+            "central_relational_v2",
+        }:
+            raise ValueError(
+                "unknown GT treatment profile "
+                f"{treatment_profile!r}; expected central_pes_v1 or central_relational_v2"
+            )
+        self.treatment_profile = normalized_treatment_profile
+        self.benchmark_identity = (
+            copy.deepcopy(benchmark_identity)
+            if isinstance(benchmark_identity, dict)
+            else None
+        )
+        # Retained only so older launchers do not break. A declaration is not
+        # runtime evidence and is intentionally excluded from parity receipts.
+        self.legacy_observed_execution_contract = (
+            copy.deepcopy(observed_execution_contract)
+            if isinstance(observed_execution_contract, dict)
+            else None
+        )
+        if runtime_observation is None and runtime_observation_path is None:
+            runtime_observation_path = os.environ.get("GT_RUNTIME_OBSERVATION_PATH")
+        if runtime_observation is not None and runtime_observation_path is not None:
+            raise ValueError("provide exactly one runtime observation source")
+        if runtime_observation_path is not None:
+            observation_path = Path(runtime_observation_path).resolve(strict=True)
+            loaded_observation = json.loads(
+                observation_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(loaded_observation, dict):
+                raise ValueError("runtime observation file must contain a JSON object")
+            runtime_observation = loaded_observation
+        self.runtime_observation = (
+            copy.deepcopy(runtime_observation)
+            if isinstance(runtime_observation, dict)
+            else None
+        )
+        if self.treatment_profile == "central_relational_v2":
+            # Relational v2 strengthens the canonical living state; it never
+            # replaces the eighteenth product mechanism or creates a parallel
+            # zero-bootstrap product identity.
+            enable_persistent_execution_state = True
+            enable_preemptive_retrieval = True
+            if enable_relational_context is None:
+                enable_relational_context = True
+            if enable_semantic_evidence is None:
+                enable_semantic_evidence = True
+            if dense_fallback_only is None:
+                dense_fallback_only = True
+        else:
+            if enable_relational_context is None:
+                enable_relational_context = False
+            if enable_semantic_evidence is None:
+                enable_semantic_evidence = False
+            if dense_fallback_only is None:
+                dense_fallback_only = False
         self.cwd = cwd
         self.temperature = temperature
         self.step_limit = step_limit
@@ -1629,6 +1828,8 @@ class MiniSweCentralAgent(BaseAgent):
             enable_progress_control = False
             enable_adaptive_validation_timeout = False
             enable_shadow_submit_gate = False
+            enable_relational_context = False
+            enable_semantic_evidence = False
         elif self.integration_mode is GTIntegrationMode.AUDIT:
             enable_task_start_advisory = False
             enable_feature_guidance = False
@@ -1640,6 +1841,8 @@ class MiniSweCentralAgent(BaseAgent):
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
             enable_shadow_submit_gate = False
+            enable_relational_context = False
+            enable_semantic_evidence = False
         elif self.policy_mode is GTPolicyMode.CERTIFIED_SHADOW:
             enable_lint = False
             enable_task_start_advisory = False
@@ -1651,6 +1854,8 @@ class MiniSweCentralAgent(BaseAgent):
             enable_context_compaction = False
             enable_completion_controller = False
             enable_adaptive_validation_timeout = False
+            enable_relational_context = False
+            enable_semantic_evidence = False
         self.enable_lint = enable_lint
         self.enable_submit_readiness = enable_submit_readiness
         self.enable_all_features = enable_all_features
@@ -1668,6 +1873,25 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_context_frontier = bool(enable_context_frontier)
         self.context_frontier_task_budget_chars = max(0, int(context_frontier_task_budget_chars))
         self.enable_preemptive_retrieval = bool(enable_preemptive_retrieval)
+        self.enable_relational_context = bool(enable_relational_context)
+        self.enable_semantic_evidence = bool(enable_semantic_evidence)
+        self.semantic_evidence_max_items = max(
+            1,
+            int(
+                FINAL_SEMANTIC_EVIDENCE_PROFILE.max_items
+                if semantic_evidence_max_items is None
+                else semantic_evidence_max_items
+            ),
+        )
+        self.semantic_evidence_max_tokens = max(
+            1,
+            int(
+                FINAL_SEMANTIC_EVIDENCE_PROFILE.max_tokens
+                if semantic_evidence_max_tokens is None
+                else semantic_evidence_max_tokens
+            ),
+        )
+        self.dense_fallback_only = bool(dense_fallback_only)
         self.preemptive_retrieval_token_budget = max(
             0,
             int(
@@ -1764,6 +1988,41 @@ class MiniSweCentralAgent(BaseAgent):
             32, min(512, int(persistent_state_context_tokens))
         )
         self.gt_request_token_budget = max(64, min(4_096, int(gt_request_token_budget)))
+        self.relational_context_max_depth = max(
+            1,
+            int(
+                FINAL_RELATIONAL_CONTEXT_PROFILE.max_depth
+                if relational_context_max_depth is None
+                else relational_context_max_depth
+            ),
+        )
+        self.relational_context_max_branching = max(
+            1,
+            int(
+                FINAL_RELATIONAL_CONTEXT_PROFILE.max_branching
+                if relational_context_max_branching is None
+                else relational_context_max_branching
+            ),
+        )
+        self.relational_context_max_processes = max(
+            1,
+            int(
+                FINAL_RELATIONAL_CONTEXT_PROFILE.max_processes
+                if relational_context_max_processes is None
+                else relational_context_max_processes
+            ),
+        )
+        self.relational_context_max_tokens = min(
+            self.gt_request_token_budget,
+            max(
+                1,
+                int(
+                    FINAL_RELATIONAL_CONTEXT_PROFILE.max_tokens
+                    if relational_context_max_tokens is None
+                    else relational_context_max_tokens
+                ),
+            ),
+        )
         self._preemptive_dense_backend: SnowflakeOnnxDenseBackend | None = None
         self._preemptive_dense_backend_error = ""
         self.enable_context_compaction = enable_context_compaction
@@ -3389,6 +3648,9 @@ class MiniSweCentralAgent(BaseAgent):
         frontier_decisions: list[dict[str, Any]] = []
         frontier_deliveries: list[dict[str, Any]] = []
         semantic_utilization = SemanticUtilizationTracker(max_calls=5, max_actions=10)
+        repository_context_utilization = SemanticUtilizationTracker(
+            max_calls=5, max_actions=10
+        )
         delivered_frontier_fact_ids: set[str] = set()
         delivered_frontier_claim_ids: set[str] = set()
         frontier_chars_delivered = 0
@@ -3422,8 +3684,36 @@ class MiniSweCentralAgent(BaseAgent):
         contribution_compilations: list[dict[str, Any]] = []
         preemptive_retrieval_decisions: list[dict[str, Any]] = []
         preemptive_retrieval_deliveries: list[dict[str, Any]] = []
+        relational_context_decisions: list[dict[str, Any]] = []
+        relational_context_deliveries: list[dict[str, Any]] = []
+        semantic_evidence_decisions: list[dict[str, Any]] = []
+        semantic_evidence_deliveries: list[dict[str, Any]] = []
+        repository_context_decisions: list[dict[str, Any]] = []
+        repository_context_deliveries: list[dict[str, Any]] = []
         decision_sufficiency_receipts: list[dict[str, Any]] = []
         delivered_preemptive_claim_ids: set[str] = set()
+        delivered_relational_claim_ids: set[str] = set()
+        delivered_semantic_evidence_claim_ids: set[str] = set()
+        delivered_repository_context_claim_ids: set[str] = set()
+        relational_context_composer = RelationalContextComposer(
+            max_depth=self.relational_context_max_depth,
+            max_branching=self.relational_context_max_branching,
+            max_processes=self.relational_context_max_processes,
+            max_tokens=self.relational_context_max_tokens,
+        )
+        semantic_evidence_bridge = SemanticEvidenceBridge(
+            max_items=self.semantic_evidence_max_items,
+            max_tokens=self.semantic_evidence_max_tokens,
+        )
+        repository_context_engine = RepositoryContextEngine(
+            max_depth=self.relational_context_max_depth,
+            max_branching=self.relational_context_max_branching,
+            max_execution_views=self.relational_context_max_processes,
+            max_tokens=max(
+                self.relational_context_max_tokens,
+                self.semantic_evidence_max_tokens,
+            ),
+        )
         preemptive_retrieval_chars_delivered = 0
         preemptive_retrieval_chars_by_lifecycle: dict[str, int] = {}
         preemptive_retrieval_cache: dict[str, Any] = {}
@@ -3626,6 +3916,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 dense_candidate_limit=(
                                     self.preemptive_retrieval_dense_candidate_limit
                                 ),
+                                dense_fallback_only=self.dense_fallback_only,
                             )
                             remaining_for_initial_retrieval = (
                                 self.preemptive_retrieval_cold_start_timeout_sec
@@ -4084,6 +4375,13 @@ class MiniSweCentralAgent(BaseAgent):
                 )
                 preemptive_frame: PreemptiveFrame | None = None
                 preemptive_compilation: PreemptiveFrameCompilation | None = None
+                retrieval_result: HybridRetrievalResult | None = None
+                relational_context_result: RelationalContextResult | None = None
+                relational_context_payload = ""
+                semantic_evidence_result: SemanticEvidenceResult | None = None
+                semantic_evidence_payload = ""
+                repository_context_projection: RepositoryContextProjection | None = None
+                repository_context_payload = ""
                 retrieval_opportunity_kind = _retrieval_opportunity_kind(
                     evidence_action=retrieval_evidence_action,
                     operation=retrieval_last_operation,
@@ -4269,6 +4567,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         dense_candidate_limit=(
                                             self.preemptive_retrieval_dense_candidate_limit
                                         ),
+                                        dense_fallback_only=self.dense_fallback_only,
                                     )
                                 remaining_chars = min(
                                     lifecycle_remaining_chars,
@@ -4502,6 +4801,220 @@ class MiniSweCentralAgent(BaseAgent):
                         (time.perf_counter() - retrieval_started) * 1_000.0,
                         6,
                     )
+                if (
+                    self.enable_relational_context
+                    and self.treatment_profile != "central_relational_v2"
+                    and retrieval_result is not None
+                    and preemptive_repository is not None
+                ):
+                    relational_context_result = relational_context_composer.compose(
+                        ContextOpportunity(
+                            kind=retrieval_opportunity_kind,
+                            evidence_action=retrieval_evidence_action,
+                            eligible_call=retrieval_eligible_call,
+                            source_revision=graph_source_revision,
+                            graph_revision=repository_evidence.graph_revision,
+                            anchors=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *retrieval_active_paths,
+                                        *(
+                                            retrieval_last_action.targets
+                                            if retrieval_last_action is not None
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            ),
+                            changed_paths=retrieval_changed_paths,
+                        ),
+                        EvidenceSnapshot(
+                            retrieval=retrieval_result,
+                            structural_links=preemptive_repository.structural_links,
+                            source_revision=graph_source_revision,
+                            graph_revision=repository_evidence.graph_revision,
+                            delivered_claim_ids=tuple(
+                                sorted(delivered_relational_claim_ids)
+                            ),
+                        ),
+                    )
+                    relational_context_payload = (
+                        relational_context_result.rendered_text
+                        if relational_context_result.status
+                        is RelationalContextStatus.DELIVER
+                        else ""
+                    )
+                    relational_context_decisions.append(
+                        {
+                            "call": calls,
+                            "status": relational_context_result.status.value,
+                            "epistemic_status": (
+                                relational_context_result.epistemic_status.value
+                            ),
+                            "opportunity_kind": retrieval_opportunity_kind,
+                            "evidence_action": retrieval_evidence_action,
+                            "eligible_call": retrieval_eligible_call,
+                            "source_revision": relational_context_result.source_revision,
+                            "graph_revision": relational_context_result.graph_revision,
+                            "claim_ids": list(relational_context_result.claim_ids),
+                            "reason_codes": list(relational_context_result.reason_codes),
+                            "token_count": relational_context_result.token_count,
+                            "process_count": len(relational_context_result.processes),
+                            "rejected_edge_count": (
+                                relational_context_result.rejected_edge_count
+                            ),
+                            "truncated_process_count": (
+                                relational_context_result.truncated_process_count
+                            ),
+                        }
+                    )
+                if (
+                    self.enable_semantic_evidence
+                    and self.treatment_profile != "central_relational_v2"
+                    and retrieval_opportunity_kind
+                    in {
+                        "post_read_search",
+                        "post_mutation",
+                        "post_diagnostic",
+                        "post_validation",
+                        "post_submit",
+                    }
+                ):
+                    semantic_evidence_result = semantic_evidence_bridge.compose(
+                        repository_evidence,
+                        source_revision=graph_source_revision,
+                        graph_revision=repository_evidence.graph_revision,
+                        delivered_claim_ids=frozenset(
+                            delivered_semantic_evidence_claim_ids
+                        ),
+                    )
+                    semantic_evidence_payload = (
+                        semantic_evidence_result.rendered_text
+                        if semantic_evidence_result.status is SemanticEvidenceStatus.DELIVER
+                        else ""
+                    )
+                    semantic_evidence_decisions.append(
+                        {
+                            "call": calls,
+                            "status": semantic_evidence_result.status.value,
+                            "opportunity_kind": retrieval_opportunity_kind,
+                            "evidence_action": retrieval_evidence_action,
+                            "eligible_call": retrieval_eligible_call,
+                            "source_revision": semantic_evidence_result.source_revision,
+                            "graph_revision": semantic_evidence_result.graph_revision,
+                            "claim_ids": list(semantic_evidence_result.claim_ids),
+                            "reason_codes": list(semantic_evidence_result.reason_codes),
+                            "item_count": semantic_evidence_result.item_count,
+                            "truncated_count": semantic_evidence_result.truncated_count,
+                            "token_count": semantic_evidence_result.token_count,
+                        }
+                    )
+                if (
+                    self.treatment_profile == "central_relational_v2"
+                    and self.enable_relational_context
+                    and self.enable_semantic_evidence
+                    and preemptive_repository is not None
+                ):
+                    repository_context_projection = repository_context_engine.project(
+                        DecisionOpportunity(
+                            kind=retrieval_opportunity_kind,
+                            evidence_action=retrieval_evidence_action,
+                            eligible_call=retrieval_eligible_call,
+                            source_revision=graph_source_revision,
+                            graph_revision=repository_evidence.graph_revision,
+                            anchors=tuple(
+                                dict.fromkeys(
+                                    (
+                                        *retrieval_active_paths,
+                                        *(
+                                            retrieval_last_action.targets
+                                            if retrieval_last_action is not None
+                                            else ()
+                                        ),
+                                    )
+                                )
+                            ),
+                            changed_paths=retrieval_changed_paths,
+                            changed_symbols=retrieval_active_symbols,
+                        ),
+                        RepositorySnapshot(
+                            source_revision=graph_source_revision,
+                            graph_revision=repository_evidence.graph_revision,
+                            repository_evidence=repository_evidence,
+                            structural_links=preemptive_repository.structural_links,
+                            diagnostics=retrieval_diagnostics,
+                            validation_checks=tuple(repository_evidence.project_checks),
+                            represented_checks=frozenset(
+                                (
+                                    *(
+                                        " ".join(str(check or "").split())
+                                        for check in explicit_checks
+                                        if str(check or "").strip()
+                                    ),
+                                    *(
+                                        (
+                                            " ".join(
+                                                retrieval_last_action.raw_command.split()
+                                            ),
+                                        )
+                                        if retrieval_last_action is not None
+                                        and retrieval_last_operation
+                                        == ActionOperation.VALIDATE.value
+                                        and retrieval_last_action.raw_command.strip()
+                                        else ()
+                                    ),
+                                )
+                            ),
+                            path_origins=tuple(
+                                sorted(
+                                    (
+                                        document.path,
+                                        document.origin.value,
+                                    )
+                                    for document in preemptive_repository.documents
+                                )
+                            ),
+                        ),
+                        delivered_claim_ids=frozenset(
+                            delivered_repository_context_claim_ids
+                        ),
+                    )
+                    repository_context_payload = (
+                        repository_context_projection.rendered_text
+                        if repository_context_projection.status
+                        is RepositoryContextStatus.DELIVER
+                        else ""
+                    )
+                    repository_context_decisions.append(
+                        {
+                            "call": calls,
+                            "status": repository_context_projection.status.value,
+                            "opportunity_kind": retrieval_opportunity_kind,
+                            "evidence_action": retrieval_evidence_action,
+                            "eligible_call": retrieval_eligible_call,
+                            "source_revision": repository_context_projection.source_revision,
+                            "graph_revision": repository_context_projection.graph_revision,
+                            "claim_ids": list(repository_context_projection.claim_ids),
+                            "reason_codes": list(repository_context_projection.reason_codes),
+                            "token_count": repository_context_projection.token_count,
+                            "execution_view_count": len(
+                                repository_context_projection.execution_views
+                            ),
+                            "impact_fact_count": len(
+                                repository_context_projection.impact_facts
+                            ),
+                            "diagnostic_fact_count": len(
+                                repository_context_projection.diagnostic_facts
+                            ),
+                            "validation_fact_count": len(
+                                repository_context_projection.validation_facts
+                            ),
+                            "rejected_edge_count": (
+                                repository_context_projection.rejected_edge_count
+                            ),
+                            "truncated_count": repository_context_projection.truncated_count,
+                        }
+                    )
                 # Frontier evidence is bound to the GRAPH source revision (the
                 # mirrored/indexable path set). Comparing it against the full
                 # semantic source revision permanently rejects post-edit
@@ -4552,6 +5065,30 @@ class MiniSweCentralAgent(BaseAgent):
                                 (
                                     *frontier_decision.reason_codes,
                                     "persistent_bootstrap_owns_task_start",
+                                )
+                            )
+                        ),
+                    )
+                if (
+                    self.treatment_profile == "central_relational_v2"
+                    and repository_context_projection is not None
+                    and repository_context_projection.status
+                    is RepositoryContextStatus.DELIVER
+                ):
+                    # The strengthened projection owns relational/semantic
+                    # claims for this request. Keep the legacy frontier
+                    # controller-visible so equivalent facts cannot consume a
+                    # second provider surface under different claim IDs.
+                    frontier_decision = replace(
+                        frontier_decision,
+                        disposition=FrontierDisposition.CONTROLLER_ONLY,
+                        rendered="",
+                        facts=(),
+                        reason_codes=tuple(
+                            dict.fromkeys(
+                                (
+                                    *frontier_decision.reason_codes,
+                                    "repository_context_owns_semantic_frontier",
                                 )
                             )
                         ),
@@ -4654,6 +5191,37 @@ class MiniSweCentralAgent(BaseAgent):
                             else 20
                         ),
                     )
+                if relational_context_result is not None:
+                    register_contribution(
+                        surface="relational_context",
+                        payload=relational_context_payload,
+                        claim_ids=relational_context_result.claim_ids,
+                        fact_ids=tuple(
+                            process.process_id
+                            for process in relational_context_result.processes
+                        ),
+                        evidence_action=retrieval_evidence_action,
+                        eligible_call=retrieval_eligible_call,
+                        revision=relational_context_result.source_revision,
+                        priority=7,
+                    )
+                if semantic_evidence_result is not None:
+                    register_contribution(
+                        surface="semantic_evidence",
+                        payload=semantic_evidence_payload,
+                        claim_ids=semantic_evidence_result.claim_ids,
+                        fact_ids=semantic_evidence_result.claim_ids,
+                        evidence_action=retrieval_evidence_action,
+                        eligible_call=retrieval_eligible_call,
+                        revision=semantic_evidence_result.source_revision,
+                        priority=6,
+                    )
+                if repository_context_projection is not None:
+                    for contribution in repository_context_projection.contributions:
+                        contribution_candidates.append(contribution)
+                        contribution_by_surface[contribution.surface] = (
+                            contribution.contribution_id
+                        )
                 frontier_fact_ids = tuple(
                     str(row.get("fact_id") or "")
                     for row in frontier_decision.accounting
@@ -4765,6 +5333,18 @@ class MiniSweCentralAgent(BaseAgent):
                     "persistent_execution_state"
                 ):
                     persistent_state_payload = ""
+                if relational_context_payload and not contribution_selected(
+                    "relational_context"
+                ):
+                    relational_context_payload = ""
+                if semantic_evidence_payload and not contribution_selected(
+                    "semantic_evidence"
+                ):
+                    semantic_evidence_payload = ""
+                if repository_context_payload and not contribution_selected(
+                    "repository_context"
+                ):
+                    repository_context_payload = ""
                 if task_semantic_payload and not contribution_selected(
                     "task_semantic_substrate"
                 ):
@@ -4801,6 +5381,9 @@ class MiniSweCentralAgent(BaseAgent):
                     item
                     for item in (
                         task_semantic_payload,
+                        repository_context_payload,
+                        semantic_evidence_payload,
+                        relational_context_payload,
                         persistent_state_payload,
                         frontier_payload,
                         guidance_payload,
@@ -5131,6 +5714,196 @@ class MiniSweCentralAgent(BaseAgent):
                 if (
                     request_dispatch_eligible
                     and runtime_message_index is not None
+                    and relational_context_payload
+                    and relational_context_result is not None
+                ):
+                    prepared_relational_delivery = {
+                        "delivery_id": "relational-context-"
+                        + hashlib.sha256(
+                            _canonical_json(
+                                {
+                                    "claims": relational_context_result.claim_ids,
+                                    "call": calls,
+                                    "source_revision": graph_source_revision,
+                                }
+                            )
+                        ).hexdigest()[:20],
+                        "call": calls,
+                        "source_revision": graph_source_revision,
+                        "graph_revision": repository_evidence.graph_revision,
+                        "claim_ids": list(relational_context_result.claim_ids),
+                        "evidence_action": retrieval_evidence_action,
+                        "first_eligible_call": retrieval_eligible_call,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "not_predictive": retrieval_evidence_action <= actions_count,
+                        "one_step_late": calls != retrieval_eligible_call,
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "message_index": runtime_message_index,
+                        "chars": len(relational_context_payload),
+                        "tokens": relational_context_result.token_count,
+                        "epistemic_status": (
+                            relational_context_result.epistemic_status.value
+                        ),
+                        "processes": [
+                            {
+                                "process_id": process.process_id,
+                                "anchor": process.anchor,
+                                "rendered": process.rendered,
+                                "truncated": process.truncated,
+                                "cycle_terminated": process.cycle_terminated,
+                            }
+                            for process in relational_context_result.processes
+                        ],
+                    }
+                else:
+                    prepared_relational_delivery = None
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
+                    and semantic_evidence_payload
+                    and semantic_evidence_result is not None
+                ):
+                    prepared_semantic_evidence_delivery = {
+                        "delivery_id": "semantic-evidence-"
+                        + hashlib.sha256(
+                            _canonical_json(
+                                {
+                                    "claims": semantic_evidence_result.claim_ids,
+                                    "call": calls,
+                                    "source_revision": graph_source_revision,
+                                }
+                            )
+                        ).hexdigest()[:20],
+                        "call": calls,
+                        "source_revision": graph_source_revision,
+                        "graph_revision": repository_evidence.graph_revision,
+                        "claim_ids": list(semantic_evidence_result.claim_ids),
+                        "evidence_action": retrieval_evidence_action,
+                        "first_eligible_call": retrieval_eligible_call,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "not_predictive": retrieval_evidence_action <= actions_count,
+                        "one_step_late": calls != retrieval_eligible_call,
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "message_index": runtime_message_index,
+                        "chars": len(semantic_evidence_payload),
+                        "tokens": semantic_evidence_result.token_count,
+                        "truncated_count": semantic_evidence_result.truncated_count,
+                        "items": [item.as_dict() for item in semantic_evidence_result.items],
+                    }
+                else:
+                    prepared_semantic_evidence_delivery = None
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
+                    and repository_context_payload
+                    and repository_context_projection is not None
+                ):
+                    repository_context_fact_rows: list[dict[str, Any]] = []
+                    if repository_context_projection.semantic_evidence is not None:
+                        repository_context_fact_rows.extend(
+                            {
+                                "path": item.path,
+                                "symbol": item.symbol,
+                                "kind": item.kind,
+                            }
+                            for item in repository_context_projection.semantic_evidence.items
+                        )
+                    for view in repository_context_projection.execution_views:
+                        for step in view.steps:
+                            repository_context_fact_rows.extend(
+                                (
+                                    {
+                                        "path": step.source.path,
+                                        "symbol": step.source.symbol,
+                                        "kind": "execution_source",
+                                    },
+                                    {
+                                        "path": step.target.path,
+                                        "symbol": step.target.symbol,
+                                        "kind": "execution_target",
+                                    },
+                                )
+                            )
+                    for fact in repository_context_projection.impact_facts:
+                        repository_context_fact_rows.extend(
+                            (
+                                {
+                                    "path": fact.source.path,
+                                    "symbol": fact.source.symbol,
+                                    "kind": "impact_source",
+                                },
+                                {
+                                    "path": fact.target.path,
+                                    "symbol": fact.target.symbol,
+                                    "kind": "impact_target",
+                                },
+                            )
+                        )
+                    repository_context_fact_rows.extend(
+                        {
+                            "path": fact.path,
+                            "symbol": "",
+                            "kind": "observed_diagnostic",
+                        }
+                        for fact in repository_context_projection.diagnostic_facts
+                    )
+                    repository_context_fact_rows.extend(
+                        {
+                            "path": fact.impacted_path,
+                            "symbol": "",
+                            "kind": "validation_target",
+                        }
+                        for fact in repository_context_projection.validation_facts
+                    )
+                    unique_repository_context_facts = list(
+                        {
+                            (
+                                str(row.get("path") or ""),
+                                str(row.get("symbol") or ""),
+                                str(row.get("kind") or ""),
+                            ): row
+                            for row in repository_context_fact_rows
+                            if row.get("path")
+                        }.values()
+                    )
+                    prepared_repository_context_delivery = {
+                        "delivery_id": "repository-context-"
+                        + hashlib.sha256(
+                            _canonical_json(
+                                {
+                                    "claims": repository_context_projection.claim_ids,
+                                    "call": calls,
+                                    "source_revision": graph_source_revision,
+                                }
+                            )
+                        ).hexdigest()[:20],
+                        "call": calls,
+                        "source_revision": graph_source_revision,
+                        "graph_revision": repository_evidence.graph_revision,
+                        "claim_ids": list(repository_context_projection.claim_ids),
+                        "evidence_action": retrieval_evidence_action,
+                        "first_eligible_call": retrieval_eligible_call,
+                        "delivered_before_call": calls,
+                        "delivered_before_model_query": True,
+                        "not_predictive": retrieval_evidence_action <= actions_count,
+                        "one_step_late": calls != retrieval_eligible_call,
+                        "request_payload_sha256": request_payload_sha256,
+                        "provider_messages_sha256": provider_messages_sha256,
+                        "message_index": runtime_message_index,
+                        "chars": len(repository_context_payload),
+                        "tokens": repository_context_projection.token_count,
+                        "facts": unique_repository_context_facts,
+                        "projection": repository_context_projection.as_dict(),
+                    }
+                else:
+                    prepared_repository_context_delivery = None
+                if (
+                    request_dispatch_eligible
+                    and runtime_message_index is not None
                     and frontier_payload
                 ):
                     fact_ids = [fact.fact_id for fact in frontier_decision.facts]
@@ -5219,6 +5992,8 @@ class MiniSweCentralAgent(BaseAgent):
                     "assistant_chars": 0,
                     "tool_observation_chars": 0,
                     "preemptive_retrieval_chars": len(preemptive_payload),
+                    "semantic_evidence_chars": len(semantic_evidence_payload),
+                    "repository_context_chars": len(repository_context_payload),
                     "task_semantic_substrate_chars": len(task_semantic_payload),
                     "persistent_execution_state_chars": len(persistent_state_payload),
                     "runtime_advisory_chars": len(guidance_payload),
@@ -5228,6 +6003,8 @@ class MiniSweCentralAgent(BaseAgent):
                         0,
                         runtime_enrichment_chars
                         - len(preemptive_payload)
+                        - len(semantic_evidence_payload)
+                        - len(repository_context_payload)
                         - len(task_semantic_payload)
                         - len(persistent_state_payload)
                         - len(guidance_payload)
@@ -5262,6 +6039,8 @@ class MiniSweCentralAgent(BaseAgent):
                             and not provider_view_metrics.compacted,
                         ),
                         ("preemptive_retrieval", bool(preemptive_payload)),
+                        ("semantic_evidence", bool(semantic_evidence_payload)),
+                        ("repository_context", bool(repository_context_payload)),
                         ("task_semantic_substrate", bool(task_semantic_payload)),
                         ("persistent_execution_state", bool(persistent_state_payload)),
                         ("certified_evidence", bool(legacy_runtime_payload)),
@@ -5311,6 +6090,42 @@ class MiniSweCentralAgent(BaseAgent):
                         "runtime_message_index": runtime_message_index,
                         "preemptive_retrieval": dict(preemptive_decision),
                         "preemptive_retrieval_delivered": bool(preemptive_payload),
+                        "relational_context": (
+                            {
+                                "status": relational_context_result.status.value,
+                                "epistemic_status": (
+                                    relational_context_result.epistemic_status.value
+                                ),
+                                "claim_ids": list(relational_context_result.claim_ids),
+                                "reason_codes": list(
+                                    relational_context_result.reason_codes
+                                ),
+                                "process_count": len(
+                                    relational_context_result.processes
+                                ),
+                            }
+                            if relational_context_result is not None
+                            else None
+                        ),
+                        "relational_context_chars": len(relational_context_payload),
+                        "relational_context_delivered": False,
+                        "semantic_evidence": (
+                            semantic_evidence_result.as_dict()
+                            if semantic_evidence_result is not None
+                            else None
+                        ),
+                        "semantic_evidence_chars": len(semantic_evidence_payload),
+                        "semantic_evidence_delivered": False,
+                        "repository_context": (
+                            repository_context_projection.as_dict()
+                            if repository_context_projection is not None
+                            else None
+                        ),
+                        "repository_context_chars": len(repository_context_payload),
+                        "repository_context_delivered": False,
+                        "selected_surfaces": list(
+                            contribution_receipt.get("selected_surfaces") or []
+                        ),
                         "task_semantic_substrate": (
                             task_semantic_frame.as_dict()
                             if task_semantic_frame is not None
@@ -5389,6 +6204,33 @@ class MiniSweCentralAgent(BaseAgent):
                         ),
                         source_revision=graph_source_revision,
                     )
+                if repository_context_projection is not None:
+                    provider_evidence.prepare(
+                        surface=ProviderEvidenceSurface.REPOSITORY_CONTEXT,
+                        fact_ids=tuple(
+                            fact_id
+                            for contribution in repository_context_projection.contributions
+                            for fact_id in contribution.fact_ids
+                        ),
+                        claim_ids=repository_context_projection.claim_ids,
+                        evidence_action=retrieval_evidence_action,
+                        eligible_call=retrieval_eligible_call,
+                        prepared_call=calls,
+                        message_indices=(
+                            (runtime_message_index,)
+                            if repository_context_payload
+                            and runtime_message_index is not None
+                            else ()
+                        ),
+                        chars=len(repository_context_payload),
+                        disposition=(
+                            ProviderEvidenceDisposition.SELECTED_NEW_CONTEXT
+                            if repository_context_payload
+                            else ProviderEvidenceDisposition.CONTROLLER_ONLY
+                        ),
+                        reason_codes=repository_context_projection.reason_codes,
+                        source_revision=repository_context_projection.source_revision,
+                    )
                 if task_semantic_frame is not None:
                     provider_evidence.prepare(
                         surface=ProviderEvidenceSurface.TASK_SEMANTIC_SUBSTRATE,
@@ -5409,6 +6251,28 @@ class MiniSweCentralAgent(BaseAgent):
                             else ProviderEvidenceDisposition.CONTROLLER_ONLY
                         ),
                         source_revision=task_semantic_frame.source_revision,
+                    )
+                if semantic_evidence_result is not None:
+                    provider_evidence.prepare(
+                        surface=ProviderEvidenceSurface.SEMANTIC_EVIDENCE,
+                        fact_ids=semantic_evidence_result.claim_ids,
+                        claim_ids=semantic_evidence_result.claim_ids,
+                        evidence_action=retrieval_evidence_action,
+                        eligible_call=retrieval_eligible_call,
+                        prepared_call=calls,
+                        message_indices=(
+                            (runtime_message_index,)
+                            if semantic_evidence_payload and runtime_message_index is not None
+                            else ()
+                        ),
+                        chars=len(semantic_evidence_payload),
+                        disposition=(
+                            None
+                            if semantic_evidence_payload
+                            else ProviderEvidenceDisposition.CONTROLLER_ONLY
+                        ),
+                        reason_codes=semantic_evidence_result.reason_codes,
+                        source_revision=semantic_evidence_result.source_revision,
                     )
                 if persistent_state_frame is not None:
                     provider_evidence.prepare(
@@ -5611,6 +6475,59 @@ class MiniSweCentralAgent(BaseAgent):
                         preemptive_retrieval_decisions[-1]["delivery_receipt"] = (
                             prepared_preemptive_delivery
                         )
+                    if (
+                        prepared_relational_delivery is not None
+                        and relational_context_result is not None
+                    ):
+                        delivered_relational_claim_ids.update(
+                            relational_context_result.claim_ids
+                        )
+                        relational_context_deliveries.append(
+                            prepared_relational_delivery
+                        )
+                        model_call_contexts[-1]["relational_context_delivered"] = True
+                        if relational_context_decisions:
+                            relational_context_decisions[-1]["status"] = "delivered"
+                            relational_context_decisions[-1]["delivery_receipt"] = (
+                                prepared_relational_delivery
+                            )
+                    if (
+                        prepared_semantic_evidence_delivery is not None
+                        and semantic_evidence_result is not None
+                    ):
+                        delivered_semantic_evidence_claim_ids.update(
+                            semantic_evidence_result.claim_ids
+                        )
+                        semantic_evidence_deliveries.append(
+                            prepared_semantic_evidence_delivery
+                        )
+                        model_call_contexts[-1]["semantic_evidence_delivered"] = True
+                        if semantic_evidence_decisions:
+                            semantic_evidence_decisions[-1]["status"] = "delivered"
+                            semantic_evidence_decisions[-1]["delivery_receipt"] = (
+                                prepared_semantic_evidence_delivery
+                            )
+                    if (
+                        prepared_repository_context_delivery is not None
+                        and repository_context_projection is not None
+                    ):
+                        delivered_repository_context_claim_ids.update(
+                            repository_context_projection.claim_ids
+                        )
+                        repository_context_deliveries.append(
+                            prepared_repository_context_delivery
+                        )
+                        repository_context_utilization.register(
+                            prepared_repository_context_delivery,
+                            call=calls,
+                            source_revision=source_revision,
+                        )
+                        model_call_contexts[-1]["repository_context_delivered"] = True
+                        if repository_context_decisions:
+                            repository_context_decisions[-1]["status"] = "delivered"
+                            repository_context_decisions[-1]["delivery_receipt"] = (
+                                prepared_repository_context_delivery
+                            )
                     if prepared_frontier_delivery is not None:
                         delivered_frontier_fact_ids.update(
                             prepared_frontier_delivery["fact_ids"]
@@ -5809,6 +6726,11 @@ class MiniSweCentralAgent(BaseAgent):
                             if proposed.operation is ActionOperation.VALIDATE:
                                 declared_validators_preserved_with_redirection += 1
                 semantic_utilization.observe(
+                    call=calls,
+                    actions=proposed_actions,
+                    source_revision=source_revision,
+                )
+                repository_context_utilization.observe(
                     call=calls,
                     actions=proposed_actions,
                     source_revision=source_revision,
@@ -6729,19 +7651,41 @@ class MiniSweCentralAgent(BaseAgent):
                                 status=RepositoryIntelligenceStatus.MIRROR_INCOMPLETE.value,
                             )
                             repository_evidence = repository_session.evidence
+                    action_target_candidates = (
+                        *(target.path for target in proposed.targets),
+                        *(
+                            RetrievalActionState.from_raw_command(
+                                proposed.raw_command
+                            ).targets
+                            if self.enable_relational_context
+                            else ()
+                        ),
+                    )
                     action_target_paths = tuple(
                         dict.fromkeys(
                             normalized
-                            for target in proposed.targets
-                            for normalized in [_workspace_target_path(target.path, cwd=self.cwd)]
-                            if normalized in snapshot.entries
-                            and snapshot.entries[normalized].kind == "f"
-                            and classify_change(
-                                normalized,
-                                kind="f",
-                                task_deliverables=task_deliverables,
-                                content=snapshot.entries[normalized].content,
-                            ).graph_indexable
+                            for target in action_target_candidates
+                            for normalized in [_workspace_target_path(target, cwd=self.cwd)]
+                            if (
+                                (
+                                    normalized in snapshot.entries
+                                    and snapshot.entries[normalized].kind == "f"
+                                    and classify_change(
+                                        normalized,
+                                        kind="f",
+                                        task_deliverables=task_deliverables,
+                                        content=snapshot.entries[normalized].content,
+                                    ).graph_indexable
+                                )
+                                or (
+                                    self.enable_relational_context
+                                    and preemptive_repository is not None
+                                    and any(
+                                        document.path == normalized
+                                        for document in preemptive_repository.documents
+                                    )
+                                )
+                            )
                         )
                     )
                     action_graph_paths = tuple(
@@ -6754,7 +7698,17 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     action_graph_symbols = tuple(
                         dict.fromkeys(
-                            anchor.symbol for anchor in diagnostic_anchors if anchor.symbol
+                            (
+                                *(
+                                    anchor.symbol
+                                    for anchor in diagnostic_anchors
+                                    if anchor.symbol
+                                ),
+                                *self._features.changed_symbols_for_action(
+                                    action_id=actions_count,
+                                    source_revision=source_revision,
+                                ),
+                            )
                         )
                     )
                     if (
@@ -6876,6 +7830,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 structural_links=activation_repository.structural_links,
                                 dense_backend=self._snowflake_dense_backend(),
                                 dense_candidate_limit=self.preemptive_retrieval_dense_candidate_limit,
+                                dense_fallback_only=self.dense_fallback_only,
                             )
                             activation_state = RetrievalState(
                                 task_text=instruction,
@@ -7807,6 +8762,10 @@ class MiniSweCentralAgent(BaseAgent):
             elapsed_seconds = max(time.monotonic() - started, 1e-6)
             semantic_utilization.finalize()
             semantic_utilization_summary = semantic_utilization.summary()
+            repository_context_utilization.finalize()
+            repository_context_utilization_summary = (
+                repository_context_utilization.summary()
+            )
             assistant_steps = sum(1 for message in messages if message.get("role") == "assistant")
             dispatched_model_call_contexts = [
                 row
@@ -8350,6 +9309,19 @@ class MiniSweCentralAgent(BaseAgent):
                     if semantic_utilization_summary["deliveries"]
                     else 1.0
                 ),
+                "repository_context_used_without_prior_exploration": (
+                    repository_context_utilization_summary[
+                        "context_used_without_prior_exploration"
+                    ]
+                ),
+                "repository_context_accompanied_exploration": (
+                    repository_context_utilization_summary[
+                        "context_accompanied_exploration"
+                    ]
+                ),
+                "repository_context_followed_exploration": repository_context_utilization_summary[
+                    "context_followed_exploration"
+                ],
                 "certified_controller_actuations": auto_submit_attempts,
                 "provider_context_limit_tokens": self.provider_context_limit_tokens,
                 "provider_context_hard_ratio": self.provider_context_hard_ratio,
@@ -8662,6 +9634,91 @@ class MiniSweCentralAgent(BaseAgent):
                     self._preemptive_dense_backend is not None
                 ),
                 "preemptive_dense_backend_error": (self._preemptive_dense_backend_error),
+                "relational_context_enabled": int(self.enable_relational_context),
+                "relational_context_opportunities": len(relational_context_decisions),
+                "relational_context_deliveries": len(relational_context_deliveries),
+                "relational_context_claims_delivered": len(
+                    delivered_relational_claim_ids
+                ),
+                "relational_context_processes_delivered": sum(
+                    len(row.get("processes") or ())
+                    for row in relational_context_deliveries
+                ),
+                "relational_context_chars_added": sum(
+                    int(row.get("chars") or 0) for row in relational_context_deliveries
+                ),
+                "relational_context_rejected_edges": sum(
+                    int(row.get("rejected_edge_count") or 0)
+                    for row in relational_context_decisions
+                ),
+                "semantic_evidence_enabled": int(self.enable_semantic_evidence),
+                "semantic_evidence_opportunities": len(semantic_evidence_decisions),
+                "semantic_evidence_deliveries": len(semantic_evidence_deliveries),
+                "semantic_evidence_claims_delivered": len(
+                    delivered_semantic_evidence_claim_ids
+                ),
+                "semantic_evidence_items_delivered": sum(
+                    len(row.get("items") or ()) for row in semantic_evidence_deliveries
+                ),
+                "semantic_evidence_chars_added": sum(
+                    int(row.get("chars") or 0) for row in semantic_evidence_deliveries
+                ),
+                "semantic_evidence_truncated_items": sum(
+                    int(row.get("truncated_count") or 0)
+                    for row in semantic_evidence_decisions
+                ),
+                "repository_context_opportunities": len(repository_context_decisions),
+                "repository_context_deliveries": len(repository_context_deliveries),
+                "repository_context_claims_delivered": len(
+                    delivered_repository_context_claim_ids
+                ),
+                "repository_context_execution_views_delivered": sum(
+                    sum(
+                        str(view.get("view_id") or "")
+                        in set(str(item) for item in row.get("claim_ids") or ())
+                        for view in (
+                            (row.get("projection") or {}).get("execution_views") or ()
+                        )
+                        if isinstance(view, dict)
+                    )
+                    for row in repository_context_deliveries
+                ),
+                "repository_context_impact_facts_delivered": sum(
+                    sum(
+                        str(fact.get("claim_id") or "")
+                        in set(str(item) for item in row.get("claim_ids") or ())
+                        for fact in (
+                            (row.get("projection") or {}).get("impact_facts") or ()
+                        )
+                        if isinstance(fact, dict)
+                    )
+                    for row in repository_context_deliveries
+                ),
+                "repository_context_diagnostic_facts_delivered": sum(
+                    sum(
+                        str(fact.get("claim_id") or "")
+                        in set(str(item) for item in row.get("claim_ids") or ())
+                        for fact in (
+                            (row.get("projection") or {}).get("diagnostic_facts") or ()
+                        )
+                        if isinstance(fact, dict)
+                    )
+                    for row in repository_context_deliveries
+                ),
+                "repository_context_validation_facts_delivered": sum(
+                    sum(
+                        str(fact.get("claim_id") or "")
+                        in set(str(item) for item in row.get("claim_ids") or ())
+                        for fact in (
+                            (row.get("projection") or {}).get("validation_facts") or ()
+                        )
+                        if isinstance(fact, dict)
+                    )
+                    for row in repository_context_deliveries
+                ),
+                "repository_context_chars_added": sum(
+                    int(row.get("chars") or 0) for row in repository_context_deliveries
+                ),
                 "contribution_compiler_candidates": sum(
                     int(row.get("candidate_count") or 0) for row in contribution_compilations
                 ),
@@ -9260,19 +10317,13 @@ class MiniSweCentralAgent(BaseAgent):
                 )
             )
             configured_mechanism_ids = (
-                *(
-                    CENTRAL_FEATURE_IDS
-                    if self.enable_all_features
-                    else ()
-                ),
-                *(
-                    (PERSISTENT_EXECUTION_STATE_MECHANISM_ID,)
-                    if self.enable_persistent_execution_state
-                    else ()
-                ),
+                *(CENTRAL_FEATURE_IDS if self.enable_all_features else ()),
+                *((PERSISTENT_EXECUTION_STATE_MECHANISM_ID,)
+                  if self.enable_persistent_execution_state else ()),
             )
-            product_mechanism_census = {
+            shared_mechanism_census = {
                 "schema": "gt.product_mechanism_census.v1",
+                "profile_id": self.treatment_profile,
                 "accounting_contract": "17_legacy_features_plus_1_persistent_state",
                 "legacy_feature_count": len(CENTRAL_FEATURE_IDS),
                 "product_mechanism_count": len(PRODUCT_MECHANISM_IDS),
@@ -9283,7 +10334,8 @@ class MiniSweCentralAgent(BaseAgent):
                 "naturally_fired_legacy_feature_ids": list(legacy_fired_ids),
                 "consumed_legacy_feature_count": len(legacy_consumed_ids),
                 "consumed_legacy_feature_ids": list(legacy_consumed_ids),
-                "persistent_execution_state": {
+            }
+            persistent_mechanism_census = {
                     "configured": self.enable_persistent_execution_state,
                     "applicable": not source_less_task,
                     "correctly_abstained": bool(source_less_task),
@@ -9309,7 +10361,10 @@ class MiniSweCentralAgent(BaseAgent):
                     ),
                     "deliveries": len(persistent_state_deliveries),
                     "failures": list(persistent_state_failures),
-                },
+            }
+            product_mechanism_census = {
+                **shared_mechanism_census,
+                "persistent_execution_state": persistent_mechanism_census,
             }
             trajectory = {
                 "info": {
@@ -9335,9 +10390,14 @@ class MiniSweCentralAgent(BaseAgent):
                     {
                         "schema": "central-runtime-receipt-v3",
                         "mode": self.runtime_mode,
+                        "treatment_profile": self.treatment_profile,
                         "integration_mode": self.integration_mode.value,
                         "policy_mode": self.policy_mode.value,
                         "preflight_mode": self.preflight_mode.value,
+                        "benchmark_identity": self.benchmark_identity,
+                        "observed_runtime_contract": (
+                            self._observed_benchmark_runtime_contract()
+                        ),
                         "provider_route": _provider_route_configuration(model),
                         "provider_prompt_identity": provider_prompt_identity,
                         "provider_response_identity": {
@@ -9364,6 +10424,27 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "repository_refresh_timeout_sec": (self.repository_refresh_timeout_sec),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
+                            "relational_context": self.enable_relational_context,
+                            "semantic_evidence": self.enable_semantic_evidence,
+                            "semantic_evidence_profile": {
+                                "profile_id": FINAL_SEMANTIC_EVIDENCE_PROFILE.profile_id,
+                                "max_items": self.semantic_evidence_max_items,
+                                "max_tokens": self.semantic_evidence_max_tokens,
+                                "certainty_threshold": (
+                                    FINAL_SEMANTIC_EVIDENCE_PROFILE.certainty_threshold
+                                ),
+                                "relevance_threshold": (
+                                    FINAL_SEMANTIC_EVIDENCE_PROFILE.relevance_threshold
+                                ),
+                            },
+                            "dense_fallback_only": self.dense_fallback_only,
+                            "relational_context_profile": {
+                                "profile_id": FINAL_RELATIONAL_CONTEXT_PROFILE.profile_id,
+                                "max_depth": self.relational_context_max_depth,
+                                "max_branching": self.relational_context_max_branching,
+                                "max_processes": self.relational_context_max_processes,
+                                "max_tokens": self.relational_context_max_tokens,
+                            },
                             "decision_sufficiency": self.enable_decision_sufficiency,
                             "task_semantic_substrate": bool(
                                 task_semantic_substrate is not None
@@ -9597,6 +10678,43 @@ class MiniSweCentralAgent(BaseAgent):
                                 else None
                             ),
                             "dense_backend_error": (self._preemptive_dense_backend_error),
+                        },
+                        "relational_context": {
+                            "schema": "gt.relational_context_runtime.v1",
+                            "enabled": self.enable_relational_context,
+                            "decisions": relational_context_decisions,
+                            "deliveries": relational_context_deliveries,
+                            "delivered_claim_ids": sorted(
+                                delivered_relational_claim_ids
+                            ),
+                        },
+                        "semantic_evidence": {
+                            "schema": "gt.semantic_evidence_runtime.v1",
+                            "enabled": self.enable_semantic_evidence,
+                            "profile": {
+                                "profile_id": FINAL_SEMANTIC_EVIDENCE_PROFILE.profile_id,
+                                "max_items": self.semantic_evidence_max_items,
+                                "max_tokens": self.semantic_evidence_max_tokens,
+                            },
+                            "decisions": semantic_evidence_decisions,
+                            "deliveries": semantic_evidence_deliveries,
+                            "delivered_claim_ids": sorted(
+                                delivered_semantic_evidence_claim_ids
+                            ),
+                        },
+                        "repository_context": {
+                            "schema": "gt.repository_context_runtime.v1",
+                            "enabled": bool(
+                                self.treatment_profile == "central_relational_v2"
+                                and self.enable_relational_context
+                                and self.enable_semantic_evidence
+                            ),
+                            "decisions": repository_context_decisions,
+                            "deliveries": repository_context_deliveries,
+                            "delivered_claim_ids": sorted(
+                                delivered_repository_context_claim_ids
+                            ),
+                            "utilization": repository_context_utilization_summary,
                         },
                         "decision_sufficiency": {
                             "schema": "gt.decision_sufficiency_runtime.v1",

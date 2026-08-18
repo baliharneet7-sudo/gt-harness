@@ -577,46 +577,99 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     )
 
 
+def _repository_context_state(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Audit the unified semantic/execution/impact projection."""
+
+    configuration = receipt.get("component_configuration") or {}
+    runtime = receipt.get("repository_context") or {}
+    decisions = runtime.get("decisions") or []
+    deliveries = runtime.get("deliveries") or []
+    failures: list[str] = []
+    if configuration.get("persistent_execution_state") is not True:
+        failures.append(f"{label}:repository_context_persistent_state_disabled")
+    if configuration.get("relational_context") is not True:
+        failures.append(f"{label}:repository_context_relational_disabled")
+    if configuration.get("semantic_evidence") is not True:
+        failures.append(f"{label}:repository_context_semantic_disabled")
+    if runtime.get("enabled") is not True:
+        failures.append(f"{label}:repository_context_runtime_disabled")
+    source_less = (
+        str((receipt.get("repository_intelligence") or {}).get("applicability") or "")
+        == "not_applicable_no_supported_source"
+    )
+    if not source_less and not decisions:
+        failures.append(f"{label}:repository_context_opportunity_accounting_missing")
+    claims: set[str] = set()
+    for index, row in enumerate(deliveries, start=1):
+        row_claims = tuple(str(item) for item in row.get("claim_ids") or ())
+        if not row_claims or not row.get("projection"):
+            failures.append(f"{label}:repository_context_delivery_support_missing:{index}")
+        for claim in row_claims:
+            if claim in claims:
+                failures.append(f"{label}:repository_context_duplicate_claim:{claim}")
+            claims.add(claim)
+    if len(deliveries) != int(
+        (receipt.get("metrics") or {}).get("repository_context_deliveries") or 0
+    ):
+        failures.append(f"{label}:repository_context_delivery_metric_mismatch")
+    return ReleaseGateCheck(
+        "repository_context_state",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "opportunities": len(decisions),
+            "deliveries": len(deliveries),
+            "claims": len(claims),
+        },
+    )
+
+
 def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
-    """Require the integrated product to account for 17 feature paths plus PES."""
+    """Require the one canonical product identity: 17 features plus PES."""
 
     census = receipt.get("product_mechanism_census") or {}
     mechanism_ids = tuple(str(item) for item in census.get("mechanism_ids") or ())
     configured_ids = tuple(
         str(item) for item in census.get("configured_mechanism_ids") or ()
     )
-    persistent = census.get("persistent_execution_state") or {}
+    mechanism_key = "persistent_execution_state"
+    mechanism = census.get(mechanism_key) or {}
     failures: list[str] = []
-    if str(census.get("accounting_contract") or "") != (
-        "17_legacy_features_plus_1_persistent_state"
-    ):
+    expected_contract = "17_legacy_features_plus_1_persistent_state"
+    if str(census.get("accounting_contract") or "") != expected_contract:
         failures.append(f"{label}:product_mechanism_contract_missing")
     if int(census.get("legacy_feature_count") or 0) != 17:
         failures.append(f"{label}:legacy_feature_count_not_17")
     if int(census.get("product_mechanism_count") or 0) != 18 or len(mechanism_ids) != 18:
         failures.append(f"{label}:product_mechanism_count_not_18")
-    expected_ids = (*CENTRAL_FEATURE_IDS, "persistent_execution_state")
+    expected_ids = (*CENTRAL_FEATURE_IDS, mechanism_key)
     if mechanism_ids != expected_ids or len(set(mechanism_ids)) != 18:
         failures.append(f"{label}:product_mechanism_identity_invalid")
     if int(census.get("configured_mechanism_count") or 0) != 18 or configured_ids != mechanism_ids:
         failures.append(f"{label}:not_all_product_mechanisms_configured")
-    persistent_applicable = persistent.get("applicable") is not False
-    if persistent.get("configured") is not True:
-        failures.append(f"{label}:persistent_product_mechanism_not_configured")
-    if persistent_applicable:
-        if persistent.get("exercised") is not True:
-            failures.append(f"{label}:persistent_product_mechanism_not_exercised")
+    mechanism_applicable = mechanism.get("applicable") is not False
+    failure_prefix = "persistent"
+    if mechanism.get("configured") is not True:
+        failures.append(f"{label}:{failure_prefix}_product_mechanism_not_configured")
+    if mechanism_applicable:
+        if mechanism.get("exercised") is not True:
+            failures.append(f"{label}:{failure_prefix}_product_mechanism_not_exercised")
+        executor_calls = int(receipt.get("executor_calls") or 0)
         if (
-            persistent.get("repeated_deterministic_use") is not True
-            or int(persistent.get("lifecycle_use_count") or 0) <= 1
+            executor_calls > 0
+            and (
+                mechanism.get("repeated_deterministic_use") is not True
+                or int(mechanism.get("lifecycle_use_count") or 0) <= 1
+            )
         ):
-            failures.append(f"{label}:persistent_product_mechanism_not_repeated")
+            failures.append(f"{label}:{failure_prefix}_product_mechanism_not_repeated")
     elif (
-        persistent.get("correctly_abstained") is not True
-        or persistent.get("exercised") is not False
-        or int(persistent.get("bootstrap_calls") or 0) != 0
+        mechanism.get("correctly_abstained") is not True
+        or mechanism.get("exercised") is not False
+        or int(mechanism.get("bootstrap_calls") or 0) != 0
     ):
-        failures.append(f"{label}:persistent_product_abstention_invalid")
+        failures.append(f"{label}:{failure_prefix}_product_abstention_invalid")
     # Natural trigger absence is evidence about the trajectory, not a failed
     # feature implementation. Preserve its separate count and never inflate it
     # to manufacture an 18/18 live-fire claim.
@@ -631,7 +684,8 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
             "task": label,
             "configured": len(configured_ids),
             "naturally_fired_legacy": naturally_fired,
-            "persistent_exercised": persistent.get("exercised") is True,
+            "profile_id": str(receipt.get("treatment_profile") or "central_pes_v1"),
+            f"{failure_prefix}_exercised": mechanism.get("exercised") is True,
         },
     )
 
@@ -895,6 +949,12 @@ def audit_treatment_runtime(
         if profile == "persistent_state_only"
         else _outcome_preservation(receipt, label)
     )
+    relational_profile = str(receipt.get("treatment_profile") or "") == "central_relational_v2"
+    capability_checks: tuple[ReleaseGateCheck, ...] = (
+        (_repository_context_state(receipt, label),)
+        if relational_profile
+        else ()
+    )
     return (
         _substrate(receipt, label),
         _dense(receipt, label),
@@ -904,6 +964,7 @@ def audit_treatment_runtime(
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),
         _persistent_execution_state(receipt, label),
+        *capability_checks,
         _product_mechanism_census(receipt, label),
         profile_check,
         _project_validation(receipt, label),
@@ -911,11 +972,56 @@ def audit_treatment_runtime(
     )
 
 
+def _repository_context_integrated_consequence(
+    receipts: Iterable[dict[str, Any]],
+) -> ReleaseGateCheck:
+    relational = [
+        receipt
+        for receipt in receipts
+        if str(receipt.get("treatment_profile") or "") == "central_relational_v2"
+    ]
+    applicable = [
+        receipt
+        for receipt in relational
+        if (receipt.get("repository_intelligence") or {}).get("denominator_excluded")
+        is not True
+    ]
+    deliveries = sum(
+        len((receipt.get("repository_context") or {}).get("deliveries") or ())
+        for receipt in applicable
+    )
+    opportunities = sum(
+        len((receipt.get("repository_context") or {}).get("decisions") or ())
+        for receipt in applicable
+    )
+    unaccounted = sum(
+        1
+        for receipt in applicable
+        if not (receipt.get("repository_context") or {}).get("decisions")
+    )
+    failures = (
+        ("repository_context_opportunity_accounting_missing",)
+        if unaccounted
+        else ()
+    )
+    return ReleaseGateCheck(
+        "repository_context_integrated_consequence",
+        not failures,
+        failures,
+        {
+            "relational_receipts": len(relational),
+            "applicable_receipts": len(applicable),
+            "opportunities": opportunities,
+            "deliveries": deliveries,
+            "correct_abstentions_allowed": True,
+        },
+    )
 def audit_release(
     receipts: Iterable[dict[str, Any]],
     *,
     static_evidence: dict[str, Any] | None = None,
     off_receipts: Iterable[dict[str, Any]] = (),
+    required_treatment_profile: str = "central_relational_v2",
 ) -> ReleaseGateReport:
     treatment = list(receipts)
     off = list(off_receipts)
@@ -924,7 +1030,25 @@ def audit_release(
         checks.append(ReleaseGateCheck("treatment_receipts", False, ("no_treatment_receipts",), {}))
     for index, receipt in enumerate(treatment, start=1):
         label = f"treatment-{index}"
+        observed_profile = str(receipt.get("treatment_profile") or "")
+        checks.append(
+            ReleaseGateCheck(
+                "required_treatment_profile",
+                observed_profile == required_treatment_profile,
+                (
+                    ()
+                    if observed_profile == required_treatment_profile
+                    else (f"{label}:required_treatment_profile_mismatch",)
+                ),
+                {
+                    "task": label,
+                    "required": required_treatment_profile,
+                    "observed": observed_profile,
+                },
+            )
+        )
         checks.extend(audit_treatment_runtime(receipt, label=label))
+    checks.append(_repository_context_integrated_consequence(treatment))
     checks.append(_baseline_shield(off))
     failures = tuple(failure for check in checks for failure in check.failures)
     summary = {
@@ -955,12 +1079,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt", action="append", type=Path, required=True)
     parser.add_argument("--off-receipt", action="append", type=Path, default=[])
     parser.add_argument("--static-evidence", type=Path, required=True)
+    parser.add_argument(
+        "--required-treatment-profile",
+        default="central_relational_v2",
+        choices=("central_pes_v1", "central_relational_v2"),
+    )
     parser.add_argument("--json", type=Path)
     args = parser.parse_args(argv)
     report = audit_release(
         [_load(path) for path in args.receipt],
         static_evidence=_load(args.static_evidence),
         off_receipts=[_load(path) for path in args.off_receipt],
+        required_treatment_profile=args.required_treatment_profile,
     )
     rendered = json.dumps(report.as_dict(), indent=2, sort_keys=True)
     if args.json:

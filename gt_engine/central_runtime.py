@@ -2089,6 +2089,36 @@ class CentralFeatureRuntime:
         self._feature_opportunities: list[FeatureOpportunityReceipt] = []
         self._certification_decisions: list[dict[str, Any]] = []
 
+    def changed_symbols_for_action(
+        self, *, action_id: int, source_revision: str
+    ) -> tuple[str, ...]:
+        """Return only source-derived symbols changed by one completed action.
+
+        This is a typed bridge for diff-to-graph binding. It reads the existing
+        signature-delta producer receipt and never re-parses a command or
+        invents a symbol from lexical similarity.
+        """
+
+        symbols: list[str] = []
+        for receipt in self.receipts:
+            if (
+                receipt.feature_id != "signature_delta"
+                or int(receipt.action_id) != int(action_id)
+                or str(receipt.source_revision or "") != str(source_revision or "")
+            ):
+                continue
+            payload = receipt.payload or {}
+            for row in payload.get("signature_deltas") or ():
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").strip()
+                if symbol:
+                    symbols.append(symbol)
+            symbol = str(payload.get("symbol") or "").strip()
+            if symbol:
+                symbols.append(symbol)
+        return tuple(dict.fromkeys(symbols))
+
     def _mark_lifecycle(self, phase: str, *, action_id: int, status: str = "observed") -> None:
         item = self._lifecycle.setdefault(
             phase,

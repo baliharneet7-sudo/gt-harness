@@ -97,8 +97,16 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 	var edges []*store.Edge
 	seen := make(map[edgeKey]bool)
 
-	addEdge := func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64) {
-		if sourceID == 0 || targetID == 0 || sourceID == targetID {
+	addEdge := func(
+		sourceID, targetID int64,
+		edgeType, sourceFile string,
+		sourceLine int,
+		method string,
+		confidence float64,
+		metadata ...string,
+	) {
+		if sourceID == 0 || targetID == 0 ||
+			(sourceID == targetID && edgeType != "HANDLES_ROUTE") {
 			return
 		}
 		key := edgeKey{sourceID: sourceID, targetID: targetID, typ: edgeType}
@@ -112,6 +120,10 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 		// IMPLEMENTS/COMPOSES/RE_EXPORTS row landed with trust_tier='' and
 		// verification_status=''. Stamp them here from the SAME thresholds
 		// tierFor uses, so tier always follows confidence.
+		metadataValue := ""
+		if len(metadata) > 0 {
+			metadataValue = metadata[0]
+		}
 		edges = append(edges, &store.Edge{
 			SourceID:           sourceID,
 			TargetID:           targetID,
@@ -124,6 +136,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 			CandidateCount:     1,
 			EvidenceType:       method,
 			VerificationStatus: "unverified",
+			Metadata:           metadataValue,
 		})
 	}
 
@@ -205,11 +218,16 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 							funcName := strings.TrimSpace(rest[:parenIdx])
 							if funcs := funcFileIndex[sf.Path]; funcs != nil {
 								if funcID, ok := funcs[funcName]; ok {
-									// Use file's first node as a pseudo "route" target
-									fileID := fileNodeMap[sf.Path]
-									if fileID != 0 {
-										addEdge(funcID, fileID, "HANDLES_ROUTE", sf.Path, pendingRouteLine, "decorator_route", 0.95)
-									}
+									// HANDLES_ROUTE is a unary fact about the handler. A
+									// self-edge preserves that identity even when the handler
+									// is the file's first indexed node; fileNodeMap previously
+									// made this edge disappear through the generic self-edge
+									// guard.
+									addEdge(
+										funcID, funcID, "HANDLES_ROUTE", sf.Path,
+										pendingRouteLine, "decorator_route", 0.95,
+										"route="+pendingRoutePath,
+									)
 								}
 							}
 						}
@@ -645,7 +663,14 @@ func resolveGoImplements(
 	interfaces []goInterfaceDecl,
 	classIndex map[string][]classNodeEntry,
 	interfaceIndex map[string][]classNodeEntry,
-	addEdge func(sourceID, targetID int64, edgeType, sourceFile string, sourceLine int, method string, confidence float64),
+	addEdge func(
+		sourceID, targetID int64,
+		edgeType, sourceFile string,
+		sourceLine int,
+		method string,
+		confidence float64,
+		metadata ...string,
+	),
 ) {
 	if len(interfaces) == 0 {
 		return

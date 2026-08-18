@@ -40,6 +40,12 @@ from eval.gt_central_agent import (
     _task_prompt_with_workspace,
     _workspace_target_path,
 )
+from gt_engine.benchmark_parity import (
+    RUNTIME_FIELD_ORIGINS,
+    RuntimeFieldObservation,
+    build_runtime_execution_observation,
+    runtime_observation_hash,
+)
 from gt_engine.central_runtime import (
     FileState,
     WorkspaceSnapshot,
@@ -78,6 +84,175 @@ from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
 from scripts.central_bootstrap_canary import production_shaped_catalog, validate_canary
 from scripts.central_release_gate import audit_treatment_runtime
+
+
+def _runtime_contract_fixture() -> dict[str, object]:
+    return {
+        "task_count": 2,
+        "task_order_sha256": hashlib.sha256(b"order").hexdigest(),
+        "provider_identity": "fixture/provider",
+        "temperature": 0.0,
+        "sampling_parameters": {"top_p": 1.0},
+        "tool_envelope_sha256": hashlib.sha256(b"tools").hexdigest(),
+        "hook_envelope_sha256": hashlib.sha256(b"hooks").hexdigest(),
+        "embedding_configuration_sha256": hashlib.sha256(b"embedding").hexdigest(),
+        "hardware_assumptions_sha256": hashlib.sha256(b"hardware").hexdigest(),
+        "retry_policy_sha256": hashlib.sha256(b"retry").hexdigest(),
+        "timeout_policy_sha256": hashlib.sha256(b"timeout").hexdigest(),
+        "token_accounting_sha256": hashlib.sha256(b"tokens").hexdigest(),
+    }
+
+
+def _benchmark_identity_fixture(contract: dict[str, object]) -> dict[str, object]:
+    return {
+        "model_id": "fixture/provider",
+        "max_steps": 19,
+        "execution_contract": contract,
+        "treatment": {"treatment_id": "groundtruth", "agent_kwargs": {}},
+    }
+
+
+def test_agent_does_not_promote_legacy_declared_contract_to_runtime_observation(
+    tmp_path,
+):
+    contract = _runtime_contract_fixture()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="fixture/provider",
+        temperature=0.0,
+        step_limit=19,
+        benchmark_identity=_benchmark_identity_fixture(contract),
+        observed_execution_contract=contract,
+    )
+
+    observed = agent._observed_benchmark_runtime_contract()
+
+    assert observed is not None
+    assert observed["schema"] == "gt.agent_runtime_observation.partial.v1"
+    assert set(observed["execution_contract"]) == {"provider_identity", "temperature"}
+    assert "task_count" in observed["unobserved_fields"]
+    assert observed["field_sources"]["provider_identity"] == {
+        "origin": "provider_request",
+        "value_sha256": runtime_observation_hash("fixture/provider"),
+    }
+
+
+def test_agent_merges_actual_provider_fields_into_sourced_runner_observation(tmp_path):
+    contract = _runtime_contract_fixture()
+    runner_observation = build_runtime_execution_observation(
+        {
+            field: RuntimeFieldObservation(contract[field], sorted(origins)[0])
+            for field, origins in RUNTIME_FIELD_ORIGINS.items()
+        }
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="fixture/provider",
+        temperature=0.0,
+        step_limit=19,
+        benchmark_identity=_benchmark_identity_fixture(contract),
+        runtime_observation=runner_observation,
+    )
+
+    observed = agent._observed_benchmark_runtime_contract()
+
+    assert observed is not None
+    assert observed["schema"] == "gt.benchmark_runtime_observation.v1"
+    assert observed["execution_contract"] == contract
+    assert observed["unobserved_fields"] == []
+    assert observed["field_sources"]["temperature"] == {
+        "origin": "agent_instance",
+        "value_sha256": runtime_observation_hash(0.0),
+    }
+
+
+def test_agent_loads_runner_observation_from_host_path(tmp_path):
+    contract = _runtime_contract_fixture()
+    runner_observation = build_runtime_execution_observation(
+        {
+            field: RuntimeFieldObservation(contract[field], sorted(origins)[0])
+            for field, origins in RUNTIME_FIELD_ORIGINS.items()
+        }
+    )
+    observation_path = tmp_path / "runtime-observation.json"
+    observation_path.write_text(json.dumps(runner_observation), encoding="utf-8")
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path / "logs",
+        model_name="fixture/provider",
+        temperature=0.0,
+        step_limit=19,
+        benchmark_identity=_benchmark_identity_fixture(contract),
+        runtime_observation_path=observation_path,
+    )
+
+    observed = agent._observed_benchmark_runtime_contract()
+
+    assert observed is not None
+    assert observed["schema"] == "gt.benchmark_runtime_observation.v1"
+    assert observed["execution_contract"] == contract
+
+
+def test_agent_loads_runner_observation_from_environment_path(tmp_path, monkeypatch):
+    contract = _runtime_contract_fixture()
+    runner_observation = build_runtime_execution_observation(
+        {
+            field: RuntimeFieldObservation(contract[field], sorted(origins)[0])
+            for field, origins in RUNTIME_FIELD_ORIGINS.items()
+        }
+    )
+    observation_path = tmp_path / "runtime-observation.json"
+    observation_path.write_text(json.dumps(runner_observation), encoding="utf-8")
+    monkeypatch.setenv("GT_RUNTIME_OBSERVATION_PATH", str(observation_path))
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path / "logs",
+        model_name="fixture/provider",
+        temperature=0.0,
+        step_limit=19,
+        benchmark_identity=_benchmark_identity_fixture(contract),
+    )
+
+    observed = agent._observed_benchmark_runtime_contract()
+
+    assert observed is not None
+    assert observed["execution_contract"] == contract
+
+
+def test_explicit_runtime_observation_wins_over_environment_conflict(tmp_path, monkeypatch):
+    contract = _runtime_contract_fixture()
+    explicit_observation = build_runtime_execution_observation(
+        {
+            field: RuntimeFieldObservation(contract[field], sorted(origins)[0])
+            for field, origins in RUNTIME_FIELD_ORIGINS.items()
+        }
+    )
+    observation_path = tmp_path / "runtime-observation.json"
+    observation_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("GT_RUNTIME_OBSERVATION_PATH", str(observation_path))
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path / "logs",
+        model_name="fixture/provider",
+        temperature=0.0,
+        benchmark_identity=_benchmark_identity_fixture(contract),
+        runtime_observation=explicit_observation,
+    )
+
+    assert agent._observed_benchmark_runtime_contract()["execution_contract"] == contract
+
+
+def test_agent_rejects_two_runtime_observation_sources(tmp_path):
+    observation_path = tmp_path / "runtime-observation.json"
+    observation_path.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="one runtime observation source"):
+        MiniSweCentralAgent(
+            logs_dir=tmp_path / "logs",
+            model_name="fixture/provider",
+            runtime_observation={},
+            runtime_observation_path=observation_path,
+        )
 
 
 def test_preemptive_lifecycle_budget_preserves_late_failure_capacity():
@@ -723,6 +898,87 @@ def test_persistent_state_is_one_switch_and_off_audit_cannot_enable_it(tmp_path)
     assert active.enable_persistent_execution_state is True
     assert off.enable_persistent_execution_state is False
     assert audit.enable_persistent_execution_state is False
+
+
+def test_relational_v2_profile_strengthens_persistent_state_without_replacing_it(tmp_path):
+    active = MiniSweCentralAgent(
+        logs_dir=tmp_path / "active-relational",
+        model_name="test",
+        integration_mode="active",
+        treatment_profile="central_relational_v2",
+        enable_persistent_execution_state=True,
+        enable_preemptive_retrieval=False,
+        relational_context_max_depth=4,
+        relational_context_max_branching=2,
+        relational_context_max_processes=2,
+        relational_context_max_tokens=144,
+    )
+    off = MiniSweCentralAgent(
+        logs_dir=tmp_path / "off-relational",
+        model_name="test",
+        integration_mode="off",
+        treatment_profile="central_relational_v2",
+    )
+
+    assert active.treatment_profile == "central_relational_v2"
+    assert active.enable_persistent_execution_state is True
+    assert active.enable_preemptive_retrieval is True
+    assert active.enable_relational_context is True
+    assert active.enable_semantic_evidence is True
+    assert active.dense_fallback_only is True
+    assert active.relational_context_max_depth == 4
+    assert active.relational_context_max_branching == 2
+    assert active.relational_context_max_processes == 2
+    assert active.relational_context_max_tokens == 144
+    assert off.enable_preemptive_retrieval is False
+    assert off.enable_relational_context is False
+    assert off.enable_semantic_evidence is False
+
+
+def test_semantic_evidence_bridge_is_explicit_and_isolated(tmp_path):
+    active = MiniSweCentralAgent(
+        logs_dir=tmp_path / "semantic-active",
+        model_name="test",
+        integration_mode="active",
+        treatment_profile="central_relational_v2",
+        enable_semantic_evidence=True,
+        semantic_evidence_max_items=4,
+        semantic_evidence_max_tokens=128,
+    )
+    audit = MiniSweCentralAgent(
+        logs_dir=tmp_path / "semantic-audit",
+        model_name="test",
+        integration_mode="audit",
+        enable_semantic_evidence=True,
+    )
+
+    assert active.enable_semantic_evidence is True
+    assert active.semantic_evidence_max_items == 4
+    assert active.semantic_evidence_max_tokens == 128
+    assert audit.enable_semantic_evidence is False
+
+
+def test_legacy_profile_preserves_existing_switches_and_unknown_profile_fails(tmp_path):
+    legacy = MiniSweCentralAgent(
+        logs_dir=tmp_path / "legacy",
+        model_name="test",
+        treatment_profile="central_pes_v1",
+        enable_persistent_execution_state=True,
+        enable_preemptive_retrieval=False,
+    )
+
+    assert legacy.treatment_profile == "central_pes_v1"
+    assert legacy.enable_persistent_execution_state is True
+    assert legacy.enable_preemptive_retrieval is False
+    assert legacy.enable_relational_context is False
+    assert legacy.dense_fallback_only is False
+
+    with pytest.raises(ValueError, match="unknown GT treatment profile"):
+        MiniSweCentralAgent(
+            logs_dir=tmp_path / "invalid",
+            model_name="test",
+            treatment_profile="invented-profile",
+        )
 
 
 def test_source_less_task_blocks_preemptive_repository_retrieval():
@@ -2147,6 +2403,89 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
         assert dense["backend_identity"].startswith(
             "snowflake_onnx:Snowflake/snowflake-arctic-embed-m@sha256:"
         )
+
+
+@pytest.mark.asyncio
+async def test_relational_v2_delivers_certified_process_after_existing_read_action(tmp_path):
+    class TransferEnvironment(_Environment):
+        async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
+            root = Path(target_dir)
+            (root / "src").mkdir(parents=True)
+            (root / "tests").mkdir(parents=True)
+            (root / "src" / "entry.py").write_text(
+                "from src.core import work\n\ndef run():\n    return work()\n"
+            )
+            (root / "src" / "core.py").write_text("def work():\n    return 1\n")
+            (root / "tests" / "test_core.py").write_text(
+                "from src.core import work\n\ndef test_work():\n    assert work() == 1\n"
+            )
+
+    model = _ScriptedModel(
+        [
+            "cat src/core.py",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        treatment_profile="central_relational_v2",
+        enable_semantic_evidence=True,
+        benchmark_identity={"benchmark_id": "fixture-benchmark"},
+        enable_task_start_advisory=False,
+        enable_context_frontier=False,
+        enable_feature_guidance=False,
+        enable_replay_capture=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run(
+        "Inspect src/core.py and preserve callers and tests.",
+        TransferEnvironment(),
+        AgentContext(),
+    )
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["benchmark_identity"] == {"benchmark_id": "fixture-benchmark"}
+    assert receipt["treatment_profile"] == "central_relational_v2"
+    assert receipt["bootstrap_calls"] == 1
+    census = receipt["product_mechanism_census"]
+    assert census["schema"] == "gt.product_mechanism_census.v1"
+    assert census["profile_id"] == "central_relational_v2"
+    assert census["accounting_contract"] == "17_legacy_features_plus_1_persistent_state"
+    assert "persistent_execution_state" in census["mechanism_ids"]
+    assert "relational_context_state" not in census["mechanism_ids"]
+    assert census["persistent_execution_state"]["configured"] is True
+    assert census["persistent_execution_state"]["exercised"] is True
+    assert census["persistent_execution_state"]["bootstrap_calls"] == 1
+    assert receipt["relational_context"]["enabled"] is True
+    assert receipt["component_configuration"]["relational_context_profile"] == {
+        "profile_id": "relational-context-v1",
+        "max_depth": 6,
+        "max_branching": 3,
+        "max_processes": 3,
+        "max_tokens": 256,
+    }
+    assert receipt["relational_context"]["deliveries"] == []
+    assert receipt["metrics"]["relational_context_deliveries"] == 0
+    assert receipt["semantic_evidence"]["enabled"] is True
+    assert receipt["semantic_evidence"]["deliveries"] == []
+    assert receipt["metrics"]["semantic_evidence_deliveries"] == 0
+    assert receipt["repository_context"]["enabled"] is True
+    assert receipt["repository_context"]["deliveries"]
+    assert receipt["metrics"]["repository_context_deliveries"] >= 1
+    second_request = "\n".join(model.observed_history[1])
+    assert "Current certified repository context" in second_request
+    assert "src/core.py" in second_request
+    assert "repository_context" in receipt["model_call_contexts"][1][
+        "selected_surfaces"
+    ]
+    _rows, failures, totals = audit_provider_deliveries(
+        receipt, task="relational-v2-integration"
+    )
+    assert failures == []
+    assert totals["surfaces"]["repository_context"]["delivery_count"] == 1
 
 
 @pytest.mark.asyncio
