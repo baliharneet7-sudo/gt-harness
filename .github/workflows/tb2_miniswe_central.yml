@@ -515,7 +515,7 @@ jobs:
                       "provider_retries": 0,
                   }),
                   "timeout_policy_sha256": digest({
-                      "execution_budget_sec": int(os.environ["EXECUTION_BUDGET"]),
+                      "execution_budget_sec": int(float(os.environ["EXECUTION_BUDGET"])),
                       "agent_timeout_multiplier": 1.0,
                   }),
               },

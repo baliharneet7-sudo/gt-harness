@@ -4410,6 +4410,7 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
     assert "assess_tb2_promotion" in workflow
     assert "build_feature_lifecycle_report" in workflow
+    assert '"execution_budget_sec": int(float(os.environ["EXECUTION_BUDGET"]))' in workflow
 
 
 @pytest.mark.asyncio
