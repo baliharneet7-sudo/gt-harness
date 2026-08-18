@@ -5071,14 +5071,12 @@ class MiniSweCentralAgent(BaseAgent):
                                     ),
                                     *(
                                         (
-                                            " ".join(
-                                                retrieval_last_action.raw_command.split()
-                                            ),
+                                            retrieval_last_action.query_text(),
                                         )
                                         if retrieval_last_action is not None
                                         and retrieval_last_operation
                                         == ActionOperation.VALIDATE.value
-                                        and retrieval_last_action.raw_command.strip()
+                                        and retrieval_last_action.query_text().strip()
                                         else ()
                                     ),
                                 )

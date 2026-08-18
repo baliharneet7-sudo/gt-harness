@@ -274,6 +274,18 @@ def test_task_budget_is_cumulative_and_reserves_only_critical_evidence():
     from gt_engine.contributions import ContributionTaskBudget
 
     budget = ContributionTaskBudget(token_budget=100, critical_reserve_tokens=20)
+    assert budget.as_dict() == {
+        "token_budget": 100,
+        "task_budget_tokens": 0,
+        "task_budget_token_limit": 100,
+        "critical_reserve_tokens": 20,
+        "used_regular_tokens": 0,
+        "used_critical_tokens": 0,
+        "used_tokens": 0,
+        "remaining_regular_tokens": 80,
+        "remaining_total_tokens": 100,
+        "exhausted": False,
+    }
     assert budget.available_tokens(critical=False) == 80
     budget.commit(75, critical=False)
     assert budget.available_tokens(critical=False) == 5

@@ -260,8 +260,8 @@ class ContributionTaskBudget:
     def as_dict(self) -> dict[str, int | bool]:
         return {
             "token_budget": self.token_budget,
-            "task_budget_tokens": self.task_budget_token_count,
-            "task_budget_token_limit": self.task_budget_token_limit,
+            "task_budget_tokens": self.used_tokens,
+            "task_budget_token_limit": self.token_budget,
             "critical_reserve_tokens": self.critical_reserve_tokens,
             "used_regular_tokens": self.used_regular_tokens,
             "used_critical_tokens": self.used_critical_tokens,
