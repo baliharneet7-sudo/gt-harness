@@ -21,6 +21,7 @@ from gt_engine.persistent_execution_state import (
     BootstrapCatalog,
     BootstrapCatalogItem,
     BootstrapMode,
+    BootstrapStatus,
     CatalogItemKind,
     CompletionReadiness,
     ContextFrameKind,
@@ -33,6 +34,7 @@ from gt_engine.persistent_execution_state import (
     build_bootstrap_catalog,
     build_bootstrap_messages,
     build_select_catalog_tool,
+    deterministic_bootstrap_selection,
     parse_bootstrap_selection,
 )
 from gt_engine.preflight import adapt_proposed_action
@@ -373,6 +375,32 @@ def test_invalid_bootstrap_uses_deterministic_fallback_without_silencing_state()
     assert frame.kind is not ContextFrameKind.NONE
     assert "Required run_validation" in frame.rendered_text
     assert "deterministic_fallback" in frame.reason_codes
+
+
+def test_deterministic_bootstrap_selection_is_valid_and_preserves_requirements():
+    catalog = _catalog()
+
+    selection = deterministic_bootstrap_selection(catalog)
+
+    assert selection.valid is True
+    assert selection.risk_item_ids == ()
+    assert "deterministic_selected" in selection.reason_codes
+    required = {item.item_id for item in catalog.items if item.required}
+    assert required <= set(selection.ordered_item_ids) | set(selection.validation_item_ids)
+
+    engine = PersistentExecutionStateEngine.initialize_from_graph(
+        task="Fix save_user.",
+        catalog=catalog,
+        structural_links=_links(),
+        present_paths=("src/service.py",),
+    )
+    engine.apply_bootstrap(
+        selection,
+        current_source_revision="source-1",
+        selection_mode=BootstrapMode.DETERMINISTIC_SELECTED,
+    )
+    assert engine.snapshot.bootstrap_status is BootstrapStatus.SELECTED
+    assert engine.snapshot.bootstrap_mode is BootstrapMode.DETERMINISTIC_SELECTED
 
 
 def test_invalid_bootstrap_ids_do_not_permanently_silence_context():

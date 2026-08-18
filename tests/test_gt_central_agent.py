@@ -1303,6 +1303,31 @@ class _BatchModel(_ScriptedModel):
 
 
 @pytest.mark.asyncio
+async def test_deterministic_bootstrap_mode_uses_no_provider_call(tmp_path):
+    catalog = production_shaped_catalog()
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        persistent_state_selection_mode="deterministic_v1",
+    )
+
+    selection, receipt = await agent._run_persistent_state_bootstrap(
+        object(),
+        instruction="Select certified repository context.",
+        catalog=catalog,
+        timeout_sec=5,
+    )
+
+    assert selection.valid is True
+    assert receipt["bootstrap_mode"] == "deterministic_selected"
+    assert receipt["selection_mode"] == "deterministic_v1"
+    assert receipt["selection_event_count"] == 1
+    assert receipt["selection_provider_calls"] == 0
+    assert receipt["provider_calls"] == 0
+    assert receipt["status"] == "selected"
+
+
+@pytest.mark.asyncio
 async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary(
     tmp_path, monkeypatch
 ):

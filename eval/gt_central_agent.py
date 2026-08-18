@@ -130,6 +130,7 @@ from gt_engine.observed_facts import (
 from gt_engine.persistent_execution_state import (
     SELECT_CATALOG_TOOL_NAME,
     BootstrapCatalog,
+    BootstrapMode,
     BootstrapSelection,
     BootstrapStatus,
     ContextFrameKind,
@@ -141,6 +142,7 @@ from gt_engine.persistent_execution_state import (
     build_bootstrap_catalog,
     build_bootstrap_messages,
     build_select_catalog_tool,
+    deterministic_bootstrap_selection,
     parse_bootstrap_selection,
 )
 from gt_engine.preemptive_retrieval import (
@@ -1507,6 +1509,7 @@ class MiniSweCentralAgent(BaseAgent):
             "persistent_state_bootstrap_timeout_sec": (
                 self.persistent_state_bootstrap_timeout_sec
             ),
+            "persistent_state_selection_mode": self.persistent_state_selection_mode,
             "persistent_state_context_tokens": self.persistent_state_context_tokens,
             "policy_mode": self.policy_mode.value,
             "preflight_mode": self.preflight_mode.value,
@@ -1701,6 +1704,7 @@ class MiniSweCentralAgent(BaseAgent):
         persistent_state_bootstrap_timeout_sec: float = 45.0,
         persistent_state_bootstrap_input_tokens: int = 2_000,
         persistent_state_bootstrap_output_tokens: int = 512,
+        persistent_state_selection_mode: str = "generative",
         persistent_state_context_tokens: int = 512,
         gt_request_token_budget: int = 1_200,
         gt_task_evidence_budget_tokens: int | None = None,
@@ -2047,6 +2051,12 @@ class MiniSweCentralAgent(BaseAgent):
         self.persistent_state_bootstrap_output_tokens = max(
             64, int(persistent_state_bootstrap_output_tokens)
         )
+        selection_mode = str(persistent_state_selection_mode or "generative").strip().lower()
+        if selection_mode not in {"generative", "deterministic_v1"}:
+            raise ValueError(
+                "persistent_state_selection_mode must be generative or deterministic_v1"
+            )
+        self.persistent_state_selection_mode = selection_mode
         self.persistent_state_context_tokens = max(
             32, min(512, int(persistent_state_context_tokens))
         )
@@ -2339,6 +2349,32 @@ class MiniSweCentralAgent(BaseAgent):
                 else "public_query_fallback"
             ),
         }
+
+        if self.persistent_state_selection_mode == "deterministic_v1":
+            selection = deterministic_bootstrap_selection(catalog)
+            receipt.update(
+                {
+                    "selection_mode": "deterministic_v1",
+                    "selection_event_count": 1,
+                    "selection_provider_calls": 0,
+                    "logical_calls": 0,
+                    "provider_calls": 0,
+                    "bootstrap_mode": (
+                        BootstrapMode.DETERMINISTIC_SELECTED.value
+                        if selection.valid
+                        else BootstrapMode.DETERMINISTIC_FALLBACK.value
+                    ),
+                    "status": (
+                        BootstrapStatus.SELECTED.value
+                        if selection.valid
+                        else BootstrapStatus.INVALID_FALLBACK.value
+                    ),
+                    "selection": selection.as_dict(),
+                    "reason_codes": list(selection.reason_codes),
+                    "selection_input_sha256": request_payload_sha256,
+                }
+            )
+            return selection, receipt
 
         def query_bootstrap_once() -> dict[str, Any]:
             """Use one direct select_catalog call. Mini-SWE Bash parse is forbidden."""
@@ -4192,6 +4228,12 @@ class MiniSweCentralAgent(BaseAgent):
                                     persistent_state_bootstrap.get("status")
                                     == BootstrapStatus.ERROR_FALLBACK.value
                                 ),
+                                selection_mode=(
+                                    BootstrapMode.DETERMINISTIC_SELECTED
+                                    if self.persistent_state_selection_mode
+                                    == "deterministic_v1"
+                                    else None
+                                ),
                             )
                             input_tokens += int(persistent_state_bootstrap.get("input_tokens") or 0)
                             output_tokens += int(
@@ -5129,6 +5171,13 @@ class MiniSweCentralAgent(BaseAgent):
                                 repository_context_projection.rejected_edge_count
                             ),
                             "truncated_count": repository_context_projection.truncated_count,
+                            "process_coverage": dict(
+                                repository_context_projection.process_coverage
+                            ),
+                            "contribution_surfaces": [
+                                contribution.surface
+                                for contribution in repository_context_projection.contributions
+                            ],
                         }
                     )
                 # Frontier evidence is bound to the GRAPH source revision (the
@@ -5547,9 +5596,17 @@ class MiniSweCentralAgent(BaseAgent):
                     "semantic_evidence"
                 ):
                     semantic_evidence_payload = ""
-                if repository_context_payload and not contribution_selected(
-                    "repository_context"
-                ):
+                if repository_context_projection is not None:
+                    selected_repository_contributions = tuple(
+                        contribution
+                        for contribution in repository_context_projection.contributions
+                        if contribution_selected(contribution.surface)
+                    )
+                    repository_context_payload = "\n".join(
+                        contribution.payload
+                        for contribution in selected_repository_contributions
+                    )
+                elif repository_context_payload:
                     repository_context_payload = ""
                 if task_semantic_payload and not contribution_selected(
                     "task_semantic_substrate"
@@ -5570,17 +5627,26 @@ class MiniSweCentralAgent(BaseAgent):
                 ):
                     observed_fact_payload_text = observed_fact_payload(pending_observed_fact)
                     observed_fact_selected = True
+                selected_surface_names = [
+                    surface
+                    for surface, contribution_id in contribution_by_surface.items()
+                    if contribution_id in selected_contribution_ids
+                ]
+                if any(
+                    surface in {"repository_semantic", "repository_process"}
+                    for surface in selected_surface_names
+                ) and "repository_context" not in selected_surface_names:
+                    # Compatibility alias: the projection is now split into
+                    # authority-preserving surfaces, but historical receipts
+                    # use repository_context as the aggregate identity.
+                    selected_surface_names.append("repository_context")
                 contribution_receipt = compiled_contributions.as_dict()
                 contribution_receipt.update(
                     {
                         "call": calls,
                         "completed_action_count_before_call": actions_count,
                         "source_revision": source_revision,
-                        "selected_surfaces": [
-                            surface
-                            for surface, contribution_id in contribution_by_surface.items()
-                            if contribution_id in selected_contribution_ids
-                        ],
+                        "selected_surfaces": selected_surface_names,
                     }
                 )
                 contribution_compilations.append(contribution_receipt)
@@ -8227,6 +8293,12 @@ class MiniSweCentralAgent(BaseAgent):
                                         persistent_state_bootstrap.get("status")
                                         == BootstrapStatus.ERROR_FALLBACK.value
                                     ),
+                                    selection_mode=(
+                                        BootstrapMode.DETERMINISTIC_SELECTED
+                                        if self.persistent_state_selection_mode
+                                        == "deterministic_v1"
+                                        else None
+                                    ),
                                 )
                                 input_tokens += int(
                                     persistent_state_bootstrap.get("input_tokens") or 0
@@ -9193,7 +9265,9 @@ class MiniSweCentralAgent(BaseAgent):
                         BootstrapStatus.ERROR_FALLBACK.value,
                     }:
                         persistent_state_failures.append("persistent_bootstrap_not_applied")
-                    expected_bootstrap_mode = (
+                    expected_bootstrap_mode = str(
+                        persistent_state_bootstrap.get("bootstrap_mode") or ""
+                    ) or (
                         "generative_selected"
                         if persistent_state_bootstrap.get("status")
                         == BootstrapStatus.SELECTED.value
@@ -9204,7 +9278,8 @@ class MiniSweCentralAgent(BaseAgent):
                         != expected_bootstrap_mode
                     ):
                         persistent_state_failures.append("persistent_bootstrap_mode_mismatch")
-                    if int(persistent_state_bootstrap.get("provider_calls") or 0) != 1:
+                    expected_bootstrap_calls = 0 if expected_bootstrap_mode == "deterministic_selected" else 1
+                    if int(persistent_state_bootstrap.get("provider_calls") or 0) != expected_bootstrap_calls:
                         persistent_state_failures.append("persistent_bootstrap_call_count")
                     if int(persistent_state_bootstrap.get("action_executions") or 0) != 0:
                         persistent_state_failures.append("persistent_bootstrap_action_executed")
@@ -10765,6 +10840,9 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "persistent_state_bootstrap_output_tokens": (
                                 self.persistent_state_bootstrap_output_tokens
+                            ),
+                            "persistent_state_selection_mode": (
+                                self.persistent_state_selection_mode
                             ),
                             "persistent_state_context_tokens": (
                                 self.persistent_state_context_tokens

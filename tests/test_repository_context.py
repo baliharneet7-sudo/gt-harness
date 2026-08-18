@@ -199,7 +199,10 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     )
 
     assert result.status is RepositoryContextStatus.DELIVER
-    assert len(result.contributions) == 1
+    assert {item.surface for item in result.contributions} == {
+        "repository_semantic",
+        "repository_process",
+    }
     assert "src/entry.py#run -> src/core.py#work -> src/helper.py#helper" in result.rendered_text
     assert "caller depth 1: src/entry.py#run calls src/core.py#work" in result.rendered_text
     assert "test: tests/test_core.py#test_work asserts src/core.py#work" in result.rendered_text
@@ -209,6 +212,87 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     assert metadata
     assert {row["origin"] for row in metadata} == {"preexisting_repository"}
     assert result.contributions[0].unsafe_provider_origins == ()
+
+
+def test_project_preserves_authority_when_packing_semantic_and_process_surfaces() -> None:
+    snapshot = replace(
+        _snapshot(
+            _link("src/entry.py", "src/core.py", "CALLS", "run", "work"),
+            _link("src/core.py", "src/helper.py", "CALLS", "work", "helper"),
+            _link(
+                "src/core.py",
+                "tests/test_core.py",
+                "ASSERTED_BY",
+                "work",
+                "test_work",
+            ),
+        ),
+        diagnostics=("src/core.py:4: expected int, got str",),
+        validation_checks=("pytest tests/test_core.py -q",),
+    )
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_diagnostic",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        snapshot,
+    )
+
+    by_surface = {item.surface: item for item in result.contributions}
+    assert set(by_surface) == {
+        "repository_context",
+        "repository_semantic",
+        "repository_process",
+    }
+    assert by_surface["repository_context"].priority == 4
+    assert by_surface["repository_semantic"].priority == 6
+    assert by_surface["repository_process"].priority == 18
+    assert by_surface["repository_context"].critical
+    assert "Observed diagnostic" in by_surface["repository_context"].payload
+    assert "declared check" in by_surface["repository_context"].payload
+    assert "Execution" in by_surface["repository_process"].payload
+    assert result.process_coverage["returned_views"] == len(result.execution_views)
+
+
+def test_process_surface_cannot_displace_critical_diagnostic_under_budget() -> None:
+    snapshot = replace(
+        _snapshot(
+            _link("src/entry.py", "src/core.py", "CALLS", "run", "work"),
+            _link("src/core.py", "src/helper.py", "CALLS", "work", "helper"),
+            _link(
+                "src/core.py",
+                "tests/test_core.py",
+                "ASSERTED_BY",
+                "work",
+                "test_work",
+            ),
+        ),
+        diagnostics=("src/core.py:4: concrete failure",),
+        validation_checks=("pytest tests/test_core.py -q",),
+    )
+    result = RepositoryContextEngine(max_tokens=30).project(
+        DecisionOpportunity(
+            kind="post_diagnostic",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        snapshot,
+    )
+
+    assert "Observed diagnostic" in result.rendered_text
+    assert "Execution (lower bound" not in result.rendered_text
+    assert result.process_coverage["omitted_for_budget"] > 0
 
 
 def test_project_never_turns_reverse_traversal_into_an_execution_path() -> None:

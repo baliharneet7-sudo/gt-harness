@@ -212,6 +212,7 @@ class BootstrapStatus(StrEnum):
 class BootstrapMode(StrEnum):
     NOT_APPLICABLE = "not_applicable"
     GENERATIVE_SELECTED = "generative_selected"
+    DETERMINISTIC_SELECTED = "deterministic_selected"
     DETERMINISTIC_FALLBACK = "deterministic_fallback"
 
 
@@ -1110,6 +1111,50 @@ def deterministic_bootstrap_fallback(
     )
 
 
+def deterministic_bootstrap_selection(
+    catalog: BootstrapCatalog,
+) -> BootstrapSelection:
+    """Select only immutable catalog facts without a model call.
+
+    This is an intentional treatment mode, distinct from invalid/error
+    fallback.  It preserves every required validation and deliverable item,
+    chooses the first certified pre-existing focus/dependency as the primary,
+    and never invents risks or repository facts.
+    """
+
+    if not catalog.complete:
+        return BootstrapSelection(False, reason_codes=("catalog_incomplete",))
+    primary_item = next(
+        (
+            item
+            for item in catalog.items
+            if item.kind in {CatalogItemKind.FOCUS, CatalogItemKind.DEPENDENCY}
+            and item.certified
+            and item.origin is EvidenceOrigin.PREEXISTING_REPOSITORY
+        ),
+        None,
+    )
+    primary = primary_item.item_id if primary_item is not None else ""
+    required = tuple(item.item_id for item in catalog.items if item.required)
+    ordered = tuple(dict.fromkeys((*required, *(item_id for item_id in (primary,) if item_id))))
+    validations = tuple(
+        item.item_id
+        for item in catalog.items
+        if item.kind is CatalogItemKind.VALIDATION
+    )[:8]
+    required_ids = {item.item_id for item in catalog.items if item.required}
+    if not required_ids.issubset(set(ordered[:16]) | set(validations)):
+        return BootstrapSelection(False, reason_codes=("required_catalog_item_missing",))
+    return BootstrapSelection(
+        valid=True,
+        primary_focus_id=primary,
+        ordered_item_ids=ordered[:16],
+        risk_item_ids=(),
+        validation_item_ids=validations,
+        reason_codes=("deterministic_selected",),
+    )
+
+
 def build_bootstrap_messages(
     *,
     task: str,
@@ -1427,16 +1472,32 @@ class PersistentExecutionStateEngine:
         *,
         current_source_revision: str,
         error: bool = False,
+        selection_mode: BootstrapMode | str | None = None,
     ) -> PersistentExecutionState:
         self._metrics["bootstrap_applications"] += 1
         if current_source_revision != self._snapshot.source_revision:
             self._metrics["stale_rejections"] += 1
             self._record("bootstrap", disposition="stale_source_revision")
             return self._snapshot
+        requested_mode = (
+            selection_mode
+            if isinstance(selection_mode, BootstrapMode)
+            else BootstrapMode(str(selection_mode))
+            if selection_mode is not None
+            else BootstrapMode.GENERATIVE_SELECTED
+        )
         status = BootstrapStatus.SELECTED
-        mode = BootstrapMode.GENERATIVE_SELECTED
+        mode = requested_mode
         applied = selection
-        if not selection.valid:
+        if requested_mode is BootstrapMode.DETERMINISTIC_SELECTED:
+            applied = deterministic_bootstrap_selection(self._catalog)
+            if not applied.valid:
+                status = BootstrapStatus.INVALID_FALLBACK
+                applied, status = deterministic_bootstrap_fallback(
+                    self._catalog, status=status
+                )
+                mode = BootstrapMode.DETERMINISTIC_FALLBACK
+        elif not selection.valid:
             status = BootstrapStatus.ERROR_FALLBACK if error else BootstrapStatus.INVALID_FALLBACK
             applied, status = deterministic_bootstrap_fallback(self._catalog, status=status)
             mode = BootstrapMode.DETERMINISTIC_FALLBACK
@@ -2672,6 +2733,7 @@ __all__ = [
     "bootstrap_visible_item_ids",
     "attempted_bootstrap_item_ids",
     "deterministic_bootstrap_fallback",
+    "deterministic_bootstrap_selection",
     "parse_bootstrap_selection",
     "SELECT_CATALOG_TOOL_NAME",
 ]

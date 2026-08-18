@@ -405,31 +405,48 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     ):
         failures.append(f"{label}:persistent_initial_retrieval_not_in_catalog")
     bootstrap_status = str(bootstrap.get("status") or "")
-    # Fallback keeps Mini-SWE alive but is not a valid generative treatment.
+    deterministic_selection = str(bootstrap.get("selection_mode") or "") == "deterministic_v1"
+    expected_bootstrap_mode = (
+        "deterministic_selected" if deterministic_selection else "generative_selected"
+    )
     if bootstrap_status != "selected":
-        failures.append(f"{label}:persistent_bootstrap_not_generative")
-    expected_bootstrap_mode = "generative_selected"
+        failures.append(
+            f"{label}:persistent_bootstrap_not_{'deterministic' if deterministic_selection else 'generative'}"
+        )
     if str(bootstrap.get("bootstrap_mode") or "") != expected_bootstrap_mode:
         failures.append(f"{label}:persistent_bootstrap_mode_invalid")
+    expected_bootstrap_calls = 0 if deterministic_selection else 1
     if (
-        int(bootstrap.get("logical_calls") or 0) != 1
-        or int(bootstrap.get("provider_calls") or 0) != 1
+        int(bootstrap.get("logical_calls") or 0) != (0 if deterministic_selection else 1)
+        or int(bootstrap.get("provider_calls") or 0) != expected_bootstrap_calls
     ):
-        failures.append(f"{label}:persistent_bootstrap_not_exactly_one_call")
+        failures.append(
+            f"{label}:persistent_bootstrap_not_{'provider_call' if deterministic_selection else 'exactly_one_call'}"
+        )
     if int(bootstrap.get("action_executions") or 0) != 0:
         failures.append(f"{label}:persistent_bootstrap_action_executed")
-    if bootstrap.get("response_received") is not True and not isinstance(
-        bootstrap.get("provider_error"), dict
-    ):
-        failures.append(f"{label}:persistent_bootstrap_response_missing")
-    if str(bootstrap.get("transport") or "") != "direct_single_provider_call":
-        failures.append(f"{label}:persistent_bootstrap_transport_not_single_call")
-    if str(bootstrap.get("provider_query_marker_error") or ""):
-        failures.append(f"{label}:persistent_bootstrap_marker_failed")
-    if not str(bootstrap.get("request_payload_sha256") or "") or not str(
-        bootstrap.get("provider_messages_sha256") or ""
-    ):
-        failures.append(f"{label}:persistent_bootstrap_hash_missing")
+    if deterministic_selection:
+        if bootstrap.get("response_received") is True:
+            failures.append(f"{label}:persistent_deterministic_bootstrap_provider_response")
+        if not str(bootstrap.get("selection_input_sha256") or ""):
+            failures.append(f"{label}:persistent_deterministic_selection_hash_missing")
+        if int(bootstrap.get("selection_event_count") or 0) != 1:
+            failures.append(f"{label}:persistent_deterministic_selection_event_missing")
+        if int(bootstrap.get("selection_provider_calls") or 0) != 0:
+            failures.append(f"{label}:persistent_deterministic_selection_provider_call")
+    else:
+        if bootstrap.get("response_received") is not True and not isinstance(
+            bootstrap.get("provider_error"), dict
+        ):
+            failures.append(f"{label}:persistent_bootstrap_response_missing")
+        if str(bootstrap.get("transport") or "") != "direct_single_provider_call":
+            failures.append(f"{label}:persistent_bootstrap_transport_not_single_call")
+        if str(bootstrap.get("provider_query_marker_error") or ""):
+            failures.append(f"{label}:persistent_bootstrap_marker_failed")
+        if not str(bootstrap.get("request_payload_sha256") or "") or not str(
+            bootstrap.get("provider_messages_sha256") or ""
+        ):
+            failures.append(f"{label}:persistent_bootstrap_hash_missing")
     if int(bootstrap.get("visible_catalog_count") or 0) <= 0 or not str(
         bootstrap.get("visible_catalog_ids_sha256") or ""
     ):
@@ -573,15 +590,15 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         )
         if not legal_empty:
             failures.append(f"{label}:persistent_no_material_delivery")
-    if int(metrics.get("persistent_state_bootstrap_calls") or 0) != 1:
+    if int(metrics.get("persistent_state_bootstrap_calls") or 0) != expected_bootstrap_calls:
         failures.append(f"{label}:persistent_bootstrap_metric_mismatch")
     if int(metrics.get("persistent_state_initial_retrieval_calls") or 0) != 1:
         failures.append(f"{label}:persistent_initial_retrieval_metric_mismatch")
-    if int(metrics.get("bootstrap_api_calls") or 0) != 1:
+    if int(metrics.get("bootstrap_api_calls") or 0) != expected_bootstrap_calls:
         failures.append(f"{label}:persistent_bootstrap_api_metric_mismatch")
-    if int(receipt.get("bootstrap_calls") or 0) != 1:
+    if int(receipt.get("bootstrap_calls") or 0) != expected_bootstrap_calls:
         failures.append(f"{label}:persistent_bootstrap_total_mismatch")
-    if int(receipt.get("calls") or 0) != executor_calls + 1:
+    if int(receipt.get("calls") or 0) != executor_calls + expected_bootstrap_calls:
         failures.append(f"{label}:persistent_provider_call_accounting_mismatch")
     if str(metrics.get("provider_query_marker_error") or ""):
         failures.append(f"{label}:executor_provider_marker_failed")

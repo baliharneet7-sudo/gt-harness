@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict, deque
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -206,6 +206,7 @@ class RepositoryContextProjection:
     token_count: int = 0
     truncated_count: int = 0
     rejected_edge_count: int = 0
+    process_coverage: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
@@ -221,6 +222,7 @@ class RepositoryContextProjection:
         row["semantic_evidence"] = (
             self.semantic_evidence.as_dict() if self.semantic_evidence is not None else None
         )
+        row["process_coverage"] = dict(self.process_coverage)
         return row
 
 
@@ -335,7 +337,7 @@ class RepositoryContextEngine:
         links: tuple[StructuralLink, ...],
         anchor_paths: frozenset[str],
         anchor_symbols: frozenset[str],
-    ) -> tuple[tuple[ExecutionView, ...], int]:
+    ) -> tuple[tuple[ExecutionView, ...], int, dict[str, int]]:
         calls = tuple(
             link for link in links if link.relation.upper() == "CALLS" and _certified(link)
         )
@@ -378,6 +380,8 @@ class RepositoryContextEngine:
             ]
 
         views: list[ExecutionView] = []
+        paths_considered = 0
+        branch_truncated = 0
         queue: deque[
             tuple[
                 SymbolRef,
@@ -391,11 +395,14 @@ class RepositoryContextEngine:
             (entry, (), frozenset({entry}), entry_kind, route)
             for entry, entry_kind, route in entries
         )
-        while queue and len(views) < self.max_execution_views:
+        while queue:
             current, steps, visited, entry_kind, route = queue.popleft()
-            rows = adjacency.get(current, ())[: self.max_branching]
+            all_rows = adjacency.get(current, ())
+            rows = all_rows[: self.max_branching]
+            branch_truncated += max(0, len(all_rows) - len(rows))
             expanded = False
             for target, link in rows:
+                paths_considered += 1
                 step = DirectedExecutionStep(
                     source=current,
                     target=target,
@@ -452,8 +459,6 @@ class RepositoryContextEngine:
                     queue.append(
                         (target, next_steps, visited | {target}, entry_kind, route)
                     )
-                if len(views) >= self.max_execution_views:
-                    break
             if steps and not expanded:
                 contains_anchor = any(
                     self._matches(node, anchor_paths, anchor_symbols)
@@ -475,7 +480,57 @@ class RepositoryContextEngine:
                         )
                     )
         unique = {view.view_id: view for view in views}
-        return tuple(unique.values()), rejected
+
+        def score(view: ExecutionView) -> tuple[Any, ...]:
+            nodes = (view.steps[0].source, *(step.target for step in view.steps))
+            exact_symbol = int(any(node.symbol in anchor_symbols for node in nodes))
+            exact_path = int(any(node.path in anchor_paths for node in nodes))
+            test_related = int(
+                any(
+                    node.path.lower().startswith(("test/", "tests/"))
+                    or "/test/" in node.path.lower()
+                    or "/tests/" in node.path.lower()
+                    for node in nodes
+                )
+            )
+            entry_rank = {
+                "route_entry": 0,
+                "declared_main": 1,
+                "graph_root": 2,
+                "anchored_seed": 3,
+            }.get(view.entry_kind, 4)
+            terminal = nodes[-1] if nodes else SymbolRef("", "", 0)
+            terminal_rank = 0 if terminal.path.lower().startswith(("test/", "tests/")) else 1
+            complete_rank = int(view.truncated or view.cycle_terminated)
+            sequence = tuple(node.rendered.lower() for node in nodes)
+            return (
+                -exact_symbol,
+                -exact_path,
+                -test_related,
+                entry_rank,
+                terminal_rank,
+                complete_rank,
+                len(view.steps),
+                sequence,
+                view.view_id,
+            )
+
+        ranked = tuple(sorted(unique.values(), key=score))
+        selected = ranked[: self.max_execution_views]
+        coverage = {
+            "entries_considered": len(entries),
+            "paths_considered": paths_considered,
+            "returned_views": len(selected),
+            "candidate_views": len(ranked),
+            "branch_truncated": branch_truncated,
+            "depth_truncated": sum(1 for view in ranked if view.truncated),
+            "cycle_terminated": sum(1 for view in ranked if view.cycle_terminated),
+            "deduplicated_paths": max(0, len(views) - len(unique)),
+            "omitted_for_view_limit": max(0, len(ranked) - len(selected)),
+            "rejected_edges": rejected,
+            "lower_bound": 1,
+        }
+        return selected, rejected, coverage
 
     def _impact(
         self,
@@ -771,6 +826,7 @@ class RepositoryContextEngine:
         *,
         semantic: SemanticEvidenceResult | None = None,
         rejected_edge_count: int = 0,
+        process_coverage: dict[str, int] | None = None,
     ) -> RepositoryContextProjection:
         return RepositoryContextProjection(
             status=RepositoryContextStatus.ABSTAIN,
@@ -782,6 +838,7 @@ class RepositoryContextEngine:
             graph_revision=opportunity.graph_revision,
             semantic_evidence=semantic,
             rejected_edge_count=rejected_edge_count,
+            process_coverage=dict(process_coverage or {}),
         )
 
     def project(
@@ -828,7 +885,7 @@ class RepositoryContextEngine:
             graph_revision=opportunity.graph_revision,
             delivered_claim_ids=delivered_claim_ids,
         )
-        execution_views, rejected_edges = self._execution_views(
+        execution_views, rejected_edges, process_coverage = self._execution_views(
             snapshot.structural_links, anchor_paths, anchor_symbols
         )
         impact, rejected_impact_edges = self._impact(
@@ -853,30 +910,58 @@ class RepositoryContextEngine:
             for claim_id in item.constituent_claim_ids
         }
 
-        lines: list[tuple[str, str]] = []
-        if semantic.status is SemanticEvidenceStatus.DELIVER:
-            lines.extend((item.claim_id, item.rendered) for item in semantic.items)
-        for view in execution_views:
-            lines.append(
-                (
-                    view.view_id,
-                    f"- Execution (lower bound; {view.entry_kind}): {view.rendered}",
-                )
-            )
-        lines.extend((item.claim_id, item.rendered) for item in coupled)
-        lines.extend(
-            (fact.claim_id, f"- Impact {fact.rendered}")
-            for fact in impact
-            if fact.claim_id not in coupled_constituents
+        semantic_lines = (
+            [(item.claim_id, item.rendered) for item in semantic.items]
+            if semantic.status is SemanticEvidenceStatus.DELIVER
+            else []
         )
-        lines.extend((fact.claim_id, fact.rendered) for fact in diagnostics)
-        lines.extend(
+        critical_lines = [(item.claim_id, item.rendered) for item in coupled]
+        critical_lines.extend(
+            (fact.claim_id, fact.rendered) for fact in diagnostics
+        )
+        critical_lines.extend(
             (fact.claim_id, fact.rendered)
             for fact in validation
             if fact.claim_id not in coupled_constituents
         )
-        lines = [(claim, line) for claim, line in lines if claim not in delivered_claim_ids]
-        if not lines:
+        process_lines = [
+            (
+                view.view_id,
+                f"- Execution (lower bound; {view.entry_kind}): {view.rendered}",
+            )
+            for view in execution_views
+        ]
+        process_lines.extend(
+            (fact.claim_id, f"- Impact {fact.rendered}")
+            for fact in impact
+            if fact.claim_id not in coupled_constituents
+        )
+        groups = (
+            (
+                "repository_context",
+                "Current certified repository context:",
+                critical_lines,
+            ),
+            (
+                "repository_semantic",
+                "Current certified repository context:",
+                semantic_lines,
+            ),
+            (
+                "repository_process",
+                "Current certified repository context:",
+                process_lines,
+            ),
+        )
+        available_groups = tuple(
+            (
+                surface,
+                heading,
+                [(claim, line) for claim, line in rows if claim not in delivered_claim_ids],
+            )
+            for surface, heading, rows in groups
+        )
+        if not any(rows for _, _, rows in available_groups):
             reasons = ["no_certified_repository_context"]
             if delivered_claim_ids and (
                 semantic.reason_codes == ("semantic_evidence_already_delivered",)
@@ -889,27 +974,54 @@ class RepositoryContextEngine:
                 tuple(reasons),
                 semantic=semantic,
                 rejected_edge_count=rejected_edges,
+                process_coverage=process_coverage,
             )
-
-        heading = "Current certified repository context (lower bound):"
-        selected: list[tuple[str, str]] = []
-        used = _tokens(heading)
-        truncated = 0
-        for claim, line in lines:
-            required = _tokens(line)
-            if used + required > self.max_tokens:
-                truncated += 1
+        selected_by_surface: dict[str, list[tuple[str, str]]] = {}
+        used = 0
+        truncated = semantic.truncated_count
+        for surface, heading, rows in available_groups:
+            if not rows:
                 continue
-            selected.append((claim, line))
-            used += required
+            heading_cost = _tokens(heading)
+            if used + heading_cost > self.max_tokens:
+                truncated += len(rows)
+                if surface == "repository_process":
+                    process_coverage["omitted_for_budget"] = process_coverage.get(
+                        "omitted_for_budget", 0
+                    ) + len(rows)
+                continue
+            group_rows: list[tuple[str, str]] = []
+            used += heading_cost
+            for claim, line in rows:
+                required = _tokens(line)
+                if used + required > self.max_tokens:
+                    truncated += 1
+                    if surface == "repository_process":
+                        process_coverage["omitted_for_budget"] = process_coverage.get(
+                            "omitted_for_budget", 0
+                        ) + 1
+                    continue
+                group_rows.append((claim, line))
+                used += required
+            if group_rows:
+                selected_by_surface[surface] = group_rows
+            else:
+                used -= heading_cost
+        selected = [row for rows in selected_by_surface.values() for row in rows]
         if not selected:
             return self._abstain(
                 opportunity,
                 ("repository_context_token_budget",),
                 semantic=semantic,
                 rejected_edge_count=rejected_edges,
+                process_coverage=process_coverage,
             )
-        rendered = "\n".join((heading, *(line for _, line in selected)))
+        payloads = []
+        for surface, heading, _ in groups:
+            rows = selected_by_surface.get(surface, [])
+            if rows:
+                payloads.append("\n".join((heading, *(line for _, line in rows))))
+        rendered = "\n".join(payloads)
         claims = tuple(claim for claim, _ in selected)
         selected_claims = frozenset(claims)
         selected_semantic_items = tuple(
@@ -958,8 +1070,10 @@ class RepositoryContextEngine:
         diagnostic_claims = {fact.claim_id for fact in diagnostics}
         validation_claims = {fact.claim_id for fact in validation}
         coupled_claims = {item.claim_id for item in coupled}
-        claim_metadata = tuple(
-            {
+        coupled_by_id = {item.claim_id: item for item in coupled}
+        def metadata_for(claim: str) -> dict[str, Any]:
+            item = coupled_by_id.get(claim)
+            return {
                 "claim_id": claim,
                 "origin": (
                     "execution_observation"
@@ -983,6 +1097,8 @@ class RepositoryContextEngine:
                     "current_attributable_failure"
                     if claim in diagnostic_claims
                     else "new_unresolved_task_obligation"
+                    if claim in coupled_claims
+                    else "new_unresolved_task_obligation"
                     if claim in validation_claims
                     else "decision_relevant_repository_context"
                 ),
@@ -993,36 +1109,43 @@ class RepositoryContextEngine:
                         "constituent_claim_ids": list(item.constituent_claim_ids),
                         "blocking": item.blocking,
                     }
-                    if (
-                        item := next(
-                            (
-                                candidate
-                                for candidate in coupled
-                                if candidate.claim_id == claim
-                            ),
-                            None,
-                        )
-                    )
+                    if item is not None
                     else {}
                 ),
             }
-            for claim in claims
-        )
-        contribution = GTContribution.create(
-            surface="repository_context",
-            kind=ContributionKind.EVIDENCE,
-            payload=rendered,
-            claim_ids=claims,
-            fact_ids=facts,
-            evidence_action=opportunity.evidence_action,
-            eligible_call=opportunity.eligible_call,
-            source_revision=opportunity.source_revision,
-            priority=18,
-            claim_metadata=claim_metadata,
-        )
+        contributions: list[GTContribution] = []
+        priority_by_surface = {
+            "repository_context": 4,
+            "repository_semantic": 6,
+            "repository_process": 18,
+        }
+        for surface, heading, _ in groups:
+            rows = selected_by_surface.get(surface, [])
+            if not rows:
+                continue
+            payload = "\n".join((heading, *(line for _, line in rows)))
+            surface_claims = tuple(claim for claim, _ in rows)
+            surface_facts = tuple(
+                _stable_id("gt-context-fact-", claim, opportunity.source_revision)
+                for claim in surface_claims
+            )
+            contributions.append(
+                GTContribution.create(
+                    surface=surface,
+                    kind=ContributionKind.EVIDENCE,
+                    payload=payload,
+                    claim_ids=surface_claims,
+                    fact_ids=surface_facts,
+                    evidence_action=opportunity.evidence_action,
+                    eligible_call=opportunity.eligible_call,
+                    source_revision=opportunity.source_revision,
+                    priority=priority_by_surface[surface],
+                    claim_metadata=tuple(metadata_for(claim) for claim in surface_claims),
+                )
+            )
         return RepositoryContextProjection(
             status=RepositoryContextStatus.DELIVER,
-            contributions=(contribution,),
+            contributions=tuple(contributions),
             rendered_text=rendered,
             claim_ids=claims,
             reason_codes=tuple(semantic.reason_codes),
@@ -1061,6 +1184,7 @@ class RepositoryContextEngine:
             token_count=_tokens(rendered),
             truncated_count=truncated,
             rejected_edge_count=rejected_edges,
+            process_coverage=process_coverage,
         )
 
 
