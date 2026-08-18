@@ -410,8 +410,9 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         "deterministic_selected" if deterministic_selection else "generative_selected"
     )
     if bootstrap_status != "selected":
+        bootstrap_status_label = "deterministic" if deterministic_selection else "generative"
         failures.append(
-            f"{label}:persistent_bootstrap_not_{'deterministic' if deterministic_selection else 'generative'}"
+            f"{label}:persistent_bootstrap_not_{bootstrap_status_label}"
         )
     if str(bootstrap.get("bootstrap_mode") or "") != expected_bootstrap_mode:
         failures.append(f"{label}:persistent_bootstrap_mode_invalid")
@@ -420,8 +421,11 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         int(bootstrap.get("logical_calls") or 0) != (0 if deterministic_selection else 1)
         or int(bootstrap.get("provider_calls") or 0) != expected_bootstrap_calls
     ):
+        bootstrap_call_label = (
+            "provider_call" if deterministic_selection else "exactly_one_call"
+        )
         failures.append(
-            f"{label}:persistent_bootstrap_not_{'provider_call' if deterministic_selection else 'exactly_one_call'}"
+            f"{label}:persistent_bootstrap_not_{bootstrap_call_label}"
         )
     if int(bootstrap.get("action_executions") or 0) != 0:
         failures.append(f"{label}:persistent_bootstrap_action_executed")

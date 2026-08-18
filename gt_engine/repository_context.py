@@ -1061,9 +1061,6 @@ class RepositoryContextEngine:
                     - len(selected_semantic_items)
                 ),
             )
-        facts = tuple(
-            _stable_id("gt-context-fact-", claim, opportunity.source_revision) for claim in claims
-        )
         semantic_claims = {item.claim_id for item in semantic.items}
         execution_claims = {view.view_id for view in execution_views}
         impact_claims = {fact.claim_id for fact in impact}

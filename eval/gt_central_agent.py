@@ -9278,8 +9278,13 @@ class MiniSweCentralAgent(BaseAgent):
                         != expected_bootstrap_mode
                     ):
                         persistent_state_failures.append("persistent_bootstrap_mode_mismatch")
-                    expected_bootstrap_calls = 0 if expected_bootstrap_mode == "deterministic_selected" else 1
-                    if int(persistent_state_bootstrap.get("provider_calls") or 0) != expected_bootstrap_calls:
+                    expected_bootstrap_calls = (
+                        0 if expected_bootstrap_mode == "deterministic_selected" else 1
+                    )
+                    if (
+                        int(persistent_state_bootstrap.get("provider_calls") or 0)
+                        != expected_bootstrap_calls
+                    ):
                         persistent_state_failures.append("persistent_bootstrap_call_count")
                     if int(persistent_state_bootstrap.get("action_executions") or 0) != 0:
                         persistent_state_failures.append("persistent_bootstrap_action_executed")
