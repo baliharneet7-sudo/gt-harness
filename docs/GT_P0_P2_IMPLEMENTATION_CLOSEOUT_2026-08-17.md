@@ -178,12 +178,12 @@ Only P3 proof and release work remains. The reusable source-owned observation bu
 implemented and wired into the frozen TB2 `repair20-v1` task runner. The remaining work is proof,
 historical replay availability, prediction freeze, and the final matched outcome run:
 
-1. freeze one exact commit;
-2. pass the exact-commit Linux source-built provider-free workflow with the pinned ONNX asset;
-3. replay the current engine on the 15 selected historical workspaces/trajectories where legal
+1. run the hosted provider-free workflow for frozen commit
+   `4f37f1f4afc1a7a6c7a2fe8981906567c7537800`;
+2. replay the current engine on the 15 selected historical workspaces/trajectories where legal
    archived task state is actually available, marking unavailable rows honestly;
-4. freeze/update the final 20-task prediction artifact without looking at new outcomes;
-5. run the final frozen comparison against the baseline and previous small GT run; and
-6. report outcomes and efficiency with the full denominator.
+3. freeze/update the final 20-task prediction artifact without looking at new outcomes;
+4. run the final frozen comparison against the baseline and previous small GT run; and
+5. report outcomes and efficiency with the full denominator.
 
-No claim of parity, superiority, solve lift, or efficiency lift is valid before step 6 completes.
+No claim of parity, superiority, solve lift, or efficiency lift is valid before step 5 completes.

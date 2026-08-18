@@ -109,12 +109,15 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
   workflow now creates source-owned documents after live budget/asset setup, composes them through
   the fixed-source builder, exports a runner-private `GT_RUNTIME_OBSERVATION_PATH`, and uploads
   the observation only after the task finishes. A copied declaration remains invalid.
-- [ ] Freeze one exact commit.
+- [x] Freeze one exact commit: `4f37f1f4afc1a7a6c7a2fe8981906567c7537800`.
 - [ ] Run the exact-commit source-built Linux provider-free workflow with current indexer and pinned
-  ONNX asset. This proves integrity, not uplift.
+  ONNX asset. This proves integrity, not uplift. An isolated Linux source-built reproduction passes
+  the curated suite, readiness audit, and legal-source integrity audit; the formal hosted workflow
+  remains open because the Codespace login shell changes the temporary test cwd for one shell test.
 - [ ] Execute the current engine against the 15 selected historical trajectories/workspaces where
-  those legal task artifacts can be restored. Record unavailable rows as unavailable; never turn
-  the frozen counterfactual predictions into fake replay measurements.
+  those legal task artifacts can be restored. The current archive has receipts and replay blobs but
+  no legal source workspaces, so those rows are currently unavailable; never turn the frozen
+  counterfactual predictions into fake replay measurements.
 - [ ] Freeze the final 20-task outcome prediction artifact.
 - [ ] Run the final frozen 20-task comparison: baseline, previous GT small run, strengthened GT.
 - [ ] Report resolve rate, flips, steps, calls, tokens, cost, evidence use, latency, abstentions, and
@@ -134,6 +137,9 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ## Exact next step
 
-Freeze one exact commit and run the source-built Linux provider-free workflow. The Go
-resolver already passes Linux `go test ./...` and a source build in the existing Codespace, but that
-is not the exact-commit provider-free release proof. Benchmarking remains the final step.
+Run the exact hosted provider-free workflow for commit
+`4f37f1f4afc1a7a6c7a2fe8981906567c7537800`, then freeze the prediction artifact
+and run the three-arm baseline/previous-GT/strengthened-GT comparison. The
+Codespace source-built reproduction is documented in
+`docs/benchmarks/GT_P3_PROVIDER_FREE_PROOF_2026-08-18.md`; it is not a solve
+claim and does not replace the hosted workflow gate.
