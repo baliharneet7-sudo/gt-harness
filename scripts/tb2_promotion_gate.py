@@ -82,6 +82,7 @@ REPAIR20_TASKS = (
 )
 PINNED_PROFILE_HASHES = {
     "repair20-v1": "36d5c8945f6f8d9ae23fe2cea759f16da0c0cea424a98f710cfaa0d9d6fd0303",
+    "regression-smoke-v1": "4c49430169d32ba1e63ba0449c6cf9841d58205cb7200d03755904ec0dfac9eb",
     "full89-v1": "3778b86071c74c8a342222cfff41089916adb5c7338d1afa69f42c9cae21fe3e",
 }
 

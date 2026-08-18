@@ -52,6 +52,24 @@
         "task_count": 20,
         "task_set_sha256": "36d5c8945f6f8d9ae23fe2cea759f16da0c0cea424a98f710cfaa0d9d6fd0303"
       },
+      "regression-smoke-v1": {
+        "task_ids": [
+          "extract-elf",
+          "headless-terminal",
+          "torch-tensor-parallelism",
+          "video-processing",
+          "winning-avg-corewars",
+          "write-compressor",
+          "count-dataset-tokens",
+          "largest-eigenval",
+          "cobol-modernization",
+          "feal-linear-cryptanalysis"
+        ],
+        "task_count": 10,
+        "task_set_sha256": "4c49430169d32ba1e63ba0449c6cf9841d58205cb7200d03755904ec0dfac9eb",
+        "diagnostic_only": true,
+        "selection_source": "caller-owned regression smoke derived from baseline and previous GT outcomes"
+      },
       "full89-v1": {
         "task_source": "all_rows",
         "task_count": 89,

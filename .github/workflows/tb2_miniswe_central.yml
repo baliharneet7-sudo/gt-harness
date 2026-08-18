@@ -17,7 +17,7 @@ on:
       comparison_profile:
         description: "Frozen comparison denominator"
         type: choice
-        options: [repair20-v1]
+        options: [repair20-v1, regression-smoke-v1]
         default: repair20-v1
       parallel:
         description: "Max concurrent task jobs (GHA concurrency cap)"

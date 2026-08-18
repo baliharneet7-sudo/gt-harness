@@ -161,7 +161,10 @@ def audit() -> dict[str, bool]:
         ),
         "staged_policy_arms_are_explicit_and_default_safe": (
             (
-                "options: [repair20-v1]" in workflow
+                (
+                    "options: [repair20-v1]" in workflow
+                    or "options: [repair20-v1, regression-smoke-v1]" in workflow
+                )
                 and "inputs.arm" not in workflow
                 and "--ak integration_mode=active --ak policy_mode=certified_active"
                 in workflow

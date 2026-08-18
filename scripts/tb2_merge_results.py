@@ -481,8 +481,15 @@ forensics_report = build_regression_forensics(
     treatment,
     treatment_artifact_root=Path("tasks"),
 )
+profile_config = (
+    (baseline.get("manifest") or {}).get("profiles") or {}
+).get(os.environ["COMPARISON_PROFILE"], {})
+diagnostic_only = bool(profile_config.get("diagnostic_only"))
 merged_payload["feature_lifecycle_passed"] = lifecycle_report["passed"]
-merged_payload["promotion_passed"] = promotion_report.passed
+merged_payload["diagnostic_only"] = diagnostic_only
+merged_payload["promotion_passed"] = (
+    None if diagnostic_only else promotion_report.passed
+)
 merged_payload["forensics_complete"] = forensics_report["passed"]
 
 out += [
@@ -490,7 +497,11 @@ out += [
     "## Release verdicts",
     "",
     f"- 17+1 mechanism lifecycle: **{'PASS' if lifecycle_report['passed'] else 'FAIL'}**",
-    f"- frozen-baseline promotion: **{'PASS' if promotion_report.passed else 'FAIL'}**",
+    (
+        "- frozen-baseline promotion: **NOT APPLIED (diagnostic smoke profile)**"
+        if diagnostic_only
+        else f"- frozen-baseline promotion: **{'PASS' if promotion_report.passed else 'FAIL'}**"
+    ),
     f"- legacy features naturally fired: **{lifecycle_report['naturally_fired_legacy_feature_count']}/17**",
     f"- solve flips: **{', '.join(promotion_report.flips) or 'none'}**",
     f"- baseline solve losses: **{', '.join(promotion_report.losses) or 'none'}**",
@@ -525,5 +536,5 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
 print(body[:4000])
 if (invalid_intelligence or invalid_dense or invalid_provider_deliveries
         or invalid_treatment_release or not lifecycle_report["passed"]
-        or not promotion_report.passed):
+        or (not diagnostic_only and not promotion_report.passed)):
     sys.exit(2)
