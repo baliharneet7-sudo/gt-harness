@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sys
@@ -16,6 +17,20 @@ from scripts.tb2_promotion_gate import assess_tb2_promotion, treatment_from_merg
 from scripts.tb2_regression_forensics import build_regression_forensics
 
 expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
+prediction_path = Path(
+    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json"
+)
+prediction_sha256 = (
+    hashlib.sha256(prediction_path.read_bytes()).hexdigest()
+    if prediction_path.exists()
+    else ""
+)
+expected_prediction_sha256 = os.environ.get("PREDICTION_SHA256") or ""
+prediction_hash_valid = bool(
+    prediction_sha256
+    and expected_prediction_sha256
+    and prediction_sha256 == expected_prediction_sha256
+)
 dense_required = True
 trials, missing, per_task, receipt_metrics = [], [], [], []
 observed_artifact_tasks = set()
@@ -468,6 +483,12 @@ merged_payload = {
     "invalid_dense_backend_tasks": invalid_dense,
     "invalid_provider_delivery_tasks": invalid_provider_deliveries,
     "invalid_treatment_release_tasks": invalid_treatment_release,
+    "frozen_outcome_prediction": {
+        "path": prediction_path.as_posix(),
+        "sha256": prediction_sha256,
+        "expected_sha256": expected_prediction_sha256,
+        "hash_valid": prediction_hash_valid,
+    },
     "dense_backend_required": dense_required,
     "call1_gt_changed_tasks": call1_gt_changed_tasks,
     "fingerprint_metadata": fingerprint_metadata,
@@ -481,6 +502,8 @@ merged_payload = {
         "profile_id": os.environ["COMPARISON_PROFILE"],
         "planned_task_ids": expected,
         "task_set_sha256": os.environ["TASK_SET_SHA256"],
+        "frozen_outcome_prediction_sha256": prediction_sha256,
+        "frozen_outcome_prediction_hash_valid": prediction_hash_valid,
         "observed_identity": {
             "executor_models": observed_executor_models,
             "executor_providers": observed_executor_providers,
@@ -550,6 +573,11 @@ out += [
     ),
     f"- solve flips: **{', '.join(promotion_report.flips) or 'none'}**",
     f"- baseline solve losses: **{', '.join(promotion_report.losses) or 'none'}**",
+    (
+        "- frozen outcome prediction hash: **PASS**"
+        if prediction_hash_valid
+        else "- frozen outcome prediction hash: **FAIL**"
+    ),
 ]
 
 Path("merged.json").write_text(
@@ -580,6 +608,7 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
     f.write(body)
 print(body[:4000])
 if (invalid_intelligence or invalid_dense or invalid_provider_deliveries
-        or invalid_treatment_release or not lifecycle_report["passed"]
+        or invalid_treatment_release or not prediction_hash_valid
+        or not lifecycle_report["passed"]
         or (not diagnostic_only and not promotion_report.passed)):
     sys.exit(2)

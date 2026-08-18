@@ -67,14 +67,27 @@ historical failure workspaces because the archived artifacts do not contain lega
 source workspaces. The frozen counterfactual predictions must not be reported as
 replay measurements.
 
+## Outcome-preparation repair
+
+The pre-outcome prediction is now frozen in
+`docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json`.
+The TB2 workflow runs `scripts/verify_frozen_outcome_prediction.py` before it
+enumerates the live task matrix. The check binds the prediction to the selected
+frozen profile, verifies the full task order and frozen-baseline hash, checks the
+runtime proof commit is an ancestor of the treatment commit, and emits a SHA-256
+proof. The merge artifact also records and validates that prediction hash.
+
+This closes a benchmark-accounting gap without adding a model call, a task rule,
+or a new treatment arm. The checked-in verifier has a regression test.
+
 ## Remaining work
 
-1. Freeze the final outcome prediction artifact before seeing new outcomes.
-2. Run the existing three-arm 20-task comparison: GT off, previous GT, and the
-   strengthened GT.
-3. Report resolve rate, positive and negative flips, steps, calls, tokens, cost,
+1. Run the strengthened GT treatment on the frozen 20-task `repair20-v1` profile.
+   The GT-off baseline and previous GT small run are joined offline; no fresh GT-off
+   arm or ablation is authorized.
+2. Report resolve rate, positive and negative flips, steps, calls, tokens, cost,
    latency, evidence delivery/use, abstentions, and provider-censored rows.
-4. Only then decide whether the strengthened architecture is actually better than
+3. Only then decide whether the strengthened architecture is actually better than
    the previous GT and whether it is competitive with the GitNexus result.
 
 The current state is `READY_FOR_OUTCOME_EVALUATION`, not `PROVEN_BETTER`.

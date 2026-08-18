@@ -1,0 +1,94 @@
+{
+  "schema": "gt.final_20_task_outcome_prediction.v1",
+  "frozen_at": "2026-08-18",
+  "prediction_before_outcome": true,
+  "outcome_run_executed": false,
+  "candidate_runtime_commit": "15bc9424cec8c9bfdf34db58c66e645ec92f8724",
+  "candidate_runtime_proof_commit": "15bc9424cec8c9bfdf34db58c66e645ec92f8724",
+  "candidate_treatment": "tb2-central-relational-v2",
+  "task_profile": "repair20-v1",
+  "task_count": 20,
+  "task_order": [
+    "cobol-modernization",
+    "count-dataset-tokens",
+    "extract-elf",
+    "feal-linear-cryptanalysis",
+    "fix-code-vulnerability",
+    "headless-terminal",
+    "largest-eigenval",
+    "llm-inference-batching-scheduler",
+    "mcmc-sampling-stan",
+    "portfolio-optimization",
+    "prove-plus-comm",
+    "qemu-alpine-ssh",
+    "regex-chess",
+    "sanitize-git-repo",
+    "schemelike-metacircular-eval",
+    "torch-pipeline-parallelism",
+    "torch-tensor-parallelism",
+    "video-processing",
+    "winning-avg-corewars",
+    "write-compressor"
+  ],
+  "source_artifacts": {
+    "frozen_gt_off": {
+      "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
+      "sha256": "f75ebc8dd1eb25cb31cfa099b196d54346016b9f2de8e6f026e420cc213dd0bf"
+    },
+    "previous_gt": {
+      "path": "artifacts/tb2_31778400203/merged/merged.json",
+      "sha256": "bd3065e05a8cd22fdd139d17ceec3a30733100244f18c4008beed3f0bb307673"
+    },
+    "prior_historical_predictions": {
+      "path": "docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.json",
+      "sha256": "1830227998d6e77c6dd443a0256772f7cdfe9e47affb6fa1ed57b943c4b0c53c"
+    }
+  },
+  "aggregate_prediction": {
+    "point_solved": 16,
+    "point_resolve_rate": 0.8,
+    "plausible_solved_range": [15, 18],
+    "plausible_resolve_rate_range": [0.75, 0.9],
+    "baseline_solved": 17,
+    "previous_gt_solved": 13,
+    "predicted_positive_flips_vs_baseline": [
+      "count-dataset-tokens",
+      "largest-eigenval"
+    ],
+    "predicted_negative_flips_vs_baseline": [
+      "extract-elf",
+      "video-processing",
+      "winning-avg-corewars"
+    ],
+    "predicted_positive_flips_vs_previous_gt": [
+      "headless-terminal",
+      "torch-tensor-parallelism",
+      "write-compressor"
+    ],
+    "efficiency_prediction": "lower_or_equal_discretionary_context_cost_than_previous_gt; one bounded bootstrap call and bounded relational frames add fixed treatment overhead",
+    "confidence": "moderate"
+  },
+  "predictions": [
+    {"task": "cobol-modernization", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No measured failure in either reference arm; certified evidence should remain silent or useful."},
+    {"task": "count-dataset-tokens", "baseline_solved": false, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_positive_flip", "confidence": "high", "reason": "Previously observed positive flip; bounded task/context evidence should not remove the useful path."},
+    {"task": "extract-elf", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high", "reason": "Frozen historical prediction classified the failure as wrong approach rather than missing repository evidence."},
+    {"task": "feal-linear-cryptanalysis", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_with_efficiency_risk", "confidence": "moderate", "reason": "Both reference arms solved; long retained reasoning remains an efficiency risk even after bounded delivery."},
+    {"task": "fix-code-vulnerability", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression and no weak-symbol correction path is expected to fire."},
+    {"task": "headless-terminal", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "moderate", "reason": "The later smoke recovered this task; bounded action-conditioned context targets the prior exploration/composition failure."},
+    {"task": "largest-eigenval", "baseline_solved": false, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_positive_flip", "confidence": "high", "reason": "Previously observed positive flip with no known destructive correction mechanism."},
+    {"task": "llm-inference-batching-scheduler", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "Both reference arms solved; relational evidence is bounded and abstains when uncertified."},
+    {"task": "mcmc-sampling-stan", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "portfolio-optimization", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "prove-plus-comm", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "qemu-alpine-ssh", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "regex-chess", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_with_exploration_risk", "confidence": "moderate", "reason": "Historical prediction targets reduced self-echo, but the task can still hit the step budget."},
+    {"task": "sanitize-git-repo", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "schemelike-metacircular-eval", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high", "reason": "No recorded reference regression."},
+    {"task": "torch-pipeline-parallelism", "baseline_solved": false, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high", "reason": "Both reference arms failed; no certified repository fact is expected to resolve the external/runtime-heavy failure."},
+    {"task": "torch-tensor-parallelism", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "low", "reason": "The strengthened path exposes exact changed symbols, callers, and checks, but the historical failure may be behavioral rather than relational."},
+    {"task": "video-processing", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high", "reason": "Frozen historical prediction classified the failure as an overfit heuristic, not a missing graph relationship."},
+    {"task": "winning-avg-corewars", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "likely_non_recovery", "confidence": "moderate", "reason": "Bounded process context may reduce duplicate exploration, but the prior smoke still showed step-budget exhaustion."},
+    {"task": "write-compressor", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "moderate", "reason": "The later smoke recovered this task and the strengthened path avoids generic repeated guidance."}
+  ],
+  "freeze_rule": "Do not edit this artifact after any candidate outcome is inspected; if the runner contract changes, create a new version with a new hash."
+}

@@ -157,9 +157,13 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
   those legal task artifacts can be restored. The current archive has receipts and replay blobs but
   no legal source workspaces, so those rows are currently unavailable; never turn the frozen
   counterfactual predictions into fake replay measurements.
-- [ ] Update and freeze the final 20-task outcome prediction artifact before inspecting any new
-  outcome.
-- [ ] Run the final frozen 20-task comparison: baseline, previous GT small run, strengthened GT.
+- [x] Update and freeze the final 20-task outcome prediction artifact before inspecting any new
+  outcome. The frozen artifact is
+  `docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json`; the workflow verifies
+  its profile, task order, baseline hash, and pre-outcome state.
+- [ ] Run the final frozen 20-task comparison: strengthened GT live, with the frozen GT-off
+  baseline and previous GT result joined offline. A new GT-off arm is forbidden by the current
+  benchmark contract.
 - [ ] Report resolve rate, flips, steps, calls, tokens, cost, evidence use, latency, abstentions, and
   invalid/provider-censored rows with the full denominator preserved.
 
@@ -177,6 +181,6 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ## Exact next step
 
-The next step is the outcome phase: freeze the updated prediction artifact, then run
-the existing three-arm baseline/previous-GT/strengthened-GT comparison. GitNexus is
-not a run arm. The provider-free proof does not establish solve uplift or efficiency.
+The next step is the outcome phase: run the strengthened candidate on frozen `repair20-v1`.
+The GT-off baseline and previous GT result are offline reference artifacts, not new run arms.
+GitNexus is not a run arm. The provider-free proof does not establish solve uplift or efficiency.

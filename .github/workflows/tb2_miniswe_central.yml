@@ -63,6 +63,7 @@ jobs:
     outputs:
       tasks: ${{ steps.enum.outputs.tasks }}
       task_set_sha256: ${{ steps.enum.outputs.task_set_sha256 }}
+      prediction_sha256: ${{ steps.prediction.outputs.prediction_sha256 }}
       canary_model: ${{ steps.canary_identity.outputs.model }}
       canary_provider: ${{ steps.canary_identity.outputs.provider }}
     env:
@@ -185,6 +186,38 @@ jobs:
               output.write(f"model={model}\nprovider={provider}\n")
           EOF
 
+      - id: prediction
+        name: Verify frozen pre-outcome prediction
+        env:
+          COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
+        run: |
+          set -euo pipefail
+          python scripts/verify_frozen_outcome_prediction.py \
+            --prediction docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json \
+            --baseline eval/frozen_baselines/tb2_miniswe_20260731.json \
+            --profile "$COMPARISON_PROFILE" \
+            --current-commit "$(git rev-parse HEAD)" \
+            --output outcome-prediction-proof.json \
+            | tee outcome-prediction-proof.stdout.json
+          prediction_sha256=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          print(json.loads(Path("outcome-prediction-proof.json").read_text())["prediction_sha256"])
+          PY
+          )
+          echo "prediction_sha256=$prediction_sha256" >> "$GITHUB_OUTPUT"
+          cat outcome-prediction-proof.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload frozen prediction proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tb2-outcome-prediction-proof-${{ github.run_id }}
+          path: |
+            outcome-prediction-proof.json
+            outcome-prediction-proof.stdout.json
+          if-no-files-found: error
+
       - name: Upload exact bootstrap proof
         if: always()
         uses: actions/upload-artifact@v4
@@ -265,6 +298,7 @@ jobs:
       GT_DENSE_INTER_OP_THREADS: "1"
       TASKS_JSON: ${{ needs.plan.outputs.tasks }}
       TASK_SET_SHA256: ${{ needs.plan.outputs.task_set_sha256 }}
+      PREDICTION_SHA256: ${{ needs.plan.outputs.prediction_sha256 }}
       GT_COMMIT: ${{ needs.resolve.outputs.sha }}
       CANARY_MODEL: ${{ needs.plan.outputs.canary_model }}
       # Provider credentials remain on the Harbor host. The external agent
@@ -863,6 +897,7 @@ jobs:
           COMPARISON_PROFILE: ${{ inputs.comparison_profile }}
           CANARY_MODEL: ${{ needs.plan.outputs.canary_model }}
           CANARY_PROVIDER: ${{ needs.plan.outputs.canary_provider }}
+          PREDICTION_SHA256: ${{ needs.plan.outputs.prediction_sha256 }}
           GT_COMMIT: ${{ needs.resolve.outputs.sha }}
           GT_RUN_ID: ${{ github.run_id }}
         # The merge implementation lives in scripts/tb2_merge_results.py to
