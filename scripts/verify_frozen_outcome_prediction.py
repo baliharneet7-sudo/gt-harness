@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from scripts.release_manifest import ReleaseManifest, load_release_manifest
+
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(
@@ -81,12 +83,28 @@ def _validate_post_runtime_paths(
         )
 
 
+def _validate_release_freeze_paths(
+    *,
+    manifest_relative: str,
+    prediction_relative: str,
+    allowed_paths: tuple[str, ...],
+) -> None:
+    expected = {manifest_relative, prediction_relative}
+    observed = {str(path).replace("\\", "/") for path in allowed_paths}
+    if observed != expected or len(allowed_paths) != 2:
+        raise ValueError(
+            "release freeze may allow only its manifest and prediction artifact"
+        )
+
+
 def verify(
     *,
     prediction_path: Path,
     baseline_path: Path,
     profile_id: str,
     current_commit: str,
+    allowed_post_runtime_paths: tuple[str, ...] | None = None,
+    expected_runtime_commit: str | None = None,
 ) -> dict[str, Any]:
     prediction = json.loads(prediction_path.read_text(encoding="utf-8"))
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -131,6 +149,8 @@ def verify(
 
     proof_commit = str(prediction.get("candidate_runtime_proof_commit") or "")
     runtime_commit = str(prediction.get("candidate_runtime_commit") or "")
+    if expected_runtime_commit is not None and runtime_commit != expected_runtime_commit:
+        raise ValueError("prediction runtime commit disagrees with release manifest")
     commits = (
         ("candidate runtime proof", proof_commit),
         ("candidate runtime", runtime_commit),
@@ -141,7 +161,11 @@ def verify(
         if not _is_ancestor(commit, current_commit):
             raise ValueError(f"{label} commit is not an ancestor of the treatment commit")
     if prediction.get("schema") == "gt.final_20_task_outcome_prediction.v2":
-        allowed_paths = tuple(prediction.get("allowed_post_runtime_paths") or ())
+        allowed_paths = (
+            allowed_post_runtime_paths
+            if allowed_post_runtime_paths is not None
+            else tuple(prediction.get("allowed_post_runtime_paths") or ())
+        )
         if not allowed_paths:
             raise ValueError("v2 prediction has no allowed post-runtime paths")
         prediction_relative = prediction_path.as_posix()
@@ -176,20 +200,75 @@ def verify(
     }
 
 
+def verify_release_manifest(
+    *,
+    manifest_path: Path,
+    current_commit: str,
+    root: Path | None = None,
+    expected_profile: str | None = None,
+) -> dict[str, Any]:
+    release: ReleaseManifest = load_release_manifest(manifest_path, root=root)
+    if expected_profile is not None and release.task_profile != expected_profile:
+        raise ValueError("selected profile disagrees with release manifest")
+    release_root = (root or Path.cwd()).resolve()
+    try:
+        manifest_relative = manifest_path.resolve().relative_to(release_root).as_posix()
+    except ValueError as exc:
+        raise ValueError("release manifest is outside release root") from exc
+    if manifest_relative not in release.allowed_post_runtime_paths:
+        raise ValueError("release manifest is not in allowed post-runtime paths")
+    _validate_release_freeze_paths(
+        manifest_relative=manifest_relative,
+        prediction_relative=release.prediction_relative,
+        allowed_paths=release.allowed_post_runtime_paths,
+    )
+    proof = verify(
+        prediction_path=release.prediction_path,
+        baseline_path=release.baseline_path,
+        profile_id=release.task_profile,
+        current_commit=current_commit,
+        allowed_post_runtime_paths=release.allowed_post_runtime_paths,
+        expected_runtime_commit=release.runtime_commit,
+    )
+    prediction = json.loads(release.prediction_path.read_text(encoding="utf-8"))
+    if str(prediction.get("candidate_runtime_proof_commit") or "") != release.runtime_commit:
+        raise ValueError("prediction proof commit disagrees with release manifest")
+    return {
+        **proof,
+        "release_manifest_path": manifest_relative,
+        "release_manifest_sha256": _sha256(manifest_path),
+        "release_id": release.release_id,
+        "treatment_path": release.treatment_relative,
+        "treatment_sha256": _sha256(release.treatment_path),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prediction", type=Path, required=True)
-    parser.add_argument("--baseline", type=Path, required=True)
-    parser.add_argument("--profile", required=True)
+    parser.add_argument("--release-manifest", type=Path)
+    parser.add_argument("--prediction", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--profile")
     parser.add_argument("--current-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    proof = verify(
-        prediction_path=args.prediction,
-        baseline_path=args.baseline,
-        profile_id=args.profile,
-        current_commit=args.current_commit,
-    )
+    if args.release_manifest is not None:
+        proof = verify_release_manifest(
+            manifest_path=args.release_manifest,
+            current_commit=args.current_commit,
+            expected_profile=args.profile,
+        )
+    else:
+        if args.prediction is None or args.baseline is None or not args.profile:
+            parser.error(
+                "--release-manifest or --prediction/--baseline/--profile is required"
+            )
+        proof = verify(
+            prediction_path=args.prediction,
+            baseline_path=args.baseline,
+            profile_id=args.profile,
+            current_commit=args.current_commit,
+        )
     args.output.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(proof, sort_keys=True))
     return 0

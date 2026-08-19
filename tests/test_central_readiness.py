@@ -50,8 +50,8 @@ def test_paid_central_workflow_installs_and_proves_repository_runtime():
     assert result["paid_central_executes_language_contract"] is True
     assert result["provider_free_gate_covers_pinned_benchmark_languages"] is True
     assert result["provider_free_gate_covers_trajectory_audit"] is True
-    assert result["replay_capture_is_opt_in"] is True
-    assert result["paid_replay_capture_switch_is_explicit"] is True
+    assert result["replay_capture_defaults_off_outside_final_profile"] is True
+    assert result["paid_replay_capture_is_hardwired"] is True
     assert result["paid_replay_capture_required_for_final_profile"] is True
     assert result["provider_free_gate_covers_intervention_audit"] is True
     assert result["provider_free_gate_covers_benchmark_reports"] is True

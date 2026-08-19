@@ -23,6 +23,7 @@ from gt_engine.treatment_adapter import (
     GroundTruthTreatmentAdapter,
     treatment_from_descriptor,
 )
+from scripts.release_manifest import load_release_manifest
 
 _IDENTITY_KEYS = frozenset(
     {
@@ -166,6 +167,7 @@ def _atomic_write(path: Path, value: Mapping[str, Any]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--descriptor", type=Path)
+    parser.add_argument("--release-manifest", type=Path)
     parser.add_argument("--source-sha")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--output", type=Path)
@@ -181,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             value is not None
             for value in (
                 args.descriptor,
+                args.release_manifest,
                 args.source_sha,
                 args.max_steps,
                 args.output,
@@ -191,9 +194,16 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(args.emit_harbor_args.resolve(strict=True).read_text(encoding="utf-8"))
         print("\n".join(harbor_argument_lines(payload)))
         return 0
-    if None in (args.descriptor, args.source_sha, args.max_steps, args.output):
-        raise ValueError("build mode requires descriptor, source SHA, max steps, and output")
-    descriptor = json.loads(args.descriptor.resolve(strict=True).read_text(encoding="utf-8"))
+    if None in (args.source_sha, args.max_steps, args.output):
+        raise ValueError("build mode requires source SHA, max steps, and output")
+    if (args.descriptor is None) == (args.release_manifest is None):
+        raise ValueError("build mode requires exactly one descriptor source")
+    descriptor_path = (
+        args.descriptor.resolve(strict=True)
+        if args.descriptor is not None
+        else load_release_manifest(args.release_manifest).treatment_path
+    )
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
     if not isinstance(descriptor, dict):
         raise ValueError("treatment descriptor must be an object")
     benchmark_manifest = (

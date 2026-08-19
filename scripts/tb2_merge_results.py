@@ -16,13 +16,13 @@ from gt_engine.intervention_chain import audit_intervention_artifacts
 from gt_engine.treatment_adapter import BenchmarkManifest
 from scripts.central_feature_lifecycle import build_feature_lifecycle_report
 from scripts.central_release_gate import audit_treatment_runtime
+from scripts.release_manifest import load_release_manifest
 from scripts.tb2_promotion_gate import assess_tb2_promotion, treatment_from_merged
 from scripts.tb2_regression_forensics import build_regression_forensics
 
 expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
-prediction_path = Path(
-    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-19_V2.json"
-)
+release_manifest = load_release_manifest()
+prediction_path = release_manifest.prediction_path
 prediction_sha256 = (
     hashlib.sha256(prediction_path.read_bytes()).hexdigest()
     if prediction_path.exists()
@@ -41,6 +41,48 @@ feature_receipts = []
 deep_tasks = {}
 verified_benchmark_manifests = {}
 artifact_integrity_failures = []
+
+provider_free_receipts = list(Path("provider-free").rglob("central_provider_free_receipt.json"))
+provider_free_mechanical = list(Path("provider-free").rglob("mechanical-completeness.json"))
+provider_free_documentation = list(
+    Path("provider-free").rglob("documentation-consistency.json")
+)
+for artifact_name, artifact_paths in (
+    ("provider_free_receipt", provider_free_receipts),
+    ("provider_free_mechanical", provider_free_mechanical),
+    ("provider_free_documentation", provider_free_documentation),
+):
+    if len(artifact_paths) != 1:
+        artifact_integrity_failures.append(
+            f"run:{artifact_name}_artifact_count:{len(artifact_paths)}"
+        )
+provider_free_receipt = (
+    json.loads(provider_free_receipts[0].read_text(encoding="utf-8"))
+    if len(provider_free_receipts) == 1
+    else {}
+)
+provider_free_mechanical_proof = (
+    json.loads(provider_free_mechanical[0].read_text(encoding="utf-8"))
+    if len(provider_free_mechanical) == 1
+    else {}
+)
+provider_free_documentation_proof = (
+    json.loads(provider_free_documentation[0].read_text(encoding="utf-8"))
+    if len(provider_free_documentation) == 1
+    else {}
+)
+provider_free_valid = bool(
+    provider_free_receipt.get("commit") == os.environ.get("GT_COMMIT")
+    and provider_free_receipt.get("provider_calls") == 0
+    and provider_free_receipt.get("provider_credentials_present") is False
+    and provider_free_receipt.get("mechanical_completeness") == "PASS"
+    and provider_free_mechanical_proof.get("status") == "PASS"
+    and provider_free_documentation_proof.get("status") == "PASS"
+    and os.environ.get("PROVIDER_FREE_COMMIT") == os.environ.get("GT_COMMIT")
+    and os.environ.get("PROVIDER_FREE_STATUS") == "PASS"
+)
+if not provider_free_valid:
+    artifact_integrity_failures.append("run:provider_free_certification_invalid")
 
 def solved(t):
     rewards = (t.get("verifier_result") or {}).get("rewards") or {}
@@ -146,11 +188,11 @@ for task_dir in sorted(Path("tasks").glob("*")):
                     f"{task_name}:intervention_chain_unreadable"
                 )
         if dense_required:
-            treatment_release_failures = [
+            treatment_release_failures.extend(
                 failure
                 for check in audit_treatment_runtime(receipt, label=task_name)
                 for failure in check.failures
-            ]
+            )
             manifest_paths = list(task_dir.rglob("benchmark-manifest.json"))
             if len(manifest_paths) != 1:
                 treatment_release_failures.append(
@@ -294,6 +336,13 @@ for task_dir in sorted(Path("tasks").glob("*")):
             ),
             "provider_delivery_failures": provider_delivery_failures,
             "treatment_release_failures": treatment_release_failures,
+            "task_execution_certificate_status": (
+                (receipt.get("task_execution_certificate") or {}).get("status")
+            ),
+            "task_execution_certificate_failures": list(
+                (receipt.get("task_execution_certificate") or {}).get("failures")
+                or ()
+            ),
             "intervention_chain_rows": artifact_summary.get("chain_rows"),
             "intervention_surface_counts": intervention_surface_counts,
             "behavioral_uptake": behavioral_uptake,
@@ -504,7 +553,7 @@ if invalid_provider_deliveries:
     )
 if invalid_treatment_release:
     out.append(
-        f"> **INVALID TREATMENT RELEASE**: persistent-state release gate failed "
+        f"> **INVALID TREATMENT RELEASE**: mechanical task release gate failed "
         f"for {len(invalid_treatment_release)} task(s): "
         f"{', '.join(invalid_treatment_release)}."
     )
@@ -563,9 +612,7 @@ for row in sorted(receipt_metrics, key=lambda x: x["task"]):
     )
 
 baseline = json.loads(
-    Path("eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(
-        encoding="utf-8"
-    )
+    release_manifest.baseline_path.read_text(encoding="utf-8")
 )
 baseline_runtime_contract = dict(
     (baseline.get("manifest") or {}).get("model_identity") or {}
@@ -587,6 +634,12 @@ merged_payload = {
     "invalid_provider_delivery_tasks": invalid_provider_deliveries,
     "invalid_treatment_release_tasks": invalid_treatment_release,
     "artifact_integrity_failures": list(dict.fromkeys(artifact_integrity_failures)),
+    "provider_free_certification": {
+        "valid": provider_free_valid,
+        "receipt": provider_free_receipt,
+        "mechanical_completeness": provider_free_mechanical_proof,
+        "documentation": provider_free_documentation_proof,
+    },
     "frozen_outcome_prediction": {
         "path": prediction_path.as_posix(),
         "sha256": prediction_sha256,

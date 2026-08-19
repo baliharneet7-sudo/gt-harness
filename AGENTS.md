@@ -1,5 +1,34 @@
 # GT central-runtime behavioral contract
 
+## Final mechanical-completeness gate (2026-08-19)
+
+The final paid treatment is exactly `central_relational_v2` on the frozen
+`repair20-v1` denominator. Its machine identity is
+`eval/release/active_release.json`; workflow-local dated prediction paths or
+alternate paid profiles are forbidden.
+
+Before every final-profile executor provider call, the host must pass
+`gt.provider_mechanical_barrier.v1`. The barrier requires exact request and
+provider-view hashes, a complete source snapshot, a current graph when
+applicable, ready repository intelligence/retrieval/persistent state, a loaded
+task-semantic substrate and runtime contract, completed prior-action
+conservation, complete context/contribution accounting, and enabled replay.
+Failure blocks the provider call as `MechanicalCompletenessBlocked`; continuing
+and merely failing release later is not an accepted fallback.
+
+Every final-profile receipt must end with
+`gt.task_execution_certificate.v1`. Every applicable release requirement must
+be `SATISFIED`; mechanical non-applicability must be
+`PROVEN_NOT_APPLICABLE`. Pending, unknown, stale, skipped, failed, or
+unaccounted requirements block the task and the run. The release gate must
+recompute the certificate rather than trust its self-reported status.
+
+No paid canary or task matrix is authorized until the secret-free release
+identity job and exact-commit source-built provider-free workflow emit
+`GT_MECHANICAL_COMPLETENESS=PASS`. See
+`docs/GT_MECHANICAL_COMPLETENESS_CONTRACT.md` and
+`docs/GT_RELEASE_DOSSIER.md`.
+
 ## GT goal and benchmark-integrity boundary (2026-08-15)
 
 GroundTruth's determinism is about **context gathering**, not outcome

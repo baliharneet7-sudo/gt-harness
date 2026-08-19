@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from gt_engine.treatment_adapter import BenchmarkManifest, treatment_from_descriptor
-from scripts.render_treatment_agent_args import build_runtime_arguments
+from scripts.render_treatment_agent_args import build_runtime_arguments, main
 
 
 def test_runtime_arguments_are_derived_from_caller_configuration(tmp_path: Path) -> None:
@@ -56,6 +56,29 @@ def test_runtime_arguments_reject_identity_override() -> None:
         assert "must not override" in str(exc)
     else:
         raise AssertionError("identity override was accepted")
+
+
+def test_cli_can_resolve_treatment_only_from_canonical_release_manifest(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    output = tmp_path / "runtime.json"
+
+    assert main(
+        [
+            "--release-manifest",
+            str(root / "eval/release/active_release.json"),
+            "--source-sha",
+            "a" * 40,
+            "--max-steps",
+            "100",
+            "--output",
+            str(output),
+        ]
+    ) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["profile_id"] == "central_relational_v2"
+    assert payload["agent_kwargs"]["enable_replay_capture"] is True
 
 
 def test_runtime_arguments_bind_caller_benchmark_manifest() -> None:

@@ -2436,6 +2436,8 @@ async def test_preemptive_hybrid_retrieval_reaches_exact_first_provider_request(
 
 @pytest.mark.asyncio
 async def test_relational_v2_delivers_certified_process_after_existing_read_action(tmp_path):
+    from scripts.render_treatment_agent_args import build_runtime_arguments
+
     class TransferEnvironment(_Environment):
         async def download_dir_with_exclusions(self, *, source_dir, target_dir, exclude):
             root = Path(target_dir)
@@ -2455,18 +2457,49 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
             "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
         ]
     )
+    descriptor = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "eval/treatments/tb2_central_relational_v2.json"
+        ).read_text(encoding="utf-8")
+    )
+    runtime_contract = build_runtime_arguments(
+        descriptor,
+        source_sha="a" * 40,
+        max_steps=100,
+    )
+    runtime_contract_path = tmp_path / "treatment-runtime.json"
+    runtime_contract_path.write_text(json.dumps(runtime_contract), encoding="utf-8")
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
         model_name="test",
-        integration_mode="active",
-        treatment_profile="central_relational_v2",
-        enable_semantic_evidence=True,
         benchmark_identity={"benchmark_id": "fixture-benchmark"},
-        enable_task_start_advisory=False,
-        enable_context_frontier=False,
-        enable_feature_guidance=False,
-        enable_replay_capture=True,
+        treatment_runtime_contract_path=str(runtime_contract_path),
+        **runtime_contract["agent_kwargs"],
     )
+
+    class FakeDenseBackend:
+        identity = "fake-dense-v1"
+
+        def embed_query(self, text):
+            del text
+            return (1.0, 0.0)
+
+        def embed_documents(self, texts):
+            return tuple((1.0, 0.0) for _ in texts)
+
+        def receipt(self):
+            return {
+                "backend": "snowflake_onnx",
+                "model_name": "fixture-dense",
+                "model_sha256": "d" * 64,
+                "available": True,
+                "failed": False,
+                "network_calls": 0,
+                "provider_calls": 0,
+            }
+
+    agent._preemptive_dense_backend = FakeDenseBackend()
     agent._model_factory = lambda: model
 
     await agent.run(
@@ -2508,6 +2541,17 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     assert receipt["metrics"]["semantic_evidence_deliveries"] == 0
     assert receipt["repository_context"]["enabled"] is True
     assert receipt["repository_context"]["deliveries"]
+    mechanical = receipt["mechanical_completeness"]
+    assert mechanical["required"] is True
+    assert len(mechanical["provider_barriers"]) == receipt["executor_calls"]
+    assert all(row["status"] == "PASS" for row in mechanical["provider_barriers"])
+    certificate = receipt["task_execution_certificate"]
+    assert certificate["schema"] == "gt.task_execution_certificate.v1"
+    assert certificate["status"] == "PASS"
+    assert certificate["pending_requirement_count"] == 0
+    assert certificate["failed_requirement_count"] == 0
+    assert certificate["failures"] == []
+    assert receipt["task_artifact_integrity"]["status"] == "PASS"
     assert receipt["metrics"]["repository_context_deliveries"] >= 1
     assert receipt["preemptive_retrieval"]["deliveries"] == []
     assert receipt["component_configuration"]["retrieval_delivery_mode"] == (
@@ -2538,6 +2582,31 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     )
     assert failures == []
     assert totals["surfaces"]["repository_context"]["delivery_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_final_profile_blocks_provider_before_incomplete_runtime_dispatch(tmp_path):
+    model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        integration_mode="active",
+        treatment_profile="central_relational_v2",
+        enable_replay_capture=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Create the requested output.", _Environment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert model.observed_history == []
+    assert receipt["metrics"]["solver_exhausted_reason"] == (
+        "mechanical_completeness_barrier"
+    )
+    barrier = receipt["mechanical_completeness"]["provider_barriers"][0]
+    assert barrier["status"] == "BLOCKED"
+    assert "runtime_contract_missing" in barrier["failures"]
+    assert receipt["task_execution_certificate"]["status"] == "BLOCKED"
 
 
 @pytest.mark.asyncio
@@ -2984,7 +3053,7 @@ def test_tb2_workflow_gates_matrix_with_exact_runtime_bootstrap_canary():
     assert "--output bootstrap-canary.json" in workflow
     assert "uses: ./.github/workflows/central_provider_free.yml" in workflow
     assert "needs: [resolve, provider_free]" in workflow
-    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 4
+    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 5
     assert "name: bootstrap-canary-${{ github.run_id }}" in workflow
     provider_free = (
         Path(__file__).resolve().parents[1]
@@ -4533,12 +4602,37 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
     assert "harbor_result=got[0] if got else None" in workflow
-    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
+    assert "load_release_manifest().baseline_path" in workflow
+    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" not in workflow
     assert "assess_tb2_promotion" in workflow
     assert "build_feature_lifecycle_report" in workflow
     assert '"resolved_task_budgets": rows' in workflow
     assert '"timeout_policy_sha256": digest(timeout_policy)' in workflow
     assert '"execution_budget_sec": receipt["execution_budget_sec"]' in workflow
+
+
+def test_merge_preserves_artifact_failures_when_runtime_checks_are_added():
+    source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "tb2_merge_results.py"
+    ).read_text(encoding="utf-8")
+
+    assert "treatment_release_failures.extend(" in source
+    assert "treatment_release_failures = [\n                failure" not in source
+    assert '"task_execution_certificate_status"' in source
+    assert '"provider_free_certification"' in source
+    assert "run:provider_free_certification_invalid" in source
+
+
+def test_paid_merge_retains_exact_provider_free_proof():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/tb2_miniswe_central.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "needs: [resolve, provider_free, plan, run]" in workflow
+    assert "central-provider-free-${{ github.run_id }}" in workflow
+    assert "PROVIDER_FREE_COMMIT:" in workflow
+    assert "PROVIDER_FREE_STATUS:" in workflow
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from typing import Any
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.mechanical_completeness import build_task_execution_certificate
 from gt_engine.runtime_gate import audit_runtime_receipt
 
 # Architecture D may send zero PES frames when every dispatched call already
@@ -1098,7 +1099,10 @@ def _project_validation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck
             failures.append(f"{label}:project_probe_repeated_revision:{revision}")
         seen_revisions.add(revision)
         status = str(probe.get("status") or "")
-        if status not in {"pass", "fail", "failed_open"}:
+        allowed_statuses = {"pass", "fail"}
+        if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
+            allowed_statuses.add("failed_open")
+        if status not in allowed_statuses:
             failures.append(f"{label}:project_probe_status_invalid:{index}")
         if status == "fail" and not str(probe.get("diagnostic") or "").strip():
             failures.append(f"{label}:project_probe_failure_without_diagnostic:{index}")
@@ -1202,7 +1206,7 @@ def _baseline_shield(receipts: Iterable[dict[str, Any]]) -> ReleaseGateCheck:
     )
 
 
-def audit_treatment_runtime(
+def _audit_treatment_runtime_requirements(
     receipt: dict[str, Any],
     *,
     label: str,
@@ -1236,8 +1240,252 @@ def audit_treatment_runtime(
         _product_mechanism_census(receipt, label),
         profile_check,
         _project_validation(receipt, label),
+        _terminal_validation_state(receipt, label),
         _retrieval_efficiency(receipt, label),
         _replay_and_intervention_audit(receipt, label),
+        _task_artifact_integrity(receipt, label),
+        _mechanical_completeness_runtime(receipt, label),
+    )
+
+
+def _task_artifact_integrity(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
+        return ReleaseGateCheck(
+            "task_artifact_integrity",
+            True,
+            (),
+            {"task": label, "required": False},
+        )
+    integrity = receipt.get("task_artifact_integrity") or {}
+    failures: list[str] = []
+    if integrity.get("schema") != "gt.task_artifact_integrity.v1":
+        failures.append(f"{label}:task_artifact_integrity_missing")
+    if integrity.get("status") != "PASS" or integrity.get("failures"):
+        failures.append(f"{label}:task_artifact_integrity_blocked")
+    return ReleaseGateCheck(
+        "task_artifact_integrity",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "required": True,
+            "status": integrity.get("status"),
+            "summary": dict(integrity.get("summary") or {}),
+        },
+    )
+
+
+def _terminal_validation_state(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Require a current pass after material change when a check is known."""
+
+    metrics = receipt.get("metrics") or {}
+    material_changes = int(metrics.get("workspace_change_actions") or 0)
+    checks = tuple(
+        str(item)
+        for item in (receipt.get("project_validation") or {}).get(
+            "discovered_checks"
+        )
+        or ()
+        if str(item)
+    )
+    if material_changes <= 0 or not checks:
+        return ReleaseGateCheck(
+            "terminal_validation_state",
+            True,
+            (),
+            {
+                "task": label,
+                "required": False,
+                "reason": (
+                    "no_material_change"
+                    if material_changes <= 0
+                    else "no_source_derived_check"
+                ),
+            },
+        )
+    state = (
+        (receipt.get("persistent_execution_state") or {}).get("state") or {}
+    )
+    validation = state.get("observed_validation") or state.get("validation") or {}
+    final_revision = str(receipt.get("source_revision") or "")
+    failures: list[str] = []
+    if validation.get("status") != "pass":
+        failures.append(f"{label}:terminal_validation_not_passed")
+    if not final_revision or validation.get("source_revision") != final_revision:
+        failures.append(f"{label}:terminal_validation_stale")
+    if not str(validation.get("command") or ""):
+        failures.append(f"{label}:terminal_validation_command_missing")
+    return ReleaseGateCheck(
+        "terminal_validation_state",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "required": True,
+            "material_changes": material_changes,
+            "known_checks": list(checks),
+            "validation": dict(validation),
+            "final_source_revision": final_revision,
+        },
+    )
+
+
+def _mechanical_completeness_runtime(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Require one passing live barrier for every executor provider call."""
+
+    if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
+        return ReleaseGateCheck(
+            "mechanical_completeness_runtime",
+            True,
+            (),
+            {"task": label, "required": False},
+        )
+    contexts = receipt.get("model_call_contexts") or []
+    dispatched = [
+        row
+        for row in contexts
+        if row.get("dispatch_status")
+        in {"invoked", "response_received", "response_error"}
+    ]
+    runtime = receipt.get("mechanical_completeness") or {}
+    barriers = runtime.get("provider_barriers") or []
+    failures: list[str] = []
+    if runtime.get("schema") != "gt.mechanical_completeness_runtime.v1":
+        failures.append(f"{label}:mechanical_completeness_runtime_missing")
+    if len(barriers) != len(dispatched):
+        failures.append(f"{label}:provider_barrier_count_mismatch")
+    barrier_by_call = {int(row.get("call") or 0): row for row in barriers}
+    if len(barrier_by_call) != len(barriers):
+        failures.append(f"{label}:provider_barrier_duplicate_call")
+    for context in dispatched:
+        call = int(context.get("call") or 0)
+        embedded = context.get("mechanical_completeness_barrier") or {}
+        barrier = barrier_by_call.get(call) or {}
+        if barrier != embedded:
+            failures.append(f"{label}:provider_barrier_join_mismatch:{call}")
+            continue
+        if barrier.get("schema") != "gt.provider_mechanical_barrier.v1":
+            failures.append(f"{label}:provider_barrier_schema:{call}")
+        if barrier.get("status") != "PASS" or barrier.get("failures"):
+            failures.append(f"{label}:provider_barrier_blocked:{call}")
+        requirements = barrier.get("requirements") or []
+        if not requirements or any(
+            row.get("status") not in {"SATISFIED", "PROVEN_NOT_APPLICABLE"}
+            for row in requirements
+        ):
+            failures.append(f"{label}:provider_barrier_requirement_invalid:{call}")
+    return ReleaseGateCheck(
+        "mechanical_completeness_runtime",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "required": True,
+            "dispatched_calls": len(dispatched),
+            "provider_barriers": len(barriers),
+        },
+    )
+
+
+def build_task_certificate(
+    receipt: dict[str, Any], *, label: str
+) -> dict[str, Any]:
+    """Build the terminal certificate from independently recomputed checks."""
+
+    checks = _audit_treatment_runtime_requirements(receipt, label=label)
+    contexts = receipt.get("model_call_contexts") or []
+    dispatched_calls = sum(
+        row.get("dispatch_status")
+        in {"invoked", "response_received", "response_error"}
+        for row in contexts
+    )
+    barriers = (
+        (receipt.get("mechanical_completeness") or {}).get("provider_barriers")
+        or []
+    )
+    return build_task_execution_certificate(
+        task=label,
+        provider_barriers=barriers,
+        dispatched_calls=dispatched_calls,
+        release_checks=[check.as_dict() for check in checks],
+    )
+
+
+def _task_execution_certificate(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Verify the embedded certificate against independently recomputed state."""
+
+    if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
+        return ReleaseGateCheck(
+            "task_execution_certificate",
+            True,
+            (),
+            {"task": label, "required": False},
+        )
+    certificate = receipt.get("task_execution_certificate") or {}
+    expected = build_task_certificate(receipt, label=label)
+    failures: list[str] = []
+    if certificate.get("schema") != "gt.task_execution_certificate.v1":
+        failures.append(f"{label}:task_execution_certificate_missing")
+    if certificate.get("status") != "PASS":
+        failures.append(f"{label}:task_execution_certificate_blocked")
+    if int(certificate.get("pending_requirement_count") or 0) != 0:
+        failures.append(f"{label}:task_execution_certificate_pending")
+    if int(certificate.get("failed_requirement_count") or 0) != 0:
+        failures.append(f"{label}:task_execution_certificate_failed")
+    if certificate.get("failures"):
+        failures.append(f"{label}:task_execution_certificate_has_failures")
+    for key in (
+        "provider_barrier_count",
+        "dispatched_provider_call_count",
+    ):
+        if certificate.get(key) != expected.get(key):
+            failures.append(f"{label}:task_execution_certificate_{key}_mismatch")
+    observed_requirements = {
+        str(row.get("requirement_id") or ""): str(row.get("status") or "")
+        for row in certificate.get("requirements") or ()
+    }
+    expected_requirements = {
+        str(row.get("requirement_id") or ""): str(row.get("status") or "")
+        for row in expected.get("requirements") or ()
+    }
+    if observed_requirements != expected_requirements:
+        failures.append(f"{label}:task_execution_certificate_requirements_mismatch")
+    if expected.get("status") != "PASS":
+        failures.append(f"{label}:task_execution_recomputation_blocked")
+    return ReleaseGateCheck(
+        "task_execution_certificate",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "required": True,
+            "embedded_status": certificate.get("status"),
+            "recomputed_status": expected.get("status"),
+        },
+    )
+
+
+def audit_treatment_runtime(
+    receipt: dict[str, Any],
+    *,
+    label: str,
+    profile: str = "certified_full",
+) -> tuple[ReleaseGateCheck, ...]:
+    """Audit requirements and verify the receipt's terminal certificate."""
+
+    return (
+        *_audit_treatment_runtime_requirements(
+            receipt,
+            label=label,
+            profile=profile,
+        ),
+        _task_execution_certificate(receipt, label),
     )
 
 

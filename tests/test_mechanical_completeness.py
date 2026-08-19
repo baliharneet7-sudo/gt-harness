@@ -1,0 +1,190 @@
+from itertools import product
+
+from gt_engine.mechanical_completeness import (
+    build_task_execution_certificate,
+    evaluate_provider_barrier,
+)
+
+
+def _barrier(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "call": 1,
+        "request_payload_sha256": "a" * 64,
+        "provider_messages_sha256": "b" * 64,
+        "source_snapshot_complete": True,
+        "runtime_contract_ready": True,
+        "task_semantic_ready": True,
+        "graph_applicable": True,
+        "graph_current": True,
+        "repository_intelligence_ready": True,
+        "retrieval_ready": True,
+        "persistent_state_ready": True,
+        "previous_actions_finalized": True,
+        "context_candidate_count": 3,
+        "context_accounted_count": 3,
+        "contribution_candidate_count": 2,
+        "contribution_accounted_count": 2,
+        "replay_capture_enabled": True,
+    }
+    values.update(overrides)
+    return evaluate_provider_barrier(**values)
+
+
+def test_provider_barrier_passes_only_with_complete_current_inputs() -> None:
+    barrier = _barrier()
+    assert barrier["status"] == "PASS"
+    assert barrier["failures"] == []
+    assert all(row["status"] == "SATISFIED" for row in barrier["requirements"])
+
+
+def test_provider_barrier_rejects_stale_graph_and_unfinalized_action() -> None:
+    barrier = _barrier(graph_current=False, previous_actions_finalized=False)
+    assert barrier["status"] == "BLOCKED"
+    assert set(barrier["failures"]) == {
+        "graph_not_current",
+        "previous_action_not_finalized",
+    }
+
+
+def test_provider_barrier_blocks_incomplete_mandatory_substrate() -> None:
+    barrier = _barrier(
+        runtime_contract_ready=False,
+        task_semantic_ready=False,
+        repository_intelligence_ready=False,
+        retrieval_ready=False,
+        persistent_state_ready=False,
+    )
+    assert barrier["status"] == "BLOCKED"
+    assert set(barrier["failures"]) == {
+        "runtime_contract_missing",
+        "task_semantic_substrate_not_ready",
+        "repository_intelligence_not_ready",
+        "retrieval_not_ready",
+        "persistent_state_not_ready",
+    }
+
+
+def test_provider_barrier_records_proven_graph_non_applicability() -> None:
+    barrier = _barrier(
+        graph_applicable=False,
+        graph_current=False,
+        repository_intelligence_ready=False,
+        retrieval_ready=False,
+        persistent_state_ready=False,
+    )
+    graph = next(
+        row for row in barrier["requirements"] if row["requirement_id"] == "graph_current"
+    )
+    assert graph["status"] == "PROVEN_NOT_APPLICABLE"
+    assert sum(
+        row["status"] == "PROVEN_NOT_APPLICABLE"
+        for row in barrier["requirements"]
+    ) == 4
+    assert barrier["status"] == "PASS"
+
+
+def test_terminal_certificate_requires_every_barrier_and_release_check() -> None:
+    certificate = build_task_execution_certificate(
+        task="fixture",
+        provider_barriers=[_barrier()],
+        dispatched_calls=1,
+        release_checks=[
+            {"name": "repository_substrate", "passed": True, "failures": []},
+            {"name": "provider_delivery", "passed": True, "failures": []},
+        ],
+    )
+    assert certificate["status"] == "PASS"
+    assert certificate["pending_requirement_count"] == 0
+    assert certificate["failed_requirement_count"] == 0
+
+
+def test_terminal_certificate_fails_closed_on_missing_barrier_or_failed_check() -> None:
+    certificate = build_task_execution_certificate(
+        task="fixture",
+        provider_barriers=[_barrier()],
+        dispatched_calls=2,
+        release_checks=[
+            {
+                "name": "provider_delivery",
+                "passed": False,
+                "failures": ["fixture:delivery_missing"],
+            }
+        ],
+    )
+    assert certificate["status"] == "BLOCKED"
+    assert "provider_barrier_count_mismatch" in certificate["failures"]
+    assert "fixture:delivery_missing" in certificate["failures"]
+
+
+def test_provider_barrier_exhaustive_applicable_truth_table() -> None:
+    fields = (
+        "runtime_contract_ready",
+        "task_semantic_ready",
+        "source_snapshot_complete",
+        "graph_current",
+        "repository_intelligence_ready",
+        "retrieval_ready",
+        "persistent_state_ready",
+        "previous_actions_finalized",
+        "replay_capture_enabled",
+    )
+    for values in product((False, True), repeat=len(fields)):
+        barrier = _barrier(**dict(zip(fields, values, strict=True)))
+        assert (barrier["status"] == "PASS") is all(values)
+
+
+def test_provider_barrier_exhaustive_non_applicable_truth_table() -> None:
+    mandatory = (
+        "runtime_contract_ready",
+        "task_semantic_ready",
+        "source_snapshot_complete",
+        "previous_actions_finalized",
+        "replay_capture_enabled",
+    )
+    graph_only = (
+        "graph_current",
+        "repository_intelligence_ready",
+        "retrieval_ready",
+        "persistent_state_ready",
+    )
+    for mandatory_values in product((False, True), repeat=len(mandatory)):
+        for graph_values in product((False, True), repeat=len(graph_only)):
+            barrier = _barrier(
+                graph_applicable=False,
+                **dict(zip(mandatory, mandatory_values, strict=True)),
+                **dict(zip(graph_only, graph_values, strict=True)),
+            )
+            assert (barrier["status"] == "PASS") is all(mandatory_values)
+
+
+def test_terminal_certificate_is_sensitive_to_each_required_check() -> None:
+    check_names = (
+        "runtime_identity",
+        "repository",
+        "retrieval",
+        "delivery",
+        "actions",
+        "persistent_state",
+        "replay",
+        "artifacts",
+    )
+    for failed_name in check_names:
+        checks = [
+            {
+                "name": name,
+                "passed": name != failed_name,
+                "failures": (
+                    [] if name != failed_name else [f"fixture:{name}:failed"]
+                ),
+            }
+            for name in check_names
+        ]
+        certificate = build_task_execution_certificate(
+            task="fixture",
+            provider_barriers=[_barrier()],
+            dispatched_calls=1,
+            release_checks=checks,
+        )
+        assert certificate["status"] == "BLOCKED"
+        assert certificate["failed_requirement_count"] == 1
+        assert f"fixture:{failed_name}:failed" in certificate["failures"]

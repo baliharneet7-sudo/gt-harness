@@ -197,7 +197,8 @@ def test_promotion_workflow_renders_the_caller_owned_treatment_contract():
     assert 'STEP_LIMIT: "100"' not in workflow
     assert "--ak step_limit=100" not in workflow
     assert "scripts.render_treatment_agent_args" in workflow
-    assert "tb2_central_relational_v2.json" in workflow
+    assert "--release-manifest eval/release/active_release.json" in workflow
+    assert "tb2_central_relational_v2.json" not in workflow
     assert "gt-treatment-runtime.json" in workflow
     assert "scripts.build_benchmark_manifest" in workflow
     assert "--benchmark-manifest" in workflow

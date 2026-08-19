@@ -123,7 +123,11 @@ from gt_engine.hybrid_retrieval import (
     build_preemptive_frame,
     filter_provider_known_context,
 )
-from gt_engine.intervention_chain import write_intervention_chain
+from gt_engine.intervention_chain import (
+    audit_intervention_artifacts,
+    write_intervention_chain,
+)
+from gt_engine.mechanical_completeness import evaluate_provider_barrier
 from gt_engine.observed_facts import (
     ObservedFact,
     extract_observed_facts,
@@ -3857,6 +3861,11 @@ class MiniSweCentralAgent(BaseAgent):
         delivered_frontier_claim_ids: set[str] = set()
         frontier_chars_delivered = 0
         model_call_contexts: list[dict[str, Any]] = []
+        mechanical_provider_barriers: list[dict[str, Any]] = []
+        mechanical_completeness_required = bool(
+            self.runtime_mode == "treatment"
+            and self.treatment_profile == "central_relational_v2"
+        )
         pending_guidance = ""
         pending_prepared_after_call = 0
         no_action_assistant_steps = 0
@@ -6802,6 +6811,105 @@ class MiniSweCentralAgent(BaseAgent):
                     )
                     terminal = "ContextBudgetExhausted"
                     solver_exhausted_reason = "context_budget_exhausted"
+                    break
+                provider_barrier: dict[str, Any] | None = None
+                if mechanical_completeness_required:
+                    graph_applicable_now = not source_less_task
+                    graph_current_now = bool(
+                        not graph_applicable_now
+                        or (
+                            graph_receipt.complete
+                            and repository_evidence.substrate_ready
+                            and repository_evidence.index_current
+                            and repository_session is not None
+                            and repository_session.indexed_source_revision
+                            == graph_source_revision
+                        )
+                    )
+                    provider_barrier = evaluate_provider_barrier(
+                        call=calls,
+                        request_payload_sha256=request_payload_sha256,
+                        provider_messages_sha256=provider_messages_sha256,
+                        source_snapshot_complete=source_receipt.complete,
+                        runtime_contract_ready=bool(
+                            self.treatment_runtime_contract
+                            and (
+                                self.treatment_runtime_contract.get("schema")
+                                == "gt.treatment_runtime_arguments.v1"
+                            )
+                        ),
+                        task_semantic_ready=(task_semantic_substrate is not None),
+                        graph_applicable=graph_applicable_now,
+                        graph_current=graph_current_now,
+                        repository_intelligence_ready=bool(
+                            not graph_applicable_now
+                            or (
+                                repository_evidence.substrate_ready
+                                and repository_evidence.index_current
+                                and repository_evidence.intelligence_valid
+                            )
+                        ),
+                        retrieval_ready=bool(
+                            not graph_applicable_now
+                            or (
+                                preemptive_retriever is not None
+                                and self._preemptive_dense_backend is not None
+                                and not self._preemptive_dense_backend_error
+                            )
+                        ),
+                        persistent_state_ready=bool(
+                            not graph_applicable_now
+                            or (
+                                persistent_state_engine is not None
+                                and persistent_state_engine.snapshot.graph_current
+                                and (
+                                    persistent_state_engine.snapshot.bootstrap_status
+                                    is BootstrapStatus.SELECTED
+                                )
+                            )
+                        ),
+                        previous_actions_finalized=(
+                            selected_actions_count
+                            == actions_count + cancelled_actions_count
+                            and actions_count
+                            == executed_actions_count + returned_actions_count
+                        ),
+                        context_candidate_count=(
+                            provider_view_metrics.candidate_fact_count
+                        ),
+                        context_accounted_count=(
+                            provider_view_metrics.accounted_fact_count
+                        ),
+                        contribution_candidate_count=(
+                            compiled_contributions.candidate_count
+                        ),
+                        contribution_accounted_count=(
+                            compiled_contributions.accounted_count
+                        ),
+                        replay_capture_enabled=replay_bundle.enabled,
+                    )
+                    model_call_contexts[-1]["mechanical_completeness_barrier"] = (
+                        provider_barrier
+                    )
+                    mechanical_provider_barriers.append(provider_barrier)
+                if provider_barrier is not None and provider_barrier["status"] != "PASS":
+                    contribution_receipt["dispatch_status"] = "prepared_not_sent"
+                    contribution_receipt["dispatch_reason"] = (
+                        "mechanical_completeness_barrier"
+                    )
+                    provider_evidence.mark_not_sent(
+                        call=calls,
+                        reason="mechanical_completeness_barrier",
+                    )
+                    replay_bundle.record_not_sent(
+                        call=calls,
+                        reason="mechanical_completeness_barrier",
+                    )
+                    model_call_contexts[-1]["dispatch_status"] = (
+                        "mechanical_completeness_blocked"
+                    )
+                    terminal = "MechanicalCompletenessBlocked"
+                    solver_exhausted_reason = "mechanical_completeness_barrier"
                     break
                 previous_provider_messages = [dict(item) for item in provider_messages]
                 try:
@@ -11331,6 +11439,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "guidance_deliveries": guidance_deliveries,
                         "provider_evidence": provider_evidence_summary,
                         "model_call_contexts": model_call_contexts,
+                        "mechanical_completeness": {
+                            "schema": "gt.mechanical_completeness_runtime.v1",
+                            "required": mechanical_completeness_required,
+                            "provider_barriers": mechanical_provider_barriers,
+                        },
                         "replay_bundle": replay_bundle_metadata,
                         "replay_state": replay_bundle_metadata,
                     },
@@ -11346,6 +11459,34 @@ class MiniSweCentralAgent(BaseAgent):
             receipt_path = self.logs_dir / "central_receipt.json"
             receipt_document = json.loads(receipt_path.read_text(encoding="utf-8"))
             receipt_document["intervention_chain"] = intervention_chain_metadata
+            if (
+                self.runtime_mode == "treatment"
+                and self.treatment_profile == "central_relational_v2"
+            ):
+                # Import lazily to keep the runtime implementation independent
+                # of CLI startup while still using the exact authoritative
+                # release checks for the embedded terminal certificate.
+                from scripts.central_release_gate import build_task_certificate
+
+                artifact_failures, artifact_summary = audit_intervention_artifacts(
+                    receipt_document,
+                    artifact_root=self.logs_dir,
+                )
+                receipt_document["task_artifact_integrity"] = {
+                    "schema": "gt.task_artifact_integrity.v1",
+                    "status": "PASS" if not artifact_failures else "BLOCKED",
+                    "failures": list(artifact_failures),
+                    "summary": artifact_summary,
+                }
+                receipt_document["task_execution_certificate"] = (
+                    build_task_certificate(
+                        receipt_document,
+                        label=str(
+                            (self.benchmark_identity or {}).get("task")
+                            or "runtime-task"
+                        ),
+                    )
+                )
             _atomic_write_text(
                 receipt_path,
                 json.dumps(receipt_document, indent=2), encoding="utf-8"

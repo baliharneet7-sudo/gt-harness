@@ -8,11 +8,20 @@ on:
         description: "Exact GT commit to certify"
         required: true
         type: string
+    outputs:
+      certified_commit:
+        description: "Exact commit that passed source-built certification"
+        value: ${{ jobs.provider_free.outputs.certified_commit }}
+      mechanical_status:
+        description: "Authoritative no-spend gate status"
+        value: ${{ jobs.provider_free.outputs.mechanical_status }}
 
 jobs:
   provider_free:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      certified_commit: ${{ steps.certification.outputs.commit }}
+      mechanical_status: ${{ steps.certification.outputs.status }}
     env:
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
@@ -23,6 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -132,6 +142,10 @@ jobs:
             tests/test_intervention_chain.py \
             tests/test_benchmark_reports.py \
             tests/test_verify_frozen_outcome_prediction.py \
+            tests/test_release_manifest.py \
+            tests/test_mechanical_completeness.py \
+            tests/test_mechanical_completeness_gate.py \
+            tests/test_documentation_consistency_audit.py \
             tests/test_preemptive_retrieval_frame.py \
             tests/test_hybrid_retrieval.py \
             tests/test_diagnostics.py \
@@ -185,6 +199,7 @@ jobs:
             gt_engine/delivery_audit.py \
             gt_engine/intervention_chain.py \
             gt_engine/benchmark_reports.py \
+            gt_engine/mechanical_completeness.py \
             gt_engine/runtime_gate.py \
             gt_engine/task_semantic_substrate.py \
             gt_engine/convergence_controller.py \
@@ -204,6 +219,9 @@ jobs:
             scripts/central_trajectory_audit.py \
             scripts/central_integrity_audit.py \
             scripts/verify_frozen_outcome_prediction.py \
+            scripts/release_manifest.py \
+            scripts/mechanical_completeness_gate.py \
+            scripts/documentation_consistency_audit.py \
             scripts/central_decision_completeness.py \
             scripts/central_decisive_replay.py \
             scripts/central_pre_smoke_gate.py \
@@ -240,6 +258,10 @@ jobs:
             tests/test_intervention_chain.py \
             tests/test_benchmark_reports.py \
             tests/test_verify_frozen_outcome_prediction.py \
+            tests/test_release_manifest.py \
+            tests/test_mechanical_completeness.py \
+            tests/test_mechanical_completeness_gate.py \
+            tests/test_documentation_consistency_audit.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py \
@@ -265,6 +287,23 @@ jobs:
             tests/test_decision_point_eval.py \
             tests/test_gt_decisive_derivation.py
 
+      - name: Documentation consistency audit
+        run: |
+          python scripts/documentation_consistency_audit.py \
+            --output documentation-consistency.json
+
+      - id: mechanical_complete
+        name: Authoritative mechanical-completeness gate
+        run: |
+          python scripts/mechanical_completeness_gate.py \
+            --output mechanical-completeness.json
+
+      - id: certification
+        name: Export exact provider-free certification
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "status=PASS" >> "$GITHUB_OUTPUT"
+
       - name: Provider-free receipt
         if: always()
         run: |
@@ -280,7 +319,9 @@ jobs:
                   ["git", "rev-parse", "HEAD"], text=True
               ).strip(),
               "provider_calls": 0,
-              "note": "Live task-container discoverability remains a separate gate.",
+              "provider_credentials_present": False,
+              "mechanical_completeness": "${{ steps.certification.outputs.status || 'BLOCKED' }}",
+              "mechanical_completeness_artifact": "mechanical-completeness.json",
           }
           language_receipt_path = Path(
               os.environ.get("GT_TB2_LANGUAGE_CONTRACT_RECEIPT", "")
@@ -306,5 +347,7 @@ jobs:
           name: central-provider-free-${{ github.run_id }}
           path: |
             central_provider_free_receipt.json
+            mechanical-completeness.json
+            documentation-consistency.json
             tb2_language_contract.json
           if-no-files-found: warn

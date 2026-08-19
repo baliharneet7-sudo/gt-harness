@@ -1,5 +1,9 @@
 # Strengthened GroundTruth Runtime Reference
 
+The final-profile mechanical execution contract and authoritative release proof
+are defined in [GT_MECHANICAL_COMPLETENESS_CONTRACT.md](GT_MECHANICAL_COMPLETENESS_CONTRACT.md)
+and [GT_RELEASE_DOSSIER.md](GT_RELEASE_DOSSIER.md).
+
 ## Profile contract
 
 `eval.gt_central_agent.MiniSweCentralAgent` accepts `treatment_profile=central_relational_v2`.

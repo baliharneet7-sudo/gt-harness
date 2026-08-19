@@ -37,6 +37,7 @@ from gt_engine.preflight import PreflightMode
 from gt_engine.treatment_adapter import treatment_from_descriptor
 from scripts.central_feature_census import census as central_feature_census
 from scripts.central_release_gate import _product_mechanism_census
+from scripts.release_manifest import load_release_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,10 +124,9 @@ def audit() -> dict[str, bool]:
     workflows = tuple(path.read_text(encoding="utf-8") for path in workflow_paths)
     workflow = workflows[0]
     verification_workflow = workflows[1]
+    release_manifest = load_release_manifest(root=ROOT)
     treatment_descriptor = json.loads(
-        (ROOT / "eval/treatments/tb2_central_relational_v2.json").read_text(
-            encoding="utf-8"
-        )
+        release_manifest.treatment_path.read_text(encoding="utf-8")
     )
     treatment_runtime = treatment_descriptor.get("runtime_agent_kwargs") or {}
     treatment_identity_descriptor = {
@@ -144,7 +144,8 @@ def audit() -> dict[str, bool]:
         treatment_effective_runtime = {}
     central_uses_typed_treatment = (
         "scripts.render_treatment_agent_args" in workflow
-        and "tb2_central_relational_v2.json" in workflow
+        and "--release-manifest eval/release/active_release.json" in workflow
+        and "tb2_central_relational_v2.json" not in workflow
         and "gt-treatment-runtime.json" in workflow
     )
     provider_free_workflow = (ROOT / ".github/workflows/central_provider_free.yml").read_text(
@@ -268,14 +269,14 @@ def audit() -> dict[str, bool]:
             "scripts/central_trajectory_audit.py" in provider_free_workflow
             and "tests/test_central_trajectory_audit.py" in provider_free_workflow
         ),
-        "replay_capture_is_opt_in": (
+        "replay_capture_defaults_off_outside_final_profile": (
             "enable_replay_capture: bool = False" in source
             and "tests/test_replay_bundle.py" in provider_free_workflow
         ),
-        "paid_replay_capture_switch_is_explicit": (
-            "replay_capture:" in workflow
-            and "REPLAY_CAPTURE:" in workflow
-            and '"$REPLAY_CAPTURE"' in workflow
+        "paid_replay_capture_is_hardwired": (
+            "replay_capture:" not in workflow
+            and "REPLAY_CAPTURE:" not in workflow
+            and '--ak enable_replay_capture="true"' in workflow
         ),
         "paid_replay_capture_required_for_final_profile": (
             treatment_runtime.get("enable_replay_capture") is True

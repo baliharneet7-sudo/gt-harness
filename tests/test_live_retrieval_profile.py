@@ -155,12 +155,13 @@ def test_central_matrix_is_treatment_only_and_uses_the_frozen_baseline_gate():
     assert "full89-v1" not in workflow
     assert "      include:" not in workflow
     assert "      exclude:" not in workflow
-    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 4
+    assert workflow.count("ref: ${{ needs.resolve.outputs.sha }}") == 5
     assert "integration_mode=off" not in workflow
     assert "integration_mode=audit" not in workflow
     assert descriptor["runtime_agent_kwargs"]["preflight_mode"] == "assistive_safe"
     assert "preflight_mode=shadow" not in workflow
-    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" in workflow
+    assert "load_release_manifest().baseline_path" in workflow
+    assert "eval/frozen_baselines/tb2_miniswe_20260731.json" not in workflow
     assert "build_feature_lifecycle_report" in workflow
     assert "assess_tb2_promotion" in workflow
     assert "promotion_report.json" in workflow

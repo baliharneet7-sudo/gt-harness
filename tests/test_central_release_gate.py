@@ -6,9 +6,11 @@ import json
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import (
     _contribution_budget,
+    _mechanical_completeness_runtime,
     _replay_and_intervention_audit,
     audit_release,
     audit_treatment_runtime,
+    build_task_certificate,
 )
 
 STATIC = {
@@ -576,8 +578,27 @@ def _relational_treatment() -> dict:
                 "reason_codes": [],
             },
             "repository_context_delivered": True,
+            "mechanical_completeness_barrier": {
+                "schema": "gt.provider_mechanical_barrier.v1",
+                "call": 1,
+                "status": "PASS",
+                "requirements": [
+                    {
+                        "requirement_id": "fixture",
+                        "status": "SATISFIED",
+                        "evidence": {},
+                    }
+                ],
+                "failures": [],
+            },
         }
     )
+    receipt["mechanical_completeness"] = {
+        "schema": "gt.mechanical_completeness_runtime.v1",
+        "provider_barriers": [
+            receipt["model_call_contexts"][0]["mechanical_completeness_barrier"]
+        ],
+    }
     receipt["component_configuration"].update(
         replay_capture=True,
         persistent_state_selection_mode="deterministic_v1",
@@ -626,7 +647,44 @@ def _relational_treatment() -> dict:
         "rows": 2,
         "canonical_delivery_rows": 2,
     }
+    receipt["task_artifact_integrity"] = {
+        "schema": "gt.task_artifact_integrity.v1",
+        "status": "PASS",
+        "failures": [],
+        "summary": {"chain_rows": 2},
+    }
+    receipt["task_execution_certificate"] = build_task_certificate(
+        receipt, label="fixture"
+    )
     return receipt
+
+
+def test_release_gate_rejects_missing_or_blocked_provider_barrier():
+    receipt = _relational_treatment()
+    receipt["mechanical_completeness"]["provider_barriers"][0]["status"] = "BLOCKED"
+    receipt["mechanical_completeness"]["provider_barriers"][0]["failures"] = [
+        "graph_not_current"
+    ]
+
+    check = _mechanical_completeness_runtime(receipt, "task")
+
+    assert check.passed is False
+    assert "task:provider_barrier_blocked:1" in check.failures
+
+
+def test_release_gate_requires_current_validation_after_material_change():
+    receipt = _relational_treatment()
+    receipt["metrics"]["workspace_change_actions"] = 1
+    receipt["project_validation"] = {
+        "discovered_checks": ["pytest -q"],
+        "probes": [],
+    }
+
+    certificate = build_task_certificate(receipt, label="task")
+
+    assert certificate["status"] == "BLOCKED"
+    assert "task:terminal_validation_not_passed" in certificate["failures"]
+    assert "task:terminal_validation_stale" in certificate["failures"]
 
 
 def test_treatment_gate_rejects_unified_contribution_budget_expansion():
@@ -989,6 +1047,9 @@ def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
         "bootstrap_calls": 0,
         "correctly_abstained": True,
     }
+    receipt["task_execution_certificate"] = build_task_certificate(
+        receipt, label="fixture"
+    )
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
 
@@ -1195,6 +1256,14 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
             "selected_surfaces": [],
         }
     )
+    second_barrier = {
+        **receipt["model_call_contexts"][0]["mechanical_completeness_barrier"],
+        "call": 2,
+    }
+    receipt["model_call_contexts"][1]["mechanical_completeness_barrier"] = (
+        second_barrier
+    )
+    receipt["mechanical_completeness"]["provider_barriers"].append(second_barrier)
     receipt["task_semantic_substrate"]["compilations"].append(
         {
             "call": 2,
@@ -1203,6 +1272,9 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
             "selected_count": 0,
             "accounting": [],
         }
+    )
+    receipt["task_execution_certificate"] = build_task_certificate(
+        receipt, label="fixture"
     )
 
     report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
