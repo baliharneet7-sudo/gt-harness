@@ -1095,6 +1095,19 @@ class RepositoryContextEngine:
         rendered = "\n".join(payloads)
         claims = tuple(claim for claim, _ in selected)
         selected_claims = frozenset(claims)
+        # The process certificate describes the exact projection delivered to
+        # the provider, not merely the pre-budget candidate set.  The shared
+        # contribution budget may omit execution views after `_execution_views`
+        # has selected them; retaining the candidate count is useful for
+        # auditability, but `returned_views` must match the receipt payload.
+        delivered_execution_views = tuple(
+            view for view in execution_views if view.view_id in selected_claims
+        )
+        process_coverage["returned_views"] = len(delivered_execution_views)
+        process_coverage["omitted_for_budget"] = max(
+            int(process_coverage.get("omitted_for_budget") or 0),
+            len(execution_views) - len(delivered_execution_views),
+        )
         selected_semantic_items = tuple(
             item for item in semantic.items if item.claim_id in selected_claims
         )
@@ -1219,9 +1232,7 @@ class RepositoryContextEngine:
             reason_codes=tuple(semantic.reason_codes),
             source_revision=opportunity.source_revision,
             graph_revision=opportunity.graph_revision,
-            execution_views=tuple(
-                view for view in execution_views if view.view_id in selected_claims
-            ),
+            execution_views=delivered_execution_views,
             impact_facts=tuple(
                 fact
                 for fact in impact

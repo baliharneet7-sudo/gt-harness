@@ -306,6 +306,10 @@ jobs:
       OPENAI_BASE_URL: https://api.deepseek.com
       GT_LITELLM_MODEL: openai/deepseek-v4-flash
       PYTHONUTF8: "1"
+      # gh release download uses GH_TOKEN in task jobs; without it a parallel
+      # task can fail before model execution with a misleading 401, leaving
+      # the denominator incomplete despite a valid pinned asset.
+      GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
       SNOWFLAKE_MODEL_REVISION: 7802add0519e4bf94c46ef23552176697c7a1ac7
       SNOWFLAKE_MODEL_SHA256: 564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971
