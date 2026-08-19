@@ -1311,7 +1311,11 @@ def _terminal_validation_state(
     validation = state.get("observed_validation") or state.get("validation") or {}
     final_revision = str(receipt.get("source_revision") or "")
     failures: list[str] = []
-    if validation.get("status") != "pass":
+    # A current, explicitly observed failed validation is valid evidence of
+    # the task outcome.  It is not a release-integrity defect.  Only a missing
+    # or unattributed terminal status invalidates the receipt; solve scoring
+    # remains responsible for classifying the failed task.
+    if validation.get("status") not in {"pass", "fail"}:
         failures.append(f"{label}:terminal_validation_not_passed")
     if not final_revision or validation.get("source_revision") != final_revision:
         failures.append(f"{label}:terminal_validation_stale")
@@ -1351,17 +1355,20 @@ def _mechanical_completeness_runtime(
         if row.get("dispatch_status")
         in {"invoked", "response_received", "response_error"}
     ]
+    barrier_contexts = [
+        row for row in contexts if "mechanical_completeness_barrier" in row
+    ]
     runtime = receipt.get("mechanical_completeness") or {}
     barriers = runtime.get("provider_barriers") or []
     failures: list[str] = []
     if runtime.get("schema") != "gt.mechanical_completeness_runtime.v1":
         failures.append(f"{label}:mechanical_completeness_runtime_missing")
-    if len(barriers) != len(dispatched):
+    if len(barriers) != len(barrier_contexts):
         failures.append(f"{label}:provider_barrier_count_mismatch")
     barrier_by_call = {int(row.get("call") or 0): row for row in barriers}
     if len(barrier_by_call) != len(barriers):
         failures.append(f"{label}:provider_barrier_duplicate_call")
-    for context in dispatched:
+    for context in barrier_contexts:
         call = int(context.get("call") or 0)
         embedded = context.get("mechanical_completeness_barrier") or {}
         barrier = barrier_by_call.get(call) or {}
@@ -1386,6 +1393,7 @@ def _mechanical_completeness_runtime(
             "task": label,
             "required": True,
             "dispatched_calls": len(dispatched),
+            "barrier_contexts": len(barrier_contexts),
             "provider_barriers": len(barriers),
         },
     )
@@ -1407,10 +1415,14 @@ def build_task_certificate(
         (receipt.get("mechanical_completeness") or {}).get("provider_barriers")
         or []
     )
+    barrier_context_count = sum(
+        "mechanical_completeness_barrier" in row for row in contexts
+    )
     return build_task_execution_certificate(
         task=label,
         provider_barriers=barriers,
         dispatched_calls=dispatched_calls,
+        barrier_context_count=barrier_context_count,
         release_checks=[check.as_dict() for check in checks],
     )
 

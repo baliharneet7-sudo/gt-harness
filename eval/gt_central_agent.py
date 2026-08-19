@@ -1273,6 +1273,23 @@ def _preemptive_retrieval_gate_reason(
     return None
 
 
+# These are deliberate, deterministic abstentions.  They mean that the
+# retrieval opportunity was inspected and closed by policy; they do not mean
+# that repository retrieval failed.  Mechanical provider barriers must still
+# fail closed for substrate errors and actual retrieval exceptions.
+_SAFE_PREEMPTIVE_ABSTENTION_REASONS = frozenset(
+    {
+        "not_applicable_no_supported_source",
+        "validation_pass_no_diagnostic",
+        "task_character_budget_closed_precheck",
+        "opportunity_budget_reserved_precheck",
+        "lifecycle_not_material",
+        "lifecycle_budget_closed_precheck",
+        "persistent_bootstrap_owns_task_start",
+    }
+)
+
+
 def _derive_task_semantic_facts(
     *,
     instruction: str,
@@ -6856,6 +6873,13 @@ class MiniSweCentralAgent(BaseAgent):
                                 and self._preemptive_dense_backend is not None
                                 and not self._preemptive_dense_backend_error
                             )
+                            or any(
+                                str(reason)
+                                in _SAFE_PREEMPTIVE_ABSTENTION_REASONS
+                                for reason in (
+                                    preemptive_decision.get("reason_codes") or ()
+                                )
+                            )
                         ),
                         persistent_state_ready=bool(
                             not graph_applicable_now
@@ -7184,6 +7208,13 @@ class MiniSweCentralAgent(BaseAgent):
                             call=calls, error_type=type(exc).__name__
                         )
                         model_call_contexts[-1]["dispatch_status"] = "response_error"
+                        # A provider timeout means the model response is not
+                        # available for an exact trajectory replay, regardless
+                        # of whether the execution-budget reserve also fired.
+                        # Preserve that external censoring fact instead of
+                        # presenting a graded workspace as a complete,
+                        # auditable treatment trajectory.
+                        censored_reason = "model_request_timeout"
                         if (
                             deadline is not None
                             and deadline - time.monotonic()
@@ -7194,7 +7225,6 @@ class MiniSweCentralAgent(BaseAgent):
                             deadline_reserve_exits += 1
                         else:
                             terminal = "ModelTimeout"
-                            censored_reason = "model_request_timeout"
                         break
                     if isinstance(exc, InterruptAgentFlow):
                         replay_bundle.record_error(

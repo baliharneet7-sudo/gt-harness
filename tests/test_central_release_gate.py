@@ -687,6 +687,29 @@ def test_release_gate_requires_current_validation_after_material_change():
     assert "task:terminal_validation_stale" in certificate["failures"]
 
 
+def test_release_gate_accepts_current_failed_validation_as_observed_outcome():
+    receipt = _relational_treatment()
+    receipt["source_revision"] = "source-1"
+    receipt["metrics"]["workspace_change_actions"] = 1
+    receipt["project_validation"] = {
+        "discovered_checks": ["pytest -q"],
+        "probes": [],
+    }
+    receipt["persistent_execution_state"]["state"]["observed_validation"] = {
+        "status": "fail",
+        "command": "pytest -q",
+        "source_revision": "source-1",
+    }
+
+    certificate = build_task_certificate(receipt, label="task")
+
+    assert certificate["status"] == "PASS"
+    assert not any(
+        failure.startswith("task:terminal_validation_")
+        for failure in certificate["failures"]
+    )
+
+
 def test_treatment_gate_rejects_unified_contribution_budget_expansion():
     receipt = _treatment()
     receipt["contribution_compiler"]["calls"][0]["payload_tokens"] = 1201

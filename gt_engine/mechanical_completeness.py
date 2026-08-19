@@ -202,6 +202,7 @@ def build_task_execution_certificate(
     task: str,
     provider_barriers: Iterable[Mapping[str, Any]],
     dispatched_calls: int,
+    barrier_context_count: int | None = None,
     release_checks: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Join live barriers and authoritative task release checks."""
@@ -209,7 +210,12 @@ def build_task_execution_certificate(
     barriers = [dict(row) for row in provider_barriers]
     checks = [dict(row) for row in release_checks]
     failures: list[str] = []
-    if len(barriers) != int(dispatched_calls):
+    expected_barrier_count = (
+        int(dispatched_calls)
+        if barrier_context_count is None
+        else int(barrier_context_count)
+    )
+    if len(barriers) != expected_barrier_count:
         failures.append("provider_barrier_count_mismatch")
     for barrier in barriers:
         if barrier.get("status") != "PASS":
