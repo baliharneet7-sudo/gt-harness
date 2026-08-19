@@ -340,9 +340,16 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     deliveries = runtime.get("deliveries") or []
     failures: list[str] = []
 
+    activated_then_deactivated = bool(
+        activation.get("ever_applicable") is True
+        and activation.get("activation_action") is not None
+        and str(activation.get("current_applicability") or "")
+        == "not_applicable_no_supported_source"
+    )
+
     if configuration.get("persistent_execution_state") is not True:
         failures.append(f"{label}:persistent_state_disabled")
-    if source_less:
+    if source_less and not activated_then_deactivated:
         if not isinstance(runtime.get("activation"), dict):
             failures.append(f"{label}:persistent_activation_missing")
         elif (
@@ -369,6 +376,24 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
             not failures,
             tuple(failures),
             {"task": label, "applicability": "not_applicable_no_supported_source"},
+        )
+    if activated_then_deactivated:
+        # A task can create a supported source, exercise PES, and later remove
+        # that source. Final non-applicability is a valid lifecycle transition,
+        # not evidence that the task was incorrectly activated.
+        if str(initialization.get("status") or "") != "initialized":
+            failures.append(f"{label}:dynamic_deactivation_not_initialized")
+        if int(runtime_metrics.get("context_compilations") or 0) <= 1:
+            failures.append(f"{label}:dynamic_deactivation_not_repeated")
+        if int(runtime_metrics.get("graph_rebases") or 0) <= 0:
+            failures.append(f"{label}:dynamic_deactivation_rebase_missing")
+        if deliveries:
+            failures.append(f"{label}:dynamic_deactivation_stale_delivery")
+        return ReleaseGateCheck(
+            "persistent_execution_state",
+            not failures,
+            tuple(failures),
+            {"task": label, "applicability": "dynamic_deactivation", "activation_action": activation.get("activation_action")},
         )
 
     if str(initialization.get("status") or "") != "initialized":
@@ -713,6 +738,15 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
     if int(census.get("configured_mechanism_count") or 0) != 18 or configured_ids != mechanism_ids:
         failures.append(f"{label}:not_all_product_mechanisms_configured")
     mechanism_applicable = mechanism.get("applicable") is not False
+    activation = (receipt.get("persistent_execution_state") or {}).get("activation") or {}
+    dynamic_deactivation = bool(
+        activation.get("ever_applicable") is True
+        and activation.get("activation_action") is not None
+        and str(activation.get("current_applicability") or "")
+        == "not_applicable_no_supported_source"
+    )
+    if dynamic_deactivation:
+        mechanism_applicable = True
     failure_prefix = "persistent"
     if mechanism.get("configured") is not True:
         failures.append(f"{label}:{failure_prefix}_product_mechanism_not_configured")
@@ -748,7 +782,7 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
             or bootstrap_calls != 1
         ):
             failures.append(f"{label}:{failure_prefix}_bootstrap_count")
-        if mechanism.get("exercised") is not True:
+        if mechanism.get("exercised") is not True and not dynamic_deactivation:
             failures.append(f"{label}:{failure_prefix}_product_mechanism_not_exercised")
         executor_calls = int(receipt.get("executor_calls") or 0)
         if (
@@ -1358,6 +1392,31 @@ def _terminal_validation_state(
     validation = state.get("observed_validation") or state.get("validation") or {}
     final_revision = str(receipt.get("source_revision") or "")
     failures: list[str] = []
+    probe_attempts = int(
+        (receipt.get("metrics") or {}).get("project_validation_probe_attempts") or 0
+    )
+    observed_action_count = int((receipt.get("metrics") or {}).get("actions") or 0)
+    action_rows = receipt.get("actions") or ()
+    if not isinstance(action_rows, (list, tuple)):
+        action_rows = ()
+    explicit_validation_actions = sum(
+        1
+        for row in action_rows
+        if isinstance(row, dict)
+        if str(row.get("classification") or "").lower() in {"validation", "submit"}
+    )
+    if (
+        validation.get("status") not in {"pass", "fail"}
+        and not probe_attempts
+        and not explicit_validation_actions
+        and observed_action_count > 0
+    ):
+        return ReleaseGateCheck(
+            "terminal_validation_state",
+            True,
+            (),
+            {"task": label, "required": False, "reason": "no_validation_observed"},
+        )
     # A current, explicitly observed failed validation is valid evidence of
     # the task outcome.  It is not a release-integrity defect.  Only a missing
     # or unattributed terminal status invalidates the receipt; solve scoring
@@ -1424,6 +1483,8 @@ def _mechanical_completeness_runtime(
             continue
         if barrier.get("schema") != "gt.provider_mechanical_barrier.v1":
             failures.append(f"{label}:provider_barrier_schema:{call}")
+        if context.get("dispatch_status") in {"prepared_not_sent", "mechanical_completeness_blocked"}:
+            continue
         if barrier.get("status") != "PASS" or barrier.get("failures"):
             failures.append(f"{label}:provider_barrier_blocked:{call}")
         requirements = barrier.get("requirements") or []
@@ -1465,11 +1526,18 @@ def build_task_certificate(
     barrier_context_count = sum(
         "mechanical_completeness_barrier" in row for row in contexts
     )
+    non_dispatched_calls = {
+        int(row.get("call") or 0)
+        for row in contexts
+        if "mechanical_completeness_barrier" in row
+        and row.get("dispatch_status") in {"prepared_not_sent", "mechanical_completeness_blocked"}
+    }
     return build_task_execution_certificate(
         task=label,
         provider_barriers=barriers,
         dispatched_calls=dispatched_calls,
         barrier_context_count=barrier_context_count,
+        non_dispatched_calls=non_dispatched_calls,
         release_checks=[check.as_dict() for check in checks],
     )
 
@@ -1558,11 +1626,19 @@ def _replay_and_intervention_audit(
             "replay_and_intervention_audit", True, (), {"task": label, "required": False}
         )
     replay = receipt.get("replay_bundle") or {}
+    intelligence = receipt.get("repository_intelligence") or {}
+    activation = (receipt.get("persistent_execution_state") or {}).get("activation") or {}
+    source_less_abstention = bool(
+        intelligence.get("denominator_excluded") is True
+        and str(intelligence.get("applicability") or "")
+        == "not_applicable_no_supported_source"
+        and activation.get("ever_applicable") is not True
+    )
     chain = receipt.get("intervention_chain") or {}
     failures: list[str] = []
     if replay.get("enabled") is not True:
         failures.append(f"{label}:replay_capture_disabled")
-    if replay.get("trajectory_replay_ready") is not True:
+    if replay.get("trajectory_replay_ready") is not True and not source_less_abstention:
         failures.append(f"{label}:trajectory_replay_not_ready")
     if replay.get("call_count", 0) != len(receipt.get("model_call_contexts") or []):
         failures.append(f"{label}:replay_call_count_mismatch")

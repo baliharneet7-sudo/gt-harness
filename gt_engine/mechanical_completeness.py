@@ -203,6 +203,7 @@ def build_task_execution_certificate(
     provider_barriers: Iterable[Mapping[str, Any]],
     dispatched_calls: int,
     barrier_context_count: int | None = None,
+    non_dispatched_calls: Iterable[int] = (),
     release_checks: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """Join live barriers and authoritative task release checks."""
@@ -210,6 +211,7 @@ def build_task_execution_certificate(
     barriers = [dict(row) for row in provider_barriers]
     checks = [dict(row) for row in release_checks]
     failures: list[str] = []
+    non_dispatched = {int(call) for call in non_dispatched_calls}
     expected_barrier_count = (
         int(dispatched_calls)
         if barrier_context_count is None
@@ -218,7 +220,10 @@ def build_task_execution_certificate(
     if len(barriers) != expected_barrier_count:
         failures.append("provider_barrier_count_mismatch")
     for barrier in barriers:
-        if barrier.get("status") != "PASS":
+        # A prepared request that the host correctly refused to send can have
+        # a blocked barrier (for example, a graph refresh became stale). It is
+        # not a provider delivery failure because no model call occurred.
+        if barrier.get("status") != "PASS" and int(barrier.get("call") or 0) not in non_dispatched:
             failures.extend(str(item) for item in barrier.get("failures") or ())
     requirement_rows: list[dict[str, Any]] = []
     for check in checks:

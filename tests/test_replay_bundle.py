@@ -85,6 +85,35 @@ def test_capture_records_exact_requests_without_provider_specific_controls(tmp_p
     assert loaded["calls"][0]["provider_messages"] == _request()
 
 
+def test_provider_error_is_captured_as_replayable_typed_response(tmp_path):
+    path = tmp_path / "gt_replay"
+    writer = ReplayBundleWriter(path, enabled=True)
+    envelope = _envelope(_request())
+    writer.record_request(
+        call=1,
+        provider_messages=_request(),
+        request_envelope=envelope,
+        request_payload_sha256=_digest(envelope),
+        provider_messages_sha256=_digest(_request()),
+        model_name="test-model",
+        model_kwargs={},
+        temperature=1.0,
+        active_state={},
+        source_revision="s1",
+        workspace_revision="w1",
+    )
+    writer.record_error(call=1, error_type="Timeout")
+
+    metadata = writer.finalize()
+    loaded = load_replay_bundle(path)
+
+    assert metadata["complete"] is True
+    assert metadata["responses_captured"] is True
+    assert metadata["trajectory_replay_ready"] is True
+    assert loaded["calls"][0]["response_error"] == "Timeout"
+    assert loaded["calls"][0]["response_captured"] is True
+
+
 def test_capture_records_exact_control_and_treatment_decision_point(tmp_path):
     path = tmp_path / "gt_replay"
     control = [

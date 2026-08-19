@@ -211,9 +211,16 @@ class ReplayBundleWriter:
         if not self.enabled:
             return
         row = self._calls.setdefault(int(call), {"call": int(call)})
+        # A typed provider error is still an observed response event. Capture
+        # it as replay data so a timeout can be audited without pretending it
+        # was a normal model response.
+        projected = {"role": "system", "error": {"type": str(error_type)}}
+        body = _canonical(projected)
         row["response_error"] = str(error_type)
+        row["response_sha256"] = hashlib.sha256(body).hexdigest()
+        row["response_blob_sha256"] = self._blob(projected)
+        row["response_captured"] = True
         row["dispatch_status"] = "response_error"
-        self._complete = False
 
     def finalize(self) -> dict[str, Any]:
         paired_rows = [
