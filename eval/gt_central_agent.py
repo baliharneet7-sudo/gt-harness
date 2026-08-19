@@ -122,6 +122,7 @@ from gt_engine.hybrid_retrieval import (
     build_preemptive_frame,
     filter_provider_known_context,
 )
+from gt_engine.intervention_chain import write_intervention_chain
 from gt_engine.observed_facts import (
     ObservedFact,
     extract_observed_facts,
@@ -199,7 +200,6 @@ from gt_engine.relational_context import (
     RelationalContextResult,
     RelationalContextStatus,
 )
-from gt_engine.intervention_chain import write_intervention_chain
 from gt_engine.replay_bundle import ReplayBundleWriter
 from gt_engine.repository_context import (
     DecisionOpportunity,
