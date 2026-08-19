@@ -25,8 +25,9 @@ _REQUIRED_TERMS = {
         "active_release.json",
         "GT_MECHANICAL_COMPLETENESS=PASS",
         "central_relational_v2",
-        "exact-commit Linux provider-free",
-        "not authorized for paid benchmarking",
+        "central_provider_free.yml",
+        "mechanical_completeness: PASS",
+        "does not embed a mutable latest-run ID",
     ),
 }
 _FORBIDDEN_OUTCOME_CLAIMS = (

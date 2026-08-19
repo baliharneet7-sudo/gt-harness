@@ -1,19 +1,26 @@
 # GroundTruth final benchmark release dossier
 
-## Release status
+## Release status authority
 
-The checked-in candidate is **not authorized for paid benchmarking until an
-exact-commit Linux provider-free workflow emits
-`GT_MECHANICAL_COMPLETENESS=PASS`**. Local tests establish implementation
-behavior; the hosted proof establishes the source-built Linux indexer, pinned
-dense runtime, full integration suite, release ancestry, and workflow contract
-for the exact frozen release identity.
+Paid-benchmark eligibility is a machine-verifiable state, not a sentence in
+this document. A frozen SHA is eligible only when the
+[`central_provider_free.yml`](../.github/workflows/central_provider_free.yml)
+run for that exact SHA succeeds and its uploaded
+`central_provider_free_receipt.json` records the same commit, zero provider
+calls, no provider credentials, and `mechanical_completeness: PASS`. Local tests
+establish implementation behavior; the hosted proof establishes the
+source-built Linux indexer, pinned dense runtime, full integration suite,
+release ancestry, and workflow contract for the exact frozen identity.
+
+The run URL and its content-addressed artifacts are the status record. This
+dossier deliberately does not embed a mutable latest-run ID: changing this file
+after certification would change the release SHA and invalidate that proof.
 
 The single canonical release identity is
 [`eval/release/active_release.json`](../eval/release/active_release.json). No
 workflow or merge script owns a second dated “active” prediction path.
 
-## Product that will be benchmarked
+## Product bound by the active release
 
 - Agent: `eval.gt_central_agent:MiniSweCentralAgent`
 - Treatment: `central_relational_v2`
