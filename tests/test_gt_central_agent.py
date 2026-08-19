@@ -1306,6 +1306,40 @@ class _BatchModel(_ScriptedModel):
 
 
 @pytest.mark.asyncio
+async def test_observed_fact_survives_later_empty_action_until_next_provider_request(tmp_path):
+    class ObservedFactEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command == "printf-shebang":
+                return ExecResult(stdout="#!/usr/bin/env python3\n", return_code=0)
+            if command == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+                return ExecResult(
+                    stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0
+                )
+            return ExecResult(stdout="", return_code=0)
+
+    model = _BatchModel(
+        [["printf-shebang", "true"], ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_observed_facts=True,
+        enable_replay_capture=True,
+    )
+    agent._model_factory = lambda: model
+    context = AgentContext()
+    await agent.run("inspect the environment and submit", ObservedFactEnvironment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert len(receipt["observed_facts"]["fact_deliveries"]) == 1
+    assert any(
+        "Observed interpreter path: /usr/bin/env." in content
+        for content in model.observed_history[1]
+    )
+
+
+@pytest.mark.asyncio
 async def test_deterministic_bootstrap_mode_uses_no_provider_call(tmp_path):
     catalog = production_shaped_catalog()
     agent = MiniSweCentralAgent(

@@ -9026,7 +9026,13 @@ class MiniSweCentralAgent(BaseAgent):
                             eligible_call=calls + 1,
                             already_delivered=observed_fact_ledger,
                         )
-                        pending_observed_fact = _observed_facts[0] if _observed_facts else None
+                        # Preserve the first pending fact until the next
+                        # provider request.  A later action in the same
+                        # response may have no recognizable fact; clearing
+                        # the slot there would silently lose the earlier
+                        # observation before it can be delivered.
+                        if _observed_facts and pending_observed_fact is None:
+                            pending_observed_fact = _observed_facts[0]
                     if self.preflight_mode is not PreflightMode.OFF:
                         self._features.record_action_postflight(
                             proposed,
