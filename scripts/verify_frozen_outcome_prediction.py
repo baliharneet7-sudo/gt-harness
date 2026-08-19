@@ -12,10 +12,17 @@ import argparse
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
-from scripts.release_manifest import ReleaseManifest, load_release_manifest
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.release_manifest import (  # noqa: E402
+    ReleaseManifest,
+    load_release_manifest,
+)
 
 
 def _canonical(value: Any) -> bytes:

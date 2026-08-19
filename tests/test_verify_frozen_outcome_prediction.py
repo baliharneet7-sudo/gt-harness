@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,24 @@ from scripts.verify_frozen_outcome_prediction import (
     _validate_release_freeze_paths,
     verify_release_manifest,
 )
+
+
+def test_operator_entry_point_loads_from_repository_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/verify_frozen_outcome_prediction.py",
+            "--help",
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "verify_frozen_outcome_prediction.py" in completed.stdout
 
 
 def test_checked_in_outcome_prediction_is_bound_to_repair20_profile() -> None:
