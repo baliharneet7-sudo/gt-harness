@@ -923,6 +923,8 @@ def test_relational_v2_profile_strengthens_persistent_state_without_replacing_it
     assert active.treatment_profile == "central_relational_v2"
     assert active.enable_persistent_execution_state is True
     assert active.enable_preemptive_retrieval is True
+    assert active.persistent_state_selection_mode == "deterministic_v1"
+    assert active.retrieval_delivery_mode == "integrated_same_observation"
     assert active.enable_relational_context is True
     assert active.enable_semantic_evidence is True
     assert active.dense_fallback_only is True
@@ -931,6 +933,7 @@ def test_relational_v2_profile_strengthens_persistent_state_without_replacing_it
     assert active.relational_context_max_processes == 2
     assert active.relational_context_max_tokens == 144
     assert off.enable_preemptive_retrieval is False
+    assert off.retrieval_delivery_mode == "disabled"
     assert off.enable_relational_context is False
     assert off.enable_semantic_evidence is False
 
@@ -2474,7 +2477,8 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     assert receipt["benchmark_identity"] == {"benchmark_id": "fixture-benchmark"}
     assert receipt["treatment_profile"] == "central_relational_v2"
-    assert receipt["bootstrap_calls"] == 1
+    assert receipt["bootstrap_calls"] == 0
+    assert receipt["persistent_state_bootstrap"]["selection_mode"] == "deterministic_v1"
     census = receipt["product_mechanism_census"]
     assert census["schema"] == "gt.product_mechanism_census.v1"
     assert census["profile_id"] == "central_relational_v2"
@@ -2483,7 +2487,7 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     assert "relational_context_state" not in census["mechanism_ids"]
     assert census["persistent_execution_state"]["configured"] is True
     assert census["persistent_execution_state"]["exercised"] is True
-    assert census["persistent_execution_state"]["bootstrap_calls"] == 1
+    assert census["persistent_execution_state"]["bootstrap_calls"] == 0
     assert receipt["relational_context"]["enabled"] is True
     assert receipt["component_configuration"]["relational_context_profile"] == {
         "profile_id": "relational-context-v1",
@@ -2500,6 +2504,18 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     assert receipt["repository_context"]["enabled"] is True
     assert receipt["repository_context"]["deliveries"]
     assert receipt["metrics"]["repository_context_deliveries"] >= 1
+    assert receipt["preemptive_retrieval"]["deliveries"] == []
+    assert receipt["component_configuration"]["retrieval_delivery_mode"] == (
+        "integrated_same_observation"
+    )
+    assert receipt["component_configuration"]["replay_capture"] is True
+    assert receipt["intervention_chain"]["schema"] == "gt.intervention_chain.v1"
+    assert receipt["intervention_chain"]["hidden_reasoning_inferred"] is False
+    assert (tmp_path / "intervention_chain.json").exists()
+    assert all(
+        decision["delivery_mode"] == "integrated_same_observation"
+        for decision in receipt["preemptive_retrieval"]["decisions"]
+    )
     second_request = "\n".join(model.observed_history[1])
     assert "Current certified repository context" in second_request
     assert "src/core.py" in second_request

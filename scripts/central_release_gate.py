@@ -1121,6 +1121,14 @@ def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     ):
         failures.append(f"{label}:retrieval_opportunity_accounting_invalid")
     metrics = receipt.get("metrics") or {}
+    configuration = receipt.get("component_configuration") or {}
+    if configuration.get("retrieval_delivery_mode") == "integrated_same_observation":
+        if runtime.get("delivery_mode") != "integrated_same_observation":
+            failures.append(f"{label}:integrated_retrieval_delivery_mode_missing")
+        if runtime.get("deliveries"):
+            failures.append(f"{label}:integrated_retrieval_has_standalone_delivery")
+        if int(metrics.get("preemptive_retrieval_standalone_deliveries") or 0) != 0:
+            failures.append(f"{label}:integrated_retrieval_standalone_metric")
     if int(metrics.get("preemptive_retrieval_duplicate_claims") or 0) > 0:
         failures.append(f"{label}:preemptive_duplicate_claims")
     return ReleaseGateCheck(
@@ -1198,9 +1206,47 @@ def audit_treatment_runtime(
         profile_check,
         _project_validation(receipt, label),
         _retrieval_efficiency(receipt, label),
+        _replay_and_intervention_audit(receipt, label),
     )
 
 
+def _replay_and_intervention_audit(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Require exact replay and intervention joins for the final profile."""
+
+    if (
+        str(receipt.get("treatment_profile") or "") != "central_relational_v2"
+        or (receipt.get("component_configuration") or {}).get("replay_capture") is not True
+    ):
+        return ReleaseGateCheck(
+            "replay_and_intervention_audit", True, (), {"task": label, "required": False}
+        )
+    replay = receipt.get("replay_bundle") or {}
+    chain = receipt.get("intervention_chain") or {}
+    failures: list[str] = []
+    if replay.get("enabled") is not True:
+        failures.append(f"{label}:replay_capture_disabled")
+    if replay.get("trajectory_replay_ready") is not True:
+        failures.append(f"{label}:trajectory_replay_not_ready")
+    if replay.get("call_count", 0) != len(receipt.get("model_call_contexts") or []):
+        failures.append(f"{label}:replay_call_count_mismatch")
+    if chain.get("schema") != "gt.intervention_chain.v1":
+        failures.append(f"{label}:intervention_chain_missing")
+    if chain.get("hidden_reasoning_inferred") is not False:
+        failures.append(f"{label}:intervention_chain_reasoning_policy")
+    if not isinstance(chain.get("path"), str) or not chain.get("path"):
+        failures.append(f"{label}:intervention_chain_artifact_missing")
+    return ReleaseGateCheck(
+        "replay_and_intervention_audit",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "replay_ready": replay.get("trajectory_replay_ready") is True,
+            "chain_rows": int(chain.get("rows") or 0),
+        },
+    )
 def _repository_context_integrated_consequence(
     receipts: Iterable[dict[str, Any]],
 ) -> ReleaseGateCheck:

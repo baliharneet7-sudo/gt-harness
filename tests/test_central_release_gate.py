@@ -6,6 +6,7 @@ import json
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import (
     _contribution_budget,
+    _replay_and_intervention_audit,
     audit_release,
     audit_treatment_runtime,
 )
@@ -1449,6 +1450,21 @@ def test_release_gate_fails_closed_when_static_evidence_is_missing():
 
     assert report.passed is False
     assert "missing_static_evidence" in report.failures
+
+
+def test_replay_and_intervention_audit_requires_final_profile_artifacts():
+    receipt = {
+        "treatment_profile": "central_relational_v2",
+        "component_configuration": {"replay_capture": True},
+        "replay_bundle": {"enabled": False, "trajectory_replay_ready": False},
+        "model_call_contexts": [],
+    }
+
+    check = _replay_and_intervention_audit(receipt, "task")
+
+    assert check.passed is False
+    assert "task:replay_capture_disabled" in check.failures
+    assert "task:intervention_chain_missing" in check.failures
 
 
 def test_release_gate_report_is_json_serializable_and_machine_readable():

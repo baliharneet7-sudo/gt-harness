@@ -219,6 +219,9 @@ def audit() -> dict[str, bool]:
             and "REPLAY_CAPTURE:" in workflow
             and '"$REPLAY_CAPTURE"' in workflow
         ),
+        "paid_replay_capture_required_for_final_profile": (
+            treatment_runtime.get("enable_replay_capture") is True
+        ),
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow
             and "tests/test_gt_deep_metrics.py" in provider_free_workflow
@@ -368,6 +371,20 @@ def audit() -> dict[str, bool]:
         "paid_context_frontier_is_explicit": (
             treatment_runtime.get("enable_context_frontier") is True
             and "--ak enable_context_frontier=true" in verification_workflow
+        ),
+        "paid_persistent_selection_is_deterministic": (
+            central_uses_typed_treatment
+            and treatment_runtime.get("persistent_state_selection_mode")
+            == "deterministic_v1"
+            and 'persistent_state_selection_mode: str = "generative"' in source
+            and '"deterministic_v1"' in source
+        ),
+        "paid_retrieval_delivery_is_integrated": (
+            central_uses_typed_treatment
+            and treatment_runtime.get("retrieval_delivery_mode")
+            == "integrated_same_observation"
+            and 'retrieval_delivery_mode: str = "standalone_preemptive"' in source
+            and '"integrated_same_observation"' in source
         ),
         "paid_graph_gate_is_explicit": (
             treatment_runtime.get("require_graph_ready") is True

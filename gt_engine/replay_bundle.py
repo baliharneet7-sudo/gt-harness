@@ -1,12 +1,11 @@
 """Bounded, opt-in capture of provider requests for counterfactual replay.
 
-The normal paid workflow keeps this disabled.  When explicitly enabled, the
-writer stores exact prepared provider messages and the corresponding model
-response metadata in a separate artifact.  It never alters the provider
-request.  A bundle is trajectory-replay-ready only when every request/response
-is captured without truncation. It never injects or requires provider-specific
-sampling controls; model-level causal reaction remains explicitly
-unidentifiable.
+The writer stores exact prepared provider messages and the corresponding model
+response metadata in a separate artifact when the treatment contract enables
+it.  It never alters the provider request.  A bundle is trajectory-replay-ready
+only when every request/response is captured without truncation. It never
+injects or requires provider-specific sampling controls; model-level causal
+reaction remains explicitly unidentifiable.
 """
 
 from __future__ import annotations

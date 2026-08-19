@@ -200,6 +200,7 @@ from gt_engine.relational_context import (
     RelationalContextStatus,
 )
 from gt_engine.replay_bundle import ReplayBundleWriter
+from gt_engine.intervention_chain import write_intervention_chain
 from gt_engine.repository_context import (
     DecisionOpportunity,
     RepositoryContextEngine,
@@ -1491,6 +1492,7 @@ class MiniSweCentralAgent(BaseAgent):
             "enable_persistent_execution_state": self.enable_persistent_execution_state,
             "enable_preemptive_retrieval": self.enable_preemptive_retrieval,
             "enable_progress_control": self.enable_progress_control,
+            "enable_replay_capture": self.enable_replay_capture,
             "enable_relational_context": self.enable_relational_context,
             "enable_repository_intelligence": self.enable_repository_intelligence,
             "enable_semantic_evidence": self.enable_semantic_evidence,
@@ -1510,6 +1512,7 @@ class MiniSweCentralAgent(BaseAgent):
                 self.persistent_state_bootstrap_timeout_sec
             ),
             "persistent_state_selection_mode": self.persistent_state_selection_mode,
+            "retrieval_delivery_mode": self.retrieval_delivery_mode,
             "persistent_state_context_tokens": self.persistent_state_context_tokens,
             "policy_mode": self.policy_mode.value,
             "preflight_mode": self.preflight_mode.value,
@@ -1696,6 +1699,7 @@ class MiniSweCentralAgent(BaseAgent):
         preemptive_retrieval_selection_limit: int | None = None,
         preemptive_retrieval_dense_candidate_limit: int | None = None,
         preemptive_retrieval_model_dir: str | None = None,
+        retrieval_delivery_mode: str = "standalone_preemptive",
         enable_decision_sufficiency: bool = False,
         enable_first_action_red_test: bool = False,
         first_action_red_test_timeout_sec: float = 30.0,
@@ -1828,6 +1832,8 @@ class MiniSweCentralAgent(BaseAgent):
             # zero-bootstrap product identity.
             enable_persistent_execution_state = True
             enable_preemptive_retrieval = True
+            persistent_state_selection_mode = "deterministic_v1"
+            retrieval_delivery_mode = "integrated_same_observation"
             if enable_relational_context is None:
                 enable_relational_context = True
             if enable_semantic_evidence is None:
@@ -1887,6 +1893,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_feature_guidance = False
             enable_context_frontier = False
             enable_preemptive_retrieval = False
+            retrieval_delivery_mode = "disabled"
             enable_decision_sufficiency = False
             enable_first_action_red_test = False
             enable_persistent_execution_state = False
@@ -1901,6 +1908,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_task_start_advisory = False
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
+            retrieval_delivery_mode = "disabled"
             enable_decision_sufficiency = False
             enable_first_action_red_test = False
             enable_persistent_execution_state = False
@@ -1915,6 +1923,7 @@ class MiniSweCentralAgent(BaseAgent):
             enable_task_start_advisory = False
             enable_feature_guidance = False
             enable_preemptive_retrieval = False
+            retrieval_delivery_mode = "disabled"
             enable_decision_sufficiency = False
             enable_first_action_red_test = False
             enable_persistent_execution_state = False
@@ -1940,6 +1949,21 @@ class MiniSweCentralAgent(BaseAgent):
         self.enable_context_frontier = bool(enable_context_frontier)
         self.context_frontier_task_budget_chars = max(0, int(context_frontier_task_budget_chars))
         self.enable_preemptive_retrieval = bool(enable_preemptive_retrieval)
+        normalized_retrieval_delivery_mode = str(
+            retrieval_delivery_mode or "standalone_preemptive"
+        ).strip().lower()
+        if normalized_retrieval_delivery_mode not in {
+            "disabled",
+            "standalone_preemptive",
+            "integrated_same_observation",
+        }:
+            raise ValueError(
+                "retrieval_delivery_mode must be disabled, standalone_preemptive, "
+                "or integrated_same_observation"
+            )
+        if not self.enable_preemptive_retrieval:
+            normalized_retrieval_delivery_mode = "disabled"
+        self.retrieval_delivery_mode = normalized_retrieval_delivery_mode
         self.enable_relational_context = bool(enable_relational_context)
         self.enable_semantic_evidence = bool(enable_semantic_evidence)
         self.semantic_evidence_max_items = max(
@@ -4570,6 +4594,10 @@ class MiniSweCentralAgent(BaseAgent):
                     "eligible_call": retrieval_eligible_call,
                     "source_revision": graph_source_revision,
                     "enabled": self.enable_preemptive_retrieval,
+                    "delivery_mode": self.retrieval_delivery_mode,
+                    "standalone_delivery_suppressed": (
+                        self.retrieval_delivery_mode == "integrated_same_observation"
+                    ),
                     "status": "disabled",
                     "reason_codes": ["preemptive_retrieval_disabled"],
                     "intent": RetrievalIntent.OTHER.value,
@@ -4902,15 +4930,33 @@ class MiniSweCentralAgent(BaseAgent):
                                         ],
                                     }
                                 )
-                                frame = build_preemptive_frame(
-                                    retrieval_result,
-                                    state,
-                                    trigger=(
-                                        "task_start"
-                                        if retrieval_evidence_action == 0
-                                        else f"post_{retrieval_last_operation or 'action'}"
-                                    ),
+                                frame = (
+                                    None
+                                    if self.retrieval_delivery_mode
+                                    == "integrated_same_observation"
+                                    else build_preemptive_frame(
+                                        retrieval_result,
+                                        state,
+                                        trigger=(
+                                            "task_start"
+                                            if retrieval_evidence_action == 0
+                                            else f"post_{retrieval_last_operation or 'action'}"
+                                        ),
+                                    )
                                 )
+                                if (
+                                    self.retrieval_delivery_mode
+                                    == "integrated_same_observation"
+                                ):
+                                    preemptive_decision["status"] = (
+                                        "computed_integrated"
+                                        if not retrieval_result.abstained
+                                        else "abstained"
+                                    )
+                                    preemptive_decision["reason_codes"] = [
+                                        *preemptive_decision["reason_codes"],
+                                        "integrated_same_observation",
+                                    ]
                                 remaining_chars = min(
                                     lifecycle_remaining_chars,
                                     max(
@@ -9950,6 +9996,15 @@ class MiniSweCentralAgent(BaseAgent):
                     for row in preemptive_retrieval_decisions
                 ),
                 "preemptive_retrieval_deliveries": len(preemptive_retrieval_deliveries),
+                "preemptive_retrieval_standalone_deliveries": len(
+                    preemptive_retrieval_deliveries
+                ),
+                "preemptive_retrieval_shared_computations": sum(
+                    bool(row.get("cache_key"))
+                    and row.get("status") not in {"disabled", "abstained"}
+                    for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_delivery_mode": self.retrieval_delivery_mode,
                 "preemptive_retrieval_ranked_files": sum(
                     len(row.get("ranked_files") or ()) for row in preemptive_retrieval_decisions
                 ),
@@ -10678,7 +10733,8 @@ class MiniSweCentralAgent(BaseAgent):
                 and not persistent_state_failures
                 and actions_count > 0
                 and int(host_execution["decision_actions"]) > 0
-                and int(persistent_state_bootstrap.get("provider_calls") or 0) == 1
+                and int(persistent_state_bootstrap.get("provider_calls") or 0)
+                == (0 if self.persistent_state_selection_mode == "deterministic_v1" else 1)
                 and int(persistent_state_engine.metrics["context_compilations"])
                 == expected_persistent_contexts
                 and int(persistent_state_engine.metrics["preflight_projections"])
@@ -10789,6 +10845,9 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                         },
                         "product_mechanism_census": product_mechanism_census,
+                        "persistent_state_initialization": persistent_state_initialization,
+                        "persistent_state_bootstrap": persistent_state_bootstrap,
+                        "persistent_state_activation": persistent_state_activation,
                         "component_configuration": {
                             "step_limit": self.step_limit,
                             "effective_runtime_agent_kwargs": (
@@ -10818,6 +10877,7 @@ class MiniSweCentralAgent(BaseAgent):
                             ),
                             "repository_refresh_timeout_sec": (self.repository_refresh_timeout_sec),
                             "preemptive_retrieval": self.enable_preemptive_retrieval,
+                            "retrieval_delivery_mode": self.retrieval_delivery_mode,
                             "relational_context": self.enable_relational_context,
                             "semantic_evidence": self.enable_semantic_evidence,
                             "semantic_evidence_profile": {
@@ -11082,6 +11142,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "preemptive_retrieval": {
                             "schema": "gt.preemptive_retrieval_runtime.v1",
                             "enabled": self.enable_preemptive_retrieval,
+                            "delivery_mode": self.retrieval_delivery_mode,
+                            "standalone_delivery_suppressed": (
+                                self.retrieval_delivery_mode
+                                == "integrated_same_observation"
+                            ),
                             "decisions": preemptive_retrieval_decisions,
                             "deliveries": preemptive_retrieval_deliveries,
                             "delivered_claim_ids": sorted(delivered_preemptive_claim_ids),
@@ -11170,6 +11235,16 @@ class MiniSweCentralAgent(BaseAgent):
                     indent=2,
                 ),
                 encoding="utf-8",
+            )
+            intervention_chain_metadata = write_intervention_chain(
+                self.logs_dir / "central_receipt.json",
+                trajectory_path=self.logs_dir / "miniswe_trajectory.json",
+            )
+            receipt_path = self.logs_dir / "central_receipt.json"
+            receipt_document = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt_document["intervention_chain"] = intervention_chain_metadata
+            receipt_path.write_text(
+                json.dumps(receipt_document, indent=2), encoding="utf-8"
             )
             self._write_atif(
                 messages,
