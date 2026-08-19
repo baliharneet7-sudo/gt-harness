@@ -199,8 +199,8 @@ from gt_engine.relational_context import (
     RelationalContextResult,
     RelationalContextStatus,
 )
-from gt_engine.replay_bundle import ReplayBundleWriter
 from gt_engine.intervention_chain import write_intervention_chain
+from gt_engine.replay_bundle import ReplayBundleWriter
 from gt_engine.repository_context import (
     DecisionOpportunity,
     RepositoryContextEngine,

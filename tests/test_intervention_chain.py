@@ -28,7 +28,12 @@ def test_intervention_chain_joins_delivery_request_and_visible_next_action():
     trajectory = {
         "messages": [
             {"role": "assistant", "extra": {"actions": [{"command": "pytest"}]}},
-            {"role": "assistant", "content": "done", "reasoning_content": "observed", "extra": {"actions": [{"command": "git diff"}]}},
+            {
+                "role": "assistant",
+                "content": "done",
+                "reasoning_content": "observed",
+                "extra": {"actions": [{"command": "git diff"}]},
+            },
         ]
     }
 

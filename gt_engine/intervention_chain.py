@@ -80,7 +80,11 @@ def build_intervention_chain(
                         or _sha(delivery)[:16]
                     ),
                     "evidence": {
-                        "claim_ids": list(delivery.get("claim_ids") or delivery.get("fact_ids") or []),
+                        "claim_ids": list(
+                            delivery.get("claim_ids")
+                            or delivery.get("fact_ids")
+                            or []
+                        ),
                         "source_revision": delivery.get("source_revision"),
                         "evidence_action": delivery.get("evidence_action"),
                         "eligible_call": delivery.get("eligible_call"),
@@ -90,7 +94,9 @@ def build_intervention_chain(
                         "call": call,
                         "request_payload_sha256": context.get("request_payload_sha256"),
                         "provider_messages_sha256": context.get("provider_messages_sha256"),
-                        "changed_message_indices": list(context.get("changed_message_indices") or []),
+                        "changed_message_indices": list(
+                            context.get("changed_message_indices") or []
+                        ),
                         "delivery_status": context.get("dispatch_status", "UNKNOWN"),
                     },
                     "model_observation": {
@@ -107,7 +113,13 @@ def build_intervention_chain(
                     "causal_status": "UNKNOWN",
                 }
             )
-    rows.sort(key=lambda row: (int(row["provider"].get("call") or 0), row["surface"], row["delivery_id"]))
+    rows.sort(
+        key=lambda row: (
+            int(row["provider"].get("call") or 0),
+            row["surface"],
+            row["delivery_id"],
+        )
+    )
     return {
         "schema": "gt.intervention_chain.v1",
         "claim_policy": "visible_host_observations_only",
@@ -115,7 +127,10 @@ def build_intervention_chain(
         "rows": rows,
         "counts": {
             "rows": len(rows),
-            "visible_model_observations": sum(bool(row["model_observation"]["visible_response"]) for row in rows),
+            "visible_model_observations": sum(
+                bool(row["model_observation"]["visible_response"])
+                for row in rows
+            ),
             "unknown_causal_status": sum(row["causal_status"] == "UNKNOWN" for row in rows),
         },
     }
