@@ -1156,10 +1156,8 @@ def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         channels = row.get("channel_receipts") or []
         if (
             str(receipt.get("treatment_profile") or "") == "central_relational_v2"
-            and not (
-                (receipt.get("repository_intelligence") or {}).get("denominator_excluded")
-                is True
-            )
+            and (receipt.get("repository_intelligence") or {}).get("denominator_excluded")
+            is not True
             and channels
         ):
             status = row.get("retrieval_status") or {}
