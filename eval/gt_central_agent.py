@@ -7738,9 +7738,21 @@ class MiniSweCentralAgent(BaseAgent):
                     submit = is_submit_command(command)
                     if submit and self.enable_submit_readiness:
                         current_readiness = self._ledger.readiness_evidence(source_revision)
-                        if (
+                        # The final release receipt must contain an observed
+                        # result for a discovered project check even when the
+                        # paid treatment is running in SHADOW mode.  Shadow
+                        # preserves the model's selected command, but it must
+                        # not leave terminal validation as an unknown merely
+                        # because the model chose not to run the check itself.
+                        terminal_probe_allowed = (
                             self.preflight_mode is PreflightMode.ASSISTIVE_SAFE
-                            and source_validation_debt
+                            or (
+                                self.runtime_mode == "treatment"
+                                and self.treatment_profile == "central_relational_v2"
+                            )
+                        )
+                        if (
+                            terminal_probe_allowed
                             and repository_evidence.project_checks
                             and not current_readiness
                             and source_revision not in project_validation_probe_revisions
