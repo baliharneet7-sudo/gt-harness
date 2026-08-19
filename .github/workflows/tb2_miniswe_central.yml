@@ -196,7 +196,7 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/verify_frozen_outcome_prediction.py \
-            --prediction docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json \
+            --prediction docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-19_V2.json \
             --baseline eval/frozen_baselines/tb2_miniswe_20260731.json \
             --profile "$COMPARISON_PROFILE" \
             --current-commit "$(git rev-parse HEAD)" \

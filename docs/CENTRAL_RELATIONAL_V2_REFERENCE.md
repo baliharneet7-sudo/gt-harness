@@ -10,6 +10,8 @@ Selecting it forces these additive capabilities on:
 - `enable_relational_context=true` by default;
 - `enable_semantic_evidence=true` by default; and
 - `dense_fallback_only=true` by default.
+- `persistent_state_selection_mode=deterministic_v1`; and
+- `enable_replay_capture=true`.
 
 OFF, AUDIT, and certified-shadow isolation still force active delivery mechanisms off. The default
 profile remains `central_pes_v1`.
@@ -30,7 +32,8 @@ Input:
 
 - a typed `DecisionOpportunity` bound to evidence action, eligible provider call, source revision,
   graph revision, paths, and changed symbols; and
-- a `RepositorySnapshot` containing current `RepositoryEvidence` and `StructuralLink` rows.
+- a `RepositorySnapshot` containing current `RepositoryEvidence`, `StructuralLink` rows, and
+  optional five-channel rank-only path hints.
 
 Output: one `RepositoryContextProjection` with:
 
@@ -55,6 +58,9 @@ impact views.
 
 This is intentionally precision-first. Unknown is safer than confidently wrong.
 
+Retrieval ranks may order certified process/impact rows for packing. They never certify a row and
+cannot turn dense, lexical, or BM25 similarity into provider-visible repository fact authority.
+
 ## Delivery
 
 The projection contributes through the existing `compile_contributions()` request budget. The old
@@ -71,6 +77,8 @@ Authoritative receipt paths:
 | `model_call_contexts[*].repository_context` | Per-call projection and selection state. |
 | `provider_evidence` | Prepared/dispatched/abstained provider-surface ledger. |
 | `product_mechanism_census.persistent_execution_state` | Canonical eighteenth mechanism lifecycle. |
+| `replay_bundle` | Exact v3 request/control/response bundle metadata. |
+| `intervention_chain` | Canonical v2 evidence-to-call-to-visible-action audit metadata. |
 
 `gt_engine.delivery_audit.audit_provider_deliveries()` validates claim support against semantic
 items, execution-view IDs, and impact claim IDs, as well as revision, timing, message index, and
@@ -81,8 +89,8 @@ request/provider-view hashes.
 For `central_relational_v2`, `scripts.central_release_gate` requires:
 
 - healthy graph substrate or legitimate no-supported-source abstention;
-- canonical persistent-state initialization, one bootstrap, repeated lifecycle use, and delivery
-  accounting when applicable;
+- canonical persistent-state initialization, one deterministic selection event, zero selection
+  provider calls, repeated lifecycle use, and delivery accounting when applicable;
 - repository-context configuration and opportunity accounting;
 - unique delivered claims backed by the stored projection;
 - delivery metrics equal receipt rows;
@@ -90,6 +98,11 @@ For `central_relational_v2`, `scripts.central_release_gate` requires:
 - dense backend proof unless every attempted dense opportunity was mechanically skipped because
   sparse support already existed; and
 - exact canonical 17+1 product identity.
+
+The merger additionally verifies the actual replay/chain/trajectory files and emits separate
+`integrity_report.json`, `solve_report.json`, `efficiency_report.json`, and
+`intervention_report.json`. Visible model reasoning is retained only when the provider returned it;
+it is never inferred and is not itself a causal claim.
 
 ## Benchmark identity
 

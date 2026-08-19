@@ -19,6 +19,7 @@ import posixpath
 import re
 import shlex
 import tarfile
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterable
@@ -207,6 +208,7 @@ from gt_engine.repository_context import (
     RepositoryContextProjection,
     RepositoryContextStatus,
     RepositorySnapshot,
+    RetrievalRankHint,
 )
 from gt_engine.repository_intelligence import (
     RepositoryEvidence,
@@ -488,21 +490,12 @@ def _provider_request_receipt(
         if provider_tools is not None
         else list(getattr(model, "tools", None) or [BASH_TOOL])
     )
-    effective_kwargs = _model_kwargs(model)
-    effective_kwargs.update(call_kwargs or {})
-    # Credentials do not define the semantic request and must never influence
-    # a replay identity or escape through future receipt diagnostics.
-    for secret_key in ("api_key", "authorization", "headers"):
-        effective_kwargs.pop(secret_key, None)
-    envelope = {
-        "model": str(
-            getattr(getattr(model, "config", None), "model_name", "")
-            or getattr(model, "model_name", "")
-        ),
-        "model_kwargs": effective_kwargs,
-        "tools": provider_tools,
-        "messages": prepared,
-    }
+    envelope = _provider_request_envelope(
+        model,
+        prepared,
+        call_kwargs=call_kwargs,
+        provider_tools=provider_tools,
+    )
     messages_bytes = _canonical_json(prepared)
     return (
         prepared,
@@ -510,6 +503,54 @@ def _provider_request_receipt(
         hashlib.sha256(messages_bytes).hexdigest(),
         len(messages_bytes.decode("utf-8")),
     )
+
+
+def _provider_request_envelope(
+    model: Any,
+    prepared_messages: list[dict[str, Any]],
+    *,
+    call_kwargs: dict[str, Any] | None = None,
+    provider_tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return the exact sanitized semantic provider request envelope."""
+
+    effective_kwargs = _model_kwargs(model)
+    effective_kwargs.update(call_kwargs or {})
+    for secret_key in ("api_key", "authorization", "headers"):
+        effective_kwargs.pop(secret_key, None)
+    return {
+        "model": str(
+            getattr(getattr(model, "config", None), "model_name", "")
+            or getattr(model, "model_name", "")
+        ),
+        "model_kwargs": effective_kwargs,
+        "tools": list(provider_tools or ()),
+        "messages": prepared_messages,
+    }
+
+
+def _atomic_write_text(
+    path: Path,
+    payload: str,
+    *,
+    encoding: str = "utf-8",
+) -> int:
+    """Durably replace one audit artifact without exposing partial JSON."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding=encoding, newline="") as handle:
+            written = handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        return written
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _provider_route_configuration(model: Any) -> dict[str, Any]:
@@ -4566,6 +4607,7 @@ class MiniSweCentralAgent(BaseAgent):
                 semantic_evidence_payload = ""
                 repository_context_projection: RepositoryContextProjection | None = None
                 repository_context_payload = ""
+                retrieval_rank_hints: tuple[RetrievalRankHint, ...] = ()
                 retrieval_opportunity_kind = _retrieval_opportunity_kind(
                     evidence_action=retrieval_evidence_action,
                     operation=retrieval_last_operation,
@@ -4841,6 +4883,17 @@ class MiniSweCentralAgent(BaseAgent):
                                 retrieval_result = filter_provider_known_context(
                                     retrieval_result,
                                     query_messages,
+                                )
+                                retrieval_rank_hints = tuple(
+                                    RetrievalRankHint(
+                                        path=row.path,
+                                        fused_score=row.fused_score,
+                                        supporting_channels=tuple(
+                                            channel.value
+                                            for channel, _rank in row.channel_ranks
+                                        ),
+                                    )
+                                    for row in retrieval_result.ranked_files
                                 )
                                 preemptive_decision.update(
                                     {
@@ -5178,6 +5231,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     for document in preemptive_repository.documents
                                 )
                             ),
+                            retrieval_rank_hints=retrieval_rank_hints,
                         ),
                         delivered_claim_ids=frozenset(
                             delivered_repository_context_claim_ids
@@ -5220,6 +5274,7 @@ class MiniSweCentralAgent(BaseAgent):
                             "process_coverage": dict(
                                 repository_context_projection.process_coverage
                             ),
+                            "retrieval_rank_hint_count": len(retrieval_rank_hints),
                             "contribution_surfaces": [
                                 contribution.surface
                                 for contribution in repository_context_projection.contributions
@@ -5939,12 +5994,27 @@ class MiniSweCentralAgent(BaseAgent):
                             default=actions_count,
                         ),
                     }
+                replay_provider_tools = list(
+                    getattr(model, "tools", None) or [BASH_TOOL]
+                )
                 replay_bundle.record_request(
                     call=calls,
                     provider_messages=provider_messages,
+                    request_envelope=_provider_request_envelope(
+                        model,
+                        provider_messages,
+                        call_kwargs=executor_query_kwargs,
+                        provider_tools=replay_provider_tools,
+                    ),
                     control_provider_messages=control_provider_messages,
+                    control_request_envelope=_provider_request_envelope(
+                        model,
+                        control_provider_messages,
+                        call_kwargs=executor_query_kwargs,
+                        provider_tools=replay_provider_tools,
+                    ),
                     intervention=intervention_capture,
-                    provider_tools=getattr(model, "tools", None) or [BASH_TOOL],
+                    provider_tools=replay_provider_tools,
                     request_payload_sha256=request_payload_sha256,
                     provider_messages_sha256=provider_messages_sha256,
                     model_name=str(self.model_name or ""),
@@ -9520,6 +9590,20 @@ class MiniSweCentralAgent(BaseAgent):
                     frontier_delivered_language_counts[language] = (
                         frontier_delivered_language_counts.get(language, 0) + 1
                     )
+            persistent_selection_mode = str(
+                persistent_state_bootstrap.get("selection_mode")
+                or self.persistent_state_selection_mode
+            )
+            persistent_selection_event_count = int(
+                persistent_state_bootstrap.get("selection_event_count")
+                if persistent_state_bootstrap.get("selection_event_count") is not None
+                else bootstrap_provider_calls
+            )
+            persistent_selection_provider_calls = (
+                0
+                if persistent_selection_mode == "deterministic_v1"
+                else bootstrap_provider_calls
+            )
             deep_metrics = {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
@@ -9817,6 +9901,11 @@ class MiniSweCentralAgent(BaseAgent):
                     persistent_state_initial_retrieval.get("selected_evidence") or ()
                 ),
                 "persistent_state_bootstrap_calls": bootstrap_provider_calls,
+                "persistent_state_selection_mode": persistent_selection_mode,
+                "persistent_state_selection_events": persistent_selection_event_count,
+                "persistent_state_selection_provider_calls": (
+                    persistent_selection_provider_calls
+                ),
                 "persistent_state_bootstrap_input_tokens": int(
                     persistent_state_bootstrap.get("input_tokens") or 0
                 ),
@@ -10001,8 +10090,12 @@ class MiniSweCentralAgent(BaseAgent):
                 ),
                 "preemptive_retrieval_shared_computations": sum(
                     bool(row.get("cache_key"))
-                    and row.get("status") not in {"disabled", "abstained"}
+                    and not bool(row.get("cache_hit"))
                     for row in preemptive_retrieval_decisions
+                ),
+                "preemptive_retrieval_rank_consumptions": sum(
+                    int(row.get("retrieval_rank_hint_count") or 0) > 0
+                    for row in repository_context_decisions
                 ),
                 "preemptive_retrieval_delivery_mode": self.retrieval_delivery_mode,
                 "preemptive_retrieval_ranked_files": sum(
@@ -10743,7 +10836,7 @@ class MiniSweCentralAgent(BaseAgent):
                 == expected_persistent_postflights
             )
             persistent_lifecycle_use_count = (
-                bootstrap_provider_calls
+                persistent_selection_event_count
                 + (
                     int(persistent_state_engine.metrics["context_compilations"])
                     + int(persistent_state_engine.metrics["preflight_projections"])
@@ -10779,6 +10872,10 @@ class MiniSweCentralAgent(BaseAgent):
                     "exercised": persistent_exercised,
                     "repeated_deterministic_use": persistent_lifecycle_use_count > 1,
                     "lifecycle_use_count": persistent_lifecycle_use_count,
+                    "selection_mode": persistent_selection_mode,
+                    "selection_event_count": persistent_selection_event_count,
+                    "selection_provider_calls": persistent_selection_provider_calls,
+                    "bootstrap_provider_calls": bootstrap_provider_calls,
                     "bootstrap_calls": bootstrap_provider_calls,
                     "context_compilations": (
                         int(persistent_state_engine.metrics["context_compilations"])
@@ -10818,11 +10915,13 @@ class MiniSweCentralAgent(BaseAgent):
                 "messages": messages,
                 "trajectory_format": "mini-swe-agent-1.1",
             }
-            (self.logs_dir / "miniswe_trajectory.json").write_text(
+            _atomic_write_text(
+                self.logs_dir / "miniswe_trajectory.json",
                 json.dumps(trajectory, indent=2), encoding="utf-8"
             )
             replay_bundle_metadata = replay_bundle.finalize()
-            (self.logs_dir / "central_receipt.json").write_text(
+            _atomic_write_text(
+                self.logs_dir / "central_receipt.json",
                 json.dumps(
                     {
                         "schema": "central-runtime-receipt-v3",
@@ -10955,6 +11054,9 @@ class MiniSweCentralAgent(BaseAgent):
                         "calls": total_provider_calls,
                         "executor_calls": model_query_invocations,
                         "bootstrap_calls": bootstrap_provider_calls,
+                        "selection_mode": persistent_selection_mode,
+                        "selection_event_count": persistent_selection_event_count,
+                        "selection_provider_calls": persistent_selection_provider_calls,
                         "provider_requests_prepared": (
                             provider_requests_prepared + bootstrap_provider_calls
                         ),
@@ -11239,11 +11341,13 @@ class MiniSweCentralAgent(BaseAgent):
             intervention_chain_metadata = write_intervention_chain(
                 self.logs_dir / "central_receipt.json",
                 trajectory_path=self.logs_dir / "miniswe_trajectory.json",
+                replay_bundle_path=replay_bundle.path,
             )
             receipt_path = self.logs_dir / "central_receipt.json"
             receipt_document = json.loads(receipt_path.read_text(encoding="utf-8"))
             receipt_document["intervention_chain"] = intervention_chain_metadata
-            receipt_path.write_text(
+            _atomic_write_text(
+                receipt_path,
                 json.dumps(receipt_document, indent=2), encoding="utf-8"
             )
             self._write_atif(

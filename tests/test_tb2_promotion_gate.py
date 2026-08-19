@@ -36,8 +36,11 @@ def _treatment(*, lose: bool = False, uncached: int = 80) -> dict:
                 "reward": 1.0 if outcome else 0.0,
                 "censored": False,
                 "provider_calls": provider_calls,
-                "executor_provider_calls": provider_calls - 1,
-                "bootstrap_provider_calls": 1,
+                "executor_provider_calls": provider_calls,
+                "bootstrap_provider_calls": 0,
+                "selection_mode": "deterministic_v1",
+                "selection_event_count": 1,
+                "selection_provider_calls": 0,
                 "persistent_applicable": True,
                 "total_tokens": max(0, int(before["total_tokens"]) - 100),
                 "input_tokens": max(0, int(before["input_tokens"]) - 80),
@@ -64,8 +67,10 @@ def _treatment(*, lose: bool = False, uncached: int = 80) -> dict:
             "observed_identity": {
                 "executor_models": ["deepseek-v4-flash"],
                 "executor_providers": ["openai"],
-                "bootstrap_model": "deepseek-v4-flash",
-                "bootstrap_provider": "openai",
+                "bootstrap_model": "",
+                "bootstrap_provider": "",
+                "selection_mode": "deterministic_v1",
+                "selection_provider_calls": 0,
                 "canary_model": "deepseek-v4-flash",
                 "canary_provider": "openai",
                 "route": "deepseek:native:api.deepseek.com",
@@ -93,6 +98,17 @@ def test_promotion_requires_zero_losses_a_flip_and_lower_resources():
     assert report.baseline_solved == 17
     assert report.treatment_solved == 18
     assert report.fingerprint_metadata == ("different-serving-fingerprint",)
+
+
+def test_promotion_rejects_a_provider_call_for_deterministic_selection():
+    treatment = _treatment()
+    treatment["rows"][0]["selection_provider_calls"] = 1
+    treatment["rows"][0]["provider_calls"] += 1
+
+    report = assess_tb2_promotion(_baseline(), treatment)
+
+    assert report.passed is False
+    assert "deterministic_selection_provider_call:cobol-modernization" in report.failures
 
 
 def test_same_model_fingerprint_change_is_metadata_not_a_gate_failure():

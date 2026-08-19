@@ -181,7 +181,8 @@ Required per-task integrity:
 - repository graph applicable and current, or explicit legitimate non-applicability;
 - dense expected/actual mode certified;
 - graph DB/manifest/root/source/binary identities agree;
-- exactly one bootstrap on each applicable task;
+- exactly one deterministic selection event and zero selection/bootstrap provider calls on each
+  applicable `central_relational_v2` task (legacy profiles retain their historical bootstrap);
 - repeated persistent-state compile/preflight/postflight/rebase lifecycle;
 - every selected contribution and effect conserved;
 - every visible claim has exact provider/request hashes, changed index, timing, revision, and semantic support;

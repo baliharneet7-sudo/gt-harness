@@ -578,6 +578,54 @@ def _relational_treatment() -> dict:
             "repository_context_delivered": True,
         }
     )
+    receipt["component_configuration"].update(
+        replay_capture=True,
+        persistent_state_selection_mode="deterministic_v1",
+    )
+    receipt["persistent_execution_state"]["bootstrap"].update(
+        {
+            "selection_mode": "deterministic_v1",
+            "bootstrap_mode": "deterministic_selected",
+            "logical_calls": 0,
+            "provider_calls": 0,
+            "response_received": False,
+            "selection_input_sha256": "selection-input",
+            "selection_event_count": 1,
+            "selection_provider_calls": 0,
+        }
+    )
+    receipt["persistent_execution_state"]["state"][
+        "bootstrap_mode"
+    ] = "deterministic_selected"
+    receipt["calls"] = receipt["executor_calls"]
+    receipt["bootstrap_calls"] = 0
+    receipt["metrics"]["persistent_state_bootstrap_calls"] = 0
+    receipt["metrics"]["bootstrap_api_calls"] = 0
+    persistent_census = receipt["product_mechanism_census"][
+        "persistent_execution_state"
+    ]
+    persistent_census.update(
+        {
+            "selection_mode": "deterministic_v1",
+            "selection_event_count": 1,
+            "selection_provider_calls": 0,
+            "bootstrap_provider_calls": 0,
+            "bootstrap_calls": 0,
+        }
+    )
+    receipt["replay_bundle"] = {
+        "enabled": True,
+        "trajectory_replay_ready": True,
+        "call_count": len(receipt["model_call_contexts"]),
+        "path": "gt_replay",
+    }
+    receipt["intervention_chain"] = {
+        "schema": "gt.intervention_chain.v2",
+        "hidden_reasoning_inferred": False,
+        "path": "intervention_chain.json",
+        "rows": 2,
+        "canonical_delivery_rows": 2,
+    }
     return receipt
 
 
@@ -1110,7 +1158,8 @@ def test_release_gate_rejects_any_provider_query_marker_failure():
 def test_release_gate_accepts_materiality_accounted_persistent_abstention():
     receipt = _relational_treatment()
     receipt["executor_calls"] = 2
-    receipt["calls"] = 3
+    receipt["calls"] = 2
+    receipt["replay_bundle"]["call_count"] = 2
     receipt["persistent_execution_state"]["metrics"]["context_compilations"] = 2
     receipt["model_call_contexts"].append(
         {
@@ -1465,6 +1514,42 @@ def test_replay_and_intervention_audit_requires_final_profile_artifacts():
     assert check.passed is False
     assert "task:replay_capture_disabled" in check.failures
     assert "task:intervention_chain_missing" in check.failures
+
+
+def test_replay_and_intervention_audit_cannot_be_disabled_for_final_profile():
+    receipt = {
+        "treatment_profile": "central_relational_v2",
+        "component_configuration": {"replay_capture": False},
+        "replay_bundle": {},
+        "model_call_contexts": [],
+    }
+
+    check = _replay_and_intervention_audit(receipt, "task")
+
+    assert check.passed is False
+    assert "task:replay_capture_disabled" in check.failures
+
+
+def test_product_census_accepts_final_deterministic_selection_without_bootstrap():
+    receipt = _relational_treatment()
+    persistent = receipt["product_mechanism_census"]["persistent_execution_state"]
+    persistent.update(
+        {
+            "selection_mode": "deterministic_v1",
+            "selection_event_count": 1,
+            "selection_provider_calls": 0,
+            "bootstrap_provider_calls": 0,
+            "bootstrap_calls": 0,
+        }
+    )
+
+    check = next(
+        item
+        for item in audit_treatment_runtime(receipt, label="task")
+        if item.name == "product_mechanism_census"
+    )
+
+    assert check.passed is True
 
 
 def test_release_gate_report_is_json_serializable_and_machine_readable():

@@ -2,14 +2,17 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gt_engine.benchmark_parity import audit_runtime_receipt
+from gt_engine.benchmark_reports import build_benchmark_reports
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.deep_metrics import extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.intervention_chain import audit_intervention_artifacts
 from gt_engine.treatment_adapter import BenchmarkManifest
 from scripts.central_feature_lifecycle import build_feature_lifecycle_report
 from scripts.central_release_gate import audit_treatment_runtime
@@ -18,7 +21,7 @@ from scripts.tb2_regression_forensics import build_regression_forensics
 
 expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
 prediction_path = Path(
-    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json"
+    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-19_V2.json"
 )
 prediction_sha256 = (
     hashlib.sha256(prediction_path.read_bytes()).hexdigest()
@@ -37,6 +40,7 @@ observed_artifact_tasks = set()
 feature_receipts = []
 deep_tasks = {}
 verified_benchmark_manifests = {}
+artifact_integrity_failures = []
 
 def solved(t):
     rewards = (t.get("verifier_result") or {}).get("rewards") or {}
@@ -47,7 +51,11 @@ for task_dir in sorted(Path("tasks").glob("*")):
     task_name = task_dir.name.split("-task-", 1)[-1]
     observed_artifact_tasks.add(task_name)
     receipt_paths = list(task_dir.rglob("central_receipt.json"))
-    if receipt_paths:
+    if len(receipt_paths) != 1:
+        artifact_integrity_failures.append(
+            f"{task_name}:receipt_artifact_count:{len(receipt_paths)}"
+        )
+    if len(receipt_paths) == 1:
         receipt = json.loads(receipt_paths[0].read_text(encoding="utf-8"))
         receipt_for_lifecycle = dict(receipt)
         receipt_for_lifecycle["task"] = task_name
@@ -86,6 +94,57 @@ for task_dir in sorted(Path("tasks").glob("*")):
             provider_delivery_totals,
         ) = audit_provider_deliveries(receipt, task=task_name)
         treatment_release_failures = []
+        if (
+            dense_required
+            and not bool(intelligence.get("denominator_excluded"))
+            and len(dense_proofs) != 1
+        ):
+            treatment_release_failures.append(
+                f"{task_name}:dense_backend_proof_artifact_count:{len(dense_proofs)}"
+            )
+        chain_paths = list(task_dir.rglob("intervention_chain.json"))
+        replay_manifests = list(task_dir.rglob("gt_replay/manifest.json"))
+        trajectories = list(task_dir.rglob("miniswe_trajectory.json"))
+        for artifact_name, artifact_paths in (
+            ("intervention_chain", chain_paths),
+            ("replay_manifest", replay_manifests),
+            ("trajectory", trajectories),
+        ):
+            if len(artifact_paths) != 1:
+                treatment_release_failures.append(
+                    f"{task_name}:{artifact_name}_artifact_count:{len(artifact_paths)}"
+                )
+        artifact_failures, artifact_summary = audit_intervention_artifacts(
+            receipt,
+            artifact_root=receipt_paths[0].parent,
+        )
+        treatment_release_failures.extend(
+            f"{task_name}:artifact:{failure}" for failure in artifact_failures
+        )
+        intervention_surface_counts = {}
+        behavioral_uptake = {}
+        if len(chain_paths) == 1:
+            try:
+                chain_payload = json.loads(
+                    chain_paths[0].read_text(encoding="utf-8")
+                )
+                intervention_surface_counts = dict(
+                    (chain_payload.get("counts") or {}).get("surface_counts") or {}
+                )
+                behavioral_uptake = dict(
+                    Counter(
+                        str((row.get("behavioral_uptake") or {}).get("status") or "")
+                        for row in chain_payload.get("rows") or ()
+                        if str(
+                            (row.get("behavioral_uptake") or {}).get("status")
+                            or ""
+                        )
+                    )
+                )
+            except (OSError, ValueError):
+                treatment_release_failures.append(
+                    f"{task_name}:intervention_chain_unreadable"
+                )
         if dense_required:
             treatment_release_failures = [
                 failure
@@ -125,6 +184,15 @@ for task_dir in sorted(Path("tasks").glob("*")):
             "api_calls": metrics.get("api_calls"),
             "executor_api_calls": metrics.get("executor_api_calls"),
             "bootstrap_api_calls": metrics.get("bootstrap_api_calls"),
+            "persistent_selection_mode": metrics.get(
+                "persistent_state_selection_mode"
+            ),
+            "persistent_selection_events": metrics.get(
+                "persistent_state_selection_events"
+            ),
+            "persistent_selection_provider_calls": metrics.get(
+                "persistent_state_selection_provider_calls"
+            ),
             "persistent_applicable": (
                 ((receipt.get("product_mechanism_census") or {})
                 .get("persistent_execution_state") or {}).get("applicable")
@@ -226,6 +294,15 @@ for task_dir in sorted(Path("tasks").glob("*")):
             ),
             "provider_delivery_failures": provider_delivery_failures,
             "treatment_release_failures": treatment_release_failures,
+            "intervention_chain_rows": artifact_summary.get("chain_rows"),
+            "intervention_surface_counts": intervention_surface_counts,
+            "behavioral_uptake": behavioral_uptake,
+            "preemptive_retrieval_shared_computations": metrics.get(
+                "preemptive_retrieval_shared_computations"
+            ),
+            "preemptive_retrieval_rank_consumptions": metrics.get(
+                "preemptive_retrieval_rank_consumptions"
+            ),
         })
     results = list(task_dir.rglob("result.json"))
     if not results:
@@ -250,8 +327,16 @@ for task_dir in sorted(Path("tasks").glob("*")):
         got.append(r)
     trials.extend(got)
     per_task.append((task_dir.name, len(got)))
+    if len(got) != 1:
+        artifact_integrity_failures.append(
+            f"{task_name}:trial_result_count:{len(got)}"
+        )
     trajectories = list(task_dir.rglob("miniswe_trajectory.json"))
-    if trajectories:
+    if len(trajectories) != 1:
+        artifact_integrity_failures.append(
+            f"{task_name}:trajectory_artifact_count:{len(trajectories)}"
+        )
+    if len(trajectories) == 1:
         reward = 1 if got and any(solved(item) for item in got) else 0 if got else None
         deep_tasks[task_name] = extract_trajectory(
             trajectories[0],
@@ -351,16 +436,34 @@ observed_bootstrap_models = sorted({
 observed_bootstrap_providers = sorted({
     row["bootstrap_provider"] for row in applicable_rows if row["bootstrap_provider"]
 })
+observed_selection_modes = sorted({
+    str(row.get("persistent_selection_mode") or "")
+    for row in applicable_rows
+    if row.get("persistent_selection_mode")
+})
+deterministic_selection = observed_selection_modes == ["deterministic_v1"]
 observed_identity_complete = bool(
     len(receipt_metrics) == len(expected)
     and all(row["executor_identity_complete"] for row in receipt_metrics)
-    and all(row["bootstrap_model"] and row["bootstrap_provider"] for row in applicable_rows)
+    and (
+        deterministic_selection
+        or all(row["bootstrap_model"] and row["bootstrap_provider"] for row in applicable_rows)
+    )
 )
 observed_identity_stable = bool(
     observed_executor_models == ["deepseek-v4-flash"]
     and observed_executor_providers == ["openai"]
-    and observed_bootstrap_models == ["deepseek-v4-flash"]
-    and observed_bootstrap_providers == ["openai"]
+    and (
+        (
+            deterministic_selection
+            and not observed_bootstrap_models
+            and not observed_bootstrap_providers
+        )
+        or (
+            observed_bootstrap_models == ["deepseek-v4-flash"]
+            and observed_bootstrap_providers == ["openai"]
+        )
+    )
 )
 
 out = ["# TB2 miniswe central matrix (GT-on)", ""]
@@ -483,6 +586,7 @@ merged_payload = {
     "invalid_dense_backend_tasks": invalid_dense,
     "invalid_provider_delivery_tasks": invalid_provider_deliveries,
     "invalid_treatment_release_tasks": invalid_treatment_release,
+    "artifact_integrity_failures": list(dict.fromkeys(artifact_integrity_failures)),
     "frozen_outcome_prediction": {
         "path": prediction_path.as_posix(),
         "sha256": prediction_sha256,
@@ -516,6 +620,15 @@ merged_payload = {
                 observed_bootstrap_providers[0]
                 if len(observed_bootstrap_providers) == 1
                 else ""
+            ),
+            "selection_mode": (
+                observed_selection_modes[0]
+                if len(observed_selection_modes) == 1
+                else ""
+            ),
+            "selection_provider_calls": sum(
+                int(row.get("persistent_selection_provider_calls") or 0)
+                for row in applicable_rows
             ),
             "canary_model": os.environ["CANARY_MODEL"],
             "canary_provider": os.environ["CANARY_PROVIDER"],
@@ -556,6 +669,30 @@ merged_payload["promotion_passed"] = (
     None if diagnostic_only else promotion_report.passed
 )
 merged_payload["forensics_complete"] = forensics_report["passed"]
+integrity_failures = [
+    *artifact_integrity_failures,
+    *(f"repository_intelligence:{task}" for task in invalid_intelligence),
+    *(f"dense_backend:{task}" for task in invalid_dense),
+    *(f"provider_delivery:{task}" for task in invalid_provider_deliveries),
+    *(f"treatment_release:{task}" for task in invalid_treatment_release),
+    *(f"missing_task:{task}" for task in missing),
+]
+benchmark_reports = build_benchmark_reports(
+    expected_tasks=expected,
+    baseline=baseline,
+    treatment=treatment,
+    receipt_metrics=receipt_metrics,
+    integrity_failures=integrity_failures,
+    efficiency={
+        "common_solved_resource_deltas": (
+            promotion_report.common_solved_resource_deltas
+        ),
+        "full_profile_resource_deltas": promotion_report.full_profile_resource_deltas,
+        "per_task_resource_deltas": promotion_report.per_task_resource_deltas,
+        "per_task_bound_failures": list(promotion_report.per_task_bound_failures),
+    },
+)
+merged_payload["integrity_report_passed"] = benchmark_reports["integrity"]["passed"]
 
 out += [
     "",
@@ -595,6 +732,10 @@ Path("promotion_report.json").write_text(
 Path("regression_forensics.json").write_text(
     json.dumps(forensics_report, indent=2), encoding="utf-8"
 )
+for report_name, report in benchmark_reports.items():
+    Path(f"{report_name}_report.json").write_text(
+        json.dumps(report, indent=2) + "\n", encoding="utf-8"
+    )
 Path("deep_metrics_certified_full.json").write_text(json.dumps({
     "schema": "central-deep-metrics-v2",
     "arm": "certified_full",
@@ -608,7 +749,8 @@ with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
     f.write(body)
 print(body[:4000])
 if (invalid_intelligence or invalid_dense or invalid_provider_deliveries
-        or invalid_treatment_release or not prediction_hash_valid
+        or invalid_treatment_release or artifact_integrity_failures
+        or not benchmark_reports["integrity"]["passed"] or not prediction_hash_valid
         or not lifecycle_report["passed"]
         or (not diagnostic_only and not promotion_report.passed)):
     sys.exit(2)

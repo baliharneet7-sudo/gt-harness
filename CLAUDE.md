@@ -1558,3 +1558,28 @@ defect): `patches/oh054/apply_gt_tools.py` and `models/e5-small-v2` are
 referenced by the `setup-eval` action but absent from the fork itself, so
 the cache-miss install branch that invokes `apply_gt_tools.py` is broken in
 the source fork as well; verify those before any paid Live Lite dispatch.
+
+## Final relational-v2 selection, replay, and release contract (2026-08-18)
+
+This section supersedes earlier final-profile references to one generative
+bootstrap provider call. `central_relational_v2` performs one deterministic
+catalog-selection event and zero selection/bootstrap provider calls. Legacy
+profiles may retain the generative path. The product identity stays 17+1.
+
+The final receipt records `selection_mode=deterministic_v1`, one selection
+event, and zero selection/bootstrap calls; total provider calls equal executor
+calls and bootstrap identity is not applicable. Five-channel retrieval supplies
+rank-only hints that may order certified process/impact facts but can never
+grant delivery authority.
+
+Replay is mandatory. Replay bundle v3 hashes the exact sanitized request and
+control envelopes plus responses. Intervention chain v2 covers every canonical
+delivery surface and joins exact call, visible response, action cycle, and
+postflight. Behavioral uptake is observable; causality remains
+`UNIDENTIFIABLE_WITHOUT_COUNTERFACTUAL` without a matched arm or ablation.
+
+The merger requires exactly one receipt, trajectory, replay manifest,
+intervention chain, and graded result per frozen task and emits separate
+integrity, solve, efficiency, and intervention reports. A paid smoke remains
+blocked until the exact candidate passes the source-built Linux provider-free
+gate.

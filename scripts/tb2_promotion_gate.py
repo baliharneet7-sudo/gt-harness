@@ -253,14 +253,29 @@ def assess_tb2_promotion(
         failures.append("observed_identity_incomplete_or_unstable")
     response_model = EXPECTED_MODEL_IDENTITY["response_model"]
     adapter_provider = EXPECTED_MODEL_IDENTITY["adapter_provider"]
+    selection_mode = str(observed.get("selection_mode") or "generative")
     if observed.get("executor_models") != [response_model] or observed.get(
-        "bootstrap_model"
-    ) != response_model or observed.get("canary_model") != response_model:
+        "canary_model"
+    ) != response_model:
         failures.append("observed_model_identity_mismatch")
     if observed.get("executor_providers") != [adapter_provider] or observed.get(
-        "bootstrap_provider"
-    ) != adapter_provider or observed.get("canary_provider") != adapter_provider:
+        "canary_provider"
+    ) != adapter_provider:
         failures.append("observed_provider_identity_mismatch")
+    if selection_mode == "deterministic_v1":
+        if observed.get("bootstrap_model") not in {None, ""}:
+            failures.append("deterministic_selection_bootstrap_model_present")
+        if observed.get("bootstrap_provider") not in {None, ""}:
+            failures.append("deterministic_selection_bootstrap_provider_present")
+        if observed.get("selection_provider_calls") != 0:
+            failures.append("deterministic_selection_identity_invalid")
+    elif selection_mode == "generative":
+        if observed.get("bootstrap_model") != response_model:
+            failures.append("observed_model_identity_mismatch")
+        if observed.get("bootstrap_provider") != adapter_provider:
+            failures.append("observed_provider_identity_mismatch")
+    else:
+        failures.append(f"selection_mode_invalid:{selection_mode}")
     if observed.get("route") != EXPECTED_MODEL_IDENTITY["route"] or observed.get(
         "api_host"
     ) != EXPECTED_MODEL_IDENTITY["api_host"]:
@@ -293,18 +308,36 @@ def assess_tb2_promotion(
         provider_calls = _number(after, "provider_calls")
         executor_calls = _number(after, "executor_provider_calls")
         bootstrap_calls = _number(after, "bootstrap_provider_calls")
+        row_selection_mode = str(after.get("selection_mode") or selection_mode)
+        selection_events = _number(after, "selection_event_count")
+        selection_calls = _number(after, "selection_provider_calls")
+        if selection_events is None:
+            selection_events = 1.0 if bootstrap_calls == 1.0 else 0.0
+        if selection_calls is None:
+            selection_calls = bootstrap_calls
         if (
             provider_calls is None
             or executor_calls is None
             or bootstrap_calls is None
-            or provider_calls != executor_calls + bootstrap_calls
+            or selection_calls is None
+            or provider_calls != executor_calls + selection_calls
+            or bootstrap_calls != selection_calls
             or bootstrap_calls not in {0.0, 1.0}
         ):
             failures.append(f"provider_call_accounting:{task}")
-        if after.get("persistent_applicable") is True and bootstrap_calls != 1.0:
-            failures.append(f"applicable_bootstrap_count:{task}")
-        if after.get("persistent_applicable") is False and bootstrap_calls != 0.0:
-            failures.append(f"abstained_bootstrap_count:{task}")
+        if after.get("persistent_applicable") is True:
+            if selection_events != 1.0:
+                failures.append(f"applicable_selection_count:{task}")
+            if row_selection_mode == "deterministic_v1":
+                if selection_calls != 0.0 or bootstrap_calls != 0.0:
+                    failures.append(f"deterministic_selection_provider_call:{task}")
+            elif row_selection_mode == "generative":
+                if selection_calls != 1.0 or bootstrap_calls != 1.0:
+                    failures.append(f"applicable_bootstrap_count:{task}")
+            else:
+                failures.append(f"selection_mode_invalid:{task}:{row_selection_mode}")
+        elif any(value != 0.0 for value in (selection_events, selection_calls, bootstrap_calls)):
+            failures.append(f"abstained_selection_count:{task}")
 
     valid_tasks = {
         task
@@ -496,6 +529,7 @@ def treatment_from_merged(merged: dict[str, Any]) -> dict[str, Any]:
         str(row.get("task") or ""): row for row in metric_rows if isinstance(row, dict)
     }
     integrity = [
+        *(str(item) for item in merged.get("artifact_integrity_failures") or ()),
         *(
             f"repository_intelligence:{task}"
             for task in merged.get("invalid_repository_intelligence_tasks") or ()
@@ -550,6 +584,9 @@ def treatment_from_merged(merged: dict[str, Any]) -> dict[str, Any]:
                 "provider_calls": row.get("api_calls"),
                 "executor_provider_calls": row.get("executor_api_calls"),
                 "bootstrap_provider_calls": row.get("bootstrap_api_calls"),
+                "selection_mode": row.get("persistent_selection_mode"),
+                "selection_event_count": row.get("persistent_selection_events"),
+                "selection_provider_calls": row.get("persistent_selection_provider_calls"),
                 "persistent_applicable": row.get("persistent_applicable"),
                 "total_tokens": row.get("total_tokens"),
                 "input_tokens": row.get("input_tokens"),

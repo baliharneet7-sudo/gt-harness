@@ -160,6 +160,30 @@ def test_lifecycle_report_separates_live_and_forced_only_features():
     assert report["persistent_execution_state"]["passed"] is True
 
 
+def test_lifecycle_report_accepts_one_deterministic_selection_without_provider_call():
+    receipt = _receipt()
+    persistent = receipt["product_mechanism_census"]["persistent_execution_state"]
+    persistent.update(
+        {
+            "selection_mode": "deterministic_v1",
+            "selection_event_count": 1,
+            "selection_provider_calls": 0,
+            "bootstrap_provider_calls": 0,
+            "bootstrap_calls": 0,
+            "lifecycle_use_count": 9,
+            "context_compilations": 3,
+        }
+    )
+
+    report = build_feature_lifecycle_report(
+        [receipt], forced_feature_ids=FEATURE_IDS, forced_proof=FORCED_PROOF
+    )
+
+    assert report["passed"] is True
+    assert report["persistent_execution_state"]["selection_event_count"] == 1
+    assert report["persistent_execution_state"]["selection_provider_calls"] == 0
+
+
 def test_lifecycle_report_fails_a_missed_trigger():
     report = build_feature_lifecycle_report(
         [_receipt(missed="recovery")],

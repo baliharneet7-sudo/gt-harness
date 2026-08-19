@@ -8,6 +8,7 @@ from gt_engine.repository_context import (
     RepositoryContextEngine,
     RepositoryContextStatus,
     RepositorySnapshot,
+    RetrievalRankHint,
     SymbolRef,
 )
 from gt_engine.repository_intelligence import RepositoryEvidence
@@ -212,6 +213,68 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     assert metadata
     assert {row["origin"] for row in metadata} == {"preexisting_repository"}
     assert result.contributions[0].unsafe_provider_origins == ()
+
+
+def test_retrieval_rank_only_reorders_certified_process_facts() -> None:
+    snapshot = replace(
+        _snapshot(
+            _link("src/a.py", "src/core.py", "CALLS", "run_a", "work"),
+            _link("src/b.py", "src/core.py", "CALLS", "run_b", "work"),
+        ),
+        path_origins=(
+            ("src/a.py", "preexisting_repository"),
+            ("src/b.py", "preexisting_repository"),
+            ("src/core.py", "preexisting_repository"),
+        ),
+        retrieval_rank_hints=(
+            RetrievalRankHint("src/b.py", 0.9, ("dense", "bm25")),
+            RetrievalRankHint("src/a.py", 0.1, ("lexical",)),
+        ),
+    )
+
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_mutation",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        snapshot,
+    )
+
+    process = next(
+        contribution
+        for contribution in result.contributions
+        if contribution.surface == "repository_process"
+    )
+    assert process.payload.index("src/b.py#run_b") < process.payload.index("src/a.py#run_a")
+    assert result.process_coverage["retrieval_rank_hints"] == 2
+
+
+def test_retrieval_rank_hint_never_creates_delivery_authority() -> None:
+    snapshot = replace(
+        _snapshot(),
+        retrieval_rank_hints=(
+            RetrievalRankHint("src/unproven.py", 1.0, ("dense", "lexical")),
+        ),
+    )
+
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_mutation",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            changed_paths=("src/unproven.py",),
+        ),
+        snapshot,
+    )
+
+    assert all(item.surface != "repository_process" for item in result.contributions)
 
 
 def test_project_preserves_authority_when_packing_semantic_and_process_surfaces() -> None:

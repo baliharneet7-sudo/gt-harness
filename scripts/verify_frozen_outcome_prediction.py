@@ -53,6 +53,34 @@ def _is_ancestor(commit: str, current: str) -> bool:
     return result.returncode == 0
 
 
+def _changed_paths(commit: str, current: str) -> tuple[str, ...]:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{commit}..{current}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(
+        line.strip().replace("\\", "/")
+        for line in result.stdout.splitlines()
+        if line.strip()
+    )
+
+
+def _validate_post_runtime_paths(
+    *,
+    changed_paths: tuple[str, ...],
+    allowed_paths: tuple[str, ...],
+) -> None:
+    allowed = {str(path).replace("\\", "/") for path in allowed_paths}
+    unexpected = sorted(set(changed_paths) - allowed)
+    if unexpected:
+        raise ValueError(
+            "runtime or harness changed after prediction freeze: "
+            + ", ".join(unexpected)
+        )
+
+
 def verify(
     *,
     prediction_path: Path,
@@ -112,6 +140,23 @@ def verify(
             raise ValueError(f"{label} is not a full commit SHA")
         if not _is_ancestor(commit, current_commit):
             raise ValueError(f"{label} commit is not an ancestor of the treatment commit")
+    if prediction.get("schema") == "gt.final_20_task_outcome_prediction.v2":
+        allowed_paths = tuple(prediction.get("allowed_post_runtime_paths") or ())
+        if not allowed_paths:
+            raise ValueError("v2 prediction has no allowed post-runtime paths")
+        prediction_relative = prediction_path.as_posix()
+        try:
+            prediction_relative = prediction_path.resolve().relative_to(
+                Path.cwd().resolve()
+            ).as_posix()
+        except ValueError:
+            pass
+        if prediction_relative not in allowed_paths:
+            raise ValueError("prediction artifact is not in allowed post-runtime paths")
+        _validate_post_runtime_paths(
+            changed_paths=_changed_paths(runtime_commit, current_commit),
+            allowed_paths=allowed_paths,
+        )
 
     return {
         "schema": "gt.frozen_outcome_prediction_proof.v1",
@@ -125,6 +170,9 @@ def verify(
         "candidate_runtime_commit": runtime_commit,
         "candidate_runtime_proof_commit": proof_commit,
         "predicted_solved": predicted_solved,
+        "post_runtime_paths_verified": (
+            prediction.get("schema") == "gt.final_20_task_outcome_prediction.v2"
+        ),
     }
 
 

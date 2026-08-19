@@ -2279,12 +2279,13 @@ async def test_opt_in_replay_capture_is_receipted_without_changing_request(tmp_p
     metadata = receipt["replay_bundle"]
     assert metadata["enabled"] is True
     assert metadata["request_bodies_captured"] is True
+    assert metadata["request_envelopes_captured"] is True
     assert metadata["responses_captured"] is True
     assert metadata["trajectory_replay_ready"] is True
     assert metadata["model_causal_replay_ready"] is False
     manifest = json.loads((tmp_path / "gt_replay" / "manifest.json").read_text())
     calls = (tmp_path / "gt_replay" / "calls.jsonl").read_text().splitlines()
-    assert manifest["schema"] == "gt.counterfactual_replay_bundle.v2"
+    assert manifest["schema"] == "gt.counterfactual_replay_bundle.v3"
     assert calls
 
 
@@ -2488,6 +2489,10 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     assert census["persistent_execution_state"]["configured"] is True
     assert census["persistent_execution_state"]["exercised"] is True
     assert census["persistent_execution_state"]["bootstrap_calls"] == 0
+    assert census["persistent_execution_state"]["selection_mode"] == "deterministic_v1"
+    assert census["persistent_execution_state"]["selection_event_count"] == 1
+    assert census["persistent_execution_state"]["selection_provider_calls"] == 0
+    assert census["persistent_execution_state"]["bootstrap_provider_calls"] == 0
     assert receipt["relational_context"]["enabled"] is True
     assert receipt["component_configuration"]["relational_context_profile"] == {
         "profile_id": "relational-context-v1",
@@ -2509,12 +2514,18 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
         "integrated_same_observation"
     )
     assert receipt["component_configuration"]["replay_capture"] is True
-    assert receipt["intervention_chain"]["schema"] == "gt.intervention_chain.v1"
+    assert receipt["intervention_chain"]["schema"] == "gt.intervention_chain.v2"
     assert receipt["intervention_chain"]["hidden_reasoning_inferred"] is False
     assert (tmp_path / "intervention_chain.json").exists()
     assert all(
         decision["delivery_mode"] == "integrated_same_observation"
         for decision in receipt["preemptive_retrieval"]["decisions"]
+    )
+    assert receipt["metrics"]["preemptive_retrieval_shared_computations"] >= 1
+    assert receipt["metrics"]["preemptive_retrieval_rank_consumptions"] >= 1
+    assert any(
+        decision["retrieval_rank_hint_count"] >= 1
+        for decision in receipt["repository_context"]["decisions"]
     )
     second_request = "\n".join(model.observed_history[1])
     assert "Current certified repository context" in second_request

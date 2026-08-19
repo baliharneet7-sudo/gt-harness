@@ -79,6 +79,9 @@ def build_feature_lifecycle_report(
         "exercised_tasks": 0,
         "lifecycle_use_count": 0,
         "bootstrap_calls": 0,
+        "selection_event_count": 0,
+        "selection_provider_calls": 0,
+        "bootstrap_provider_calls": 0,
         "context_compilations": 0,
         "preflight_projections": 0,
         "postflight_commits": 0,
@@ -172,14 +175,30 @@ def build_feature_lifecycle_report(
 
         pes = census.get("persistent_execution_state") or {}
         count_fields = (
-            "bootstrap_calls",
             "context_compilations",
             "preflight_projections",
             "postflight_commits",
             "graph_rebases",
         )
         counts = {field: int(pes.get(field) or 0) for field in count_fields}
-        computed_lifecycle_uses = sum(counts.values())
+        selection_mode = str(pes.get("selection_mode") or "generative")
+        bootstrap_calls = int(pes.get("bootstrap_calls") or 0)
+        selection_events = int(
+            pes.get("selection_event_count")
+            if pes.get("selection_event_count") is not None
+            else bootstrap_calls
+        )
+        selection_provider_calls = int(
+            pes.get("selection_provider_calls")
+            if pes.get("selection_provider_calls") is not None
+            else bootstrap_calls
+        )
+        bootstrap_provider_calls = int(
+            pes.get("bootstrap_provider_calls")
+            if pes.get("bootstrap_provider_calls") is not None
+            else bootstrap_calls
+        )
+        computed_lifecycle_uses = selection_events + sum(counts.values())
         recorded_lifecycle_uses = int(pes.get("lifecycle_use_count") or 0)
         if recorded_lifecycle_uses != computed_lifecycle_uses:
             persistent["failures"].append(f"{task}:persistent_lifecycle_count_mismatch")
@@ -189,7 +208,19 @@ def build_feature_lifecycle_report(
             persistent["failures"].append(f"{task}:persistent_not_configured")
         if pes.get("applicable") is True:
             persistent["applicable_tasks"] += 1
-            if counts["bootstrap_calls"] != 1:
+            if selection_events != 1:
+                persistent["failures"].append(f"{task}:persistent_selection_count")
+            if selection_mode == "deterministic_v1":
+                if selection_provider_calls or bootstrap_provider_calls or bootstrap_calls:
+                    persistent["failures"].append(
+                        f"{task}:deterministic_selection_used_provider"
+                    )
+            elif (
+                selection_mode != "generative"
+                or selection_provider_calls != 1
+                or bootstrap_provider_calls != 1
+                or bootstrap_calls != 1
+            ):
                 persistent["failures"].append(f"{task}:persistent_bootstrap_count")
             if computed_lifecycle_uses <= 0 or pes.get("exercised") is not True:
                 persistent["failures"].append(f"{task}:persistent_not_exercised")
@@ -207,6 +238,10 @@ def build_feature_lifecycle_report(
             persistent["failures"].append(f"{task}:persistent_applicability_unaccounted")
         if pes.get("exercised") is True:
             persistent["exercised_tasks"] += 1
+        persistent["bootstrap_calls"] += bootstrap_calls
+        persistent["selection_event_count"] += selection_events
+        persistent["selection_provider_calls"] += selection_provider_calls
+        persistent["bootstrap_provider_calls"] += bootstrap_provider_calls
         for field in ("lifecycle_use_count", *count_fields):
             persistent[field] += int(pes.get(field) or 0)
         persistent["failures"].extend(

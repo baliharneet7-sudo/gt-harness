@@ -46,7 +46,8 @@ task + exact checkout + observed actions
  provider evidence ledger + delivery audit + release gate
 
 PersistentExecutionStateEngine remains active around the same loop:
-one bounded bootstrap, compile_context, preflight, postflight, graph rebase.
+one deterministic zero-provider selection event, compile_context, preflight, postflight, graph
+rebase. The generative bootstrap remains a legacy-profile implementation path only.
 ```
 
 ## Safety and evidence rules

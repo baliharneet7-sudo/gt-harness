@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -115,14 +117,55 @@ def test_bundle_audit_counts_only_exact_valid_pairs(tmp_path):
     row = _row()
     path = tmp_path / "task-1__trial" / "agent" / "gt_replay"
     writer = ReplayBundleWriter(path, enabled=True)
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    for call in (1, 2):
+        messages = [{"role": "user", "content": f"prior-{call}"}]
+        envelope = {
+            "model": row["model_name"],
+            "model_kwargs": {},
+            "tools": row["provider_tools"],
+            "messages": messages,
+        }
+        writer.record_request(
+            call=call,
+            provider_messages=messages,
+            request_envelope=envelope,
+            provider_tools=row["provider_tools"],
+            request_payload_sha256=hashlib.sha256(canonical(envelope)).hexdigest(),
+            provider_messages_sha256=hashlib.sha256(canonical(messages)).hexdigest(),
+            model_name=row["model_name"],
+            model_kwargs={},
+            temperature=row["sampling"]["temperature"],
+            active_state={},
+            source_revision=row["source_revision"],
+            workspace_revision=row["workspace_revision"],
+        )
+        writer.record_response(
+            call=call, response={"role": "assistant", "content": "continue"}
+        )
+    request_envelope = {
+        "model": row["model_name"],
+        "model_kwargs": {},
+        "tools": row["provider_tools"],
+        "messages": row["provider_messages"],
+    }
+    control_envelope = {
+        **request_envelope,
+        "messages": row["control_provider_messages"],
+    }
     writer.record_request(
         call=row["call"],
         provider_messages=row["provider_messages"],
         control_provider_messages=row["control_provider_messages"],
         intervention=row["intervention"],
         provider_tools=row["provider_tools"],
-        request_payload_sha256="request",
-        provider_messages_sha256="treatment",
+        request_envelope=request_envelope,
+        control_request_envelope=control_envelope,
+        request_payload_sha256=hashlib.sha256(canonical(request_envelope)).hexdigest(),
+        provider_messages_sha256=hashlib.sha256(
+            canonical(row["provider_messages"])
+        ).hexdigest(),
         model_name=row["model_name"],
         model_kwargs={},
         temperature=row["sampling"]["temperature"],
@@ -140,7 +183,7 @@ def test_bundle_audit_counts_only_exact_valid_pairs(tmp_path):
 
     assert report["bundle_count"] == 1
     assert report["valid_case_count"] == 1
-    assert report["validity_counts"] == {"valid": 1}
+    assert report["validity_counts"] == {"missing_control": 2, "valid": 1}
 
 
 def test_promotion_workflow_renders_the_caller_owned_treatment_contract():

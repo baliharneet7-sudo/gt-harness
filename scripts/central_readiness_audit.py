@@ -25,12 +25,18 @@ from harbor.agents.installed.base import BaseInstalledAgent
 from minisweagent.models.litellm_model import BASH_TOOL, LitellmModel
 
 from eval.gt_central_agent import GTIntegrationMode, MiniSweCentralAgent
-from gt_engine.central_runtime import CentralFeatureRuntime, ValidationClassification
+from gt_engine.central_runtime import (
+    CENTRAL_FEATURE_IDS,
+    CentralFeatureRuntime,
+    ValidationClassification,
+)
 from gt_engine.component_registry import audit_component_registry
 from gt_engine.host_execution import HostExecutionRecorder
+from gt_engine.intervention_chain import build_intervention_chain
 from gt_engine.preflight import PreflightMode
 from gt_engine.treatment_adapter import treatment_from_descriptor
 from scripts.central_feature_census import census as central_feature_census
+from scripts.central_release_gate import _product_mechanism_census
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -153,6 +159,58 @@ def audit() -> dict[str, bool]:
         model = agent._build_model()
     feature_result = central_feature_census()
     component_result = audit_component_registry()
+    deterministic_census_check = _product_mechanism_census(
+        {
+            "treatment_profile": "central_relational_v2",
+            "executor_calls": 1,
+            "product_mechanism_census": {
+                "accounting_contract": "17_legacy_features_plus_1_persistent_state",
+                "legacy_feature_count": 17,
+                "product_mechanism_count": 18,
+                "mechanism_ids": [*CENTRAL_FEATURE_IDS, "persistent_execution_state"],
+                "configured_mechanism_count": 18,
+                "configured_mechanism_ids": [
+                    *CENTRAL_FEATURE_IDS,
+                    "persistent_execution_state",
+                ],
+                "naturally_fired_legacy_feature_count": 0,
+                "persistent_execution_state": {
+                    "configured": True,
+                    "applicable": True,
+                    "correctly_abstained": False,
+                    "exercised": True,
+                    "repeated_deterministic_use": True,
+                    "lifecycle_use_count": 2,
+                    "selection_mode": "deterministic_v1",
+                    "selection_event_count": 1,
+                    "selection_provider_calls": 0,
+                    "bootstrap_provider_calls": 0,
+                    "bootstrap_calls": 0,
+                },
+            },
+        },
+        "readiness",
+    )
+    intervention_probe = build_intervention_chain(
+        {
+            "model_call_contexts": [
+                {
+                    "call": 1,
+                    "request_payload_sha256": "request",
+                    "provider_messages_sha256": "messages",
+                }
+            ],
+            "task_semantic_substrate": {
+                "deliveries": [
+                    {
+                        "delivery_id": "probe",
+                        "delivered_before_call": 1,
+                        "claim_ids": ["probe-claim"],
+                    }
+                ]
+            },
+        }
+    )
     return {
         "host_base_agent": issubclass(MiniSweCentralAgent, BaseAgent),
         "not_installed_agent": not issubclass(MiniSweCentralAgent, BaseInstalledAgent),
@@ -221,6 +279,30 @@ def audit() -> dict[str, bool]:
         ),
         "paid_replay_capture_required_for_final_profile": (
             treatment_runtime.get("enable_replay_capture") is True
+        ),
+        "provider_free_gate_covers_intervention_audit": (
+            "tests/test_intervention_chain.py" in provider_free_workflow
+            and "gt_engine/intervention_chain.py" in provider_free_workflow
+        ),
+        "provider_free_gate_covers_benchmark_reports": (
+            "tests/test_benchmark_reports.py" in provider_free_workflow
+            and "gt_engine/benchmark_reports.py" in provider_free_workflow
+            and "tests/test_verify_frozen_outcome_prediction.py"
+            in provider_free_workflow
+        ),
+        "final_zero_provider_selection_contract_executes": (
+            deterministic_census_check.passed
+        ),
+        "canonical_intervention_coverage_executes": (
+            intervention_probe.get("schema") == "gt.intervention_chain.v2"
+            and int((intervention_probe.get("counts") or {}).get("rows") or 0) == 1
+            and int(
+                (intervention_probe.get("counts") or {}).get(
+                    "canonical_delivery_rows"
+                )
+                or 0
+            )
+            == 1
         ),
         "provider_free_gate_covers_context_compiler": (
             "tests/test_provider_view.py" in provider_free_workflow

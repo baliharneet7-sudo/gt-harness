@@ -2142,3 +2142,44 @@ defect): `patches/oh054/apply_gt_tools.py` and `models/e5-small-v2` are
 referenced by the `setup-eval` action but absent from the fork itself, so the
 cache-miss install branch invoking `apply_gt_tools.py` is broken in the source
 fork too; verify those before any paid Live Lite dispatch.
+
+## Final relational-v2 selection, replay, and release contract (2026-08-18)
+
+This section supersedes every earlier statement that the final
+`central_relational_v2` treatment performs one generative bootstrap provider
+call. The final treatment performs exactly one deterministic catalog-selection
+event and **zero** selection/bootstrap provider calls. The legacy generative
+bootstrap remains available only to older profiles; it is not part of the final
+TB2 treatment. The product census remains 17+1: selection is a lifecycle event
+inside `persistent_execution_state`, not a nineteenth mechanism.
+
+Every applicable final receipt must record
+`selection_mode=deterministic_v1`, `selection_event_count=1`,
+`selection_provider_calls=0`, and `bootstrap_provider_calls=0`. Total provider
+calls therefore equal executor provider calls. Identity comes from executor
+responses; an empty bootstrap model/provider is correct and must not make the
+identity incomplete.
+
+Five-channel retrieval is computed once per semantic cache key and supplies
+rank-only path hints to `RepositoryContextEngine`. Those hints may reorder
+already-certified process and impact facts; dense, lexical, or BM25 support can
+never create delivery authority. Certified graph/type/test/route/check evidence
+remains mandatory. This gives GT GitNexus-style process-aware packing without
+downgrading GT's stronger uncertainty and provenance boundary.
+
+Replay capture is mandatory for the final profile. `gt_replay` v3 stores the
+exact sanitized model/kwargs/tools/messages envelope, control envelope, and
+response blobs under content hashes. `intervention_chain.json` v2 is generated
+from the same twelve canonical delivery surfaces as the authoritative delivery
+audit and joins each delivery to its exact call, visible response, selected
+action cycle, and postflight. Visible reasoning references and behavioral
+alignment are observational uptake only. Every row remains
+`UNIDENTIFIABLE_WITHOUT_COUNTERFACTUAL` until a matched arm or mechanism
+ablation establishes causality.
+
+The merge gate must load and cryptographically verify exactly one receipt,
+trajectory, replay manifest, intervention chain, and graded trial result for
+each frozen task. It emits separate integrity, solve, efficiency, and
+intervention reports. No paid smoke is authorized until the exact candidate
+commit passes the source-built Linux provider-free workflow; local Python or a
+stale checked-in Windows index binary cannot substitute for that proof.

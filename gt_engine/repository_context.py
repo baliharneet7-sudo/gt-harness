@@ -132,6 +132,15 @@ class DecisionOpportunity:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalRankHint:
+    """Rank-only retrieval signal; never a provider-delivery certificate."""
+
+    path: str
+    fused_score: float
+    supporting_channels: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RepositorySnapshot:
     source_revision: str
     graph_revision: str
@@ -141,6 +150,7 @@ class RepositorySnapshot:
     validation_checks: tuple[str, ...] = ()
     represented_checks: frozenset[str] = frozenset()
     path_origins: tuple[tuple[str, str], ...] = ()
+    retrieval_rank_hints: tuple[RetrievalRankHint, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -909,6 +919,59 @@ class RepositoryContextEngine:
             for item in coupled
             for claim_id in item.constituent_claim_ids
         }
+        retrieval_scores = {
+            _path(hint.path): float(hint.fused_score)
+            for hint in snapshot.retrieval_rank_hints
+            if _path(hint.path)
+        }
+
+        def retrieval_order(paths: tuple[str, ...], stable_id: str) -> tuple[float, str]:
+            score = max((retrieval_scores.get(_path(path), -1.0) for path in paths), default=-1.0)
+            return (-score, stable_id)
+
+        execution_views = tuple(
+            sorted(
+                execution_views,
+                key=lambda view: retrieval_order(
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                *(step.source.path for step in view.steps),
+                                *(step.target.path for step in view.steps),
+                            )
+                        )
+                    ),
+                    view.view_id,
+                ),
+            )
+        )
+        impact = tuple(
+            sorted(
+                impact,
+                key=lambda fact: retrieval_order(
+                    (fact.source.path, fact.target.path),
+                    fact.claim_id,
+                ),
+            )
+        )
+        process_coverage["retrieval_rank_hints"] = len(snapshot.retrieval_rank_hints)
+        process_coverage["retrieval_ranked_items"] = sum(
+            any(_path(path) in retrieval_scores for path in paths)
+            for paths in (
+                *(
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                *(step.source.path for step in view.steps),
+                                *(step.target.path for step in view.steps),
+                            )
+                        )
+                    )
+                    for view in execution_views
+                ),
+                *((fact.source.path, fact.target.path) for fact in impact),
+            )
+        )
 
         semantic_lines = (
             [(item.claim_id, item.rendered) for item in semantic.items]

@@ -697,6 +697,37 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
     if mechanism.get("configured") is not True:
         failures.append(f"{label}:{failure_prefix}_product_mechanism_not_configured")
     if mechanism_applicable:
+        selection_mode = str(mechanism.get("selection_mode") or "generative")
+        bootstrap_calls = int(mechanism.get("bootstrap_calls") or 0)
+        selection_events = int(
+            mechanism.get("selection_event_count")
+            if mechanism.get("selection_event_count") is not None
+            else bootstrap_calls
+        )
+        selection_provider_calls = int(
+            mechanism.get("selection_provider_calls")
+            if mechanism.get("selection_provider_calls") is not None
+            else bootstrap_calls
+        )
+        bootstrap_provider_calls = int(
+            mechanism.get("bootstrap_provider_calls")
+            if mechanism.get("bootstrap_provider_calls") is not None
+            else bootstrap_calls
+        )
+        if selection_events != 1:
+            failures.append(f"{label}:{failure_prefix}_selection_count")
+        if selection_mode == "deterministic_v1":
+            if selection_provider_calls or bootstrap_provider_calls or bootstrap_calls:
+                failures.append(
+                    f"{label}:{failure_prefix}_deterministic_selection_used_provider"
+                )
+        elif (
+            selection_mode != "generative"
+            or selection_provider_calls != 1
+            or bootstrap_provider_calls != 1
+            or bootstrap_calls != 1
+        ):
+            failures.append(f"{label}:{failure_prefix}_bootstrap_count")
         if mechanism.get("exercised") is not True:
             failures.append(f"{label}:{failure_prefix}_product_mechanism_not_exercised")
         executor_calls = int(receipt.get("executor_calls") or 0)
@@ -1215,10 +1246,7 @@ def _replay_and_intervention_audit(
 ) -> ReleaseGateCheck:
     """Require exact replay and intervention joins for the final profile."""
 
-    if (
-        str(receipt.get("treatment_profile") or "") != "central_relational_v2"
-        or (receipt.get("component_configuration") or {}).get("replay_capture") is not True
-    ):
+    if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
         return ReleaseGateCheck(
             "replay_and_intervention_audit", True, (), {"task": label, "required": False}
         )
@@ -1231,12 +1259,14 @@ def _replay_and_intervention_audit(
         failures.append(f"{label}:trajectory_replay_not_ready")
     if replay.get("call_count", 0) != len(receipt.get("model_call_contexts") or []):
         failures.append(f"{label}:replay_call_count_mismatch")
-    if chain.get("schema") != "gt.intervention_chain.v1":
+    if chain.get("schema") != "gt.intervention_chain.v2":
         failures.append(f"{label}:intervention_chain_missing")
     if chain.get("hidden_reasoning_inferred") is not False:
         failures.append(f"{label}:intervention_chain_reasoning_policy")
     if not isinstance(chain.get("path"), str) or not chain.get("path"):
         failures.append(f"{label}:intervention_chain_artifact_missing")
+    if int(chain.get("rows") or 0) != int(chain.get("canonical_delivery_rows") or 0):
+        failures.append(f"{label}:intervention_chain_delivery_coverage")
     return ReleaseGateCheck(
         "replay_and_intervention_audit",
         not failures,

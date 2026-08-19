@@ -129,6 +129,9 @@ jobs:
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py \
             tests/test_replay_bundle.py \
+            tests/test_intervention_chain.py \
+            tests/test_benchmark_reports.py \
+            tests/test_verify_frozen_outcome_prediction.py \
             tests/test_preemptive_retrieval_frame.py \
             tests/test_hybrid_retrieval.py \
             tests/test_diagnostics.py \
@@ -180,6 +183,8 @@ jobs:
             gt_engine/snowflake_onnx.py \
             gt_engine/semantic_decisions.py gt_engine/deep_metrics.py \
             gt_engine/delivery_audit.py \
+            gt_engine/intervention_chain.py \
+            gt_engine/benchmark_reports.py \
             gt_engine/runtime_gate.py \
             gt_engine/task_semantic_substrate.py \
             gt_engine/convergence_controller.py \
@@ -198,6 +203,7 @@ jobs:
             scripts/central_replay.py scripts/central_run_diff.py \
             scripts/central_trajectory_audit.py \
             scripts/central_integrity_audit.py \
+            scripts/verify_frozen_outcome_prediction.py \
             scripts/central_decision_completeness.py \
             scripts/central_decisive_replay.py \
             scripts/central_pre_smoke_gate.py \
@@ -231,6 +237,9 @@ jobs:
             tests/test_gt_runtime_gate.py \
             tests/test_gt_preemptive_decision_accounting.py \
             tests/test_replay_bundle.py \
+            tests/test_intervention_chain.py \
+            tests/test_benchmark_reports.py \
+            tests/test_verify_frozen_outcome_prediction.py \
             tests/test_gt_deep_metrics.py \
             tests/test_gt_central_consumer_proof.py \
             tests/test_gt_on_experiment.py \

@@ -13,6 +13,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,22 @@ def _response_projection(response: Any) -> dict[str, Any]:
     }
 
 
+def _atomic_write(path: Path, body: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 class ReplayBundleWriter:
     """Write an exact content-addressed replay bundle.
 
@@ -96,7 +114,9 @@ class ReplayBundleWriter:
         *,
         call: int,
         provider_messages: list[dict[str, Any]],
+        request_envelope: dict[str, Any],
         control_provider_messages: list[dict[str, Any]] | None = None,
+        control_request_envelope: dict[str, Any] | None = None,
         intervention: dict[str, Any] | None = None,
         provider_tools: Any = None,
         request_payload_sha256: str,
@@ -112,6 +132,7 @@ class ReplayBundleWriter:
             return
         body = _canonical(provider_messages)
         request_blob = self._blob(provider_messages)
+        envelope_blob = self._blob(request_envelope)
         row: dict[str, Any] = {
             "call": int(call),
             "request_payload_sha256": str(request_payload_sha256),
@@ -124,11 +145,15 @@ class ReplayBundleWriter:
             "workspace_revision": str(workspace_revision),
             "controller_state": active_state,
             "request_blob_sha256": request_blob,
+            "request_envelope_blob_sha256": envelope_blob,
+            "request_envelope_captured": True,
             "request_captured": True,
             "response_captured": False,
             "dispatch_status": "prepared",
         }
         if control_provider_messages is not None:
+            if control_request_envelope is None:
+                raise ValueError("control request envelope required")
             control_body = _canonical(control_provider_messages)
             row.update(
                 {
@@ -139,6 +164,10 @@ class ReplayBundleWriter:
                         control_body
                     ).hexdigest(),
                     "control_request_captured": True,
+                    "control_request_envelope_blob_sha256": self._blob(
+                        control_request_envelope
+                    ),
+                    "control_request_envelope_captured": True,
                     "intervention": dict(intervention or {}),
                 }
             )
@@ -202,6 +231,14 @@ class ReplayBundleWriter:
                 and self._calls
                 and all(row.get("request_captured") for row in self._calls.values())
             ),
+            "request_envelopes_captured": bool(
+                self.enabled
+                and self._calls
+                and all(
+                    row.get("request_envelope_captured")
+                    for row in self._calls.values()
+                )
+            ),
             "responses_captured": bool(
                 self.enabled
                 and all(
@@ -215,6 +252,10 @@ class ReplayBundleWriter:
                 and self._complete
                 and self._calls
                 and all(row.get("request_captured") for row in self._calls.values())
+                and all(
+                    row.get("request_envelope_captured")
+                    for row in self._calls.values()
+                )
                 and all(
                     row.get("response_captured")
                     for row in self._calls.values()
@@ -239,25 +280,28 @@ class ReplayBundleWriter:
         for digest, body in self._blobs.items():
             target = blobs_dir / f"{digest}.json.gz"
             if not target.exists():
-                target.write_bytes(gzip.compress(body, mtime=0))
+                _atomic_write(target, gzip.compress(body, mtime=0))
         calls_body = b"".join(
             _canonical(self._calls[key]) + b"\n" for key in sorted(self._calls)
         )
         calls_path = self.path / "calls.jsonl"
-        calls_path.write_bytes(calls_body)
+        _atomic_write(calls_path, calls_body)
         metadata["calls_sha256"] = hashlib.sha256(calls_body).hexdigest()
         manifest = {
-            "schema": "gt.counterfactual_replay_bundle.v2",
+            "schema": "gt.counterfactual_replay_bundle.v3",
             "metadata": metadata,
         }
         manifest_path = self.path / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        _atomic_write(
+            manifest_path,
+            (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
+        )
         metadata["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
         return metadata
 
 
 def load_replay_bundle(path: str | Path) -> dict[str, Any]:
-    """Load and cryptographically verify an exact v2 replay bundle."""
+    """Load and cryptographically verify an exact replay bundle."""
 
     root = Path(path)
     manifest_path = root / "manifest.json"
@@ -267,7 +311,11 @@ def load_replay_bundle(path: str | Path) -> dict[str, Any]:
         calls_body = calls_path.read_bytes()
     except (OSError, ValueError) as exc:
         raise ValueError("replay manifest unreadable") from exc
-    if manifest.get("schema") != "gt.counterfactual_replay_bundle.v2":
+    schema = str(manifest.get("schema") or "")
+    if schema not in {
+        "gt.counterfactual_replay_bundle.v2",
+        "gt.counterfactual_replay_bundle.v3",
+    }:
         raise ValueError("replay schema mismatch")
     metadata = manifest.get("metadata") or {}
     if hashlib.sha256(calls_body).hexdigest() != metadata.get("calls_sha256"):
@@ -280,7 +328,12 @@ def load_replay_bundle(path: str | Path) -> dict[str, Any]:
             raise ValueError("replay call row invalid") from exc
         for field, output_key in (
             ("request_blob_sha256", "provider_messages"),
+            ("request_envelope_blob_sha256", "request_envelope"),
             ("control_request_blob_sha256", "control_provider_messages"),
+            (
+                "control_request_envelope_blob_sha256",
+                "control_request_envelope",
+            ),
             ("provider_tools_blob_sha256", "provider_tools"),
             ("response_blob_sha256", "response"),
         ):
@@ -299,10 +352,38 @@ def load_replay_bundle(path: str | Path) -> dict[str, Any]:
             except ValueError as exc:
                 raise ValueError("replay blob JSON invalid") from exc
         calls.append(row)
-    if [int(row.get("call") or 0) for row in calls] != sorted(
-        int(row.get("call") or 0) for row in calls
-    ):
+    call_ids = [int(row.get("call") or 0) for row in calls]
+    if call_ids != sorted(call_ids) or len(call_ids) != len(set(call_ids)):
         raise ValueError("replay call order invalid")
+    if schema == "gt.counterfactual_replay_bundle.v3":
+        if call_ids and call_ids != list(range(1, len(call_ids) + 1)):
+            raise ValueError("replay call sequence invalid")
+        for row in calls:
+            messages = row.get("provider_messages")
+            envelope = row.get("request_envelope")
+            if not isinstance(messages, list) or not isinstance(envelope, dict):
+                raise ValueError("replay request envelope missing")
+            if hashlib.sha256(_canonical(messages)).hexdigest() != str(
+                row.get("provider_messages_sha256") or ""
+            ):
+                raise ValueError("replay provider messages hash mismatch")
+            if hashlib.sha256(_canonical(envelope)).hexdigest() != str(
+                row.get("request_payload_sha256") or ""
+            ):
+                raise ValueError("replay request envelope hash mismatch")
+            if envelope.get("messages") != messages:
+                raise ValueError("replay envelope messages mismatch")
+            if row.get("provider_tools_captured") and envelope.get("tools") != row.get(
+                "provider_tools"
+            ):
+                raise ValueError("replay envelope tools mismatch")
+            control = row.get("control_provider_messages")
+            control_envelope = row.get("control_request_envelope")
+            if control is not None:
+                if not isinstance(control_envelope, dict):
+                    raise ValueError("replay control envelope missing")
+                if control_envelope.get("messages") != control:
+                    raise ValueError("replay control envelope messages mismatch")
     return {"manifest": manifest, "calls": calls}
 
 

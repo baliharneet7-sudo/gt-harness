@@ -41,7 +41,8 @@ small-run GT versus strengthened GT on the frozen 20-task setup.
 
 ## Completed build work
 
-- [x] Preserve `PersistentExecutionStateEngine` and its one bounded bootstrap.
+- [x] Preserve `PersistentExecutionStateEngine`; replace the final profile's generative bootstrap
+  with one deterministic catalog-selection event and zero selection provider calls.
 - [x] Preserve the canonical 17 legacy mechanisms plus persistent state product census.
 - [x] Read edge resolution provenance and treat missing provenance as unknown.
 - [x] Refuse ambiguous, external, heuristic, stale, low-confidence, or content-unbound edges.
@@ -157,15 +158,22 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
   those legal task artifacts can be restored. The current archive has receipts and replay blobs but
   no legal source workspaces, so those rows are currently unavailable; never turn the frozen
   counterfactual predictions into fake replay measurements.
-- [x] Update and freeze the final 20-task outcome prediction artifact before inspecting any new
-  outcome. The frozen artifact is
-  `docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-18.json`; the workflow verifies
-  its profile, task order, baseline hash, and pre-outcome state.
+- [x] Implement the final deterministic-selection, replay-v3, intervention-chain-v2, retrieval
+  rank-consumption, and four-report merge contract. The candidate now has one deterministic
+  selection event with zero selection/bootstrap provider calls; all visible delivery surfaces,
+  exact request envelopes, action joins, replay hashes, and causal limitations are auditable.
+- [x] Freeze the prediction artifact as the prediction-only follow-up commit
+  `docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-19_V2.json`. The verifier rejects
+  any runtime or harness change after the implementation commit; only this artifact may be added.
+- [ ] Run the exact source-built Linux provider-free workflow for the implementation commit,
+  then verify the prediction-only commit. Local Windows execution is not authoritative because
+  the checked-in index binary can be stale.
 - [ ] Run the final frozen 20-task comparison: strengthened GT live, with the frozen GT-off
   baseline and previous GT result joined offline. A new GT-off arm is forbidden by the current
-  benchmark contract.
-- [ ] Report resolve rate, flips, steps, calls, tokens, cost, evidence use, latency, abstentions, and
-  invalid/provider-censored rows with the full denominator preserved.
+  benchmark contract. Do not run a paid smoke before the exact source-built proof passes.
+- [ ] Publish the four separate reports: integrity, solve, efficiency, and intervention. Preserve
+  the full denominator and classify counterfactual causality as unknown unless a matched replay or
+  mechanism ablation supports it.
 
 ## Do not build
 
@@ -181,6 +189,8 @@ prediction is in `docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.
 
 ## Exact next step
 
-The next step is the outcome phase: run the strengthened candidate on frozen `repair20-v1`.
-The GT-off baseline and previous GT result are offline reference artifacts, not new run arms.
-GitNexus is not a run arm. The provider-free proof does not establish solve uplift or efficiency.
+The implementation is frozen pending the source-built Linux proof. Run that proof, then verify the
+prediction-only commit and only afterward execute the frozen `repair20-v1` comparison. The GT-off
+baseline and previous GT result are offline reference artifacts, not new run arms. GitNexus is not
+a run arm. Provider-free proof establishes integrity only; the four benchmark reports establish
+solve, efficiency, and intervention results separately.
