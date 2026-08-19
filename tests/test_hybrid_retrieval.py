@@ -1393,3 +1393,48 @@ def test_preemptive_frame_is_none_when_retriever_abstains():
 
     assert result.abstained is True
     assert build_preemptive_frame(result, _state(), trigger="task_start") is None
+
+
+def test_retrieval_status_separates_dense_attempt_from_selected_use():
+    result = HybridRetriever(
+        (
+            RepositoryDocument("src/allocator.py", "allocator implementation"),
+            RepositoryDocument("tests/test_allocator.py", "allocator regression"),
+        ),
+        structural_links=(
+            StructuralLink(
+                source_path="src/allocator.py",
+                target_path="tests/test_allocator.py",
+                relation="calls",
+                certified=True,
+                target_start_line=1,
+            ),
+        ),
+        dense_backend=FakeDenseBackend(),
+        dense_fallback_only=True,
+    ).retrieve(
+        _state(
+            intent=RetrievalIntent.VALIDATION_CONTEXT,
+            active_paths=("src/allocator.py",),
+        ),
+        token_budget=200,
+    )
+
+    status = result.retrieval_status()
+    assert status["expected_mode"] == "dense_fallback_only"
+    assert status["dense_channel_present"] is True
+    assert status["dense_query_attempted"] is True
+    assert status["dense_candidate_count"] >= 0
+    assert status["dense_result_used"] is False or status["fallback_used"] is False
+
+
+def test_retrieval_status_reports_missing_dense_channel_without_fabrication():
+    result = HybridRetriever(
+        (), channels=(StructuralRetrievalChannel((), ()),), dense_fallback_only=True
+    ).retrieve(_state())
+
+    status = result.retrieval_status()
+    assert status["dense_channel_present"] is False
+    assert status["dense_query_attempted"] is False
+    assert status["dense_result_used"] is False
+    assert status["fallback_used"] is False

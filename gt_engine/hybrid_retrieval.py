@@ -750,6 +750,57 @@ class HybridRetrievalResult:
     selected_token_count: int
     character_budget: int | None = None
     selected_character_count: int = 0
+    dense_fallback_only: bool = False
+
+    def retrieval_status(self) -> dict[str, object]:
+        """Return an explicit dense/fallback accounting boundary.
+
+        A dense backend receipt proves provisioning and a dense channel receipt
+        proves an attempt/result.  Neither proves that dense evidence affected
+        the selected context.  This method keeps those facts separate so a
+        report cannot silently label sparse fallback as dense success.
+        """
+
+        dense = next(
+            (row for row in self.channel_receipts if row.channel is RetrievalChannel.DENSE),
+            None,
+        )
+        dense_reason = str(dense.reason if dense is not None else "")
+        dense_attempted = bool(
+            dense is not None
+            and not dense.failed
+            and dense_reason not in {"backend_unavailable", "candidate_pool_empty"}
+        )
+        dense_ranked_paths = {
+            row.path
+            for row in self.ranked_files
+            if any(channel is RetrievalChannel.DENSE for channel, _rank in row.channel_ranks)
+        }
+        dense_selected = any(
+            row.path in dense_ranked_paths for row in self.selected_context
+        )
+        available = bool(dense is not None and dense.available and not dense.failed)
+        fallback_used = bool(self.selected_context) and not dense_selected
+        fallback_reason = ""
+        if fallback_used:
+            fallback_reason = (
+                dense_reason
+                or "dense_not_selected"
+                if dense is not None
+                else "dense_channel_missing"
+            )
+        return {
+            "schema": "gt.retrieval_status.v1",
+            "expected_mode": "dense_fallback_only" if self.dense_fallback_only else "dense_primary",
+            "dense_channel_present": dense is not None,
+            "dense_backend_available": available,
+            "dense_query_attempted": dense_attempted,
+            "dense_candidate_count": int(dense.candidate_count) if dense is not None else 0,
+            "dense_result_used": dense_selected,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
+            "selected_evidence_count": len(self.selected_context),
+        }
 
 
 @dataclass(frozen=True)
@@ -1643,6 +1694,7 @@ class HybridRetriever:
                 selected_token_count=0,
                 character_budget=normalized_character_budget,
                 selected_character_count=0,
+                dense_fallback_only=self._dense_fallback_only,
             )
         channel_results: dict[RetrievalChannel, tuple[RetrievalCandidate, ...]] = {}
         receipts: list[ChannelReceipt] = []
@@ -1884,6 +1936,7 @@ class HybridRetriever:
             selected_token_count=selected_tokens,
             character_budget=normalized_character_budget,
             selected_character_count=selected_characters,
+            dense_fallback_only=self._dense_fallback_only,
         )
 
 

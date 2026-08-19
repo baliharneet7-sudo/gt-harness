@@ -116,6 +116,9 @@ def test_tracker_records_use_without_claiming_counterfactual_replacement() -> No
 
     assert delivery["exploration_relationship"] == "context_used_without_prior_exploration"
     assert tracker.summary()["context_used_without_prior_exploration"] == 1
+    assert tracker.summary()["replacement_opportunities"] == 1
+    assert tracker.summary()["causal_claim_allowed"] is False
+    assert tracker.summary()["causal_claim_requires_matched_ablation"] is True
 
 
 def test_tracker_records_when_context_is_followed_by_more_exploration() -> None:

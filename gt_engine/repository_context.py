@@ -216,7 +216,11 @@ class RepositoryContextProjection:
     token_count: int = 0
     truncated_count: int = 0
     rejected_edge_count: int = 0
-    process_coverage: dict[str, int] = field(default_factory=dict)
+    # A bounded, replayable certificate for the process projection.  The
+    # counters are deliberately kept separate from the returned views: a
+    # consumer must be able to tell a complete lower-bound projection from a
+    # view-list that was silently truncated.
+    process_coverage: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         row = asdict(self)
@@ -528,6 +532,10 @@ class RepositoryContextEngine:
         ranked = tuple(sorted(unique.values(), key=score))
         selected = ranked[: self.max_execution_views]
         coverage = {
+            "profile_id": "gt.certified_process.v1",
+            "max_depth": self.max_depth,
+            "max_branching": self.max_branching,
+            "max_execution_views": self.max_execution_views,
             "entries_considered": len(entries),
             "paths_considered": paths_considered,
             "returned_views": len(selected),

@@ -649,6 +649,25 @@ def _repository_context_state(receipt: dict[str, Any], label: str) -> ReleaseGat
         row_claims = tuple(str(item) for item in row.get("claim_ids") or ())
         if not row_claims or not row.get("projection"):
             failures.append(f"{label}:repository_context_delivery_support_missing:{index}")
+        projection = row.get("projection") or {}
+        execution_views = tuple(projection.get("execution_views") or ())
+        if execution_views:
+            coverage = projection.get("process_coverage") or {}
+            coverage_valid = bool(
+                isinstance(coverage, dict)
+                and str(coverage.get("profile_id") or "")
+                == "gt.certified_process.v1"
+                and int(coverage.get("max_depth") or 0) > 0
+                and int(coverage.get("max_branching") or 0) > 0
+                and int(coverage.get("max_execution_views") or 0) > 0
+                and int(coverage.get("returned_views") or 0) == len(execution_views)
+                and int(coverage.get("candidate_views") or 0) >= len(execution_views)
+                and int(coverage.get("lower_bound") or 0) == 1
+            )
+            if not coverage_valid:
+                failures.append(
+                    f"{label}:repository_context_process_coverage_invalid:{index}"
+                )
         for claim in row_claims:
             if claim in claims:
                 failures.append(f"{label}:repository_context_duplicate_claim:{claim}")
@@ -1135,6 +1154,36 @@ def _retrieval_efficiency(receipt: dict[str, Any], label: str) -> ReleaseGateChe
             failures.append(f"{label}:retrieval_opportunity_missing:{index}")
         reasons = set(row.get("reason_codes") or ())
         channels = row.get("channel_receipts") or []
+        if (
+            str(receipt.get("treatment_profile") or "") == "central_relational_v2"
+            and not (
+                (receipt.get("repository_intelligence") or {}).get("denominator_excluded")
+                is True
+            )
+            and channels
+        ):
+            status = row.get("retrieval_status") or {}
+            dense = next(
+                (item for item in channels if str(item.get("channel") or "") == "dense"),
+                None,
+            )
+            expected_mode = (
+                "dense_fallback_only"
+                if (receipt.get("component_configuration") or {}).get(
+                    "dense_fallback_only"
+                ) is True
+                else "dense_primary"
+            )
+            status_valid = bool(
+                isinstance(status, dict)
+                and status.get("schema") == "gt.retrieval_status.v1"
+                and status.get("expected_mode") == expected_mode
+                and status.get("dense_channel_present") is (dense is not None)
+                and int(status.get("dense_candidate_count") or 0)
+                == int((dense or {}).get("candidate_count") or 0)
+            )
+            if not status_valid:
+                failures.append(f"{label}:retrieval_status_missing_or_invalid:{index}")
         if (
             reasons
             & {

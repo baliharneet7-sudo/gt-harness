@@ -367,6 +367,18 @@ def _relational_treatment() -> dict:
                     "latency_ms": 0.0,
                 }
             ],
+            "retrieval_status": {
+                "schema": "gt.retrieval_status.v1",
+                "expected_mode": "dense_fallback_only",
+                "dense_channel_present": True,
+                "dense_backend_available": False,
+                "dense_query_attempted": False,
+                "dense_candidate_count": 0,
+                "dense_result_used": False,
+                "fallback_used": False,
+                "fallback_reason": "",
+                "selected_evidence_count": 0,
+            },
         }
     ]
     receipt["preemptive_retrieval"]["opportunity_accounting"] = {
@@ -522,6 +534,23 @@ def _relational_treatment() -> dict:
                         "items": [{"claim_id": "semantic-1"}],
                     },
                     "execution_views": [{"view_id": "process-1"}],
+                    "process_coverage": {
+                        "profile_id": "gt.certified_process.v1",
+                        "max_depth": 6,
+                        "max_branching": 3,
+                        "max_execution_views": 3,
+                        "entries_considered": 1,
+                        "paths_considered": 1,
+                        "returned_views": 1,
+                        "candidate_views": 1,
+                        "branch_truncated": 0,
+                        "depth_truncated": 0,
+                        "cycle_terminated": 0,
+                        "deduplicated_paths": 0,
+                        "omitted_for_view_limit": 0,
+                        "rejected_edges": 0,
+                        "lower_bound": 1,
+                    },
                     "impact_facts": [],
                 },
             }

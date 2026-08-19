@@ -267,7 +267,7 @@ class SemanticUtilizationTracker:
             self._completed.append(delivery)
         self._active = []
 
-    def summary(self) -> dict[str, int]:
+    def summary(self) -> dict[str, Any]:
         counts = {item.value: 0 for item in SemanticUse}
         for delivery in self._completed:
             value = str(delivery.get("semantic_utilization") or SemanticUse.PENDING.value)
@@ -287,6 +287,15 @@ class SemanticUtilizationTracker:
                 delivery.get("exploration_relationship") == outcome
                 for delivery in self._completed
             )
+        # This is an auditable replacement *opportunity* proxy: the model
+        # targeted a delivered anchor without a preceding read/search in the
+        # bounded window.  It is not a counterfactual and must never be
+        # reported as causal use without a matched process-off arm.
+        counts["replacement_opportunities"] = counts[
+            "context_used_without_prior_exploration"
+        ]
+        counts["causal_claim_allowed"] = False
+        counts["causal_claim_requires_matched_ablation"] = True
         return counts
 
 

@@ -443,6 +443,43 @@ def test_repository_context_accepts_certified_coupled_obligation_claim():
     assert not failures
 
 
+def test_repository_context_rejects_uncertified_process_coverage():
+    receipt = _coupled_receipt()
+    projection = receipt["repository_context"]["deliveries"][0]["projection"]
+    projection["execution_views"] = [{"view_id": "process-1"}]
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert any("repository_context_process_coverage_invalid" in item for item in failures)
+
+
+def test_repository_context_accepts_certified_process_coverage():
+    receipt = _coupled_receipt()
+    projection = receipt["repository_context"]["deliveries"][0]["projection"]
+    projection["execution_views"] = [{"view_id": "process-1"}]
+    projection["process_coverage"] = {
+        "profile_id": "gt.certified_process.v1",
+        "max_depth": 6,
+        "max_branching": 3,
+        "max_execution_views": 3,
+        "entries_considered": 1,
+        "paths_considered": 1,
+        "returned_views": 1,
+        "candidate_views": 1,
+        "branch_truncated": 0,
+        "depth_truncated": 0,
+        "cycle_terminated": 0,
+        "deduplicated_paths": 0,
+        "omitted_for_view_limit": 0,
+        "rejected_edges": 0,
+        "lower_bound": 1,
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert not failures
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_failure"),
     (

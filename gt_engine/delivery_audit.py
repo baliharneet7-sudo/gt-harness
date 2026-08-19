@@ -419,6 +419,43 @@ def audit_provider_deliveries(
                 for item in projection.get("execution_views") or ()
                 if isinstance(item, dict)
             }
+            execution_views = tuple(
+                item
+                for item in projection.get("execution_views") or ()
+                if isinstance(item, dict)
+            )
+            process_coverage = projection.get("process_coverage") or {}
+            if execution_views:
+                coverage_valid = bool(
+                    isinstance(process_coverage, dict)
+                    and str(process_coverage.get("profile_id") or "")
+                    == "gt.certified_process.v1"
+                    and int(process_coverage.get("max_depth") or 0) > 0
+                    and int(process_coverage.get("max_branching") or 0) > 0
+                    and int(process_coverage.get("max_execution_views") or 0) > 0
+                    and int(process_coverage.get("returned_views") or 0)
+                    == len(execution_views)
+                    and int(process_coverage.get("candidate_views") or 0)
+                    >= len(execution_views)
+                    and int(process_coverage.get("lower_bound") or 0) == 1
+                    and all(
+                        int(process_coverage.get(key) or 0) >= 0
+                        for key in (
+                            "entries_considered",
+                            "paths_considered",
+                            "branch_truncated",
+                            "depth_truncated",
+                            "cycle_terminated",
+                            "deduplicated_paths",
+                            "omitted_for_view_limit",
+                            "rejected_edges",
+                        )
+                    )
+                )
+                if not coverage_valid:
+                    failures.append(
+                        f"{task}:repository_context_process_coverage_invalid:{index}"
+                    )
             impact_ids = {
                 str(item.get("claim_id") or "")
                 for item in projection.get("impact_facts") or ()

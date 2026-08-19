@@ -1176,6 +1176,7 @@ def _initial_persistent_retrieval_receipt(
         ],
         "selected_token_count": result.selected_token_count,
         "selected_character_count": result.selected_character_count,
+        "retrieval_status": result.retrieval_status(),
         "channel_receipts": [
             {
                 "channel": row.channel.value,
@@ -4679,6 +4680,22 @@ class MiniSweCentralAgent(BaseAgent):
                     "lifecycle_budget_remaining_chars": lifecycle_remaining_chars,
                     "lifecycle_selection_limit": lifecycle_selection_limit,
                     "cache_hit": False,
+                    "retrieval_status": {
+                        "schema": "gt.retrieval_status.v1",
+                        "expected_mode": (
+                            "dense_fallback_only"
+                            if self.dense_fallback_only
+                            else "dense_primary"
+                        ),
+                        "dense_channel_present": False,
+                        "dense_backend_available": False,
+                        "dense_query_attempted": False,
+                        "dense_candidate_count": 0,
+                        "dense_result_used": False,
+                        "fallback_used": False,
+                        "fallback_reason": "not_computed",
+                        "selected_evidence_count": 0,
+                    },
                 }
                 preemptive_gate_reason = _preemptive_retrieval_gate_reason(
                     enabled=self.enable_preemptive_retrieval,
@@ -4994,6 +5011,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         "selected_character_count": (
                                             retrieval_result.selected_character_count
                                         ),
+                                        "retrieval_status": retrieval_result.retrieval_status(),
                                         "remaining_budget_chars": remaining_chars,
                                         "channel_receipts": [
                                             {

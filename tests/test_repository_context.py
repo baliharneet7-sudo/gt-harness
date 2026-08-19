@@ -321,6 +321,8 @@ def test_project_preserves_authority_when_packing_semantic_and_process_surfaces(
     assert "declared check" in by_surface["repository_context"].payload
     assert "Execution" in by_surface["repository_process"].payload
     assert result.process_coverage["returned_views"] == len(result.execution_views)
+    assert result.process_coverage["profile_id"] == "gt.certified_process.v1"
+    assert result.process_coverage["max_depth"] > 0
 
 
 def test_process_surface_cannot_displace_critical_diagnostic_under_budget() -> None:
