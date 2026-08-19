@@ -393,7 +393,11 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
             "persistent_execution_state",
             not failures,
             tuple(failures),
-            {"task": label, "applicability": "dynamic_deactivation", "activation_action": activation.get("activation_action")},
+            {
+                "task": label,
+                "applicability": "dynamic_deactivation",
+                "activation_action": activation.get("activation_action"),
+            },
         )
 
     if str(initialization.get("status") or "") != "initialized":
@@ -1483,7 +1487,10 @@ def _mechanical_completeness_runtime(
             continue
         if barrier.get("schema") != "gt.provider_mechanical_barrier.v1":
             failures.append(f"{label}:provider_barrier_schema:{call}")
-        if context.get("dispatch_status") in {"prepared_not_sent", "mechanical_completeness_blocked"}:
+        if context.get("dispatch_status") in {
+            "prepared_not_sent",
+            "mechanical_completeness_blocked",
+        }:
             continue
         if barrier.get("status") != "PASS" or barrier.get("failures"):
             failures.append(f"{label}:provider_barrier_blocked:{call}")
