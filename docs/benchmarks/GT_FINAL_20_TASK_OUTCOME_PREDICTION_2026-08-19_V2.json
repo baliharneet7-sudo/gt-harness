@@ -1,0 +1,71 @@
+{
+  "schema": "gt.final_20_task_outcome_prediction.v2",
+  "frozen_at": "2026-08-19",
+  "prediction_before_outcome": true,
+  "outcome_run_executed": false,
+  "candidate_runtime_commit": "8fe23776e49ca804a3fd0286f5adc59589aa532d",
+  "candidate_runtime_proof_commit": "8fe23776e49ca804a3fd0286f5adc59589aa532d",
+  "candidate_treatment": "tb2-central-relational-v2",
+  "task_profile": "repair20-v1",
+  "task_count": 20,
+  "task_order": [
+    "cobol-modernization", "count-dataset-tokens", "extract-elf",
+    "feal-linear-cryptanalysis", "fix-code-vulnerability", "headless-terminal",
+    "largest-eigenval", "llm-inference-batching-scheduler", "mcmc-sampling-stan",
+    "portfolio-optimization", "prove-plus-comm", "qemu-alpine-ssh", "regex-chess",
+    "sanitize-git-repo", "schemelike-metacircular-eval", "torch-pipeline-parallelism",
+    "torch-tensor-parallelism", "video-processing", "winning-avg-corewars",
+    "write-compressor"
+  ],
+  "source_artifacts": {
+    "frozen_gt_off": {
+      "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
+      "sha256": "f75ebc8dd1eb25cb31cfa099b196d54346016b9f2de8e6f026e420cc213dd0bf"
+    },
+    "previous_gt": {
+      "path": "artifacts/tb2_31778400203/merged/merged.json",
+      "sha256": "bd3065e05a8cd22fdd139d17ceec3a30733100244f18c4008beed3f0bb307673"
+    },
+    "prior_historical_predictions": {
+      "path": "docs/benchmarks/GT_P0_P2_FROZEN_REPLAY_PREDICTIONS_2026-08-17.json",
+      "sha256": "1830227998d6e77c6dd443a0256772f7cdfe9e47affb6fa1ed57db943c4b0c53c"
+    }
+  },
+  "aggregate_prediction": {
+    "point_solved": 16,
+    "point_resolve_rate": 0.8,
+    "plausible_solved_range": [15, 18],
+    "plausible_resolve_rate_range": [0.75, 0.9],
+    "baseline_solved": 17,
+    "previous_gt_solved": 13,
+    "predicted_positive_flips_vs_baseline": ["count-dataset-tokens", "largest-eigenval"],
+    "predicted_negative_flips_vs_baseline": ["extract-elf", "video-processing", "winning-avg-corewars"],
+    "predicted_positive_flips_vs_previous_gt": ["headless-terminal", "torch-tensor-parallelism", "write-compressor"],
+    "efficiency_prediction": "lower_or_equal_discretionary_context_cost_than_previous_gt; deterministic zero-provider selection and bounded relational frames add fixed treatment overhead",
+    "confidence": "moderate"
+  },
+  "predictions": [
+    {"task": "cobol-modernization", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "count-dataset-tokens", "baseline_solved": false, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_positive_flip", "confidence": "high"},
+    {"task": "extract-elf", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high"},
+    {"task": "feal-linear-cryptanalysis", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_with_efficiency_risk", "confidence": "moderate"},
+    {"task": "fix-code-vulnerability", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "headless-terminal", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "moderate"},
+    {"task": "largest-eigenval", "baseline_solved": false, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_positive_flip", "confidence": "high"},
+    {"task": "llm-inference-batching-scheduler", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "mcmc-sampling-stan", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "portfolio-optimization", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "prove-plus-comm", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "qemu-alpine-ssh", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "regex-chess", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve_with_exploration_risk", "confidence": "moderate"},
+    {"task": "sanitize-git-repo", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "schemelike-metacircular-eval", "baseline_solved": true, "previous_gt_solved": true, "predicted_solved": true, "prediction": "preserve", "confidence": "high"},
+    {"task": "torch-pipeline-parallelism", "baseline_solved": false, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high"},
+    {"task": "torch-tensor-parallelism", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "low"},
+    {"task": "video-processing", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "no_effect", "confidence": "high"},
+    {"task": "winning-avg-corewars", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": false, "prediction": "likely_non_recovery", "confidence": "moderate"},
+    {"task": "write-compressor", "baseline_solved": true, "previous_gt_solved": false, "predicted_solved": true, "prediction": "possible_recovery", "confidence": "moderate"}
+  ],
+  "allowed_post_runtime_paths": ["docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-19_V2.json"],
+  "freeze_rule": "Do not edit this artifact after any candidate outcome is inspected; if the runner contract changes, create a new version with a new hash."
+}
