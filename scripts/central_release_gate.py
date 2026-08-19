@@ -795,13 +795,35 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
             used_critical = int(task_budget.get("used_critical_tokens") or 0)
             used_total = int(task_budget.get("used_tokens") or 0)
             reserve = int(task_budget.get("critical_reserve_tokens") or 0)
+            # A compiler row is prepared before the durable provider marker.
+            # Deadline/marker holds are valid non-deliveries and must not be
+            # charged against the cumulative budget. Older receipts lack the
+            # status field and are conservatively treated as dispatched.
+            dispatched_calls = [
+                row
+                for row in calls
+                if row.get("dispatch_status", "dispatched") == "dispatched"
+            ]
+            prepared_not_sent = [
+                row
+                for row in calls
+                if row.get("dispatch_status") == "prepared_not_sent"
+            ]
+            invalid_statuses = [
+                row.get("dispatch_status")
+                for row in calls
+                if row.get("dispatch_status")
+                not in {None, "dispatched", "prepared_not_sent"}
+            ]
+            if invalid_statuses:
+                failures.append(f"{label}:contribution_dispatch_status_invalid")
             payload_total = sum(
                 int(
                     row.get("task_budget_tokens")
                     if "task_budget_tokens" in row
                     else row.get("payload_tokens") or 0
                 )
-                for row in calls
+                for row in dispatched_calls
             )
             if int(task_budget.get("token_budget") or -1) != configured_task_budget:
                 failures.append(f"{label}:contribution_task_budget_mismatch")
@@ -809,6 +831,11 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
                 failures.append(f"{label}:contribution_task_reserve_invalid")
             if used_total != used_regular + used_critical or used_total != payload_total:
                 failures.append(f"{label}:contribution_task_usage_mismatch")
+            if any(
+                int(row.get("task_budget_tokens") or 0) < 0
+                for row in prepared_not_sent
+            ):
+                failures.append(f"{label}:contribution_task_unsent_usage_invalid")
             if used_critical > reserve or used_total > configured_task_budget:
                 failures.append(f"{label}:contribution_task_budget_exceeded")
     return ReleaseGateCheck(

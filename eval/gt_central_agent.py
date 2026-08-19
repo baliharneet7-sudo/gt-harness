@@ -5647,6 +5647,11 @@ class MiniSweCentralAgent(BaseAgent):
                         "completed_action_count_before_call": actions_count,
                         "source_revision": source_revision,
                         "selected_surfaces": selected_surface_names,
+                        # The compiler runs before the durable provider marker
+                        # and therefore starts in a prepared state.  Release
+                        # accounting must not charge a request that is later
+                        # held by the deadline/marker gate.
+                        "dispatch_status": "prepared",
                     }
                 )
                 contribution_compilations.append(contribution_receipt)
@@ -6690,6 +6695,8 @@ class MiniSweCentralAgent(BaseAgent):
                         guidance_deliveries[-1]["query_started_at"] = query_started_at
                     query_timeout = planned_query_timeout
                     if query_timeout is not None and query_timeout <= 0:
+                        contribution_receipt["dispatch_status"] = "prepared_not_sent"
+                        contribution_receipt["dispatch_reason"] = "deadline_reserve_reached"
                         provider_evidence.mark_not_sent(
                             call=calls,
                             reason="deadline_reserve_reached",
@@ -6717,6 +6724,8 @@ class MiniSweCentralAgent(BaseAgent):
                         request_payload_sha256=request_payload_sha256,
                     )
                     if provider_query_marker_error:
+                        contribution_receipt["dispatch_status"] = "prepared_not_sent"
+                        contribution_receipt["dispatch_reason"] = "provider_query_marker_error"
                         provider_evidence.mark_not_sent(
                             call=calls,
                             reason="provider_query_marker_error",
@@ -6731,6 +6740,7 @@ class MiniSweCentralAgent(BaseAgent):
                         break
                     model_query_invocations = next_model_query_invocation
                     model_call_contexts[-1]["dispatch_status"] = "invoked"
+                    contribution_receipt["dispatch_status"] = "dispatched"
                     replay_bundle.record_invocation(call=calls)
                     provider_evidence.mark_dispatched(
                         call=calls,

@@ -4,7 +4,11 @@ import hashlib
 import json
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
-from scripts.central_release_gate import audit_release, audit_treatment_runtime
+from scripts.central_release_gate import (
+    _contribution_budget,
+    audit_release,
+    audit_treatment_runtime,
+)
 
 STATIC = {
     "census_passed": True,
@@ -584,6 +588,49 @@ def test_treatment_gate_rejects_unified_contribution_budget_expansion():
 
     assert report.passed is False
     assert "treatment-1:contribution_token_budget_exceeded:1" in report.failures
+
+
+def test_release_gate_excludes_prepared_not_sent_contribution_from_task_usage():
+    receipt = {
+        "component_configuration": {
+            "gt_request_token_budget": 1200,
+            "gt_task_evidence_budget_tokens": 4096,
+        },
+        "model_call_contexts": [{}, {}],
+        "contribution_compiler": {
+            "calls": [
+                {
+                    "token_budget": 1200,
+                    "task_budget_tokens": 25,
+                    "task_budget_token_limit": 4096,
+                    "payload_tokens": 25,
+                    "candidate_count": 0,
+                    "accounted_count": 0,
+                    "dispatch_status": "dispatched",
+                },
+                {
+                    "token_budget": 1200,
+                    "task_budget_tokens": 25,
+                    "task_budget_token_limit": 4071,
+                    "payload_tokens": 25,
+                    "candidate_count": 0,
+                    "accounted_count": 0,
+                    "dispatch_status": "prepared_not_sent",
+                },
+            ],
+            "task_budget": {
+                "token_budget": 4096,
+                "critical_reserve_tokens": 512,
+                "used_regular_tokens": 25,
+                "used_critical_tokens": 0,
+                "used_tokens": 25,
+            },
+        },
+    }
+
+    check = _contribution_budget(receipt, "task-1")
+
+    assert check.passed is True
 
 
 def test_treatment_gate_rejects_conflated_selected_and_executed_actions():
