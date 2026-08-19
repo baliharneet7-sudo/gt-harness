@@ -5624,6 +5624,34 @@ async def test_execution_budget_reserve_exits_before_outer_timeout(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_provider_request_is_not_started_when_only_teardown_reserve_remains(tmp_path):
+    class MustNotQuery(_ScriptedModel):
+        def query(self, messages, **kwargs):
+            raise AssertionError("provider request must not start inside deadline reserve")
+
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        execution_budget_sec=0.5,
+        deadline_reserve_sec=0.1,
+        model_timeout_sec=0.1,
+        enable_replay_capture=True,
+    )
+    model = MustNotQuery(["echo never-executed"])
+    agent._model_factory = lambda: model
+    context = AgentContext()
+
+    await agent.run("do it", _Environment(), context)
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    assert receipt["metrics"]["censored"] is False
+    assert receipt["metrics"]["provider_requests_not_sent"] == 1
+    assert receipt["metrics"]["provider_responses_received"] == 0
+    assert receipt["replay_bundle"]["trajectory_replay_ready"] is True
+    assert context.metadata["exit_status"] == "DeadlineReserveReached"
+
+
+@pytest.mark.asyncio
 async def test_syntax_failure_does_not_interrupt_multi_action_batch(tmp_path):
     submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 

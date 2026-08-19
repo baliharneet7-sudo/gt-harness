@@ -6942,7 +6942,27 @@ class MiniSweCentralAgent(BaseAgent):
                     if delivery_metadata is not None:
                         guidance_deliveries[-1]["query_started_at"] = query_started_at
                     query_timeout = planned_query_timeout
-                    if query_timeout is not None and query_timeout <= 0:
+                    # Do not start a provider request that can consume the
+                    # executor's teardown reserve.  The timeout passed to the
+                    # transport is already capped by the remaining deadline;
+                    # a small positive value is nevertheless still a real
+                    # request and can time out after the task has no usable
+                    # time left.  Treat that case as an unsent terminal
+                    # request, preserving a replay-complete, uncensored
+                    # receipt.  Genuine provider failures after dispatch are
+                    # still censored below.
+                    deadline_query_headroom_insufficient = bool(
+                        deadline is not None
+                        and query_timeout is not None
+                        and query_timeout <= max(0.0, float(self.deadline_reserve_sec))
+                    )
+                    if (
+                        query_timeout is not None
+                        and (
+                            query_timeout <= 0
+                            or deadline_query_headroom_insufficient
+                        )
+                    ):
                         contribution_receipt["dispatch_status"] = "prepared_not_sent"
                         contribution_receipt["dispatch_reason"] = "deadline_reserve_reached"
                         provider_evidence.mark_not_sent(
