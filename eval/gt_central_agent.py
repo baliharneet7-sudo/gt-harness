@@ -11095,8 +11095,11 @@ class MiniSweCentralAgent(BaseAgent):
                 and not source_less_task
                 and persistent_state_engine is not None
                 and not persistent_state_failures
-                and actions_count > 0
-                and int(host_execution["decision_actions"]) > 0
+                and (
+                    actions_count > 0
+                    and int(host_execution["decision_actions"]) > 0
+                    or int(persistent_state_engine.metrics["context_compilations"]) > 1
+                )
                 and int(persistent_state_bootstrap.get("provider_calls") or 0)
                 == (0 if self.persistent_state_selection_mode == "deterministic_v1" else 1)
                 and int(persistent_state_engine.metrics["context_compilations"])
