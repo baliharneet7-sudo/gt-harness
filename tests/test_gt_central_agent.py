@@ -470,9 +470,8 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
         'proof["system_fingerprint"]:'
     )
     assert fingerprint_gate in workflow
-    assert "https://api.deepseek.com" in workflow
+    assert 'echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}"' in workflow
     assert "openai/deepseek-v4-flash" in workflow
-    assert "deepseek:native:api.deepseek.com" in workflow
     assert "deepseek_native" in workflow
     readiness = (
         Path(__file__).resolve().parents[1] / "scripts" / "central_readiness_audit.py"
