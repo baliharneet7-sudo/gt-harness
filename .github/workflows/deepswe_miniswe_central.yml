@@ -703,6 +703,7 @@ jobs:
               # Match the preceding central comparison exactly, adding only
               # the graph-first persistent execution state mechanism.
               PROFILE_ARGS=(
+                --ak treatment_profile=central_relational_v2
                 --ak integration_mode=active --ak policy_mode=certified_active
                 --ak preflight_mode=shadow
                 --ak enable_all_features=true --ak enable_submit_readiness=true
@@ -726,6 +727,7 @@ jobs:
               )
             elif [ "$PROFILE" = "certified_full" ]; then
               PROFILE_ARGS=(
+                --ak treatment_profile=central_relational_v2
                 --ak integration_mode=active --ak policy_mode=certified_active
                 --ak preflight_mode=shadow
                 --ak enable_all_features=true --ak enable_submit_readiness=true
@@ -771,6 +773,10 @@ jobs:
             && ! find results/deepswe -name central_receipt.json -print -quit | grep -q . \
             && ! find results/deepswe -name provider_query_started.json -print -quit | grep -q .; then
             echo "infra-only retry: no GT provider query started"
+            # Docker registry throttles are transient infrastructure failures;
+            # give the registry window time to clear before retrying.  No model
+            # request has started at this point.
+            sleep 75
             mkdir -p results/deepswe-infra-attempt-1
             find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} +
             set +e
