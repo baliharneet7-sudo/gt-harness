@@ -2,10 +2,10 @@
   "schema": "gt.release_manifest.v1",
   "release_id": "gt-final-mechanical-completeness-2026-08-20-v20",
   "task_profile": "repair20-v1",
-  "runtime_commit": "a859c18a9418cc47a422d7b4c5f31f046b01c912",
+  "runtime_commit": "9491d5fe47c83e461ac256001800cd75d8eec096",
   "prediction": {
     "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-20_V20.json",
-    "sha256": "ccc2abcdea8a5814c069f5d9a141faadbb8a46fe965c2643b24691624d64d3a5"
+    "sha256": "cc395fe07de352b7cbe4729571e4b7d485fa314d46f0ff06e79bd9e15c843f4c"
   },
   "baseline": {
     "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
