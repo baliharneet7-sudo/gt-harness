@@ -3938,7 +3938,12 @@ class MiniSweCentralAgent(BaseAgent):
         repository_context_engine = RepositoryContextEngine(
             max_depth=self.relational_context_max_depth,
             max_branching=self.relational_context_max_branching,
-            max_execution_views=1,
+            # Keep process composition bounded, but retain up to three
+            # independently ranked entry-to-terminal views so a changed
+            # symbol can surface multiple affected paths in one observation.
+            # The shared 256-token contribution budget remains authoritative;
+            # omitted views are recorded in process_coverage.
+            max_execution_views=min(3, max(1, self.relational_context_max_processes)),
             max_impact_facts=3,
             max_semantic_items=3,
             max_tokens=max(
@@ -11266,7 +11271,9 @@ class MiniSweCentralAgent(BaseAgent):
                             },
                             "repository_context_profile": {
                                 "profile_id": "gt.action_local_repository_context.v1",
-                                "max_execution_views": 1,
+                                "max_execution_views": min(
+                                    3, max(1, self.relational_context_max_processes)
+                                ),
                                 "max_relation_facts": 3,
                                 "max_semantic_items": 3,
                                 "delivery_mode": "integrated_same_observation",

@@ -2564,7 +2564,7 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     }
     assert receipt["component_configuration"]["repository_context_profile"] == {
         "profile_id": "gt.action_local_repository_context.v1",
-        "max_execution_views": 1,
+        "max_execution_views": 3,
         "max_relation_facts": 3,
         "max_semantic_items": 3,
         "delivery_mode": "integrated_same_observation",
