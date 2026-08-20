@@ -463,6 +463,7 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
     assert 'tokenrouter_base = os.environ["PROVIDER_BASE_URL"].strip()' in workflow
     assert 'PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}' in workflow
+    assert 'echo "GT_LITELLM_MODEL=${executor_model}"' in workflow
     assert "python -m scripts.central_bootstrap_canary" in workflow
     assert "--provider-proof provider-route-proof.json" in workflow
     fingerprint_gate = (

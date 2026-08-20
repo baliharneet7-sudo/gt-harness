@@ -653,6 +653,15 @@ jobs:
           elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
             echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
+            # Keep the executor on the same OpenAI-compatible model identity
+            # that the bootstrap canary authenticated.  Without this export,
+            # LiteLLM interprets `deepseek/...` as its native DeepSeek route
+            # even though the endpoint is TokenRouter.
+            case "$MODEL" in
+              openai/*) executor_model="$MODEL" ;;
+              *) executor_model="openai/$MODEL" ;;
+            esac
+            echo "GT_LITELLM_MODEL=${executor_model}" >> "$GITHUB_ENV"
           elif [ "${PROVIDER:-configured}" = "deepseek" ]; then
             echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
