@@ -12,7 +12,6 @@ from typing import Any
 
 from scripts.harbor_results import collect_harbor_results
 
-
 _AUDIT_NAMES = frozenset(
     {
         "result.json",
@@ -88,4 +87,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

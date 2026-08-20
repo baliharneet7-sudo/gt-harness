@@ -195,8 +195,9 @@ def _summary(collection: HarborResultCollection) -> str:
         rewards = (row.get("verifier_result") or {}).get("rewards")
         exception = (row.get("exception_info") or {}).get("exception_type")
         mark = "yes" if rewards and _solved(row) else "no" if rewards else "-"
+        outcome = json.dumps(rewards) if rewards else (exception or "no reward")
         lines.append(
-            f"| {task} | {mark} | {json.dumps(rewards) if rewards else (exception or 'no reward')} |"
+            f"| {task} | {mark} | {outcome} |"
         )
     return "\n".join(lines) + "\n"
 

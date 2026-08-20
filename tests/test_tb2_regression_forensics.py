@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from scripts.tb2_regression_forensics import build_regression_forensics
 from scripts.tb2_promotion_gate import task_set_sha256
+from scripts.tb2_regression_forensics import build_regression_forensics
 
 ROOT = Path(__file__).resolve().parents[1]
 

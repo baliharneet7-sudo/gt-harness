@@ -9,8 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from gt_engine.runtime_gate import audit_runtime_receipt
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.runtime_gate import audit_runtime_receipt
 from scripts.tb2_promotion_gate import RESOURCE_FIELDS, task_set_sha256
 
 
