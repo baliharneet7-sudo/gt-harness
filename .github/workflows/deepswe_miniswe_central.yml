@@ -760,6 +760,15 @@ jobs:
               echo "::error::unknown comparison profile: $PROFILE"
               return 2
             fi
+            if [ "$PROFILE" != "baseline" ]; then
+              # The signed treatment contract is authoritative.  Do not let
+              # this workflow's historical profile shorthand diverge from
+              # the exact runtime arguments audited by the release gate.
+              mapfile -t PROFILE_ARGS < <(
+                python -m scripts.render_treatment_agent_args \
+                  --emit-harbor-args "$TREATMENT_CONTRACT"
+              )
+            fi
             timeout --signal=TERM --kill-after=30s 6000s pier run -p deepswe-bench/tasks --include-task-name "$TASK" \
               --agent-import-path eval.pier_gt_adapter:PierMiniSweCentralAgent \
               -m "$MODEL" -o results/deepswe \
