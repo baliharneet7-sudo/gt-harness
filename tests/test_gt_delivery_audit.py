@@ -170,6 +170,56 @@ def test_legacy_only_accounting_would_miss_preemptive_delivery():
     assert totals["surfaces"]["preemptive_retrieval"]["delivery_count"] == 1
 
 
+def test_provider_value_contract_rejects_visible_claim_without_certificate():
+    receipt = _receipt(include_preemptive=False)
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["contribution_compiler"] = {
+        "provider_value_contract": "gt.provider_value.v1",
+        "calls": [{"call": 1, "value_certificates": []}],
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert failures == ["task:provider_value_certificate_count:1:claim-legacy:0"]
+
+
+def test_provider_value_contract_accepts_exact_action_local_certificate():
+    receipt = _receipt(include_preemptive=False)
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["contribution_compiler"] = {
+        "provider_value_contract": "gt.provider_value.v1",
+        "calls": [
+            {
+                "call": 1,
+                "value_certificates": [
+                    {
+                        "claim_id": "claim-legacy",
+                        "value_class": "execution_contradiction",
+                        "disposition": "same_observation",
+                        "completeness": "exact",
+                        "authority": "execution_observation",
+                        "source_revision": "source-1",
+                        "anchors": ["pytest -q"],
+                        "novelty_basis": "new_execution_state_not_represented",
+                        "decision_point": "next_executor_request",
+                        "replaces_operation": "failure_or_validation_rediscovery",
+                    }
+                ],
+            }
+        ],
+    }
+
+    rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert failures == []
+    assert rows[0]["value_certificates"][0]["claim_id"] == "claim-legacy"
+    replacement = receipt["guidance_deliveries"][0]["exploration_replacement_receipt"]
+    assert replacement["expected_replaced_operations"] == [
+        "failure_or_validation_rediscovery"
+    ]
+    assert replacement["causal_claim_allowed"] is False
+
+
 def test_run_diff_visible_call_and_summary_include_preemptive_surface():
     receipt = _receipt()
     receipt["guidance_deliveries"] = []
@@ -441,6 +491,45 @@ def test_repository_context_accepts_certified_coupled_obligation_claim():
     _rows, failures, _totals = audit_provider_deliveries(_coupled_receipt())
 
     assert not failures
+
+
+def test_repository_context_audits_resolved_convention_composition():
+    receipt = _coupled_receipt()
+    delivery = receipt["repository_context"]["deliveries"][0]
+    delivery["claim_ids"] = ["convention-1"]
+    delivery["claim_metadata"] = [
+        _claim_meta(
+            "convention-1",
+            authority="certified_composition",
+            materiality_reason="new_unresolved_task_obligation",
+            constituent_claim_ids=["definition-1", "process-1", "test-1"],
+            provider_value_anchors=[
+                "src/core.py#work",
+                "src/entry.py#run",
+                "tests/test_core.py#test_work",
+            ],
+            signature="def work(value: int) -> int",
+            resolved_type="int",
+        )
+    ]
+    delivery["projection"]["resolved_conventions"] = [
+        {
+            "claim_id": "convention-1",
+            "subject": {"path": "src/core.py", "symbol": "work", "line": 1},
+            "signature": "def work(value: int) -> int",
+            "resolved_type": "int",
+            "callers": ["src/entry.py#run"],
+            "tests": ["tests/test_core.py#test_work"],
+            "constituent_claim_ids": ["definition-1", "process-1", "test-1"],
+        }
+    ]
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+    assert not failures
+
+    delivery["projection"]["resolved_conventions"][0]["resolved_type"] = "str"
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+    assert any("repository_context_convention_support_invalid" in row for row in failures)
 
 
 def test_repository_context_rejects_uncertified_process_coverage():

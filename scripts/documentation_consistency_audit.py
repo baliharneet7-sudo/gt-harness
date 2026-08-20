@@ -20,6 +20,7 @@ _REQUIRED_TERMS = {
         "MechanicalCompletenessBlocked",
         "hidden_reasoning_inferred",
         "repair20-v1",
+        "gt.provider_value.v1",
     ),
     "GT_RELEASE_DOSSIER.md": (
         "active_release.json",
@@ -28,6 +29,7 @@ _REQUIRED_TERMS = {
         "central_provider_free.yml",
         "mechanical_completeness: PASS",
         "does not embed a mutable latest-run ID",
+        "scripts.harbor_results",
     ),
 }
 _FORBIDDEN_OUTCOME_CLAIMS = (

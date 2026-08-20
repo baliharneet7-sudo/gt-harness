@@ -231,6 +231,22 @@ def audit_provider_deliveries(
     identities: set[str] = set()
     seen_claims: set[str] = set()
     rows = collect_provider_deliveries(receipt)
+    contribution_runtime = receipt.get("contribution_compiler") or {}
+    value_contract_active = (
+        contribution_runtime.get("provider_value_contract") == "gt.provider_value.v1"
+    )
+    value_certificates: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    if value_contract_active:
+        for compilation in contribution_runtime.get("calls") or ():
+            if not isinstance(compilation, dict):
+                continue
+            call = _positive_int(compilation.get("call"))
+            for certificate in compilation.get("value_certificates") or ():
+                if not isinstance(certificate, dict):
+                    continue
+                claim_id = str(certificate.get("claim_id") or "")
+                if call and claim_id:
+                    value_certificates.setdefault((call, claim_id), []).append(certificate)
     for index, row in enumerate(rows, start=1):
         identity = row["identity"]
         duplicate_identity = identity in identities
@@ -249,6 +265,82 @@ def audit_provider_deliveries(
         delivered = row["delivered_before_call"]
         eligible = row["first_eligible_call"]
         context = contexts.get(delivered) if isinstance(delivered, int) else None
+        row_value_certificates: list[dict[str, Any]] = []
+        if value_contract_active and isinstance(delivered, int):
+            for claim_id in _provider_claims(row["raw"]):
+                matches = value_certificates.get((delivered, claim_id), [])
+                if len(matches) != 1:
+                    failures.append(
+                        f"{task}:provider_value_certificate_count:{index}:{claim_id}:{len(matches)}"
+                    )
+                    continue
+                certificate = matches[0]
+                row_value_certificates.append(certificate)
+                allowed = bool(
+                    certificate.get("value_class")
+                    in {
+                        "action_local_relation",
+                        "execution_contradiction",
+                        "certified_predecision_gap",
+                    }
+                    and certificate.get("disposition")
+                    in {"same_observation", "predecision"}
+                    and certificate.get("completeness") == "exact"
+                    and str(certificate.get("authority") or "")
+                    and str(certificate.get("source_revision") or "")
+                    and bool(certificate.get("anchors"))
+                    and str(certificate.get("novelty_basis") or "")
+                    and str(certificate.get("decision_point") or "")
+                    and str(certificate.get("replaces_operation") or "")
+                )
+                if not allowed:
+                    failures.append(
+                        f"{task}:provider_value_certificate_rejected:{index}:{claim_id}"
+                    )
+        row["value_certificates"] = row_value_certificates
+        if value_contract_active:
+            relationship = str(
+                row["raw"].get("exploration_relationship") or "unreported"
+            )
+            replacement_status = (
+                "replacement_opportunity"
+                if relationship == "context_used_without_prior_exploration"
+                else "exploration_added_or_not_replaced"
+                if relationship
+                in {
+                    "context_accompanied_exploration",
+                    "context_followed_exploration",
+                    "context_unmatched_after_exploration",
+                }
+                else "not_observed"
+            )
+            row["raw"]["provider_value_certificates"] = [
+                dict(certificate) for certificate in row_value_certificates
+            ]
+            row["raw"]["exploration_replacement_receipt"] = {
+                "schema": "gt.exploration_replacement.v1",
+                "expected_replaced_operations": list(
+                    dict.fromkeys(
+                        str(certificate.get("replaces_operation") or "")
+                        for certificate in row_value_certificates
+                        if str(certificate.get("replaces_operation") or "")
+                    )
+                ),
+                "first_followup_operation": str(
+                    row["raw"].get("first_followup_operation") or ""
+                ),
+                "semantic_utilization": str(
+                    row["raw"].get("semantic_utilization") or "unreported"
+                ),
+                "exploration_actions_before_use": int(
+                    row["raw"].get("exploration_actions_before_use") or 0
+                ),
+                "exploration_relationship": relationship,
+                "replacement_status": replacement_status,
+                "reasoning_uptake": "not_captured_by_delivery_receipt",
+                "causal_claim_allowed": False,
+                "causal_claim_requires_matched_trajectory_or_ablation": True,
+            }
         completed_actions = (
             context.get("completed_action_count_before_call")
             if isinstance(context, dict)
@@ -490,6 +582,14 @@ def audit_provider_deliveries(
                 str(item.get("claim_id") or "")
                 for item in coupled_items
             }
+            convention_items = tuple(
+                item
+                for item in projection.get("resolved_conventions") or ()
+                if isinstance(item, dict)
+            )
+            convention_ids = {
+                str(item.get("claim_id") or "") for item in convention_items
+            }
             supported_ids = (
                 semantic_ids
                 | execution_ids
@@ -497,6 +597,7 @@ def audit_provider_deliveries(
                 | diagnostic_ids
                 | validation_ids
                 | coupled_obligation_ids
+                | convention_ids
             ) - {""}
             coupled_support_failures: list[str] = []
             for item in coupled_items:
@@ -634,6 +735,65 @@ def audit_provider_deliveries(
                 failures.extend(
                     f"{task}:repository_context_coupled_support_invalid:{index}:{claim_id}"
                     for claim_id in coupled_support_failures
+                )
+            convention_support_failures: list[str] = []
+            for item in convention_items:
+                claim_id = str(item.get("claim_id") or "")
+                if claim_id not in row["claim_ids"]:
+                    continue
+                subject = item.get("subject") or {}
+                callers = tuple(
+                    str(value) for value in item.get("callers") or () if str(value)
+                )
+                tests = tuple(
+                    str(value) for value in item.get("tests") or () if str(value)
+                )
+                constituents = tuple(
+                    str(value)
+                    for value in item.get("constituent_claim_ids") or ()
+                    if str(value)
+                )
+                metadata = metadata_by_claim.get(claim_id) or {}
+                metadata_constituents = tuple(
+                    str(value)
+                    for value in metadata.get("constituent_claim_ids") or ()
+                    if str(value)
+                )
+                anchors = {
+                    str(value)
+                    for value in metadata.get("provider_value_anchors") or ()
+                    if str(value)
+                }
+                subject_rendered = (
+                    f"{subject.get('path')}#{subject.get('symbol')}"
+                    if subject.get("path") and subject.get("symbol")
+                    else ""
+                )
+                support_valid = bool(
+                    claim_id
+                    and subject_rendered
+                    and _positive_int(subject.get("line")) > 0
+                    and str(item.get("signature") or "")
+                    and str(item.get("resolved_type") or "")
+                    and callers
+                    and tests
+                    and len(constituents) >= 3
+                    and len(constituents) == len(set(constituents))
+                    and constituents == metadata_constituents
+                    and str(metadata.get("authority") or "")
+                    == "certified_composition"
+                    and str(metadata.get("signature") or "")
+                    == str(item.get("signature") or "")
+                    and str(metadata.get("resolved_type") or "")
+                    == str(item.get("resolved_type") or "")
+                    and {subject_rendered, *callers, *tests} <= anchors
+                )
+                if not support_valid:
+                    convention_support_failures.append(claim_id or "missing_claim_id")
+            if convention_support_failures:
+                failures.extend(
+                    f"{task}:repository_context_convention_support_invalid:{index}:{claim_id}"
+                    for claim_id in convention_support_failures
                 )
             semantic_support_valid = bool(
                 row["claim_ids"]

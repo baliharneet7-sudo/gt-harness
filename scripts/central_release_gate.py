@@ -575,6 +575,28 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         for row in eligible_contexts
         if row.get("dispatch_status") in {"invoked", "response_received", "response_error"}
     ]
+    contribution_calls = {
+        int(item.get("call") or 0): item
+        for item in ((receipt.get("contribution_compiler") or {}).get("calls") or ())
+        if isinstance(item, dict) and int(item.get("call") or 0) > 0
+    }
+
+    def persistent_value_rejected(call: int) -> bool:
+        matches = [
+            item
+            for item in (contribution_calls.get(call) or {}).get("accounting") or ()
+            if isinstance(item, dict)
+            and item.get("surface") == "persistent_execution_state"
+        ]
+        return bool(
+            len(matches) == 1
+            and matches[0].get("disposition") == "value_rejected"
+            and matches[0].get("reason_codes")
+            and all(
+                str(reason).startswith("provider_value_rejected:")
+                for reason in matches[0].get("reason_codes") or ()
+            )
+        )
     delivered_contexts = 0
     for index, row in enumerate(eligible_contexts, start=1):
         frame = row.get("persistent_execution_state")
@@ -595,7 +617,9 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
             if kind == "none" or not frame.get("claim_ids"):
                 failures.append(f"{label}:persistent_delivered_frame_invalid:{call}")
         elif dispatched and runtime.get("valid") is True and state.get("graph_current") is True:
-            if kind != "none" or not reasons:
+            if kind != "none" and persistent_value_rejected(call):
+                pass
+            elif kind != "none" or not reasons:
                 failures.append(f"{label}:persistent_controller_accounting_missing:{call}")
             elif not set(reasons).intersection(_PERSISTENT_NONE_FRAME_REASONS):
                 failures.append(f"{label}:persistent_nonmaterial_abstention_invalid:{call}")
@@ -620,6 +644,7 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
             set(
                 (row.get("persistent_execution_state") or {}).get("reason_codes") or ()
             ).intersection(_PERSISTENT_NONE_FRAME_REASONS)
+            or persistent_value_rejected(int(row.get("call") or 0))
             for row in dispatched_contexts
         )
         if not legal_empty:
@@ -940,6 +965,104 @@ def _contribution_budget(receipt: dict[str, Any], label: str) -> ReleaseGateChec
     )
 
 
+def _provider_value_contract(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Fail closed when provider text lacks counterfactual information value."""
+
+    required = str(receipt.get("treatment_profile") or "") == "central_relational_v2"
+    if not required:
+        return ReleaseGateCheck(
+            "provider_value_contract",
+            True,
+            (),
+            {"task": label, "required": False},
+        )
+
+    runtime = receipt.get("contribution_compiler") or {}
+    calls = runtime.get("calls") or []
+    failures: list[str] = []
+    if runtime.get("schema") != "gt.contribution_compiler.runtime.v2":
+        failures.append(f"{label}:provider_value_compiler_schema")
+    if runtime.get("provider_value_contract") != "gt.provider_value.v1":
+        failures.append(f"{label}:provider_value_contract_missing")
+
+    allowed_classes = {
+        "action_local_relation",
+        "execution_contradiction",
+        "certified_predecision_gap",
+    }
+    allowed_dispositions = {"same_observation", "predecision"}
+    selected_certificate_count = 0
+    for index, call in enumerate(calls, start=1):
+        call_number = int(call.get("call") or index)
+        accounting = [
+            row for row in call.get("accounting") or () if isinstance(row, dict)
+        ]
+        if any(row.get("disposition") == "value_uncertified" for row in accounting):
+            failures.append(f"{label}:provider_value_uncertified:{call_number}")
+        selected_ids = {
+            str(item) for item in call.get("selected_ids") or () if str(item)
+        }
+        accounted_selected = {
+            str(row.get("contribution_id") or "")
+            for row in accounting
+            if row.get("disposition") == "selected"
+        }
+        if selected_ids != accounted_selected:
+            failures.append(f"{label}:provider_value_selected_accounting:{call_number}")
+
+        certificates = [
+            row
+            for row in call.get("value_certificates") or ()
+            if isinstance(row, dict)
+        ]
+        certificate_ids: set[tuple[str, str]] = set()
+        certified_contributions: set[str] = set()
+        for certificate in certificates:
+            contribution_id = str(certificate.get("contribution_id") or "")
+            claim_id = str(certificate.get("claim_id") or "")
+            identity = (contribution_id, claim_id)
+            if not contribution_id or not claim_id or identity in certificate_ids:
+                failures.append(
+                    f"{label}:provider_value_certificate_identity:{call_number}"
+                )
+                continue
+            certificate_ids.add(identity)
+            certified_contributions.add(contribution_id)
+            if contribution_id not in selected_ids:
+                failures.append(
+                    f"{label}:provider_value_certificate_unselected:{call_number}:{claim_id}"
+                )
+            if (
+                certificate.get("value_class") not in allowed_classes
+                or certificate.get("disposition") not in allowed_dispositions
+                or certificate.get("completeness") != "exact"
+                or not certificate.get("authority")
+                or not certificate.get("source_revision")
+                or not certificate.get("anchors")
+                or not certificate.get("novelty_basis")
+                or not certificate.get("decision_point")
+                or not certificate.get("replaces_operation")
+            ):
+                failures.append(
+                    f"{label}:provider_value_certificate_rejected:{call_number}:{claim_id}"
+                )
+        if selected_ids - certified_contributions:
+            failures.append(f"{label}:provider_value_selected_uncertified:{call_number}")
+        selected_certificate_count += len(certificates)
+
+    return ReleaseGateCheck(
+        "provider_value_contract",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "required": True,
+            "calls": len(calls),
+            "selected_certificates": selected_certificate_count,
+        },
+    )
+
+
 def _action_lifecycle(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     accounting = receipt.get("action_accounting")
     metrics = receipt.get("metrics") or {}
@@ -1098,13 +1221,21 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
         "progress_control",
         "adaptive_validation_timeout",
     )
-    failures = tuple(
+    failures = list(
         f"{label}:{name}_disabled" for name in required if configuration.get(name) is not True
     )
+    if str(receipt.get("treatment_profile") or "") == "central_relational_v2":
+        epochs = (receipt.get("metrics") or {}).get("context_compaction_epochs") or ()
+        if any(
+            str(row.get("trigger_kind") or "") == "character_pressure"
+            for row in epochs
+            if isinstance(row, dict)
+        ):
+            failures.append(f"{label}:soft_character_compaction_forbidden")
     return ReleaseGateCheck(
         "outcome_preservation_controls",
         not failures,
-        failures,
+        tuple(failures),
         {
             "task": label,
             "configuration": {name: configuration.get(name) for name in required},
@@ -1112,6 +1243,73 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     )
 
 
+def _completion_integrity(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Fail closed on partial, stale, or internally inconsistent auto-submit proof."""
+
+    if str(receipt.get("treatment_profile") or "") != "central_relational_v2":
+        return ReleaseGateCheck(
+            "completion_integrity",
+            True,
+            (),
+            {"task": label, "applicability": "legacy_profile"},
+        )
+    completion = receipt.get("completion") or {}
+    plan = completion.get("plan") or {}
+    certificates = tuple(
+        row for row in completion.get("certificates") or () if isinstance(row, dict)
+    )
+    attempts = int(completion.get("auto_submit_attempts") or 0)
+    submitted = int(completion.get("auto_submit_count") or 0)
+    failures: list[str] = []
+    if plan.get("schema") != "gt.completion_plan.v1":
+        failures.append(f"{label}:completion_plan_schema_missing")
+    eligible_count = 0
+    for index, certificate in enumerate(certificates, start=1):
+        if certificate.get("schema") != "gt.completion_certificate.v1":
+            failures.append(f"{label}:completion_certificate_schema:{index}")
+        eligible = certificate.get("auto_submit_eligible") is True
+        if eligible:
+            eligible_count += 1
+            observations = tuple(
+                row
+                for row in certificate.get("observations") or ()
+                if isinstance(row, dict)
+            )
+            workspace_revision = str(certificate.get("workspace_revision") or "")
+            if (
+                certificate.get("status") != "complete"
+                or not observations
+                or certificate.get("missing_predicate_ids")
+                or certificate.get("failing_predicate_ids")
+                or certificate.get("stale_predicate_ids")
+                or not workspace_revision
+                or any(
+                    row.get("schema")
+                    != "gt.completion_predicate_observation.v1"
+                    or str(row.get("workspace_revision") or "")
+                    != workspace_revision
+                    or int(row.get("returncode") or 0) != 0
+                    or not str(row.get("output_sha256") or "")
+                    for row in observations
+                )
+            ):
+                failures.append(f"{label}:completion_eligible_proof_invalid:{index}")
+    if plan.get("executable") is not True and (eligible_count or submitted):
+        failures.append(f"{label}:completion_partial_plan_submitted")
+    if submitted > attempts or submitted > eligible_count:
+        failures.append(f"{label}:completion_submit_accounting_invalid")
+    return ReleaseGateCheck(
+        "completion_integrity",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "certificates": len(certificates),
+            "eligible": eligible_count,
+            "attempts": attempts,
+            "submitted": submitted,
+        },
+    )
 def _diagnostic_isolation(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
     """Prove the persistent-state-only ablation did not silently enable controls."""
 
@@ -1316,6 +1514,7 @@ def _audit_treatment_runtime_requirements(
         _dense(receipt, label),
         _delivery(receipt, label),
         _contribution_budget(receipt, label),
+        _provider_value_contract(receipt, label),
         _action_lifecycle(receipt, label),
         _deterministic_task_controls(receipt, label),
         _preflight(receipt, label),
@@ -1324,6 +1523,7 @@ def _audit_treatment_runtime_requirements(
         *capability_checks,
         _product_mechanism_census(receipt, label),
         profile_check,
+        _completion_integrity(receipt, label),
         _project_validation(receipt, label),
         _terminal_validation_state(receipt, label),
         _retrieval_efficiency(receipt, label),

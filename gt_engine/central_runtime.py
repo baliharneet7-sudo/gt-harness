@@ -5327,6 +5327,34 @@ class CentralFeatureRuntime:
             "source_revision": frame.source_revision,
             "materialized_for_call": frame.materialized_for_call,
             "feedback": feedback,
+            # Provider-value certification is deliberately derived from the
+            # selected typed feature receipt, not from the rendered sentence.
+            # Signature guidance is authorized only when the existing caller
+            # contract supplies a concrete nonlocal endpoint.
+            "certified_nonlocal_relation": bool(
+                selected.feature_id == "signature_delta"
+                and selected.payload.get("callers")
+            ),
+            "relation": (
+                "CALLS"
+                if selected.feature_id == "signature_delta"
+                and selected.payload.get("callers")
+                else ""
+            ),
+            "relation_endpoint": next(
+                (
+                    str(item.get("caller_path") or item.get("path") or "")
+                    for item in selected.payload.get("callers") or ()
+                    if str(item.get("caller_path") or item.get("path") or "")
+                ),
+                "",
+            ),
+            "certified_predecision_gap": bool(
+                selected.feature_id == "GT_EDIT_CHECK"
+                and selected.payload.get("intervention") == "validation_debt"
+                and selected.payload.get("declared_check")
+                and selected.payload.get("changed_paths")
+            ),
         }
         if deferred:
             self._prepared_guidance = metadata

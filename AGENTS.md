@@ -2212,3 +2212,84 @@ each frozen task. It emits separate integrity, solve, efficiency, and
 intervention reports. No paid smoke is authorized until the exact candidate
 commit passes the source-built Linux provider-free workflow; local Python or a
 stale checked-in Windows index binary cannot substitute for that proof.
+
+## Provider information-value and canonical result contract (2026-08-19)
+
+Truth, grounding, freshness, and delivery timing are necessary but no longer
+sufficient authority to change a provider request. Every provider-visible
+claim in `central_relational_v2` must carry one `gt.provider_value.v1`
+certificate produced before contribution selection. The certificate binds the
+claim to its authority, source/graph revision, concrete anchors, exact versus
+partial completeness, novelty basis, decision point, and the ordinary
+search/read/rediscovery operation the evidence is expected to replace.
+
+Only three exact classes may be provider-visible:
+
+1. a certified nonlocal relation attached to the same observation;
+2. a new execution contradiction or attributable validation result; or
+3. a certified pre-decision information gap that is not already entailed by
+   the instruction or represented in provider history.
+
+Instruction restatements, generic deliverable present/absent state, local file
+facts already returned by the selected tool, generic repository anchors,
+persistent-state summaries without a counterfactual replacement, incomplete or
+ambiguous relations, and uncertified claims remain controller-only. They still
+receive a compiler disposition and remain auditable; they do not consume
+provider tokens. `value_uncertified` is a release failure. `value_rejected` is
+a valid fail-closed controller disposition. Every selected contribution must
+have an admissible exact certificate, and the authoritative delivery audit must
+join every visible claim to exactly one selected certificate.
+
+This imports GitNexus's useful same-observation placement while preserving GT's
+stronger uncertainty, freshness, and receipt contract. An exploration-
+replacement receipt links each delivery to the first later search/read and
+records whether the delivered anchors were used without prior rediscovery.
+Reasoning-anchor overlap is observational only; causal solve or efficiency
+claims still require a matched arm or mechanism ablation with identical prompt,
+model, scaffold, settings, task SHA, and evaluator.
+
+Harbor results are ingested only through `scripts.harbor_results`. The loader
+accepts aggregate and per-trial schemas, deduplicates only byte-equivalent task
+rows, rejects conflicting duplicates, ignores job-summary JSON, and fails on
+every missing or unexpected expected task. A nonzero agent exit accompanied by
+a verifier reward is graded, not infrastructure-censored. Each shard must stage
+a readable artifact tree and a complete manifest before upload; upload and
+merge fail closed. A merged summary with fewer rows than the frozen denominator
+is incomplete evidence and may never be reported as a solve-rate result.
+
+## Final regression shield and release-identity correction (2026-08-19)
+
+Final `central_relational_v2` imports GitNexus's useful narrow placement rule
+without importing its silent-failure boundary. After a read/search, semantic,
+process, and impact facts confined to the files already returned by the tool are
+controller-only. Only certified consequences crossing that observation boundary
+may enter the same next provider observation. Five-channel retrieval remains
+rank-only and never creates a separate provider surface or delivery authority.
+
+Provider-value authority is exhaustive over all 17 historical features. There
+is no generic `feature_fact -> execution contradiction` fallback. Syntax,
+covering-test, repeated-failure, and submission-failure evidence may certify a
+new execution contradiction; signature/precedent evidence requires a certified
+nonlocal relation; `GT_EDIT_CHECK` requires the typed `validation_debt`
+pre-decision gap; every other feature is explicitly controller-only. Registry
+and authority-table identity is a test invariant.
+
+Final v2 never compacts because of a soft character threshold. It preserves the
+stock provider view until measured provider-budget pressure requires a bounded
+transform, and the release gate rejects any final-v2 `character_pressure`
+epoch. Assistant content and reasoning remain preservation boundaries.
+
+Two deterministic amplifiers are part of the final candidate. A
+`ResolvedConventionRecord` is exact only when signature/type evidence, a
+certified caller, and a certified test agree; conflicting type evidence is an
+audited abstention. Completion uses `gt.completion_plan.v1`,
+`gt.completion_predicate_observation.v1`, and `gt.completion_certificate.v1`;
+partial, missing, failing, or stale predicates can never auto-submit and now
+fail the release audit if they claim eligibility.
+
+The no-spend mechanical gate must verify a clean tracked worktree before release
+manifest ancestry. Commit-based proof cannot see uncommitted runtime changes.
+`tracked_worktree_not_clean` therefore blocks `GT_MECHANICAL_COMPLETENESS=PASS`.
+This correction supersedes any local PASS produced while tracked candidate
+changes existed outside the manifest's `runtime_commit`. Exact-SHA Linux
+provider-free proof is still mandatory before any paid smoke.

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from gt_engine.runtime_gate import audit_runtime_receipt
+from gt_engine.delivery_audit import audit_provider_deliveries
 from scripts.tb2_promotion_gate import RESOURCE_FIELDS, task_set_sha256
 
 
@@ -49,6 +50,102 @@ def _action_hashes(path: Path | None) -> tuple[str, ...]:
             if command:
                 hashes.append(hashlib.sha256(command.encode("utf-8")).hexdigest())
     return tuple(hashes)
+
+
+def _trajectory_steps(path: Path | None) -> tuple[dict[str, Any], ...]:
+    if path is None:
+        return ()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    steps: list[dict[str, Any]] = []
+    call = 0
+    action_ordinal = 0
+    for message in payload.get("messages") or ():
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        call += 1
+        actions = []
+        for action in (message.get("extra") or {}).get("actions") or ():
+            if not isinstance(action, dict):
+                continue
+            command = str(action.get("command") or "")
+            if command:
+                action_ordinal += 1
+                actions.append(
+                    {
+                        "ordinal": action_ordinal,
+                        "command": command,
+                        "sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                    }
+                )
+        reasoning = str(
+            message.get("reasoning_content")
+            or ((message.get("extra") or {}).get("reasoning_content"))
+            or ""
+        )
+        steps.append({"call": call, "reasoning_content": reasoning, "actions": actions})
+    return tuple(steps)
+
+
+def _step_for_action(
+    steps: tuple[dict[str, Any], ...], action_ordinal: int | None
+) -> dict[str, Any] | None:
+    if action_ordinal is None:
+        return None
+    return next(
+        (
+            step
+            for step in steps
+            if any(action.get("ordinal") == action_ordinal for action in step["actions"])
+        ),
+        None,
+    )
+
+
+def _command_at(
+    steps: tuple[dict[str, Any], ...], action_ordinal: int | None
+) -> str:
+    if action_ordinal is None:
+        return ""
+    for step in steps:
+        for action in step["actions"]:
+            if action.get("ordinal") == action_ordinal:
+                return str(action.get("command") or "")
+    return ""
+
+
+def _delivery_influence(
+    receipt: dict[str, Any], *, through_call: int | None, reasoning: str
+) -> list[dict[str, Any]]:
+    rows, _failures, _totals = audit_provider_deliveries(receipt, task="forensics")
+    result: list[dict[str, Any]] = []
+    reasoning_lower = reasoning.lower()
+    for row in rows:
+        delivered = row.get("delivered_before_call")
+        if through_call is not None and isinstance(delivered, int) and delivered > through_call:
+            continue
+        anchors: list[str] = []
+        for certificate in row.get("value_certificates") or ():
+            anchors.extend(str(item) for item in certificate.get("anchors") or () if str(item))
+        for fact in row.get("raw", {}).get("facts") or ():
+            if isinstance(fact, dict) and str(fact.get("path") or ""):
+                anchors.append(str(fact["path"]))
+        anchors = list(dict.fromkeys(anchors))
+        mentioned = [anchor for anchor in anchors if anchor.lower() in reasoning_lower]
+        result.append(
+            {
+                "surface": row["surface"],
+                "delivered_before_call": delivered,
+                "claim_ids": list(row["claim_ids"]),
+                "value_certificates": list(row.get("value_certificates") or ()),
+                "anchors": anchors,
+                "reasoning_anchor_mentions": mentioned,
+                "reasoning_uptake": bool(mentioned),
+                "exploration_replacement": dict(
+                    row.get("raw", {}).get("exploration_replacement_receipt") or {}
+                ),
+            }
+        )
+    return result
 
 
 def _exit_status(path: Path | None) -> str:
@@ -154,6 +251,28 @@ def build_regression_forensics(
         baseline_actions = _action_hashes(baseline_trajectory)
         treatment_actions = _action_hashes(treatment_trajectory)
         divergence = _first_divergence(baseline_actions, treatment_actions)
+        baseline_steps = _trajectory_steps(baseline_trajectory)
+        treatment_steps = _trajectory_steps(treatment_trajectory)
+        baseline_divergence_step = _step_for_action(baseline_steps, divergence)
+        treatment_divergence_step = _step_for_action(treatment_steps, divergence)
+        divergence_call = (
+            int(treatment_divergence_step.get("call") or 0)
+            if treatment_divergence_step is not None
+            else None
+        )
+        divergence_reasoning = str(
+            (treatment_divergence_step or {}).get("reasoning_content") or ""
+        )
+        receipt_document = (
+            json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt_path is not None
+            else {}
+        )
+        preceding_deliveries = _delivery_influence(
+            receipt_document,
+            through_call=divergence_call,
+            reasoning=divergence_reasoning,
+        )
         first_gt_call = receipt["first_gt_changed_call"]
         if outcome != "negative_flip":
             attribution = "not_a_regression"
@@ -191,6 +310,17 @@ def build_regression_forensics(
                 "baseline_exit_status": _exit_status(baseline_trajectory),
                 "treatment_exit_status": _exit_status(treatment_trajectory),
                 "first_action_divergence": divergence,
+                "first_divergence_detail": {
+                    "treatment_call": divergence_call,
+                    "baseline_command": _command_at(baseline_steps, divergence),
+                    "treatment_command": _command_at(treatment_steps, divergence),
+                    "baseline_reasoning": str(
+                        (baseline_divergence_step or {}).get("reasoning_content") or ""
+                    ),
+                    "treatment_reasoning": divergence_reasoning,
+                    "preceding_gt_deliveries": preceding_deliveries,
+                    "reasoning_uptake_is_proxy_not_causal_proof": True,
+                },
                 "first_gt_provider_view_change": first_gt_call,
                 "attribution": attribution,
                 "confidence": confidence,
@@ -198,7 +328,7 @@ def build_regression_forensics(
             }
         )
     return {
-        "schema": "gt.tb2.regression_forensics.v1",
+        "schema": "gt.tb2.regression_forensics.v2",
         "profile_id": profile_id,
         "task_set_sha256": task_set_sha256(task_ids),
         "passed": not failures,

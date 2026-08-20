@@ -215,6 +215,106 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     assert result.contributions[0].unsafe_provider_origins == ()
 
 
+def test_post_read_search_suppresses_same_file_process_and_impact_echoes() -> None:
+    """A read already exposes local bytes; local graph facts add no information."""
+
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_read_search",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        _snapshot(
+            _link("src/core.py", "src/core.py", "CALLS", "run", "work"),
+        ),
+    )
+
+    assert result.execution_views == ()
+    assert result.impact_facts == ()
+    assert "Execution" not in result.rendered_text
+    assert "caller depth" not in result.rendered_text
+    assert "local_observation_already_represented" in result.reason_codes
+
+
+def test_resolved_convention_requires_agreeing_type_caller_and_test_evidence() -> None:
+    evidence = replace(
+        _evidence(),
+        definitions=(
+            {
+                **_evidence().definitions[0],
+                "signature": "def work(value: int) -> int",
+                "return_type": "int",
+            },
+        ),
+    )
+    snapshot = replace(
+        _snapshot(
+            _link(
+                "src/entry.py",
+                "src/core.py",
+                "CALLS",
+                "run",
+                "work",
+                target_return_type="int",
+            ),
+            _link(
+                "src/core.py",
+                "tests/test_core.py",
+                "ASSERTED_BY",
+                "work",
+                "test_work",
+            ),
+        ),
+        repository_evidence=evidence,
+    )
+
+    result = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_read_search",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        snapshot,
+    )
+
+    assert len(result.resolved_conventions) == 1
+    convention = result.resolved_conventions[0]
+    assert convention.resolved_type == "int"
+    assert convention.callers == ("src/entry.py#run",)
+    assert convention.tests == ("tests/test_core.py#test_work",)
+    assert "Resolved convention (exact)" in result.rendered_text
+
+    conflicting_snapshot = replace(
+        snapshot,
+        structural_links=(
+            replace(snapshot.structural_links[0], target_return_type="str"),
+            snapshot.structural_links[1],
+        ),
+    )
+    conflicting = RepositoryContextEngine(max_tokens=320).project(
+        DecisionOpportunity(
+            kind="post_read_search",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        conflicting_snapshot,
+    )
+    assert conflicting.resolved_conventions == ()
+    assert conflicting.convention_coverage["conflicting_type_evidence"] == 1
+
+
 def test_retrieval_rank_only_reorders_certified_process_facts() -> None:
     snapshot = replace(
         _snapshot(

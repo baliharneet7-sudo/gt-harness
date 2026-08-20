@@ -50,6 +50,7 @@ class CompletionPlan:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "schema": "gt.completion_plan.v1",
             "status": self.status.value,
             "executable": self.executable,
             "predicates": [asdict(item) for item in self.predicates],
@@ -69,6 +70,7 @@ class PredicateObservation:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "schema": "gt.completion_predicate_observation.v1",
             "predicate_id": self.predicate_id,
             "returncode": self.returncode,
             "output_sha256": hashlib.sha256(
@@ -92,6 +94,7 @@ class CompletionCertificate:
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "schema": "gt.completion_certificate.v1",
             "status": self.status.value,
             "auto_submit_eligible": self.auto_submit_eligible,
             "workspace_revision": self.workspace_revision,

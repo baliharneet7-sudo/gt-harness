@@ -15,7 +15,11 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
-from gt_engine.contributions import ContributionKind, GTContribution
+from gt_engine.contributions import (
+    ContributionKind,
+    GTContribution,
+    build_provider_value_certificates,
+)
 from gt_engine.hybrid_retrieval import EvidenceOrigin, StructuralLink
 from gt_engine.repository_intelligence import RepositoryEvidence
 from gt_engine.semantic_evidence import (
@@ -199,6 +203,28 @@ class CoupledChangeObligation:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedConventionRecord:
+    """Exact convention composed from agreeing independent semantic sources."""
+
+    claim_id: str
+    subject: SymbolRef
+    signature: str
+    resolved_type: str
+    callers: tuple[str, ...]
+    tests: tuple[str, ...]
+    constituent_claim_ids: tuple[str, ...]
+
+    @property
+    def rendered(self) -> str:
+        return (
+            "- Resolved convention (exact): "
+            f"{self.subject.rendered}; signature={self.signature}; "
+            f"type={self.resolved_type}; callers={', '.join(self.callers)}; "
+            f"tests={', '.join(self.tests)}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RepositoryContextProjection:
     status: RepositoryContextStatus
     contributions: tuple[GTContribution, ...]
@@ -212,6 +238,8 @@ class RepositoryContextProjection:
     diagnostic_facts: tuple[DiagnosticFact, ...] = ()
     validation_facts: tuple[ValidationFact, ...] = ()
     coupled_obligations: tuple[CoupledChangeObligation, ...] = ()
+    resolved_conventions: tuple[ResolvedConventionRecord, ...] = ()
+    convention_coverage: dict[str, int] = field(default_factory=dict)
     semantic_evidence: SemanticEvidenceResult | None = None
     token_count: int = 0
     truncated_count: int = 0
@@ -232,6 +260,9 @@ class RepositoryContextProjection:
         row["validation_facts"] = [asdict(item) for item in self.validation_facts]
         row["coupled_obligations"] = [
             asdict(item) for item in self.coupled_obligations
+        ]
+        row["resolved_conventions"] = [
+            asdict(item) for item in self.resolved_conventions
         ]
         row["semantic_evidence"] = (
             self.semantic_evidence.as_dict() if self.semantic_evidence is not None else None
@@ -331,6 +362,7 @@ class RepositoryContextEngine:
         max_branching: int = 3,
         max_execution_views: int = 3,
         max_impact_facts: int = 8,
+        max_semantic_items: int = 6,
         max_tokens: int = 256,
     ) -> None:
         self.max_depth = max(1, int(max_depth))
@@ -338,7 +370,10 @@ class RepositoryContextEngine:
         self.max_execution_views = max(1, int(max_execution_views))
         self.max_impact_facts = max(1, int(max_impact_facts))
         self.max_tokens = max(1, int(max_tokens))
-        self._semantic = SemanticEvidenceBridge(max_items=6, max_tokens=max_tokens)
+        self.max_semantic_items = max(1, int(max_semantic_items))
+        self._semantic = SemanticEvidenceBridge(
+            max_items=self.max_semantic_items, max_tokens=max_tokens
+        )
 
     @staticmethod
     def _matches(node: SymbolRef, paths: frozenset[str], symbols: frozenset[str]) -> bool:
@@ -837,6 +872,115 @@ class RepositoryContextEngine:
             )
         return ()
 
+    @staticmethod
+    def _resolved_conventions(
+        semantic: SemanticEvidenceResult,
+        execution_views: tuple[ExecutionView, ...],
+        impact: tuple[ImpactFact, ...],
+        anchor_paths: frozenset[str],
+        anchor_symbols: frozenset[str],
+    ) -> tuple[tuple[ResolvedConventionRecord, ...], dict[str, int]]:
+        """Compose only an exact, independently corroborated convention.
+
+        A signature or graph edge alone is intentionally insufficient.  The
+        subject must have a resolved type, a certified caller, and a certified
+        test relation.  Conflicting type evidence is recorded and abstains.
+        """
+
+        coverage = {
+            "definition_candidates": 0,
+            "exact_records": 0,
+            "missing_type_evidence": 0,
+            "missing_caller_evidence": 0,
+            "missing_test_evidence": 0,
+            "conflicting_type_evidence": 0,
+        }
+        records: list[ResolvedConventionRecord] = []
+        for definition in semantic.items:
+            if definition.kind != "definition" or not definition.signature:
+                continue
+            if anchor_paths and _path(definition.path) not in anchor_paths:
+                continue
+            if anchor_symbols and definition.symbol not in anchor_symbols:
+                continue
+            coverage["definition_candidates"] += 1
+            subject = SymbolRef(
+                _path(definition.path), definition.symbol, definition.line
+            )
+            matching_views: list[ExecutionView] = []
+            matching_steps: list[DirectedExecutionStep] = []
+            for view in execution_views:
+                steps = tuple(
+                    step
+                    for step in view.steps
+                    if step.target.path == subject.path
+                    and step.target.symbol == subject.symbol
+                )
+                if steps:
+                    matching_views.append(view)
+                    matching_steps.extend(steps)
+            tests = tuple(
+                fact
+                for fact in impact
+                if fact.kind == "test"
+                and fact.source.path == subject.path
+                and fact.source.symbol == subject.symbol
+            )
+            resolved_types = {
+                value
+                for value in (
+                    definition.return_type,
+                    *(step.target_return_type for step in matching_steps),
+                )
+                if value
+            }
+            if not resolved_types:
+                coverage["missing_type_evidence"] += 1
+                continue
+            if len(resolved_types) != 1:
+                coverage["conflicting_type_evidence"] += 1
+                continue
+            if not matching_steps:
+                coverage["missing_caller_evidence"] += 1
+                continue
+            if not tests:
+                coverage["missing_test_evidence"] += 1
+                continue
+            callers = tuple(
+                dict.fromkeys(step.source.rendered for step in matching_steps)
+            )
+            test_refs = tuple(dict.fromkeys(fact.target.rendered for fact in tests))
+            constituents = tuple(
+                dict.fromkeys(
+                    (
+                        definition.claim_id,
+                        *(view.view_id for view in matching_views),
+                        *(fact.claim_id for fact in tests),
+                    )
+                )
+            )
+            resolved_type = next(iter(resolved_types))
+            records.append(
+                ResolvedConventionRecord(
+                    claim_id=_stable_id(
+                        "gt-resolved-convention-",
+                        subject.rendered,
+                        definition.signature,
+                        resolved_type,
+                        *callers,
+                        *test_refs,
+                    ),
+                    subject=subject,
+                    signature=definition.signature,
+                    resolved_type=resolved_type,
+                    callers=callers,
+                    tests=test_refs,
+                    constituent_claim_ids=constituents,
+                )
+            )
+        coverage["exact_records"] = len(records)
+        return tuple(records), coverage
+
     def _abstain(
         self,
         opportunity: DecisionOpportunity,
@@ -903,6 +1047,46 @@ class RepositoryContextEngine:
             graph_revision=opportunity.graph_revision,
             delivered_claim_ids=delivered_claim_ids,
         )
+        semantic_for_composition = semantic
+        if (
+            opportunity.kind == "post_read_search"
+            and semantic.status is SemanticEvidenceStatus.DELIVER
+            and anchor_paths
+        ):
+            # The normal tool observation already contains the complete bytes
+            # of files the model chose to read/search. Retain only nonlocal
+            # semantic consequences; repeating local definitions perturbs the
+            # trajectory without replacing exploration.
+            nonlocal_items = tuple(
+                item for item in semantic.items if _path(item.path) not in anchor_paths
+            )
+            if len(nonlocal_items) != len(semantic.items):
+                rendered = "\n".join(item.rendered for item in nonlocal_items)
+                semantic = replace(
+                    semantic,
+                    status=(
+                        SemanticEvidenceStatus.DELIVER
+                        if nonlocal_items
+                        else SemanticEvidenceStatus.ABSTAIN
+                    ),
+                    items=nonlocal_items,
+                    rendered_text=(
+                        "Certified semantic context (source-backed; omitted facts may exist):\n"
+                        + rendered
+                        if rendered
+                        else ""
+                    ),
+                    claim_ids=tuple(item.claim_id for item in nonlocal_items),
+                    reason_codes=tuple(
+                        dict.fromkeys(
+                            (*semantic.reason_codes, "local_observation_already_represented")
+                        )
+                    ),
+                    token_count=_tokens(rendered),
+                    truncated_count=(
+                        semantic.truncated_count + len(semantic.items) - len(nonlocal_items)
+                    ),
+                )
         execution_views, rejected_edges, process_coverage = self._execution_views(
             snapshot.structural_links, anchor_paths, anchor_symbols
         )
@@ -910,6 +1094,68 @@ class RepositoryContextEngine:
             snapshot.structural_links, anchor_paths, anchor_symbols
         )
         rejected_edges += rejected_impact_edges
+        if opportunity.kind == "post_read_search" and anchor_paths:
+            # The selected read/search observation already contains every local
+            # byte needed to rediscover relations whose endpoints are confined
+            # to those files.  Only retain a process/impact fact when it crosses
+            # that observation boundary.  This is the regression-safety part of
+            # same-observation augmentation: certified does not mean novel.
+            local_execution_count = sum(
+                1
+                for view in execution_views
+                if all(
+                    _path(ref.path) in anchor_paths
+                    for step in view.steps
+                    for ref in (step.source, step.target)
+                )
+            )
+            local_impact_count = sum(
+                1
+                for fact in impact
+                if _path(fact.source.path) in anchor_paths
+                and _path(fact.target.path) in anchor_paths
+            )
+            if local_execution_count:
+                execution_views = tuple(
+                    view
+                    for view in execution_views
+                    if not all(
+                        _path(ref.path) in anchor_paths
+                        for step in view.steps
+                        for ref in (step.source, step.target)
+                    )
+                )
+            if local_impact_count:
+                impact = tuple(
+                    fact
+                    for fact in impact
+                    if not (
+                        _path(fact.source.path) in anchor_paths
+                        and _path(fact.target.path) in anchor_paths
+                    )
+                )
+            if local_execution_count or local_impact_count:
+                process_coverage["local_observation_suppressed_views"] = (
+                    local_execution_count
+                )
+                process_coverage["local_observation_suppressed_impact"] = (
+                    local_impact_count
+                )
+                semantic = replace(
+                    semantic,
+                    reason_codes=tuple(
+                        dict.fromkeys(
+                            (*semantic.reason_codes, "local_observation_already_represented")
+                        )
+                    ),
+                )
+        conventions, convention_coverage = self._resolved_conventions(
+            semantic_for_composition,
+            execution_views,
+            impact,
+            anchor_paths,
+            anchor_symbols,
+        )
         diagnostics = self._diagnostics(snapshot.diagnostics, anchor_paths)
         validation = self._validation(
             impact,
@@ -925,6 +1171,11 @@ class RepositoryContextEngine:
         coupled_constituents = {
             claim_id
             for item in coupled
+            for claim_id in item.constituent_claim_ids
+        }
+        convention_constituents = {
+            claim_id
+            for item in conventions
             for claim_id in item.constituent_claim_ids
         }
         retrieval_scores = {
@@ -987,6 +1238,7 @@ class RepositoryContextEngine:
             else []
         )
         critical_lines = [(item.claim_id, item.rendered) for item in coupled]
+        critical_lines.extend((item.claim_id, item.rendered) for item in conventions)
         critical_lines.extend(
             (fact.claim_id, fact.rendered) for fact in diagnostics
         )
@@ -1006,6 +1258,7 @@ class RepositoryContextEngine:
             (fact.claim_id, f"- Impact {fact.rendered}")
             for fact in impact
             if fact.claim_id not in coupled_constituents
+            and fact.claim_id not in convention_constituents
         )
         groups = (
             (
@@ -1034,6 +1287,8 @@ class RepositoryContextEngine:
         )
         if not any(rows for _, _, rows in available_groups):
             reasons = ["no_certified_repository_context"]
+            if "local_observation_already_represented" in semantic.reason_codes:
+                reasons.append("local_observation_already_represented")
             if delivered_claim_ids and (
                 semantic.reason_codes == ("semantic_evidence_already_delivered",)
                 or execution_views
@@ -1151,9 +1406,79 @@ class RepositoryContextEngine:
         diagnostic_claims = {fact.claim_id for fact in diagnostics}
         validation_claims = {fact.claim_id for fact in validation}
         coupled_claims = {item.claim_id for item in coupled}
+        convention_claims = {item.claim_id for item in conventions}
         coupled_by_id = {item.claim_id: item for item in coupled}
+        convention_by_id = {item.claim_id: item for item in conventions}
+        semantic_by_id = {item.claim_id: item for item in semantic.items}
+        execution_by_id = {item.view_id: item for item in execution_views}
+        impact_by_id = {item.claim_id: item for item in impact}
+        diagnostic_by_id = {item.claim_id: item for item in diagnostics}
+        validation_by_id = {item.claim_id: item for item in validation}
+
+        def anchors_for(claim: str) -> tuple[str, ...]:
+            semantic_item = semantic_by_id.get(claim)
+            if semantic_item is not None:
+                return tuple(
+                    dict.fromkeys(
+                        item
+                        for item in (
+                            _path(semantic_item.path),
+                            str(semantic_item.symbol or "").strip(),
+                        )
+                        if item
+                    )
+                )
+            execution = execution_by_id.get(claim)
+            if execution is not None:
+                return tuple(
+                    dict.fromkeys(
+                        ref.rendered
+                        for step in execution.steps
+                        for ref in (step.source, step.target)
+                        if ref.rendered
+                    )
+                )
+            impact_item = impact_by_id.get(claim)
+            if impact_item is not None:
+                return tuple(
+                    dict.fromkeys(
+                        (impact_item.source.rendered, impact_item.target.rendered)
+                    )
+                )
+            diagnostic = diagnostic_by_id.get(claim)
+            if diagnostic is not None:
+                return (f"{diagnostic.path}:{diagnostic.line}",)
+            validation_item = validation_by_id.get(claim)
+            if validation_item is not None:
+                return (validation_item.impacted_path, validation_item.command)
+            coupled_item = coupled_by_id.get(claim)
+            if coupled_item is not None:
+                return tuple(
+                    dict.fromkeys(
+                        (
+                            coupled_item.changed.rendered,
+                            *coupled_item.dependent_paths,
+                            *coupled_item.test_paths,
+                            coupled_item.declared_check,
+                        )
+                    )
+                )
+            convention = convention_by_id.get(claim)
+            if convention is not None:
+                return tuple(
+                    dict.fromkeys(
+                        (
+                            convention.subject.rendered,
+                            *convention.callers,
+                            *convention.tests,
+                        )
+                    )
+                )
+            return ()
+
         def metadata_for(claim: str) -> dict[str, Any]:
             item = coupled_by_id.get(claim)
+            convention = convention_by_id.get(claim)
             return {
                 "claim_id": claim,
                 "origin": (
@@ -1167,7 +1492,7 @@ class RepositoryContextEngine:
                     else "certified_structural"
                     if claim in execution_claims or claim in impact_claims
                     else "certified_composition"
-                    if claim in coupled_claims
+                    if claim in coupled_claims or claim in convention_claims
                     else "compiler_semantic"
                     if claim in semantic_claims
                     else "declared_validation"
@@ -1178,19 +1503,28 @@ class RepositoryContextEngine:
                     "current_attributable_failure"
                     if claim in diagnostic_claims
                     else "new_unresolved_task_obligation"
-                    if claim in coupled_claims
+                    if claim in coupled_claims or claim in convention_claims
                     else "new_unresolved_task_obligation"
                     if claim in validation_claims
                     else "decision_relevant_repository_context"
                 ),
                 "source_revision": opportunity.source_revision,
                 "graph_revision": opportunity.graph_revision,
+                "provider_value_anchors": list(anchors_for(claim)),
                 **(
                     {
                         "constituent_claim_ids": list(item.constituent_claim_ids),
                         "blocking": item.blocking,
                     }
                     if item is not None
+                    else {
+                        "constituent_claim_ids": list(
+                            convention.constituent_claim_ids
+                        ),
+                        "resolved_type": convention.resolved_type,
+                        "signature": convention.signature,
+                    }
+                    if convention is not None
                     else {}
                 ),
             }
@@ -1210,6 +1544,7 @@ class RepositoryContextEngine:
                 _stable_id("gt-context-fact-", claim, opportunity.source_revision)
                 for claim in surface_claims
             )
+            surface_metadata = tuple(metadata_for(claim) for claim in surface_claims)
             contributions.append(
                 GTContribution.create(
                     surface=surface,
@@ -1221,7 +1556,15 @@ class RepositoryContextEngine:
                     eligible_call=opportunity.eligible_call,
                     source_revision=opportunity.source_revision,
                     priority=priority_by_surface[surface],
-                    claim_metadata=tuple(metadata_for(claim) for claim in surface_claims),
+                    claim_metadata=surface_metadata,
+                    value_certificates=build_provider_value_certificates(
+                        surface=surface,
+                        claim_ids=surface_claims,
+                        fact_ids=surface_facts,
+                        claim_metadata=surface_metadata,
+                        source_revision=opportunity.source_revision,
+                        evidence_action=opportunity.evidence_action,
+                    ),
                 )
             )
         return RepositoryContextProjection(
@@ -1242,6 +1585,11 @@ class RepositoryContextEngine:
                     and fact.claim_id in item.constituent_claim_ids
                     for item in coupled
                 )
+                or any(
+                    item.claim_id in selected_claims
+                    and fact.claim_id in item.constituent_claim_ids
+                    for item in conventions
+                )
             ),
             diagnostic_facts=tuple(
                 fact for fact in diagnostics if fact.claim_id in selected_claims
@@ -1259,6 +1607,10 @@ class RepositoryContextEngine:
             coupled_obligations=tuple(
                 item for item in coupled if item.claim_id in selected_claims
             ),
+            resolved_conventions=tuple(
+                item for item in conventions if item.claim_id in selected_claims
+            ),
+            convention_coverage=convention_coverage,
             semantic_evidence=semantic,
             token_count=_tokens(rendered),
             truncated_count=truncated,
@@ -1277,6 +1629,7 @@ __all__ = [
     "RepositoryContextEngine",
     "RepositoryContextProjection",
     "RepositoryContextStatus",
+    "ResolvedConventionRecord",
     "RepositorySnapshot",
     "SymbolRef",
     "ValidationFact",

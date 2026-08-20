@@ -28,7 +28,7 @@ def _entry(path: str, text: str) -> WorkspaceEntry:
     )
 
 
-def test_source_less_binary_gets_call_one_semantic_context_without_graph():
+def test_source_less_binary_gets_only_novel_structural_context_without_graph():
     derivation = derive_decisive_facts(
         instruction=(
             "I have provided /app/a.out, a compiled C binary. "
@@ -62,13 +62,13 @@ def test_source_less_binary_gets_call_one_semantic_context_without_graph():
     assert frame.eligible_call == 1
     assert "Current task evidence:" in frame.rendered_text
     assert "[structural]" in frame.rendered_text
-    assert "[obligation]" in frame.rendered_text
+    assert "[obligation]" not in frame.rendered_text
     assert "Task-decisive context" not in frame.rendered_text
     assert "ELF 64-bit LSB x86-64" in frame.rendered_text
-    assert "extract.js" in frame.rendered_text
+    assert "extract.js" not in frame.rendered_text
 
 
-def test_semantic_substrate_exposes_changed_deliverable_state_once():
+def test_semantic_substrate_keeps_instruction_entailed_deliverable_state_private():
     instruction = "Create /app/out.json."
     initial = derive_decisive_facts(
         instruction=instruction,
@@ -87,8 +87,10 @@ def test_semantic_substrate_exposes_changed_deliverable_state_once():
         provider_messages=(),
         max_chars=1_200,
     )
-    assert absent is not None and "absent" in absent.rendered_text
-    substrate.mark_dispatched(absent)
+    assert absent is None
+    assert substrate.as_dict()["compilations"][-1]["accounting"][0]["disposition"] == (
+        "instruction_entailed_controller_only"
+    )
 
     current = derive_decisive_facts(
         instruction=instruction,
@@ -107,18 +109,39 @@ def test_semantic_substrate_exposes_changed_deliverable_state_once():
         max_chars=1_200,
     )
 
-    assert present is not None
-    assert "present" in present.rendered_text
-    assert present.claim_ids != absent.claim_ids
-    substrate.mark_dispatched(present)
-    assert (
-        substrate.compile_context(
-            current_source_revision="source-2",
-            current_call=3,
-            provider_messages=(),
-            max_chars=1_200,
-        )
-        is None
+    assert present is None
+    assert substrate.as_dict()["compilations"][-1]["accounting"][0]["disposition"] == (
+        "instruction_entailed_controller_only"
+    )
+
+
+def test_source_less_instruction_only_deliverable_does_not_change_call_one():
+    derivation = derive_decisive_facts(
+        instruction="Create /app/parallel_linear.py.",
+        workspace=(_entry("README.md", "task\n"),),
+        deliverables=("parallel_linear.py",),
+        source_revision="source-0",
+    )
+    substrate = TaskSemanticSubstrate.from_derivation(
+        derivation,
+        evidence_action=0,
+        eligible_call=1,
+    )
+
+    frame = substrate.compile_context(
+        current_source_revision="source-0",
+        current_call=1,
+        provider_messages=(
+            {"role": "user", "content": "Create /app/parallel_linear.py."},
+        ),
+        max_chars=1_200,
+    )
+
+    assert frame is None
+    receipt = substrate.as_dict()["compilations"][-1]
+    assert receipt["selected_count"] == 0
+    assert receipt["accounting"][0]["disposition"] == (
+        "instruction_entailed_controller_only"
     )
 
 

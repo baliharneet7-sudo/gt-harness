@@ -94,6 +94,7 @@ from gt_engine.contributions import (
     ContributionKind,
     ContributionTaskBudget,
     GTContribution,
+    build_provider_value_certificates,
     compile_contributions,
 )
 from gt_engine.convergence_controller import convergence_preflight
@@ -3937,7 +3938,9 @@ class MiniSweCentralAgent(BaseAgent):
         repository_context_engine = RepositoryContextEngine(
             max_depth=self.relational_context_max_depth,
             max_branching=self.relational_context_max_branching,
-            max_execution_views=self.relational_context_max_processes,
+            max_execution_views=1,
+            max_impact_facts=3,
+            max_semantic_items=3,
             max_tokens=max(
                 self.relational_context_max_tokens,
                 self.semantic_evidence_max_tokens,
@@ -4491,7 +4494,10 @@ class MiniSweCentralAgent(BaseAgent):
                     stock_provider_request_chars,
                 ) = _provider_request_receipt(model, messages)
                 compaction_epoch_started = False
-                if self.enable_context_compaction:
+                if (
+                    self.enable_context_compaction
+                    and self.treatment_profile != "central_relational_v2"
+                ):
                     raw_context_chars = sum(_message_context_chars(message) for message in messages)
                     checkpoint_exists = bool(provider_view_session.checkpoint_messages)
                     if checkpoint_exists:
@@ -4964,6 +4970,7 @@ class MiniSweCentralAgent(BaseAgent):
                                         ],
                                         "selected_evidence": [
                                             {
+                                                "claim_id": row.claim_hash,
                                                 "path": row.path,
                                                 "start_line": row.start_line,
                                                 "end_line": row.end_line,
@@ -5460,6 +5467,14 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=revision,
                         priority=priority,
                         claim_metadata=claim_metadata,
+                        value_certificates=build_provider_value_certificates(
+                            surface=surface,
+                            claim_ids=claim_ids,
+                            fact_ids=fact_ids,
+                            claim_metadata=claim_metadata,
+                            source_revision=revision,
+                            evidence_action=evidence_action,
+                        ),
                         lifecycle_required=lifecycle_required,
                     )
                     _candidates.append(contribution)
@@ -5604,10 +5619,32 @@ class MiniSweCentralAgent(BaseAgent):
                     claim_metadata=tuple(
                         {
                             "claim_id": claim_id,
+                            "feature_id": str(
+                                prepared_guidance_metadata.get("feature_id") or ""
+                            ),
                             "origin": "execution_observation",
                             "authority": "deterministic_feature_evidence",
                             "materiality_reason": "feature_control_evidence",
                             "source_revision": source_revision,
+                            "certified_nonlocal_relation": bool(
+                                prepared_guidance_metadata.get(
+                                    "certified_nonlocal_relation"
+                                )
+                            ),
+                            "relation": str(
+                                prepared_guidance_metadata.get("relation") or ""
+                            ),
+                            "relation_endpoint": str(
+                                prepared_guidance_metadata.get("relation_endpoint") or ""
+                            ),
+                            "certified_predecision_gap": bool(
+                                prepared_guidance_metadata.get(
+                                    "certified_predecision_gap"
+                                )
+                            ),
+                            "provider_value_anchors": list(
+                                prepared_guidance_metadata.get("claim_anchors") or ()
+                            ),
                         }
                         for claim_id in tuple(
                             dict.fromkeys(
@@ -6297,6 +6334,28 @@ class MiniSweCentralAgent(BaseAgent):
                         }
                         for fact in repository_context_projection.validation_facts
                     )
+                    for convention in repository_context_projection.resolved_conventions:
+                        repository_context_fact_rows.append(
+                            {
+                                "path": convention.subject.path,
+                                "symbol": convention.subject.symbol,
+                                "kind": "resolved_convention_subject",
+                            }
+                        )
+                        repository_context_fact_rows.extend(
+                            {
+                                "path": value.split("#", 1)[0],
+                                "symbol": (
+                                    value.split("#", 1)[1] if "#" in value else ""
+                                ),
+                                "kind": kind,
+                            }
+                            for kind, values in (
+                                ("resolved_convention_caller", convention.callers),
+                                ("resolved_convention_test", convention.tests),
+                            )
+                            for value in values
+                        )
                     unique_repository_context_facts = list(
                         {
                             (
@@ -9712,6 +9771,12 @@ class MiniSweCentralAgent(BaseAgent):
             frontier_material_undelivered = bool(
                 frontier_required
                 and not frontier_deliveries
+                and not any(
+                    item.get("surface") == "graph_frontier"
+                    and item.get("disposition") == "value_rejected"
+                    for compilation in contribution_compilations
+                    for item in compilation.get("accounting") or ()
+                )
                 and any(
                     row.get("disposition") == FrontierDisposition.SELECTED_FRONTIER.value
                     for row in frontier_decisions
@@ -9726,6 +9791,13 @@ class MiniSweCentralAgent(BaseAgent):
                 if any(
                     row.get("disposition") == FrontierDisposition.REPRESENTED_MESSAGE.value
                     for row in frontier_decisions
+                )
+                else "controller_only_value_rejected"
+                if any(
+                    item.get("surface") == "graph_frontier"
+                    and item.get("disposition") == "value_rejected"
+                    for compilation in contribution_compilations
+                    for item in compilation.get("accounting") or ()
                 )
                 else "no_certified_incremental_fact"
                 if frontier_decisions
@@ -11192,6 +11264,13 @@ class MiniSweCentralAgent(BaseAgent):
                                 "max_processes": self.relational_context_max_processes,
                                 "max_tokens": self.relational_context_max_tokens,
                             },
+                            "repository_context_profile": {
+                                "profile_id": "gt.action_local_repository_context.v1",
+                                "max_execution_views": 1,
+                                "max_relation_facts": 3,
+                                "max_semantic_items": 3,
+                                "delivery_mode": "integrated_same_observation",
+                            },
                             "decision_sufficiency": self.enable_decision_sufficiency,
                             "task_semantic_substrate": bool(
                                 task_semantic_substrate is not None
@@ -11502,7 +11581,8 @@ class MiniSweCentralAgent(BaseAgent):
                             "decisions": decision_sufficiency_receipts,
                         },
                         "contribution_compiler": {
-                            "schema": "gt.contribution_compiler.runtime.v1",
+                            "schema": "gt.contribution_compiler.runtime.v2",
+                            "provider_value_contract": "gt.provider_value.v1",
                             "calls": contribution_compilations,
                             "task_budget": (
                                 contribution_task_budget.as_dict()

@@ -2,7 +2,13 @@ import pytest
 
 
 def _contribution(**overrides):
-    from gt_engine.contributions import ContributionKind, GTContribution
+    from gt_engine.contributions import (
+        ContributionKind,
+        GTContribution,
+        ProviderValueCertificate,
+        ProviderValueClass,
+        ProviderValueDisposition,
+    )
 
     values = {
         "surface": "preemptive_retrieval",
@@ -27,7 +33,199 @@ def _contribution(**overrides):
             }
             for authority_id in authority_ids
         )
+    if "value_certificates" not in overrides:
+        authority_ids = values["claim_ids"] or values["fact_ids"]
+        values["value_certificates"] = tuple(
+            ProviderValueCertificate(
+                claim_id=authority_id,
+                value_class=ProviderValueClass.ACTION_LOCAL_RELATION,
+                disposition=ProviderValueDisposition.SAME_OBSERVATION,
+                authority="certified_structural",
+                source_revision=values["source_revision"],
+                anchors=("src/a.py",),
+                novelty_basis="nonlocal_relation_absent_from_observation",
+                decision_point="next_executor_request",
+                replaces_operation="repository_relationship_search",
+                materiality_reason="decision_relevant_repository_context",
+            )
+            for authority_id in authority_ids
+        )
     return GTContribution.create(**values)
+
+
+def test_contribution_compiler_rejects_truth_without_value_certificate():
+    from gt_engine.contributions import ContributionDisposition, compile_contributions
+
+    contribution = _contribution(value_certificates=())
+    result = compile_contributions(
+        (contribution,),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=1_000,
+    )
+
+    assert result.payload == ""
+    assert result.accounting[0].disposition is ContributionDisposition.VALUE_UNCERTIFIED
+    assert result.accounting[0].reason_codes == ("missing_value_certificate:claim-a",)
+
+
+def test_contribution_compiler_keeps_instruction_entailed_truth_controller_only():
+    from gt_engine.contributions import (
+        ContributionDisposition,
+        ProviderValueCertificate,
+        ProviderValueClass,
+        ProviderValueDisposition,
+        compile_contributions,
+    )
+
+    contribution = _contribution(
+        value_certificates=(
+            ProviderValueCertificate(
+                claim_id="claim-a",
+                value_class=ProviderValueClass.INSTRUCTION_ENTAILED,
+                disposition=ProviderValueDisposition.CONTROLLER_ONLY,
+                authority="task_instruction",
+                source_revision="rev-1",
+                anchors=("src/a.py",),
+                novelty_basis="already_entailed_by_instruction",
+                decision_point="none",
+                replaces_operation="none",
+            ),
+        )
+    )
+    result = compile_contributions(
+        (contribution,),
+        current_source_revision="rev-1",
+        current_call=2,
+        budget_chars=1_000,
+    )
+
+    assert result.payload == ""
+    assert result.accounting[0].disposition is ContributionDisposition.VALUE_REJECTED
+
+
+def test_preemptive_value_certificate_requires_certified_semantic_support():
+    from gt_engine.contributions import build_provider_value_certificates
+
+    base = {
+        "claim_id": "retrieval-claim",
+        "path": "src/caller.py",
+        "origin": "preexisting_repository",
+        "authority": "certified_relation",
+        "materiality_reason": "decision_relevant_repository_context",
+        "support_kind": "certified_relation",
+        "supporting_channels": ["structural"],
+    }
+    accepted = build_provider_value_certificates(
+        surface="preemptive_retrieval",
+        claim_ids=("retrieval-claim",),
+        fact_ids=(),
+        claim_metadata=(base,),
+        source_revision="rev-1",
+        evidence_action=1,
+    )
+    rejected = build_provider_value_certificates(
+        surface="preemptive_retrieval",
+        claim_ids=("retrieval-claim",),
+        fact_ids=(),
+        claim_metadata=({**base, "supporting_channels": []},),
+        source_revision="rev-1",
+        evidence_action=1,
+    )
+
+    assert len(accepted) == 1 and accepted[0].provider_visible_allowed is True
+    assert len(rejected) == 1 and rejected[0].provider_visible_allowed is False
+
+
+@pytest.mark.parametrize(
+    "feature_id",
+    (
+        "caller_contract",
+        "def_partition",
+        "localization",
+        "obligations",
+        "GT_CERT_DELIVERY",
+        "GT_CHANGE_SURFACE",
+        "GT_HYPOTHESIS",
+        "GT_LOC_RESLOT",
+        "GT_PATCH_DELTA",
+        "GT_SS_SUBMIT_RED",
+    ),
+)
+def test_nonmaterial_feature_facts_are_explicitly_controller_only(feature_id):
+    from gt_engine.contributions import build_provider_value_certificates
+
+    certificates = build_provider_value_certificates(
+        surface="feature_fact",
+        claim_ids=(f"claim-{feature_id}",),
+        fact_ids=(),
+        claim_metadata=(
+            {
+                "claim_id": f"claim-{feature_id}",
+                "feature_id": feature_id,
+                "origin": "execution_observation",
+                "authority": "deterministic_feature_evidence",
+                "materiality_reason": "feature_control_evidence",
+                "provider_value_anchors": ["src/core.py"],
+            },
+        ),
+        source_revision="rev-1",
+        evidence_action=1,
+    )
+
+    assert len(certificates) == 1
+    assert certificates[0].provider_visible_allowed is False
+    assert "feature_controller_only" in certificates[0].reason_codes
+
+
+def test_feature_value_rules_distinguish_failures_from_uncertified_relations():
+    from gt_engine.contributions import (
+        ProviderValueClass,
+        build_provider_value_certificates,
+    )
+
+    def certificate(feature_id, **extra):
+        return build_provider_value_certificates(
+            surface="feature_fact",
+            claim_ids=("claim-a",),
+            fact_ids=(),
+            claim_metadata=(
+                {
+                    "claim_id": "claim-a",
+                    "feature_id": feature_id,
+                    "origin": "execution_observation",
+                    "authority": "deterministic_feature_evidence",
+                    "materiality_reason": "feature_control_evidence",
+                    "provider_value_anchors": ["src/core.py"],
+                    **extra,
+                },
+            ),
+            source_revision="rev-1",
+            evidence_action=1,
+        )[0]
+
+    syntax = certificate("syntax_result")
+    signature_without_callers = certificate("signature_delta")
+    signature_with_callers = certificate(
+        "signature_delta",
+        certified_nonlocal_relation=True,
+        relation="CALLS",
+        relation_endpoint="src/caller.py#run",
+    )
+
+    assert syntax.provider_visible_allowed is True
+    assert syntax.value_class is ProviderValueClass.EXECUTION_CONTRADICTION
+    assert signature_without_callers.provider_visible_allowed is False
+    assert signature_with_callers.provider_visible_allowed is True
+    assert signature_with_callers.value_class is ProviderValueClass.ACTION_LOCAL_RELATION
+
+
+def test_provider_value_rule_table_exhaustively_covers_17_feature_registry():
+    from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
+    from gt_engine.contributions import FEATURE_PROVIDER_VALUE_FEATURE_IDS
+
+    assert FEATURE_PROVIDER_VALUE_FEATURE_IDS == frozenset(CENTRAL_FEATURE_IDS)
+    assert len(FEATURE_PROVIDER_VALUE_FEATURE_IDS) == 17
 
 
 def test_contribution_compiler_accounts_every_candidate_once():

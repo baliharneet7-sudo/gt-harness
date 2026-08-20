@@ -46,6 +46,7 @@ _REQUIRED_TASK_CHECKS = (
     "dense_backend",
     "delivery_timing_accounting",
     "contribution_budget",
+    "provider_value_contract",
     "action_lifecycle",
     "deterministic_task_controls",
     "preflight_precision",
@@ -73,6 +74,7 @@ _REQUIRED_DOCS = (
     "docs/gt_gitnexus_program/12_FAILURE_TO_MECHANISM_MATRIX.md",
     "docs/gt_gitnexus_program/14_IMPLEMENTATION_PLAN.md",
     "docs/gt_gitnexus_program/15_20_TASK_RERUN_REPORT.md",
+    "docs/gt_gitnexus_program/20_FINAL_REGRESSION_CONTROL_AND_BENCHMARK_READINESS.md",
 )
 
 
@@ -214,6 +216,19 @@ def _head(root: Path) -> str:
     ).strip()
 
 
+def _tracked_worktree_changes(root: Path) -> tuple[str, ...]:
+    """Return tracked changes that are invisible to commit-based release proof."""
+
+    completed = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(line.rstrip() for line in completed.stdout.splitlines() if line.strip())
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -222,6 +237,21 @@ def main() -> int:
     root = args.root.resolve()
     report = audit_configuration(root)
     try:
+        tracked_changes = _tracked_worktree_changes(root)
+        report["worktree_identity"] = {
+            "clean": not tracked_changes,
+            "tracked_change_count": len(tracked_changes),
+            "tracked_changes": list(tracked_changes),
+        }
+        if tracked_changes:
+            report["status"] = "BLOCKED"
+            report["failures"] = [
+                *report["failures"],
+                "tracked_worktree_not_clean",
+            ]
+            raise ValueError(
+                "tracked worktree changes are not bound to the release commit"
+            )
         report["release_identity_proof"] = verify_release_manifest(
             manifest_path=root / ACTIVE_RELEASE_PATH,
             current_commit=_head(root),

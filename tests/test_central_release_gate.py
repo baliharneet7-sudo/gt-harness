@@ -5,6 +5,7 @@ import json
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import (
+    _completion_integrity,
     _contribution_budget,
     _mechanical_completeness_runtime,
     _replay_and_intervention_audit,
@@ -570,23 +571,67 @@ def _relational_treatment() -> dict:
         {
             "candidate_count": 2,
             "accounted_count": 2,
-            "payload_tokens": 40,
+            "payload_tokens": 20,
+            "selected_ids": ["repository-context-contribution"],
             "selected_surfaces": [
-                "persistent_execution_state",
                 "repository_context",
             ],
+            "accounting": [
+                {
+                    "contribution_id": "persistent-state-contribution",
+                    "surface": "persistent_execution_state",
+                    "disposition": "value_rejected",
+                    "reason_codes": ["provider_value_rejected:state-claim-1"],
+                    "chars": 30,
+                },
+                {
+                    "contribution_id": "repository-context-contribution",
+                    "surface": "repository_context",
+                    "disposition": "selected",
+                    "reason_codes": [],
+                    "chars": 70,
+                },
+            ],
+            "value_certificates": [
+                {
+                    "contribution_id": "repository-context-contribution",
+                    "surface": "repository_context",
+                    "claim_id": claim_id,
+                    "value_class": "certified_predecision_gap",
+                    "disposition": "predecision",
+                    "authority": "certified_structural",
+                    "source_revision": "source-1",
+                    "graph_revision": "graph-1",
+                    "anchors": ["src/a.py"],
+                    "novelty_basis": "certified_nonlocal_relation_absent_from_provider_view",
+                    "decision_point": "initial_repository_plan",
+                    "replaces_operation": "repository_relationship_search",
+                    "materiality_reason": "decision_relevant_repository_context",
+                    "completeness": "exact",
+                    "reason_codes": [],
+                }
+                for claim_id in ("semantic-1", "process-1")
+            ],
+        }
+    )
+    receipt["contribution_compiler"].update(
+        {
+            "schema": "gt.contribution_compiler.runtime.v2",
+            "provider_value_contract": "gt.provider_value.v1",
         }
     )
     receipt["contribution_compiler"]["task_budget"] = {
         "token_budget": 4096,
         "critical_reserve_tokens": 512,
-        "used_regular_tokens": 40,
+        "used_regular_tokens": 20,
         "used_critical_tokens": 0,
-        "used_tokens": 40,
-        "remaining_regular_tokens": 3544,
-        "remaining_total_tokens": 4056,
+        "used_tokens": 20,
+        "remaining_regular_tokens": 3564,
+        "remaining_total_tokens": 4076,
         "exhausted": False,
     }
+    receipt["persistent_execution_state"]["deliveries"] = []
+    receipt["model_call_contexts"][0]["persistent_execution_state_delivered"] = False
     receipt["model_call_contexts"][0].update(
         {
             "relational_context": {
@@ -681,6 +726,22 @@ def _relational_treatment() -> dict:
         "status": "PASS",
         "failures": [],
         "summary": {"chain_rows": 2},
+    }
+    receipt["completion"] = {
+        "plan": {
+            "schema": "gt.completion_plan.v1",
+            "status": "partial",
+            "executable": False,
+            "predicates": [],
+            "obligation_ids": [],
+            "uncovered_obligation_ids": [],
+            "target_paths": [],
+            "uncovered_obligation_texts": [],
+        },
+        "certificates": [],
+        "latest_certificate": None,
+        "auto_submit_attempts": 0,
+        "auto_submit_count": 0,
     }
     receipt["task_execution_certificate"] = build_task_certificate(
         receipt, label="fixture"
@@ -849,6 +910,42 @@ def test_release_gate_accepts_relational_profile_as_additive_persistent_capabili
     assert report.passed is True
     assert not any("persistent_" in failure for failure in report.failures)
     assert not any("dense_backend_receipt_missing" in failure for failure in report.failures)
+
+
+def test_relational_release_gate_rejects_missing_provider_value_contract():
+    receipt = _relational_treatment()
+    receipt["contribution_compiler"].pop("provider_value_contract")
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:provider_value_contract_missing" in report.failures
+
+
+def test_relational_release_gate_rejects_selected_uncertified_contribution():
+    receipt = _relational_treatment()
+    receipt["contribution_compiler"]["calls"][0]["value_certificates"] = []
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:provider_value_selected_uncertified:1" in report.failures
+
+
+def test_relational_release_gate_rejects_ambiguous_provider_value():
+    receipt = _relational_treatment()
+    certificate = receipt["contribution_compiler"]["calls"][0][
+        "value_certificates"
+    ][0]
+    certificate["completeness"] = "ambiguous"
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert (
+        "treatment-1:provider_value_certificate_rejected:1:semantic-1"
+        in report.failures
+    )
 
 
 def test_strengthened_release_rejects_legacy_profile_receipt() -> None:
@@ -1028,6 +1125,58 @@ def test_release_gate_fails_closed_when_outcome_preservation_is_disabled():
     assert report.passed is False
     assert "treatment-1:context_compaction_disabled" in report.failures
     assert "treatment-1:completion_controller_disabled" in report.failures
+
+
+def test_release_gate_rejects_soft_character_compaction_in_final_v2():
+    receipt = _treatment()
+    receipt["treatment_profile"] = "central_relational_v2"
+    receipt["metrics"]["context_compaction_epochs"] = [
+        {"epoch": 1, "trigger_kind": "character_pressure"}
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert "treatment-1:soft_character_compaction_forbidden" in report.failures
+
+
+def test_completion_integrity_rejects_stale_or_partial_auto_submit_proof():
+    receipt = {
+        "treatment_profile": "central_relational_v2",
+        "completion": {
+            "plan": {
+                "schema": "gt.completion_plan.v1",
+                "executable": False,
+            },
+            "certificates": [
+                {
+                    "schema": "gt.completion_certificate.v1",
+                    "status": "complete",
+                    "auto_submit_eligible": True,
+                    "workspace_revision": "w2",
+                    "observations": [
+                        {
+                            "schema": "gt.completion_predicate_observation.v1",
+                            "workspace_revision": "w1",
+                            "returncode": 0,
+                            "output_sha256": "a" * 64,
+                        }
+                    ],
+                    "missing_predicate_ids": [],
+                    "failing_predicate_ids": [],
+                    "stale_predicate_ids": [],
+                }
+            ],
+            "auto_submit_attempts": 1,
+            "auto_submit_count": 1,
+        },
+    }
+
+    check = _completion_integrity(receipt, "task")
+
+    assert check.passed is False
+    assert "task:completion_eligible_proof_invalid:1" in check.failures
+    assert "task:completion_partial_plan_submitted" in check.failures
 
 
 def test_release_gate_requires_graph_independent_semantic_context():

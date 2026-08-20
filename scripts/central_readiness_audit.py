@@ -36,7 +36,10 @@ from gt_engine.intervention_chain import build_intervention_chain
 from gt_engine.preflight import PreflightMode
 from gt_engine.treatment_adapter import treatment_from_descriptor
 from scripts.central_feature_census import census as central_feature_census
-from scripts.central_release_gate import _product_mechanism_census
+from scripts.central_release_gate import (
+    _product_mechanism_census,
+    _provider_value_contract,
+)
 from scripts.release_manifest import load_release_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,6 +191,46 @@ def audit() -> dict[str, bool]:
                     "bootstrap_provider_calls": 0,
                     "bootstrap_calls": 0,
                 },
+            },
+        },
+        "readiness",
+    )
+    provider_value_check = _provider_value_contract(
+        {
+            "treatment_profile": "central_relational_v2",
+            "contribution_compiler": {
+                "schema": "gt.contribution_compiler.runtime.v2",
+                "provider_value_contract": "gt.provider_value.v1",
+                "calls": [
+                    {
+                        "call": 1,
+                        "selected_ids": ["readiness-contribution"],
+                        "accounting": [
+                            {
+                                "contribution_id": "readiness-contribution",
+                                "surface": "repository_context",
+                                "disposition": "selected",
+                                "reason_codes": [],
+                            }
+                        ],
+                        "value_certificates": [
+                            {
+                                "contribution_id": "readiness-contribution",
+                                "surface": "repository_context",
+                                "claim_id": "readiness-claim",
+                                "value_class": "action_local_relation",
+                                "disposition": "same_observation",
+                                "completeness": "exact",
+                                "authority": "certified_relation",
+                                "source_revision": "readiness-source-revision",
+                                "anchors": ["src/readiness.py"],
+                                "novelty_basis": "nonlocal_relation_absent_from_observation",
+                                "decision_point": "next_executor_request",
+                                "replaces_operation": "repository_relationship_search",
+                            }
+                        ],
+                    }
+                ],
             },
         },
         "readiness",
@@ -455,6 +498,7 @@ def audit() -> dict[str, bool]:
             treatment_runtime.get("enable_context_frontier") is True
             and "--ak enable_context_frontier=true" in verification_workflow
         ),
+        "provider_information_value_contract_executes": provider_value_check.passed,
         "paid_persistent_selection_is_deterministic": (
             central_uses_typed_treatment
             and treatment_runtime.get("persistent_state_selection_mode")

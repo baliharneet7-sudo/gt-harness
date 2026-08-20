@@ -3,7 +3,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.mechanical_completeness_gate import audit_configuration
+from scripts.mechanical_completeness_gate import (
+    _tracked_worktree_changes,
+    audit_configuration,
+)
 
 
 def test_operator_entry_point_loads_from_repository_root() -> None:
@@ -68,3 +71,23 @@ def test_gate_is_sensitive_to_replay_and_release_order_mutations(tmp_path) -> No
     assert report["status"] == "BLOCKED"
     assert "final_treatment_contract" in report["failures"]
     assert "paid_dispatch_interlock" in report["failures"]
+
+
+def test_release_identity_detects_tracked_changes_outside_commit(tmp_path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True
+    )
+    candidate = tmp_path / "candidate.txt"
+    candidate.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "candidate.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
+
+    assert _tracked_worktree_changes(tmp_path) == ()
+    candidate.write_text("uncommitted\n", encoding="utf-8")
+    assert _tracked_worktree_changes(tmp_path) == (" M candidate.txt",)

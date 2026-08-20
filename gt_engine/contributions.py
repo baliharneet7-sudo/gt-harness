@@ -31,7 +31,110 @@ class ContributionDisposition(StrEnum):
     DUPLICATE_CLAIM = "duplicate_claim"
     DUPLICATE_TEXT = "duplicate_text"
     UNSAFE_PROVENANCE = "unsafe_provenance"
+    VALUE_UNCERTIFIED = "value_uncertified"
+    VALUE_REJECTED = "value_rejected"
     BUDGET = "budget"
+
+
+class ProviderValueClass(StrEnum):
+    INSTRUCTION_ENTAILED = "instruction_entailed"
+    OBSERVATION_DUPLICATE = "observation_duplicate"
+    ACTION_LOCAL_RELATION = "action_local_relation"
+    EXECUTION_CONTRADICTION = "execution_contradiction"
+    CERTIFIED_PREDECISION_GAP = "certified_predecision_gap"
+    AMBIGUOUS_OR_PARTIAL = "ambiguous_or_partial"
+
+
+class ProviderValueDisposition(StrEnum):
+    CONTROLLER_ONLY = "controller_only"
+    SAME_OBSERVATION = "same_observation"
+    PREDECISION = "predecision"
+
+
+class ProviderValueCompleteness(StrEnum):
+    EXACT = "exact"
+    LOWER_BOUND = "lower_bound"
+    PARTIAL = "partial"
+    AMBIGUOUS = "ambiguous"
+
+
+# The 17 historical features remain active and auditable, but only the rows
+# below can independently establish one of the three provider-value classes.
+# Keeping this table here makes the authority boundary exhaustive instead of
+# treating every feature that happens to render text as an execution failure.
+_FEATURE_EXECUTION_CONTRADICTIONS = frozenset(
+    {"syntax_result", "covering_red", "recovery", "submit_refusal"}
+)
+_FEATURE_RELATION_CANDIDATES = frozenset({"signature_delta", "newfile_precedent"})
+_FEATURE_PREDECISION_CANDIDATES = frozenset({"GT_EDIT_CHECK"})
+_FEATURE_CONTROLLER_ONLY = frozenset(
+    {
+        "caller_contract",
+        "def_partition",
+        "localization",
+        "obligations",
+        "GT_CERT_DELIVERY",
+        "GT_CHANGE_SURFACE",
+        "GT_HYPOTHESIS",
+        "GT_LOC_RESLOT",
+        "GT_PATCH_DELTA",
+        "GT_SS_SUBMIT_RED",
+    }
+)
+FEATURE_PROVIDER_VALUE_FEATURE_IDS = frozenset().union(
+    _FEATURE_EXECUTION_CONTRADICTIONS,
+    _FEATURE_RELATION_CANDIDATES,
+    _FEATURE_PREDECISION_CANDIDATES,
+    _FEATURE_CONTROLLER_ONLY,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderValueCertificate:
+    """Replayable proof that provider-visible evidence can change useful work."""
+
+    claim_id: str
+    value_class: ProviderValueClass
+    disposition: ProviderValueDisposition
+    authority: str
+    source_revision: str
+    graph_revision: str = ""
+    anchors: tuple[str, ...] = ()
+    novelty_basis: str = ""
+    decision_point: str = ""
+    replaces_operation: str = ""
+    materiality_reason: str = ""
+    completeness: ProviderValueCompleteness = ProviderValueCompleteness.EXACT
+    reason_codes: tuple[str, ...] = ()
+
+    @property
+    def provider_visible_allowed(self) -> bool:
+        if self.disposition is ProviderValueDisposition.CONTROLLER_ONLY:
+            return False
+        if self.completeness is not ProviderValueCompleteness.EXACT:
+            return False
+        if self.value_class not in {
+            ProviderValueClass.ACTION_LOCAL_RELATION,
+            ProviderValueClass.EXECUTION_CONTRADICTION,
+            ProviderValueClass.CERTIFIED_PREDECISION_GAP,
+        }:
+            return False
+        return bool(
+            self.claim_id
+            and self.authority
+            and self.source_revision
+            and self.anchors
+            and self.novelty_basis
+            and self.decision_point
+            and self.replaces_operation
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["value_class"] = self.value_class.value
+        row["disposition"] = self.disposition.value
+        row["completeness"] = self.completeness.value
+        return row
 
 
 def _canonical_hash(value: object) -> str:
@@ -52,6 +155,210 @@ def _default_token_counter(text: str) -> int:
     return len(re.findall(r"\w+|[^\w\s]", str(text or ""), re.UNICODE))
 
 
+def build_provider_value_certificates(
+    *,
+    surface: str,
+    claim_ids: tuple[str, ...],
+    fact_ids: tuple[str, ...],
+    claim_metadata: tuple[Mapping[str, Any], ...],
+    source_revision: str,
+    evidence_action: int,
+) -> tuple[ProviderValueCertificate, ...]:
+    """Classify provider value without granting truth automatic delivery authority."""
+
+    metadata_by_id: dict[str, Mapping[str, Any]] = {}
+    for row in claim_metadata:
+        for key in ("claim_id", "fact_id", "evidence_id"):
+            value = str(row.get(key) or "")
+            if value:
+                metadata_by_id[value] = row
+    required_ids = tuple(dict.fromkeys(claim_ids or fact_ids))
+    certificates: list[ProviderValueCertificate] = []
+    for claim_id in required_ids:
+        row = metadata_by_id.get(claim_id)
+        if row is None:
+            continue
+        reason_codes: tuple[str, ...] = ()
+        explicit_class = str(row.get("provider_value_class") or "")
+        explicit_disposition = str(row.get("provider_value_disposition") or "")
+        explicit_completeness = str(row.get("provider_value_completeness") or "exact")
+        feature_id = str(row.get("feature_id") or "")
+        if surface == "feature_fact":
+            anchors = tuple(
+                str(item)
+                for item in row.get("provider_value_anchors") or ()
+                if str(item)
+            )
+            completeness = ProviderValueCompleteness.EXACT
+            if (
+                feature_id in _FEATURE_EXECUTION_CONTRADICTIONS
+                and evidence_action > 0
+                and anchors
+            ):
+                value_class = ProviderValueClass.EXECUTION_CONTRADICTION
+                disposition = ProviderValueDisposition.SAME_OBSERVATION
+                novelty_basis = "new_execution_state_not_represented"
+                decision_point = "next_executor_request"
+                replaces_operation = "failure_or_validation_rediscovery"
+                reason_codes = ("feature_execution_contradiction",)
+            elif (
+                feature_id in _FEATURE_RELATION_CANDIDATES
+                and evidence_action > 0
+                and anchors
+                and bool(row.get("certified_nonlocal_relation"))
+                and bool(row.get("relation") or row.get("relation_endpoint"))
+            ):
+                value_class = ProviderValueClass.ACTION_LOCAL_RELATION
+                disposition = ProviderValueDisposition.SAME_OBSERVATION
+                novelty_basis = "certified_nonlocal_relation_absent_from_observation"
+                decision_point = "next_executor_request"
+                replaces_operation = "repository_relationship_search"
+                reason_codes = ("feature_certified_nonlocal_relation",)
+            elif (
+                feature_id in _FEATURE_PREDECISION_CANDIDATES
+                and anchors
+                and bool(row.get("certified_predecision_gap"))
+            ):
+                value_class = ProviderValueClass.CERTIFIED_PREDECISION_GAP
+                disposition = ProviderValueDisposition.PREDECISION
+                novelty_basis = "certified_decision_gap_absent_from_provider_history"
+                decision_point = "next_executor_request"
+                replaces_operation = "declared_check_rediscovery"
+                reason_codes = ("feature_certified_predecision_gap",)
+            else:
+                value_class = ProviderValueClass.INSTRUCTION_ENTAILED
+                disposition = ProviderValueDisposition.CONTROLLER_ONLY
+                novelty_basis = "no_feature_specific_provider_authority"
+                decision_point = "none"
+                replaces_operation = "none"
+                reason_codes = (
+                    "feature_controller_only"
+                    if feature_id in _FEATURE_CONTROLLER_ONLY
+                    or feature_id in _FEATURE_RELATION_CANDIDATES
+                    or feature_id in _FEATURE_PREDECISION_CANDIDATES
+                    else "unknown_feature_controller_only",
+                )
+        elif explicit_class and explicit_disposition:
+            value_class = ProviderValueClass(explicit_class)
+            disposition = ProviderValueDisposition(explicit_disposition)
+            completeness = ProviderValueCompleteness(explicit_completeness)
+            novelty_basis = str(row.get("provider_value_novelty_basis") or "")
+            decision_point = str(row.get("provider_value_decision_point") or "")
+            replaces_operation = str(row.get("provider_value_replaces_operation") or "")
+            anchors = tuple(
+                str(item)
+                for item in row.get("provider_value_anchors") or ()
+                if str(item)
+            )
+        else:
+            materiality = str(row.get("materiality_reason") or "")
+            authority = str(row.get("authority") or "")
+            relation = str(row.get("relation") or "")
+            provided_anchors = tuple(
+                str(item)
+                for item in row.get("provider_value_anchors") or ()
+                if str(item)
+            )
+            anchor = str(
+                row.get("relation_endpoint")
+                or row.get("path")
+                or row.get("declared_validation_id")
+                or ""
+            )
+            anchors = provided_anchors or ((anchor,) if anchor else ())
+            completeness = ProviderValueCompleteness.EXACT
+            if materiality in {
+                "current_attributable_failure",
+                "declared_validation_status_change",
+            }:
+                value_class = ProviderValueClass.EXECUTION_CONTRADICTION
+                disposition = ProviderValueDisposition.SAME_OBSERVATION
+                novelty_basis = "new_execution_state_not_represented"
+                decision_point = "next_executor_request"
+                replaces_operation = "failure_or_validation_rediscovery"
+            elif (
+                materiality == "new_unresolved_task_obligation"
+                and authority
+                in {
+                    "certified_relation",
+                    "certified_structural",
+                    "certified_composition",
+                }
+                and bool(relation or row.get("constituent_claim_ids"))
+            ):
+                value_class = ProviderValueClass.ACTION_LOCAL_RELATION
+                disposition = (
+                    ProviderValueDisposition.SAME_OBSERVATION
+                    if evidence_action > 0
+                    else ProviderValueDisposition.PREDECISION
+                )
+                novelty_basis = "certified_nonlocal_obligation_absent_from_observation"
+                decision_point = "next_executor_request"
+                replaces_operation = "coupled_change_relationship_search"
+            elif (
+                surface in {"repository_context", "repository_semantic", "repository_process"}
+                and evidence_action > 0
+                and authority
+                in {
+                    "certified_relation",
+                    "certified_structural",
+                    "certified_composition",
+                    "compiler_semantic",
+                }
+            ):
+                value_class = ProviderValueClass.ACTION_LOCAL_RELATION
+                disposition = ProviderValueDisposition.SAME_OBSERVATION
+                novelty_basis = "nonlocal_relation_absent_from_observation"
+                decision_point = "next_executor_request"
+                replaces_operation = "repository_relationship_search"
+            elif (
+                surface == "preemptive_retrieval"
+                and evidence_action > 0
+                and bool(anchors)
+                and str(row.get("support_kind") or "")
+                in {"certified_relation", "validation_candidate"}
+                and bool(row.get("supporting_channels"))
+                and str(row.get("origin") or "") == "preexisting_repository"
+                and authority in {"certified_relation", "ranking_support"}
+                and bool(materiality)
+            ):
+                value_class = ProviderValueClass.ACTION_LOCAL_RELATION
+                disposition = ProviderValueDisposition.SAME_OBSERVATION
+                novelty_basis = "ranked_nonlocal_evidence_absent_from_observation"
+                decision_point = "next_executor_request"
+                replaces_operation = "repository_search_or_read"
+            else:
+                value_class = ProviderValueClass.INSTRUCTION_ENTAILED
+                disposition = ProviderValueDisposition.CONTROLLER_ONLY
+                novelty_basis = "no_counterfactual_replacement_proven"
+                decision_point = "none"
+                replaces_operation = "none"
+        certificates.append(
+            ProviderValueCertificate(
+                claim_id=claim_id,
+                value_class=value_class,
+                disposition=disposition,
+                authority=str(row.get("authority") or row.get("origin") or "unknown"),
+                source_revision=source_revision,
+                graph_revision=str(row.get("graph_revision") or ""),
+                anchors=anchors,
+                novelty_basis=novelty_basis,
+                decision_point=decision_point,
+                replaces_operation=replaces_operation,
+                materiality_reason=str(row.get("materiality_reason") or ""),
+                completeness=completeness,
+                reason_codes=(
+                    reason_codes
+                    or tuple(
+                        str(item)
+                        for item in row.get("provider_value_reason_codes") or ()
+                    )
+                ),
+            )
+        )
+    return tuple(certificates)
+
+
 @dataclass(frozen=True, slots=True)
 class GTContribution:
     contribution_id: str
@@ -66,6 +373,7 @@ class GTContribution:
     source_revision: str
     priority: int
     claim_metadata: tuple[dict[str, Any], ...] = ()
+    value_certificates: tuple[ProviderValueCertificate, ...] = ()
     lifecycle_required: bool = False
 
     @classmethod
@@ -82,6 +390,7 @@ class GTContribution:
         source_revision: str,
         priority: int,
         claim_metadata: tuple[Mapping[str, Any], ...] = (),
+        value_certificates: tuple[ProviderValueCertificate, ...] = (),
         lifecycle_required: bool = False,
     ) -> GTContribution:
         normalized = _normalized_payload(payload)
@@ -107,6 +416,9 @@ class GTContribution:
             "eligible_call": max(1, int(eligible_call)),
             "source_revision": str(source_revision),
             "claim_metadata": metadata,
+            "value_certificates": tuple(
+                certificate.as_dict() for certificate in value_certificates
+            ),
             "lifecycle_required": bool(lifecycle_required),
         }
         return cls(
@@ -122,8 +434,31 @@ class GTContribution:
             source_revision=str(source_revision),
             priority=int(priority),
             claim_metadata=metadata,
+            value_certificates=tuple(value_certificates),
             lifecycle_required=bool(lifecycle_required),
         )
+
+    @property
+    def provider_value_failures(self) -> tuple[str, ...]:
+        if self.kind is not ContributionKind.EVIDENCE or not self.payload:
+            return ()
+        required_ids = set(self.claim_ids or self.fact_ids)
+        certificates = {
+            certificate.claim_id: certificate for certificate in self.value_certificates
+        }
+        failures: list[str] = []
+        for claim_id in sorted(required_ids):
+            certificate = certificates.get(claim_id)
+            if certificate is None:
+                failures.append(f"missing_value_certificate:{claim_id}")
+            elif not certificate.provider_visible_allowed:
+                failures.append(f"provider_value_rejected:{claim_id}")
+            elif (
+                certificate.source_revision
+                and certificate.source_revision != self.source_revision
+            ):
+                failures.append(f"value_certificate_revision_mismatch:{claim_id}")
+        return tuple(failures)
 
     @property
     def unsafe_provider_origins(self) -> tuple[str, ...]:
@@ -188,6 +523,7 @@ class CompiledContributions:
     token_budget: int | None = None
     task_budget_token_count: int = 0
     task_budget_token_limit: int | None = None
+    value_certificates: tuple[dict[str, Any], ...] = ()
 
     @property
     def candidate_count(self) -> int:
@@ -209,6 +545,7 @@ class CompiledContributions:
             "task_budget_tokens": self.task_budget_token_count,
             "task_budget_token_limit": self.task_budget_token_limit,
             "selected_ids": list(self.selected_ids),
+            "value_certificates": [dict(row) for row in self.value_certificates],
             "candidate_count": self.candidate_count,
             "accounted_count": self.accounted_count,
             "accounting": [row.as_dict() for row in self.accounting],
@@ -331,6 +668,17 @@ def compile_contributions(
                 f"{origin}_provider_authority"
                 for origin in contribution.unsafe_provider_origins
             )
+        elif contribution.provider_value_failures:
+            missing = any(
+                reason.startswith("missing_value_certificate:")
+                for reason in contribution.provider_value_failures
+            )
+            disposition = (
+                ContributionDisposition.VALUE_UNCERTIFIED
+                if missing
+                else ContributionDisposition.VALUE_REJECTED
+            )
+            reasons = contribution.provider_value_failures
         elif (
             not allow_noncritical
             and not contribution.critical
@@ -400,6 +748,15 @@ def compile_contributions(
         token_budget=token_limit,
         task_budget_token_count=token_counter(task_payload),
         task_budget_token_limit=task_token_limit,
+        value_certificates=tuple(
+            {
+                "contribution_id": item.contribution_id,
+                "surface": item.surface,
+                **certificate.as_dict(),
+            }
+            for item in selected
+            for certificate in item.value_certificates
+        ),
     )
 
 
@@ -410,5 +767,11 @@ __all__ = [
     "ContributionKind",
     "ContributionTaskBudget",
     "GTContribution",
+    "ProviderValueCertificate",
+    "ProviderValueClass",
+    "ProviderValueCompleteness",
+    "ProviderValueDisposition",
+    "FEATURE_PROVIDER_VALUE_FEATURE_IDS",
+    "build_provider_value_certificates",
     "compile_contributions",
 ]

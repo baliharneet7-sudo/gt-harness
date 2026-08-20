@@ -71,6 +71,32 @@ def _represented_by_provider_view(fact: DecisiveFact, provider_view: str) -> boo
     return False
 
 
+def _provider_value_disposition(fact: DecisiveFact) -> str:
+    """Classify whether a derived fact is worth perturbing the provider view.
+
+    Deliverable presence is useful controller state, but the instruction already
+    tells the model which artifact it must create.  Repeating absence at call one
+    or presence after the model created it is correct yet information-free and
+    was the concrete regression witness in the matched repair smoke.
+    """
+
+    if fact.kind is DecisiveKind.DELIVERABLE_STATE:
+        return "instruction_entailed_controller_only"
+    if fact.kind is DecisiveKind.REPOSITORY_ANCHOR:
+        return "generic_anchor_controller_only"
+    return "provider_candidate"
+
+
+def _provider_value_anchors(fact: DecisiveFact) -> tuple[str, ...]:
+    if fact.path:
+        return (fact.path,)
+    if fact.kind in {DecisiveKind.REQUIRED_CHECK, DecisiveKind.PROJECT_CHECK}:
+        _prefix, separator, command = fact.gap_text.partition(": ")
+        if separator and command.strip():
+            return (command.strip(),)
+    return ()
+
+
 @dataclass(slots=True)
 class TaskSemanticSubstrate:
     """One-shot, revision-aware delivery over deterministic derived facts."""
@@ -146,6 +172,8 @@ class TaskSemanticSubstrate:
                 disposition = "expired_window"
             elif self.eligible_call > call:
                 disposition = "future_eligible_call"
+            elif _provider_value_disposition(fact) != "provider_candidate":
+                disposition = _provider_value_disposition(fact)
             else:
                 candidates.append((fact, _render_fact(fact)))
             accounting.append(
@@ -198,6 +226,20 @@ class TaskSemanticSubstrate:
                 {
                     **fact.as_dict(),
                     "evidence_class": _EVIDENCE_CLASS[fact.kind].value,
+                    "provider_value_class": "certified_predecision_gap",
+                    "provider_value_disposition": "predecision",
+                    "provider_value_completeness": "exact",
+                    "provider_value_anchors": list(_provider_value_anchors(fact)),
+                    "provider_value_novelty_basis": "derived_workspace_fact_not_represented",
+                    "provider_value_decision_point": "next_executor_request",
+                    "provider_value_replaces_operation": (
+                        "binary_or_repository_inspection"
+                        if fact.kind in {
+                            DecisiveKind.BINARY_FORMAT,
+                            DecisiveKind.SECRET_LOCATION,
+                        }
+                        else "validation_discovery"
+                    ),
                 }
                 for fact in facts
             ),

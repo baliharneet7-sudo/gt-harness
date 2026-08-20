@@ -52,6 +52,7 @@ jobs:
     outputs:
       matrix: ${{ steps.shard.outputs.matrix }}
       n_tasks: ${{ steps.shard.outputs.n_tasks }}
+      tasks_json: ${{ steps.shard.outputs.tasks_json }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -183,6 +184,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"matrix={json.dumps(shards)}\n")
               f.write(f"n_tasks={len(tasks)}\n")
+              f.write(f"tasks_json={json.dumps(tasks, separators=(',', ':'))}\n")
 
           summary = [f"## Plan: {len(tasks)} tasks across {n_shards} shard(s)", ""]
           for s in shards:
@@ -284,13 +286,28 @@ jobs:
         if: always()
         run: df -h /
 
+      - name: Stage readable, complete shard artifacts
+        if: always()
+        env:
+          SHARD_TASKS: ${{ matrix.shard.tasks }}
+        run: |
+          set -euo pipefail
+          if [ ! -d results/terminal-bench ]; then
+            echo "::error::Harbor produced no results/terminal-bench directory"
+            exit 1
+          fi
+          sudo chmod -R a+rX results/terminal-bench
+          python -m scripts.stage_harbor_artifacts \
+            results/terminal-bench staged-results \
+            --expected-csv "$SHARD_TASKS"
+
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tb2-miniswe-${{ github.run_id }}-shard${{ matrix.shard.id }}
-          path: results/terminal-bench/
-          if-no-files-found: warn
+          path: staged-results/
+          if-no-files-found: error
 
   merge:
     needs: [plan, shard]
@@ -298,6 +315,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -313,79 +331,12 @@ jobs:
       # a missing shard, never silently treated as zero solved tasks.
       - name: Merge shard results
         env:
-          EXPECTED_TASKS: ${{ needs.plan.outputs.n_tasks }}
+          EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks_json }}
         run: |
-          python - <<'EOF'
-          import json, os
-          from pathlib import Path
-
-          expected = int(os.environ.get("EXPECTED_TASKS") or 0)
-          trials, missing, per_shard = [], [], []
-
-          for shard_dir in sorted(Path("shards").glob("*")):
-              results = list(shard_dir.rglob("result.json"))
-              if not results:
-                  missing.append(shard_dir.name)
-                  continue
-              for rp in results:
-                  r = json.loads(rp.read_text(encoding="utf-8"))
-                  got = r.get("trial_results", []) or []
-                  trials.extend(got)
-                  per_shard.append((shard_dir.name, len(got)))
-
-          def solved(t):
-              rewards = (t.get("verifier_result") or {}).get("rewards") or {}
-              vals = [v for v in rewards.values() if isinstance(v, (int, float))]
-              return bool(vals) and all(v >= 1 for v in vals)
-
-          graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
-          errored = [t for t in trials if t.get("exception_info")]
-          n_solved = sum(1 for t in graded if solved(t))
-
-          out = ["# TB2 miniswe baseline (sharded, no GT)", ""]
-          if missing:
-              out.append(f"> **INCOMPLETE**: {len(missing)} shard(s) produced no "
-                         f"result.json: {', '.join(missing)}. The score below covers "
-                         "only the shards that reported.")
-              out.append("")
-          out += [
-              f"- tasks planned: **{expected}**",
-              f"- trials returned: **{len(trials)}**",
-              f"- graded (verifier produced rewards): **{len(graded)}**",
-              f"- errored (exception, not graded): **{len(errored)}**",
-          ]
-          if graded:
-              out.append(f"- **solved: {n_solved}/{len(graded)} "
-                         f"({100 * n_solved / len(graded):.1f}% of graded)**")
-          if expected:
-              out.append(f"- **solved of planned: {n_solved}/{expected} "
-                         f"({100 * n_solved / expected:.1f}%)**")
-          out += ["", "| shard | trials |", "|---|---|"]
-          out += [f"| {name} | {n} |" for name, n in per_shard]
-          out += ["", "| task | solved | rewards / error |", "|---|---|---|"]
-          for t in sorted(trials, key=lambda x: x.get("task_name") or ""):
-              name = t.get("task_name") or t.get("trial_name", "?")
-              rewards = (t.get("verifier_result") or {}).get("rewards")
-              exc = (t.get("exception_info") or {}).get("exception_type")
-              mark = "yes" if rewards and solved(t) else ("no" if rewards else "-")
-              out.append(f"| {name} | {mark} | {json.dumps(rewards) if rewards else (exc or 'no reward')} |")
-
-          Path("merged.json").write_text(json.dumps({
-              "expected_tasks": expected,
-              "missing_shards": missing,
-              "n_trials": len(trials),
-              "n_graded": len(graded),
-              "n_errored": len(errored),
-              "n_solved": n_solved,
-              "trial_results": trials,
-          }, indent=2), encoding="utf-8")
-
-          body = "\n".join(out) + "\n"
-          Path("SUMMARY.md").write_text(body, encoding="utf-8")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
-              f.write(body)
-          print(body[:4000])
-          EOF
+          python -m scripts.harbor_results shards \
+            --expected-json "$EXPECTED_TASKS_JSON" \
+            --merged merged.json \
+            --summary SUMMARY.md
 
       - name: Upload merged result
         if: always()
@@ -395,4 +346,4 @@ jobs:
           path: |
             merged.json
             SUMMARY.md
-          if-no-files-found: warn
+          if-no-files-found: error

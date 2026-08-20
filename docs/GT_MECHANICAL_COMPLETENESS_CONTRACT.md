@@ -35,8 +35,10 @@ Immediately before every final-profile executor provider call,
 3. the graph is current when applicable, or non-applicability is explicit;
 4. every previously selected action is executed, returned, or cancelled;
 5. every context fact is accounted;
-6. every contribution candidate is accounted; and
-7. exact replay capture is enabled.
+6. every contribution candidate is accounted;
+7. every provider-visible claim has an admissible exact
+   `gt.provider_value.v1` certificate; and
+8. exact replay capture is enabled.
 
 The host records the barrier in both the model-call row and the task-level
 runtime ledger. A failure sets `MechanicalCompletenessBlocked` before
@@ -53,6 +55,8 @@ following independent requirements:
 - repository substrate and dense retrieval;
 - delivery timing, hashes, message indices, novelty, and grounding;
 - contribution budget and complete candidate accounting;
+- provider information-value certificates proving novelty, decision point, and
+  the ordinary search/read/rediscovery operation each visible claim replaces;
 - selected/processed/executed/returned/cancelled action conservation;
 - task semantics and convergence preflights;
 - assistive preflight precision;
@@ -71,6 +75,17 @@ following independent requirements:
 The merge gate recomputes these requirements again and compares their statuses
 with the embedded certificate. A receipt cannot authorize itself by writing
 `PASS`.
+
+The completion requirement is separately typed. `gt.completion_plan.v1` may
+authorize submission only when it is executable and every
+`gt.completion_predicate_observation.v1` in the current
+`gt.completion_certificate.v1` passes at the same workspace revision. A stale,
+missing, failing, or partial predicate blocks automatic submission and release.
+
+Repository convention evidence is also compositional. An exact convention may
+be provider-visible only when signature/type evidence, at least one certified
+caller, and at least one certified test agree. Conflicting type evidence is an
+audited abstention, never a guessed convention.
 
 ## Intervention and model-reasoning audit
 
@@ -96,6 +111,12 @@ pinned dense asset, and benchmark manifest must match their recorded
 identities. Any missing task or artifact remains in the denominator and blocks
 promotion.
 
+Harbor results are loaded only through `scripts.harbor_results`. Aggregate and
+per-trial rows are normalized, identical duplicates are deduplicated,
+conflicting duplicates and unexpected tasks fail, and every missing expected
+task blocks the run. A row with verifier rewards remains graded even if Harbor
+also records a nonzero agent exit after submission.
+
 The paid workflow has no replay-off switch and no alternate profile. Its
 secret-free release-identity job and reusable provider-free certification must
 pass before the bootstrap canary or task matrix can start.
@@ -108,3 +129,7 @@ pass before the bootstrap canary or task matrix can start.
 - Run proof: `merged.json`, integrity/solve/efficiency/intervention reports
 - No-spend proof: `mechanical-completeness.json`
 - Release identity: [`active_release.json`](../eval/release/active_release.json)
+
+The no-spend proof is valid only from a clean tracked worktree. The gate checks
+tracked status before verifying the manifest so uncommitted runtime changes can
+never inherit a PASS from an older release commit.

@@ -131,7 +131,11 @@ def test_workspace_manifest_command_is_shell_parseable_and_prunes_derived_trees(
     (tmp_path / "node_modules" / "ignored.js").write_text("ignored\n", encoding="utf-8")
 
     result = subprocess.run(
-        ["bash", "-lc", central_runtime._MANIFEST_COMMAND],
+        # Production sends the manifest command directly to the task shell at
+        # the task workspace.  A login shell may run profile code that changes
+        # directory first (Codespaces does), which tests the profile rather
+        # than the manifest command.
+        ["bash", "-c", central_runtime._MANIFEST_COMMAND],
         cwd=tmp_path,
         capture_output=True,
         text=True,

@@ -29,10 +29,17 @@ workflow or merge script owns a second dated “active” prediction path.
 - Selection: deterministic, zero-provider `deterministic_v1`
 - Retrieval: exact, lexical, BM25, pinned local dense, and certified structure
 - Delivery: bounded same-observation contributions, no extra executor call
+- Provider value: `gt.provider_value.v1`; instruction restatements, local
+  observation duplicates, and partial/ambiguous relations stay private
 - Preflight: `assistive_safe`; no rewrites or silent suppression
 - Replay: mandatory and content-addressed
 - Repository graph: required when supported source is present; dynamically
   activated when supported source is created
+- Compaction: final v2 preserves the stock provider view until measured
+  provider-budget pressure; soft character-pressure epochs are forbidden
+- Convention: exact only from agreeing signature/type, caller, and test facts
+- Completion: typed current-revision predicates; partial or stale proof cannot
+  auto-submit
 
 ## What “GT did this” means
 
@@ -47,6 +54,8 @@ mechanism ablation; delivery alone is not called causation.
 ## Mechanical proof chain
 
 1. The canonical release manifest verifies content hashes and Git ancestry.
+   The no-spend gate also requires a clean tracked worktree; uncommitted source
+   cannot inherit certification from the manifest's older runtime commit.
 2. The secret-free release job rejects profile or post-freeze drift.
 3. The provider-free workflow builds `gt-index` from current Go source.
 4. Parser/spec tests prove declaration-free files retain identity without
@@ -55,6 +64,8 @@ mechanism ablation; delivery alone is not called causation.
 6. The complete central suite exercises repository intelligence, lifecycle,
    retrieval, delivery, persistent state, semantic composition, replay,
    intervention joins, promotion accounting, and mutation-sensitive gates.
+   It also proves selected provider claims have exact information-value
+   certificates and that rejected/uncertain facts remain controller-only.
 7. Static, readiness, legal-source integrity, and pre-smoke checks pass.
 8. The authoritative no-spend gate emits one machine-readable verdict.
    The paid caller verifies the certified commit/status before its canary, and
@@ -65,6 +76,8 @@ mechanism ablation; delivery alone is not called causation.
     execution certificate.
 11. Merge requires all 20 receipts, artifacts, certificates, benchmark
     manifests, trials, and frozen identities before any outcome verdict.
+    Canonical result ingestion uses `scripts.harbor_results`; missing or
+    conflicting task rows cannot be converted into a score.
 
 ## GitNexus research applied without downgrading GT
 
@@ -83,7 +96,7 @@ state, obligation logic, exact delivery receipts, and legal-source audit.
 
 ## Historical evidence boundary
 
-The 17 documents under [`docs/gt_gitnexus_program`](gt_gitnexus_program/) are
+The numbered documents under [`docs/gt_gitnexus_program`](gt_gitnexus_program/) are
 research and run snapshots. Their embedded commit IDs and “live-unverified”
 statements describe the dated evidence they analyze; they are not the active
 release identity. The active manifest and this dossier are the current release

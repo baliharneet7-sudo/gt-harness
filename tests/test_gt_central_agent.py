@@ -1332,10 +1332,16 @@ async def test_observed_fact_survives_later_empty_action_until_next_provider_req
     await agent.run("inspect the environment and submit", ObservedFactEnvironment(), context)
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
-    assert len(receipt["observed_facts"]["fact_deliveries"]) == 1
-    assert any(
+    assert receipt["observed_facts"]["fact_deliveries"] == []
+    assert not any(
         "Observed interpreter path: /usr/bin/env." in content
         for content in model.observed_history[1]
+    )
+    assert any(
+        row["surface"] == "observed_execution"
+        and row["disposition"] == "value_rejected"
+        for call in receipt["contribution_compiler"]["calls"]
+        for row in call["accounting"]
     )
 
 
@@ -2213,17 +2219,15 @@ async def test_supported_source_creation_activates_persistent_state_once(
     assert persistent["bootstrap"]["status"] == "selected"
     assert persistent["metrics"]["postflight_commits"] == 2
     assert persistent["state"]["files_modified"] == ["app.py"]
-    semantic_deliveries = [
-        row
-        for row in receipt["task_semantic_substrate"]["deliveries"]
-        if any(
-            meta.get("kind") == "deliverable_state"
-            for meta in row.get("claim_metadata", ())
+    assert receipt["task_semantic_substrate"]["deliveries"] == []
+    assert all(
+        any(
+            row.get("kind") == "deliverable_state"
+            and row.get("disposition") == "instruction_entailed_controller_only"
+            for row in compilation.get("accounting", ())
         )
-    ]
-    assert len(semantic_deliveries) == 2
-    assert semantic_deliveries[0]["delivered_before_call"] == 1
-    assert semantic_deliveries[1]["delivered_before_call"] == 2
+        for compilation in receipt["task_semantic_substrate"]["compilations"]
+    )
     assert not any(
         meta.get("decisive")
         for row in persistent["deliveries"]
@@ -2352,29 +2356,19 @@ async def test_context_frontier_advances_repository_intelligence_without_feature
     )
 
     first_request = "\n".join(model.observed_history[0])
-    assert "Repository facts for the next decision:" in first_request
-    assert "src/greeter.py" in first_request
-    assert "def greet(name: str) -> str" in first_request
+    assert "Repository facts for the next decision:" not in first_request
+    assert "def greet(name: str) -> str" not in first_request
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     intelligence = receipt["repository_intelligence"]
     assert intelligence["status"] == "passed"
-    assert len(intelligence["frontier_deliveries"]) == 1
-    delivery = intelligence["frontier_deliveries"][0]
-    assert delivery["delivered_before_call"] == 1
-    assert (
-        delivery["request_payload_sha256"]
-        == receipt["model_call_contexts"][0]["request_payload_sha256"]
+    assert intelligence["frontier_deliveries"] == []
+    assert receipt["metrics"]["context_frontier_chars_added"] == 0
+    assert receipt["metrics"]["semantic_utilization_deliveries"] == 0
+    assert receipt["metrics"]["context_frontier_zero_tasks"] == 1
+    assert any(
+        row["surface"] == "graph_frontier" and row["disposition"] == "value_rejected"
+        for row in receipt["contribution_compiler"]["calls"][0]["accounting"]
     )
-    assert delivery["behavioral_relation"] == "submit_action"
-    assert delivery["anchor_followed"] is False
-    assert delivery["certified_opportunity"]["certified"] is True
-    assert receipt["metrics"]["repository_intelligence_valid"] == 1
-    assert receipt["metrics"]["repository_graph_schema_valid"] == 1
-    assert receipt["metrics"]["repository_graph_nodes"] > 0
-    assert receipt["metrics"]["context_frontier_chars_added"] > 0
-    assert receipt["metrics"]["semantic_utilization_deliveries"] == 1
-    assert receipt["metrics"]["semantic_utilization_no_match"] == 1
-    assert receipt["metrics"]["context_frontier_zero_tasks"] == 0
     assert receipt["metrics"]["repository_mirror_files"] == 2
     assert receipt["metrics"]["repository_mirror_bytes"] > 0
     assert receipt["metrics"]["repository_mirror_transfer_ms"] >= 0
@@ -2568,6 +2562,13 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
         "max_processes": 3,
         "max_tokens": 256,
     }
+    assert receipt["component_configuration"]["repository_context_profile"] == {
+        "profile_id": "gt.action_local_repository_context.v1",
+        "max_execution_views": 1,
+        "max_relation_facts": 3,
+        "max_semantic_items": 3,
+        "delivery_mode": "integrated_same_observation",
+    }
     assert receipt["relational_context"]["deliveries"] == []
     assert receipt["metrics"]["relational_context_deliveries"] == 0
     assert receipt["semantic_evidence"]["enabled"] is True
@@ -2608,6 +2609,9 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     second_request = "\n".join(model.observed_history[1])
     assert "Current certified repository context" in second_request
     assert "src/core.py" in second_request
+    assert "Definition src/core.py" not in second_request
+    assert "src/entry.py" in second_request
+    assert "tests/test_core.py" in second_request
     assert "repository_context" in receipt["model_call_contexts"][1][
         "selected_surfaces"
     ]
@@ -2965,17 +2969,18 @@ async def test_context_frontier_exposes_path_only_evidence_without_symbol_leak(t
     agent._start_repository_session = fake_repository_session
     await agent.run("Update the record writer in legacy.cob.", _Environment(), AgentContext())
 
-    assert any("legacy.cob:42" in item for item in model.observed_history[0])
+    assert not any("legacy.cob:42" in item for item in model.observed_history[0])
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     deliveries = receipt["repository_intelligence"]["frontier_deliveries"]
-    assert len(deliveries) == 1
-    assert deliveries[0]["delivered_before_call"] == 1
-    assert deliveries[0]["facts"][0]["kind"] == "file"
-    assert deliveries[0]["facts"][0]["symbol"] == ""
+    assert deliveries == []
     call = receipt["model_call_contexts"][0]
-    assert call["stock_provider_messages_sha256"] != call["provider_messages_sha256"]
-    assert call["provider_changed_message_indices"]
-    assert call["certified_graph_chars"] > 0
+    assert call["stock_provider_messages_sha256"] == call["provider_messages_sha256"]
+    assert call["provider_changed_message_indices"] == []
+    assert call["certified_graph_chars"] == 0
+    assert any(
+        row["surface"] == "graph_frontier" and row["disposition"] == "value_rejected"
+        for row in receipt["contribution_compiler"]["calls"][0]["accounting"]
+    )
 
 
 @pytest.mark.asyncio
@@ -3011,17 +3016,16 @@ async def test_source_less_task_is_denominator_excluded_not_graph_invalid(
     assert preemptive["decisions"][0]["status"] == "abstained"
     assert preemptive["decisions"][0]["reason_codes"] == ["not_applicable_no_supported_source"]
     call = receipt["model_call_contexts"][0]
-    assert call["control_provider_messages_sha256"] != call["provider_messages_sha256"]
-    assert call["control_request_payload_sha256"] != call["request_payload_sha256"]
-    assert call["task_semantic_substrate_delivered"] is True
-    assert any("Current task evidence:" in item for item in model.observed_history[0])
+    assert call["control_provider_messages_sha256"] == call["provider_messages_sha256"]
+    assert call["control_request_payload_sha256"] == call["request_payload_sha256"]
+    assert call["task_semantic_substrate_delivered"] is False
+    assert not any("Current task evidence:" in item for item in model.observed_history[0])
     semantic = receipt["task_semantic_substrate"]
-    assert len(semantic["deliveries"]) == 1
-    assert semantic["deliveries"][0]["delivered_before_call"] == 1
+    assert semantic["deliveries"] == []
     assert any(
-        fact["kind"] == "deliverable_state"
-        and "absent in the workspace" in fact["gap_text"]
-        for fact in semantic["deliveries"][0]["fact_metadata"]
+        row["kind"] == "deliverable_state"
+        and row["disposition"] == "instruction_entailed_controller_only"
+        for row in semantic["compilations"][0]["accounting"]
     )
     assert receipt["metrics"]["repository_intelligence_valid"] == 0
     assert receipt["metrics"]["repository_graph_schema_valid"] == 0
@@ -3174,13 +3178,15 @@ async def test_progress_delivery_uses_authoritative_provider_receipt_schema(tmp_
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
     progress = receipt["progress"]["fact_deliveries"]
-    assert len(progress) == 1
-    assert progress[0]["fact_ids"]
-    assert progress[0]["provider_messages_sha256"]
-    assert progress[0]["delivered_before_model_query"] is True
+    assert progress == []
     rows, failures, _ = audit_provider_deliveries(receipt, task="progress")
-    assert [row["surface"] for row in rows] == ["progress"]
+    assert rows == []
     assert failures == []
+    assert any(
+        row["surface"] == "progress_frame" and row["disposition"] == "value_rejected"
+        for call in receipt["contribution_compiler"]["calls"]
+        for row in call["accounting"]
+    )
 
 
 @pytest.mark.asyncio
@@ -3581,6 +3587,52 @@ async def test_context_soft_character_limit_starts_repeated_bounded_compaction_e
     assert int(
         receipt["metrics"]["context_compaction_epochs"][-1]["epoch"]
     ) == receipt["metrics"]["context_compactions"]
+
+
+@pytest.mark.asyncio
+async def test_relational_v2_ignores_soft_character_trigger_until_provider_pressure(
+    tmp_path,
+):
+    class LargeReadEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command.startswith("uname "):
+                return ExecResult(stdout="Linux\t6.8\tversion\tx86_64\n", return_code=0)
+            if "-printf" in command:
+                return ExecResult(stdout="", return_code=0)
+            if command.startswith("cat huge"):
+                return ExecResult(stdout=command[-5:] * 5_000, return_code=0)
+            return ExecResult(return_code=0)
+
+    model = _ScriptedModel(
+        [
+            "cat huge1.log",
+            "cat huge2.log",
+            "cat huge3.log",
+            "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT",
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        treatment_profile="central_relational_v2",
+        enable_context_compaction=True,
+        context_trigger_chars=1_500,
+        context_target_chars=800,
+        context_min_compaction_savings_chars=1,
+        context_min_compaction_savings_ratio=0.0,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("Inspect the logs and finish.", LargeReadEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text())
+    assert receipt["metrics"]["context_compactions"] == 0
+    assert receipt["metrics"]["context_compaction_deferrals"] == []
+    assert all(
+        row["trigger_kind"] != "character_pressure"
+        for row in receipt["metrics"]["context_compaction_epochs"]
+    )
 
 
 @pytest.mark.asyncio
@@ -5425,15 +5477,15 @@ async def test_stall_aggregate_reaches_first_next_model_call_once_without_advice
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
     deliveries = receipt["progress"]["fact_deliveries"]
-    assert len(deliveries) == 1
-    assert deliveries[0]["first_eligible_call"] == deliveries[0]["delivered_before_call"]
-    assert deliveries[0]["one_step_late"] is False
-    assert deliveries[0]["not_predictive"] is True
-    assert receipt["metrics"]["progress_frame_deliveries"] == 1
+    assert deliveries == []
+    assert receipt["metrics"]["progress_frame_deliveries"] == 0
     visible = "\n".join(model.observed_history[12])
-    assert "Execution state STALLED" in visible
-    stall_line = next(line for line in visible.splitlines() if "Execution state STALLED" in line)
-    assert "should" not in stall_line.lower()
+    assert "Execution state STALLED" not in visible
+    assert any(
+        row["surface"] == "progress_frame" and row["disposition"] == "value_rejected"
+        for call in receipt["contribution_compiler"]["calls"]
+        for row in call["accounting"]
+    )
 
 
 @pytest.mark.asyncio
