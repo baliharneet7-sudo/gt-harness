@@ -689,29 +689,7 @@ jobs:
             --max-steps "$STEP_LIMIT" \
             --output "$TREATMENT_CONTRACT"
           if [ "$PROFILE" = "persistent_state_only" ]; then
-            python - "$TREATMENT_CONTRACT" <<'PY'
-            import hashlib, json, pathlib, sys
-            path = pathlib.Path(sys.argv[1])
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            args = payload["agent_kwargs"]
-            args.update({
-                "dense_fallback_only": False,
-                "enable_adaptive_validation_timeout": False,
-                "enable_completion_controller": False,
-                "enable_context_compaction": False,
-                "enable_progress_control": False,
-                "enable_shadow_submit_gate": False,
-                "preflight_mode": "shadow",
-                "gt_task_evidence_budget_tokens": 1200,
-                "gt_task_critical_reserve_tokens": 512,
-                "enable_replay_capture": True,
-            })
-            material = dict(payload)
-            material.pop("contract_sha256", None)
-            canonical = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", "surrogatepass")
-            payload["contract_sha256"] = hashlib.sha256(canonical).hexdigest()
-            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            PY
+            python -c 'import hashlib,json,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d["agent_kwargs"].update({"dense_fallback_only":False,"enable_adaptive_validation_timeout":False,"enable_completion_controller":False,"enable_context_compaction":False,"enable_progress_control":False,"enable_shadow_submit_gate":False,"preflight_mode":"shadow","gt_task_evidence_budget_tokens":1200,"gt_task_critical_reserve_tokens":512,"enable_replay_capture":True}); m=dict(d); m.pop("contract_sha256",None); d["contract_sha256"]=hashlib.sha256(json.dumps(m,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8","surrogatepass")).hexdigest(); p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")' "$TREATMENT_CONTRACT"
           fi
           run_task() {
             PROFILE_ARGS=()
