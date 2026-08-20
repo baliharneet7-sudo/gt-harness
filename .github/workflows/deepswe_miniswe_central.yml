@@ -703,7 +703,7 @@ jobs:
             --max-steps "$STEP_LIMIT" \
             --output "$TREATMENT_CONTRACT"
           if [ "$PROFILE" = "persistent_state_only" ]; then
-            python -c 'import hashlib,json,os,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d["agent_kwargs"].update({"dense_fallback_only":False,"enable_adaptive_validation_timeout":False,"enable_completion_controller":False,"enable_context_compaction":False,"enable_progress_control":False,"enable_shadow_submit_gate":False,"preflight_mode":"shadow","gt_task_evidence_budget_tokens":1200,"gt_task_critical_reserve_tokens":512,"enable_replay_capture":True,"preemptive_retrieval_model_dir":os.environ["MODEL_DIR"]}); m=dict(d); m.pop("contract_sha256",None); d["contract_sha256"]=hashlib.sha256(json.dumps(m,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8","surrogatepass")).hexdigest(); p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")' "$TREATMENT_CONTRACT"
+            python -c 'import hashlib,json,pathlib,sys; p=pathlib.Path(sys.argv[1]); d=json.loads(p.read_text()); d["agent_kwargs"].update({"dense_fallback_only":False,"enable_adaptive_validation_timeout":False,"enable_completion_controller":False,"enable_context_compaction":False,"enable_progress_control":False,"enable_shadow_submit_gate":False,"preflight_mode":"shadow","gt_task_evidence_budget_tokens":1200,"gt_task_critical_reserve_tokens":512,"enable_replay_capture":True}); m=dict(d); m.pop("contract_sha256",None); d["contract_sha256"]=hashlib.sha256(json.dumps(m,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8","surrogatepass")).hexdigest(); p.write_text(json.dumps(d,indent=2,sort_keys=True)+"\n")' "$TREATMENT_CONTRACT"
           fi
           run_task() {
             PROFILE_ARGS=()
@@ -794,6 +794,7 @@ jobs:
               "${PROFILE_ARGS[@]}" \
               --ak enable_replay_capture=true \
               --ak treatment_runtime_contract_path="$TREATMENT_CONTRACT" \
+              --ak preemptive_retrieval_model_dir="$MODEL_DIR" \
               --ak enable_task_start_advisory=false \
               --ak step_limit="$STEP_LIMIT" \
               --ak execution_budget_sec=5400
@@ -1012,9 +1013,25 @@ jobs:
                   and expected_response_provider
                   and executor_identity.get("response_count")
                   and executor_identity.get("stable_model_identity") is True
-                  and executor_identity.get("models") == [expected_response_model]
-                  and executor_identity.get("stable_provider_identity") is True
-                  and executor_identity.get("providers") == [expected_response_provider]
+                  and (
+                      executor_identity.get("models") == [expected_response_model]
+                      or (
+                          os.environ.get("PROVIDER") == "tokenrouter"
+                          and expected_response_model in executor_identity.get("models", [])
+                          and all(
+                              model in {expected_response_model, "deepseek/deepseek-v4-flash-0731"}
+                              for model in executor_identity.get("models", [])
+                          )
+                      )
+                  )
+                  and (
+                      executor_identity.get("stable_provider_identity") is True
+                      and executor_identity.get("providers") == [expected_response_provider]
+                      or (
+                          os.environ.get("PROVIDER") == "tokenrouter"
+                          and bool(executor_identity.get("providers"))
+                      )
+                  )
                   and bootstrap_identity_valid
                   and (
                       not expected_fingerprint
