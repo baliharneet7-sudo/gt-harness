@@ -636,13 +636,6 @@ jobs:
           elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
             echo "OPENAI_BASE_URL=https://api.tokenrouter.com/v1" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
-            # TokenRouter's OpenAI-compatible endpoint expects the exact
-            # catalog identifier in the request body.  LiteLLM's `openai/`
-            # prefix selects the transport; the nested `deepseek/` prefix is
-            # part of TokenRouter's model ID and must not be dropped.
-            if [[ "${MODEL:-}" == "deepseek-v4-flash" || "${MODEL:-}" == "deepseek-v4-flash-0731" ]]; then
-              echo "GT_LITELLM_MODEL=openai/deepseek/deepseek-v4-flash-0731" >> "$GITHUB_ENV"
-            fi
           elif [ "${PROVIDER:-configured}" = "deepseek" ]; then
             echo "OPENAI_BASE_URL=https://api.deepseek.com" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
