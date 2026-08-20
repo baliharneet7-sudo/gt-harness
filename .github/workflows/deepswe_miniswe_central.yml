@@ -48,6 +48,10 @@ on:
         required: true
         options: [openrouter, tokenrouter, deepseek]
         default: "openrouter"
+      provider_base_url:
+        description: "OpenAI-compatible provider base URL supplied by the run configuration"
+        type: string
+        required: true
       baseline_run_id:
         description: "GitHub run ID containing the frozen contemporaneous GT-off result"
         type: string
@@ -254,6 +258,7 @@ jobs:
           BENCH_SHA: ${{ needs.plan.outputs.bench_sha }}
           MODEL: ${{ inputs.model }}
           PROVIDER: ${{ inputs.provider }}
+          PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
           STEP_LIMIT: ${{ inputs.step_limit }}
         run: |
           set -euo pipefail
@@ -384,6 +389,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       MODEL: ${{ inputs.model }}
       PROVIDER: ${{ inputs.provider }}
+      PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -419,7 +425,7 @@ jobs:
               if not model.startswith("openai/"):
                   model = f"openai/{model}"
               export("GT_LITELLM_MODEL", model)
-              export("OPENAI_BASE_URL", base or "https://openrouter.ai/api/v1")
+              export("OPENAI_BASE_URL", os.environ["PROVIDER_BASE_URL"])
               export("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
               export("GT_OPENROUTER_DATA_COLLECTION", "allow")
           elif provider == "tokenrouter":
@@ -428,7 +434,9 @@ jobs:
               if not model.startswith("openai/"):
                   model = f"openai/{model}"
               tokenrouter_key = os.environ["TOKENROUTER_API_KEY"].strip()
-              tokenrouter_base = "https://api.tokenrouter.com/v1"
+              tokenrouter_base = os.environ["PROVIDER_BASE_URL"].strip()
+              if not tokenrouter_base:
+                  raise SystemExit("provider_base_url is required")
               # The catalog query is unbilled mechanism identity proof.  A
               # missing exact checkpoint aborts before the completion call.
               request = urllib.request.Request(
@@ -459,7 +467,7 @@ jobs:
               elif not model.startswith("openai/"):
                   model = f"openai/{model}"
               export("GT_LITELLM_MODEL", model)
-              export("OPENAI_BASE_URL", "https://api.deepseek.com")
+              export("OPENAI_BASE_URL", os.environ["PROVIDER_BASE_URL"])
               export("OPENAI_API_KEY", os.environ["DEEPSEEK_API_KEY"].strip())
           elif base:
               if "/" not in model:
@@ -529,6 +537,7 @@ jobs:
       TASK: ${{ matrix.task }}
       STEP_LIMIT: ${{ inputs.step_limit }}
       PROVIDER: ${{ inputs.provider }}
+      PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
       PROFILE: ${{ inputs.comparison_profile }}
     steps:
       - uses: actions/checkout@v4
@@ -639,13 +648,13 @@ jobs:
             # supplying OPENROUTER_API_KEY is insufficient: a model string
             # containing `deepseek/` otherwise selects LiteLLM's native
             # DeepSeek provider and bypasses OpenRouter.
-            echo "OPENAI_BASE_URL=https://openrouter.ai/api/v1" >> "$GITHUB_ENV"
+            echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${OPENROUTER_API_KEY}" >> "$GITHUB_ENV"
           elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
-            echo "OPENAI_BASE_URL=https://api.tokenrouter.com/v1" >> "$GITHUB_ENV"
+            echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
           elif [ "${PROVIDER:-configured}" = "deepseek" ]; then
-            echo "OPENAI_BASE_URL=https://api.deepseek.com" >> "$GITHUB_ENV"
+            echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
             echo "GT_LITELLM_MODEL=openai/deepseek-v4-flash" >> "$GITHUB_ENV"
           fi
@@ -815,6 +824,7 @@ jobs:
           GT_SHA: ${{ needs.plan.outputs.gt_sha }}
           MODEL: ${{ inputs.model }}
           PROVIDER: ${{ inputs.provider }}
+          PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}
           STEP_LIMIT: ${{ inputs.step_limit }}
           PROFILE: ${{ inputs.comparison_profile }}
           ARM: ${{ inputs.arm }}
@@ -889,7 +899,7 @@ jobs:
                       and provider_proof.get("requested_provider") == "tokenrouter"
                       and provider_proof.get("catalog_model_confirmed") is True
                       and provider_route.get("api_base")
-                      == "https://api.tokenrouter.com/v1"
+                      == os.environ["PROVIDER_BASE_URL"]
                       and not (provider_route.get("thinking_mode") or "")
                       and provider_proof.get("thinking_mode") == "disabled"
                       and provider_proof.get("forced_tool") == "select_catalog"
@@ -909,7 +919,7 @@ jobs:
                       route_common
                       and provider_proof.get("requested_provider") == "deepseek_native"
                       and provider_route.get("api_base")
-                      == "https://api.deepseek.com"
+                      == os.environ["PROVIDER_BASE_URL"]
                       and not (provider_route.get("thinking_mode") or "")
                       and provider_proof.get("thinking_mode") == "disabled"
                       and provider_proof.get("forced_tool") == "select_catalog"
@@ -922,7 +932,7 @@ jobs:
                       and provider_proof.get("allow_fallbacks") is False
                       and provider_proof.get("require_parameters") is True
                       and provider_route.get("api_base")
-                      == "https://openrouter.ai/api/v1"
+                      == os.environ["PROVIDER_BASE_URL"]
                       and (provider_route.get("provider_policy") or {}).get("only")
                       == ["deepseek"]
                   )
