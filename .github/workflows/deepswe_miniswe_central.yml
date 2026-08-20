@@ -571,8 +571,16 @@ jobs:
           set -euo pipefail
           model_dir="$RUNNER_TEMP/snowflake-arctic-embed-m"
           mkdir -p "$model_dir"
-          gh release download gt-retrieval-runtime-v1 --repo harneet2512/gt-harness \
-            --pattern model.onnx --pattern tokenizer.json --pattern manifest.json --dir "$model_dir"
+          # Download public release assets directly.  Calling `gh release
+          # download` independently from 20 matrix jobs requires a GitHub API
+          # credential and is vulnerable to per-job 401/rate-limit failures.
+          release_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/gt-retrieval-runtime-v1"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "$release_base/model.onnx" --output "$model_dir/model.onnx"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "$release_base/tokenizer.json" --output "$model_dir/tokenizer.json"
+          curl --fail --location --retry 3 --retry-all-errors \
+            "$release_base/manifest.json" --output "$model_dir/manifest.json"
           echo "$SNOWFLAKE_MODEL_SHA256  $model_dir/model.onnx" | sha256sum -c -
           echo "$SNOWFLAKE_TOKENIZER_SHA256  $model_dir/tokenizer.json" | sha256sum -c -
           MODEL_DIR="$model_dir" python - <<'PY'
