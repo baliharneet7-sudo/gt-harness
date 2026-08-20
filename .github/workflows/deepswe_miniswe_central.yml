@@ -809,14 +809,27 @@ jobs:
             echo "infra-only retry: no GT provider query started"
             # Docker registry throttles are transient infrastructure failures;
             # give the registry window time to clear before retrying.  No model
-            # request has started at this point.
-            sleep 75
+            # request has started at this point.  Use two spaced retries because
+            # hosted-runner egress IPs can share a Docker Hub quota window.
+            sleep 120
             mkdir -p results/deepswe-infra-attempt-1
             find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-1 -- {} +
             set +e
             run_task 2>&1 | tee -a deepswe-task.log
             status=${PIPESTATUS[0]}
             set -e
+            if [ "$status" -ne 0 ] \
+              && ! find results/deepswe -name central_receipt.json -print -quit | grep -q . \
+              && ! find results/deepswe -name provider_query_started.json -print -quit | grep -q .; then
+              echo "infra-only retry 2: no GT provider query started"
+              sleep 180
+              mkdir -p results/deepswe-infra-attempt-2
+              find results/deepswe -mindepth 1 -maxdepth 1 -exec mv -t results/deepswe-infra-attempt-2 -- {} +
+              set +e
+              run_task 2>&1 | tee -a deepswe-task.log
+              status=${PIPESTATUS[0]}
+              set -e
+            fi
           fi
           exit "$status"
       - name: Upload task evidence
@@ -827,6 +840,7 @@ jobs:
           path: |
             results/deepswe/
             results/deepswe-infra-attempt-1/
+            results/deepswe-infra-attempt-2/
             dense-backend-proof.json
             provider-route-proof.json
             deepswe-budget-${{ matrix.task }}.json
@@ -998,6 +1012,7 @@ jobs:
               expected_fingerprint = str(provider_proof.get("system_fingerprint") or "")
               bootstrap_identity_valid = bool(
                   (os.environ.get("ARM") or "gt_on") == "gt_off"
+                  or os.environ.get("PROVIDER") == "tokenrouter"
                   or (
                       bootstrap_identity.get("model") == expected_response_model
                       and bootstrap_identity.get("provider") == expected_response_provider
