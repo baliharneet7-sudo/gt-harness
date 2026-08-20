@@ -461,7 +461,8 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert "options: [openrouter, tokenrouter, deepseek]" in workflow
     assert "TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}" in workflow
     assert "DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" in workflow
-    assert 'tokenrouter_base = "https://api.tokenrouter.com/v1"' in workflow
+    assert 'tokenrouter_base = os.environ["PROVIDER_BASE_URL"].strip()' in workflow
+    assert 'PROVIDER_BASE_URL: ${{ inputs.provider_base_url }}' in workflow
     assert "python -m scripts.central_bootstrap_canary" in workflow
     assert "--provider-proof provider-route-proof.json" in workflow
     fingerprint_gate = (
