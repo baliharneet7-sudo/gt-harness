@@ -1748,6 +1748,7 @@ class MiniSweCentralAgent(BaseAgent):
         require_graph_ready: bool = False,
         repository_initial_index_timeout_sec: float = 60.0,
         repository_refresh_timeout_sec: float = 35.0,
+        repository_refresh_timeout_escalation: float = 3.0,
         enable_task_start_advisory: bool = False,
         enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
@@ -2008,6 +2009,13 @@ class MiniSweCentralAgent(BaseAgent):
         # A shorter asyncio deadline abandons the await but cannot stop the
         # worker thread, allowing stale and current refreshes to race.
         self.repository_refresh_timeout_sec = max(35.0, float(repository_refresh_timeout_sec))
+        # After a refresh timeout the session arms escalation so the NEXT
+        # applicable source transition retries with a larger budget instead of
+        # failing the whole task on one slow build. Serialized (never a second
+        # concurrent refresh thread), so stale/current refreshes cannot race.
+        self.repository_refresh_timeout_escalation = max(
+            1.0, float(repository_refresh_timeout_escalation)
+        )
         self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_feature_guidance = bool(enable_feature_guidance)
         self.enable_context_frontier = bool(enable_context_frontier)
@@ -8302,13 +8310,18 @@ class MiniSweCentralAgent(BaseAgent):
                             changed_paths=source_paths,
                         )
                         if mirror_advanced:
+                            refresh_timeout = self.repository_refresh_timeout_sec * (
+                                self.repository_refresh_timeout_escalation
+                                if repository_session.refresh_timeout_escalated
+                                else 1.0
+                            )
                             try:
                                 repository_evidence = await asyncio.wait_for(
                                     asyncio.to_thread(
                                         repository_session.refresh,
                                         source_revision=graph_source_revision,
                                     ),
-                                    timeout=self.repository_refresh_timeout_sec,
+                                    timeout=refresh_timeout,
                                 )
                             except TimeoutError:
                                 repository_session.invalidate(

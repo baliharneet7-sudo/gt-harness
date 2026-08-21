@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gt_engine.benchmark_parity import audit_runtime_receipt
 from gt_engine.benchmark_reports import build_benchmark_reports
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
-from gt_engine.deep_metrics import extract_trajectory
+from gt_engine.deep_metrics import censor_reason, extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.intervention_chain import audit_intervention_artifacts
 from gt_engine.treatment_adapter import BenchmarkManifest
@@ -386,7 +386,18 @@ for task_dir in sorted(Path("tasks").glob("*")):
             f"{task_name}:trajectory_artifact_count:{len(trajectories)}"
         )
     if len(trajectories) == 1:
-        reward = 1 if got and any(solved(item) for item in got) else 0 if got else None
+        trial_rewards = any(
+            bool((item.get("verifier_result") or {}).get("rewards")) for item in got
+        )
+        # An errored row (no verifier rewards) must stay ``None`` in the
+        # trajectory metrics — never silently converted to reward 0. The
+        # verifier reward is the only solve signal; a censored/errored task is
+        # not an unsolved task.
+        reward = (
+            None
+            if not trial_rewards
+            else (1 if any(solved(item) for item in got) else 0)
+        )
         deep_tasks[task_name] = extract_trajectory(
             trajectories[0],
             task=task_name,
@@ -401,7 +412,26 @@ missing.extend(
 missing = list(dict.fromkeys(missing))
 
 graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
-errored = [t for t in trials if t.get("exception_info")]
+errored = [
+    t
+    for t in trials
+    if t.get("exception_info") and not (t.get("verifier_result") or {}).get("rewards")
+]
+censored = [
+    t
+    for t in errored
+    if censor_reason(
+        str((t.get("exception_info") or {}).get("exception_type") or ""),
+        str((t.get("exception_info") or {}).get("exception_message") or ""),
+        str((t.get("agent_result") or {}).get("metadata") or {}).get("exit_status") or "",
+    )
+]
+censored_tasks = list(
+    dict.fromkeys(
+        str(t.get("task_name") or t.get("task") or "")
+        for t in censored
+    )
+)
 n_solved = sum(1 for t in graded if solved(t))
 n_expected = len(expected) if expected else 0
 invalid_intelligence = [
@@ -628,6 +658,8 @@ merged_payload = {
     "n_trials": len(trials),
     "n_graded": len(graded),
     "n_errored": len(errored),
+    "n_censored": len(censored_tasks),
+    "censored_tasks": censored_tasks,
     "n_solved": n_solved,
     "invalid_repository_intelligence_tasks": invalid_intelligence,
     "invalid_dense_backend_tasks": invalid_dense,

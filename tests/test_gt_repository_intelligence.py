@@ -1083,3 +1083,19 @@ def test_repository_query_cache_is_scoped_to_boundary_and_diagnostic_state(tmp_p
     assert session.refresh_log[-1]["boundary"] == "post_validate"
     assert session.refresh_log[-1]["active_symbols"] == ["greet"]
     assert session.refresh_log[-1]["diagnostic_fingerprint"] == "failure-1"
+
+
+def test_refresh_timeout_invalidation_arms_escalation_and_stays_armed():
+    session = RepositorySession.temporary(instruction="fix the bug")
+    try:
+        assert session.refresh_timeout_escalated is False
+        session.invalidate(source_revision="r1", status="refresh_timeout")
+        assert session.refresh_timeout_escalated is True
+        # a non-timeout invalidation must NOT disarm escalation; only a
+        # successful refresh() resets it (exercised on the integration path).
+        session.invalidate(source_revision="r2", status="sensor_degraded")
+        assert session.refresh_timeout_escalated is True
+        session.invalidate(source_revision="r3", status="refresh_timeout")
+        assert session.refresh_timeout_escalated is True
+    finally:
+        session.close()

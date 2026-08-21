@@ -254,6 +254,109 @@ def test_context_window_provider_exception_is_censored(tmp_path):
     assert metrics["solved"] is False
 
 
+def test_provider_connection_reset_exception_is_censored(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "InternalServerError"},
+                "messages": [_assistant("pytest -q", prompt=10, completion=1)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {
+        "task_name": "task",
+        "exception_info": {
+            "exception_type": "InternalServerError",
+            "exception_message": (
+                "litellm.InternalServerError: OpenAIException - Connection error. "
+                "httpx.ConnectError: [Errno 104] Connection reset by peer"
+            ),
+        },
+    }
+
+    metrics = extract_trajectory(path, task="task", reward=0, harbor_result=harbor_result)
+
+    assert metrics["censored"] is True
+    assert metrics["censored_reason"] == "provider_connection_error"
+    assert metrics["uncensored_resolved"] is False
+    assert metrics["solved"] is False
+
+
+def test_provider_incomplete_chunked_read_exception_is_censored(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "InternalServerError"},
+                "messages": [_assistant("pytest -q", prompt=10, completion=1)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {
+        "task_name": "task",
+        "exception_info": {
+            "exception_type": "InternalServerError",
+            "exception_message": (
+                "httpx.RemoteProtocolError: peer closed connection without "
+                "sending complete message body (incomplete chunked read)"
+            ),
+        },
+    }
+
+    metrics = extract_trajectory(path, task="task", reward=0, harbor_result=harbor_result)
+
+    assert metrics["censored"] is True
+    assert metrics["censored_reason"] == "provider_connection_error"
+
+
+def test_verifier_internal_server_error_without_connection_markers_is_not_censored(tmp_path):
+    path = tmp_path / "task_trajectory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "info": {"exit_status": "InternalServerError"},
+                "messages": [_assistant("pytest -q", prompt=10, completion=1)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    harbor_result = {
+        "task_name": "task",
+        "exception_info": {
+            "exception_type": "InternalServerError",
+            "exception_message": "the verifier service returned HTTP 500 on the test harness",
+        },
+    }
+
+    metrics = extract_trajectory(path, task="task", reward=0, harbor_result=harbor_result)
+
+    assert metrics["censored"] is False
+    assert metrics["harbor_exception_type"] == "InternalServerError"
+
+
+def test_censor_reason_buckets_exit_status_and_connection_patterns():
+    from gt_engine.deep_metrics import censor_reason
+
+    assert censor_reason("AgentTimeoutError", "", "") == "AgentTimeoutError"
+    assert censor_reason("", "", "Cancelled") == "Cancelled"
+    assert (
+        censor_reason(
+            "InternalServerError",
+            "OpenAIException - Connection error. [Errno 104] Connection reset by peer",
+            "InternalServerError",
+        )
+        == "provider_connection_error"
+    )
+    assert (
+        censor_reason("InternalServerError", "HTTP 500 from the verifier", "InternalServerError")
+        == ""
+    )
+    assert censor_reason("", "", "") == ""
+
+
 def test_rewarded_clean_step_exhaustion_is_salvaged_resolved_not_censored(tmp_path):
     path = tmp_path / "task_trajectory.json"
     path.write_text(

@@ -278,6 +278,40 @@ _CENSORED_HARBOR_EXCEPTIONS = {
     "ContextWindowExceededError",
 }
 
+# Provider/network transport failures. litellm maps a dropped/connection-reset
+# stream to a generic ``InternalServerError`` whose *message* carries the real
+# cause (e.g. "OpenAIException - Connection error.", httpx ConnectError /
+# RemoteProtocolError "incomplete chunked read"). These are infrastructure
+# censors: the verifier never ran, the model never finished a call, and the row
+# must never be counted as a clean solve or a solve regression.
+_PROVIDER_CONNECTION_PATTERNS = re.compile(
+    r"Connection error|ConnectError|RemoteProtocolError|APIConnectionError|"
+    r"Connection reset|peer closed connection|incomplete chunked read|"
+    r"ReadTimeout|ConnectTimeout|Connection pool is full|"
+    r"maximum number of attempts|timed? ?out",
+    re.I,
+)
+
+
+def censor_reason(exception_type: str, exception_message: str, exit_status: str) -> str:
+    """Return a typed censor reason for a harbor exception/exit, or ``""``.
+
+    A task is censored (excluded from solve accounting, kept in the planned
+    denominator) when the run was interrupted by an outer-run timeout, a
+    cancelled agent, an exhausted context window, or a provider transport
+    failure.  Verifier- or task-level failures are *not* censors.
+    """
+    if exception_type in _CENSORED_HARBOR_EXCEPTIONS:
+        return exception_type
+    if (
+        exception_type == "InternalServerError"
+        and _PROVIDER_CONNECTION_PATTERNS.search(exception_message)
+    ):
+        return "provider_connection_error"
+    if exit_status in _CENSORED:
+        return exit_status
+    return ""
+
 
 def normalized_token_cost(cache_miss: int, cache_hit: int, output: int) -> float:
     return (
@@ -596,9 +630,10 @@ def extract_trajectory(
     exception_type = str(
         ((harbor_result or {}).get("exception_info") or {}).get("exception_type") or ""
     )
-    censored_reason = exception_type if exception_type in _CENSORED_HARBOR_EXCEPTIONS else ""
-    if not censored_reason and exit_status in _CENSORED:
-        censored_reason = exit_status
+    exception_message = str(
+        ((harbor_result or {}).get("exception_info") or {}).get("exception_message") or ""
+    )
+    censored_reason = censor_reason(exception_type, exception_message, exit_status)
     agent_execution = (harbor_result or {}).get("agent_execution") or {}
     agent_wall_time = _elapsed_seconds(
         agent_execution.get("started_at"), agent_execution.get("finished_at")

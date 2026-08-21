@@ -194,6 +194,10 @@ class RepositorySession:
             RepositoryEvidence,
         ] = {}
         self._owned_directories: tuple[TemporaryDirectory[str], ...] = ()
+        # Armed by a ``refresh_timeout`` invalidation so the host can retry the
+        # next applicable source transition with an escalated timeout budget.
+        # Reset whenever a refresh succeeds.
+        self.refresh_timeout_escalated = False
 
     @classmethod
     def temporary(cls, *, instruction: str) -> RepositorySession:
@@ -226,6 +230,10 @@ class RepositorySession:
     def invalidate(self, *, source_revision: str, status: str) -> None:
         self.source_revision = source_revision
         self.fresh = False
+        if status == "refresh_timeout":
+            # Arm escalation so the next applicable source transition retries
+            # with a larger budget instead of failing the task on one slow build.
+            self.refresh_timeout_escalated = True
         self.evidence = RepositoryEvidence(
             project_checks=self.evidence.project_checks,
             status=status,
@@ -361,6 +369,7 @@ class RepositorySession:
         self.indexed_source_revision = source_revision
         self.fresh = evidence.intelligence_valid
         self.evidence = evidence
+        self.refresh_timeout_escalated = False
         self._query_cache.clear()
         self._pending_index_paths.clear()
         self._requires_full_rebuild = False
