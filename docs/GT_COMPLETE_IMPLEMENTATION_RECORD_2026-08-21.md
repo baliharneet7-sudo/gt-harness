@@ -6,10 +6,14 @@ Branch: `baseline-swe-live-lite-v4flash0731`
 
 ## Status
 
-`IMPLEMENTED_UNVERIFIED` until the final committed SHA passes the source-built
-Linux provider-free workflow. The canonical SHA and artifact hashes live only
-in [`active_release.json`](../eval/release/active_release.json); this document
-does not embed a mutable release identity.
+`PARTIALLY VERIFIED` for implementation mechanics (no-spend): Linux provider-free
+mechanical completeness passed for candidate SHA `77db941152d0d33929348590c7ce9528b3be64d6`
+in workflow [32526386608](https://github.com/harneet2512/gt-harness/actions/runs/32526386608)
+with `provider_calls: 0`, `READY`, `SMOKE_APPROVED`, and `GT_MECHANICAL_COMPLETENESS=PASS`.
+The canonical release identity is still in
+[`active_release.json`](../eval/release/active_release.json), which currently points to
+runtime SHA `bcc1543d6d050cb54820baeccc15c3c8f2e230cc`.
+This is a mechanical-completeness closure step, not an outcome/solve claim.
 
 ## Product contract
 
@@ -74,16 +78,16 @@ negative flip is assigned confirmed GT causality.
 
 ## Final proof still required
 
-1. create the final runtime commit, then run the final freeze-sensitive full
-   Python suite against that exact identity;
-2. current Go source built and tested with `sqlite_fts5` on Linux;
-3. pinned ONNX asset verified in the real provider-free workflow;
-4. all 17 actual-agent trigger witnesses and the persistent lifecycle witness;
-5. current 20-receipt replay, delivery, integrity, and release reports;
-6. final code/documentation commit;
-7. two-file prediction/release freeze on that runtime commit;
-8. push of the exact frozen SHA;
-9. exact provider-free `READY`, `SMOKE_APPROVED`, and mechanical-completeness
-   proof.
+1. decide whether the release manifest should move to runtime SHA
+   `77db941152d0d33929348590c7ce9528b3be64d6` (the latest proven candidate) or
+   re-run provider-free on the manifest runtime SHA `bcc1543d6d050cb54820baeccc15c3c8f2e230cc`;
+2. run the full Python suite against that exact frozen identity;
+3. ensure current Go source is built and tested with `sqlite_fts5` on Linux;
+4. ensure provider-free proof is aligned to the exact frozen manifest runtime SHA;
+5. replay all 20 current receipts through delivery, integrity, and release audits and
+   keep all schema/runtime mismatch labels explicit;
+6. align the remaining no-spend outputs with that exact frozen candidate;
+7. push the exact frozen SHA;
+8. one matched-paid 20-task GT-on smoke remains the final benchmark authorization step.
 
 Only then may one paid matched 20-task GT-on smoke run.

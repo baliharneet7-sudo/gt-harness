@@ -2,10 +2,11 @@
 
 ## Current truth
 
-The implementation repairs are present in the working candidate, but the active
-release manifest still identifies the previous frozen runtime. This is correct
-fail-closed behavior while tracked changes exist. Do not run a paid task matrix
-until the final source-built provider-free proof passes for the exact frozen SHA.
+The implementation repairs are present in the working candidate. Candidate SHA
+`77db941152d0d33929348590c7ce9528b3be64d6` has a passing exact Linux
+provider-free mechanical proof (`WORKFLOW:32526386608`), while the active
+release manifest still points to runtime SHA `bcc1543d6d050cb54820baeccc15c3c8f2e230cc`.
+This is why the product is mechanically stable yet still not benchmark-authorized.
 
 ## Closed code defects
 
@@ -40,19 +41,24 @@ until the final source-built provider-free proof passes for the exact frozen SHA
 
 ## Remaining no-spend verification
 
-1. Commit the reviewed runtime and documentation candidate.
-2. Create the new two-file prediction/release freeze for that runtime commit.
-3. Run the complete Python suite against the frozen identity and explain every
-   skip. The pre-freeze full pass collected 2,047 tests; after two modernized
-   audit fixtures, the only remaining failure is the intentionally stale v23
-   release identity.
-4. Build/test current Go source with the production `sqlite_fts5` tag on Linux.
-5. Provision and verify the pinned Snowflake ONNX and tokenizer hashes.
-6. Execute the actual-agent trigger matrix for all 17 historical mechanisms and
-   persistent execution state.
-7. Replay all 20 archived receipts through current delivery, integrity, and
-   release audits; label historical schema/runtime limitations explicitly.
-8. Push the exact freeze SHA and run `central_provider_free.yml`.
+1. freeze a single canonical manifest path and align it to the proven runtime
+   candidate (or rerun provider-free on the manifest runtime);
+2. re-run the full no-spend suite on the exact frozen identity and keep the
+   current no-spend output hash trail;
+3. run the complete Python suite against that same frozen identity and explain
+   every skip/failure explicitly;
+4. build/test current Go source with production `sqlite_fts5` on Linux;
+5. provision and verify the pinned Snowflake ONNX and tokenizer hashes;
+6. execute full actual-agent triggers for all 17 historical mechanisms plus
+   persistent execution state;
+7. replay all 20 archived receipts through delivery, integrity, and release audits;
+8. close three high-confidence evidence-to-causality gaps:
+   - source→non-source transition when prior source bytes are missing from the
+     workspace sensor but present in the mirror;
+   - terminal observed-fact proof still needs stronger self-authored/no-op guards;
+   - censor classification must separate provider-connection failures from verifier/
+     task execution exceptions;
+9. push the exact frozen SHA.
 
 ## Paid benchmark authorization gate
 

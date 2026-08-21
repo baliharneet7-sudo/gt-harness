@@ -15,6 +15,17 @@ establish implementation behavior; the hosted proof establishes the
 source-built Linux indexer, pinned dense runtime, full integration suite,
 release ancestry, and workflow contract for the exact frozen identity.
 
+The latest mechanically proven candidate proof is currently:
+- workflow [32526386608](https://github.com/harneet2512/gt-harness/actions/runs/32526386608)
+- runtime SHA `77db941152d0d33929348590c7ce9528b3be64d6`
+- status: `provider_calls=0`, `provider_credentials_present=false`,
+  `READY`, `SMOKE_APPROVED`, `mechanical_completeness: PASS`
+- receipt SHA `209fe2445362e149a5d09860ff14b1139839407b64a70cdd5d937bb0cb3cff55`
+- mechanical JSON SHA `0628d9b3af03b980ac40a30987b56be508ff3f3a08cb1a728a0568cb10ff26d8`
+
+This is a non-authoritative candidate proof until the release manifest runtime SHA
+and this candidate proof use the same commit.
+
 The run URL and its content-addressed artifacts are the status record. This
 dossier deliberately does not embed a mutable latest-run ID: changing this file
 after certification would change the release SHA and invalidate that proof.
