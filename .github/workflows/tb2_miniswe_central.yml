@@ -14,6 +14,18 @@ name: TB2 miniswe central matrix (GT-on)
 on:
   workflow_dispatch:
     inputs:
+      api_key:
+        description: "Provider API key, supplied from outside at dispatch time (overrides the repo secret)."
+        required: false
+        default: ""
+      model:
+        description: "LLM model id (litellm/OpenRouter format, e.g. openrouter/stealth/ox-alpha)"
+        required: false
+        default: "openrouter/stealth/ox-alpha"
+      api_base:
+        description: "OpenAI-compatible base URL for the provider"
+        required: false
+        default: "https://openrouter.ai/api/v1"
       comparison_profile:
         description: "Frozen comparison denominator"
         type: choice
@@ -113,11 +125,11 @@ jobs:
       canary_model: ${{ steps.canary_identity.outputs.model }}
       canary_provider: ${{ steps.canary_identity.outputs.provider }}
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_BASE_URL: https://api.deepseek.com
-      GT_LITELLM_MODEL: openai/deepseek-v4-flash
+      ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ inputs.api_key || secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.api_key || secrets.DEEPSEEK_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.api_base }}
+      GT_LITELLM_MODEL: ${{ inputs.model }}
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
@@ -205,7 +217,7 @@ jobs:
 
       - name: Prove exact persistent bootstrap provider contract (gates all jobs)
         env:
-          MODEL: deepseek-v4-flash
+          MODEL: ${{ inputs.model }}
           PROVIDER_PREFLIGHT_TIMEOUT_SEC: ${{ inputs.provider_preflight_timeout_sec }}
         run: |
           set -euo pipefail
@@ -300,11 +312,11 @@ jobs:
       matrix:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      OPENAI_BASE_URL: https://api.deepseek.com
-      GT_LITELLM_MODEL: openai/deepseek-v4-flash
+      ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ inputs.api_key || secrets.DEEPSEEK_API_KEY }}
+      OPENAI_API_KEY: ${{ inputs.api_key || secrets.DEEPSEEK_API_KEY }}
+      OPENAI_BASE_URL: ${{ inputs.api_base }}
+      GT_LITELLM_MODEL: ${{ inputs.model }}
       PYTHONUTF8: "1"
       # gh release download uses GH_TOKEN in task jobs; without it a parallel
       # task can fail before model execution with a misleading 401, leaving
