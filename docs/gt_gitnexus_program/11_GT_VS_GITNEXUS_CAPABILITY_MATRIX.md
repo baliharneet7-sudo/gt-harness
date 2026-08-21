@@ -7,9 +7,9 @@ Output:
 
 This matrix compares:
 
-- GT-on workflow `32163376177` at `e423c87`, documented in [01](01_GT_CURRENT_ARCHITECTURE.md) through [06](06_GT_UNUSED_ASSETS.md);
-- the candidate commit containing this matrix, based on `18f95fbc366d5857f090b304a04c5bd6861ef7db`, which has not received an exact-commit live run;
-- official GitNexus source pinned at `fc885a4bf3edddf9214df633d8d1c0767ef58af9`, documented in [07](07_GITNEXUS_ARCHITECTURE.md) through [10](10_GITNEXUS_BENCHMARK_FORENSICS.md).
+- archived GT receipts and outcomes documented in [01](01_GT_CURRENT_ARCHITECTURE.md) through [06](06_GT_UNUSED_ASSETS.md);
+- the current implementation candidate, which still requires exact-pushed-SHA provider-free proof;
+- official GitNexus source snapshots documented in [07](07_GITNEXUS_ARCHITECTURE.md) through [10](10_GITNEXUS_BENCHMARK_FORENSICS.md), plus the later regression-control source audit pinned in [20](20_FINAL_REGRESSION_CONTROL_AND_BENCHMARK_READINESS.md).
 
 Akon does not publish the GitNexus commit or full treatment configuration behind its benchmark. The source comparison therefore cannot attribute Akon's reported solve delta to a specific feature.
 
@@ -96,4 +96,3 @@ The coupled obligation is implemented in the candidate but is not yet live-prove
 ## Matrix conclusion
 
 GitNexus is currently stronger at converting graph edges into process-shaped answers. GT is stronger at task semantics, live revision state, observed validation, intervention authority, and exact delivery proof. The outperformance architecture is their intersection: **GitNexus-quality composition on GT-certified, revision-current evidence, delivered automatically through GT's existing provider boundary and joined to change/test/completion state.**
-

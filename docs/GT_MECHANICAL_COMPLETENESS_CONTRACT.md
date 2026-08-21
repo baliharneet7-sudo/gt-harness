@@ -40,7 +40,8 @@ Immediately before every final-profile executor provider call,
 5. every context fact is accounted;
 6. every contribution candidate is accounted;
 7. every provider-visible claim has an admissible exact
-   `gt.provider_value.v1` certificate; and
+   `gt.provider_value.v1` certificate naming authority, materiality, novelty,
+   anchors, decision point, and the exploration operation it replaces; and
 8. exact replay capture is enabled.
 
 The host records the barrier in both the model-call row and the task-level
@@ -78,6 +79,11 @@ following independent requirements:
 The merge gate recomputes these requirements again and compares their statuses
 with the embedded certificate. A receipt cannot authorize itself by writing
 `PASS`.
+
+Provider route identity is also non-circular. The merge joins the immutable
+release route contract, the actual one-call bootstrap canary response identity,
+and every task receipt's configured endpoint and executor response identity.
+Expected route metadata alone cannot certify an observed route.
 
 The completion requirement is separately typed. `gt.completion_plan.v1` may
 authorize submission only when it is executable and every
@@ -136,4 +142,3 @@ pass before the bootstrap canary or task matrix can start.
 The no-spend proof is valid only from a clean tracked worktree. The gate checks
 tracked status before verifying the manifest so uncommitted runtime changes can
 never inherit a PASS from an older release commit.
-

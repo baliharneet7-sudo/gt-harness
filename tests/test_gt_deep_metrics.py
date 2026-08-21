@@ -357,6 +357,89 @@ def test_censor_reason_buckets_exit_status_and_connection_patterns():
     assert censor_reason("", "", "") == ""
 
 
+def test_verifier_timeout_text_is_not_misclassified_as_provider_censor():
+    from gt_engine.deep_metrics import censor_reason
+
+    assert (
+        censor_reason(
+            "InternalServerError",
+            "the verifier timed out while executing hidden tests",
+            "InternalServerError",
+        )
+        == ""
+    )
+
+
+def test_generic_verifier_timeout_exception_is_not_a_censor():
+    from gt_engine.deep_metrics import TrialOutcome, censor_reason, classify_trial_outcome
+
+    trial = {
+        "exception_info": {
+            "exception_type": "TimeoutError",
+            "exception_message": "verifier timed out while executing hidden tests",
+        }
+    }
+
+    assert censor_reason("TimeoutError", "verifier timed out", "") == ""
+    assert classify_trial_outcome(trial) is TrialOutcome.ERROR
+
+
+def test_typed_provider_timeout_with_transport_evidence_is_a_censor():
+    from gt_engine.deep_metrics import censor_reason
+
+    assert (
+        censor_reason("APITimeoutError", "provider connection timed out", "")
+        == "provider_connection_error"
+    )
+
+
+def test_verifier_error_with_provider_like_words_is_not_a_censor():
+    from gt_engine.deep_metrics import censor_reason
+
+    assert (
+        censor_reason(
+            "VerifierError",
+            "assertion failed: expected Connection error handling",
+            "",
+        )
+        == ""
+    )
+
+
+def test_trial_outcome_classifier_is_exhaustive_and_mutually_exclusive():
+    from gt_engine.deep_metrics import TrialOutcome, classify_trial_outcome
+
+    cases = [
+        ({"verifier_result": {"rewards": {"reward": 1}}}, TrialOutcome.SOLVED),
+        (
+            {"verifier_result": {"rewards": {"reward": 0}}},
+            TrialOutcome.UNSOLVED_GRADED,
+        ),
+        (
+            {
+                "exception_info": {
+                    "exception_type": "InternalServerError",
+                    "exception_message": "httpx.ConnectError: Connection reset",
+                }
+            },
+            TrialOutcome.CENSORED,
+        ),
+        (
+            {"exception_info": {"exception_type": "VerifierError"}},
+            TrialOutcome.ERROR,
+        ),
+        ({}, TrialOutcome.MISSING_VERIFIER),
+        (
+            {"agent_result": {"metadata": {"exit_status": "Submitted"}}},
+            TrialOutcome.MISSING_VERIFIER,
+        ),
+    ]
+
+    assert [classify_trial_outcome(row) for row, _ in cases] == [
+        expected for _, expected in cases
+    ]
+
+
 def test_rewarded_clean_step_exhaustion_is_salvaged_resolved_not_censored(tmp_path):
     path = tmp_path / "task_trajectory.json"
     path.write_text(

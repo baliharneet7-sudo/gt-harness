@@ -127,6 +127,7 @@ class ProviderValueCertificate:
             and self.novelty_basis
             and self.decision_point
             and self.replaces_operation
+            and self.materiality_reason
         )
 
     def as_dict(self) -> dict[str, Any]:

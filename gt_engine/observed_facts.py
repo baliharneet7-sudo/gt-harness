@@ -26,6 +26,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from gt_engine.contributions import ContributionDisposition
+
 # Maximum number of distinct observed-fact deliveries per task.  Bounded so the
 # surface cannot spam the model and to keep the delivery deterministic.
 MAX_OBSERVED_FACTS_PER_TASK = 4
@@ -215,9 +217,159 @@ def observed_fact_payload(fact: ObservedFact) -> str:
     return fact.text
 
 
+def audit_observed_fact_lifecycle(receipt: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """Join every extracted fact to one causally supported terminal outcome."""
+
+    section = receipt.get("observed_facts") or {}
+    failures: list[str] = []
+    extractions = section.get("fact_extractions")
+    if not isinstance(extractions, list):
+        return ["extraction_inventory_missing"], {
+            "extractions": 0,
+            "decisions": 0,
+            "deliveries": 0,
+        }
+    extraction_ids = [
+        str(row.get("fact_id") or "") if isinstance(row, dict) else ""
+        for row in extractions
+    ]
+    if any(not fact_id for fact_id in extraction_ids):
+        failures.append("extraction_identity_missing")
+    if len(set(extraction_ids)) != len(extraction_ids):
+        failures.append("extraction_identity_duplicate")
+    extraction_by_id = {
+        str(row.get("fact_id") or ""): row
+        for row in extractions
+        if isinstance(row, dict) and str(row.get("fact_id") or "")
+    }
+    decisions = section.get("fact_decisions") or []
+    decision_by_id: dict[str, list[dict[str, Any]]] = {}
+    for row in decisions:
+        if not isinstance(row, dict) or not str(row.get("fact_id") or ""):
+            failures.append("decision_identity_missing")
+            continue
+        decision_by_id.setdefault(str(row["fact_id"]), []).append(row)
+    for fact_id, rows in decision_by_id.items():
+        if len(rows) != 1:
+            failures.append(f"decision_not_unique:{fact_id}:{len(rows)}")
+
+    deliveries = section.get("fact_deliveries") or []
+    delivery_by_id: dict[str, list[dict[str, Any]]] = {}
+    for delivery in deliveries:
+        if not isinstance(delivery, dict):
+            failures.append("delivery_malformed")
+            continue
+        ids = {
+            str(item) for item in (delivery.get("fact_ids") or ()) if str(item)
+        }
+        direct = str(delivery.get("fact_id") or "")
+        if direct:
+            ids.add(direct)
+        if not ids:
+            failures.append("delivery_identity_missing")
+        for fact_id in ids:
+            delivery_by_id.setdefault(fact_id, []).append(delivery)
+
+    compiler_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    for call in (receipt.get("contribution_compiler") or {}).get("calls") or ():
+        if not isinstance(call, dict):
+            continue
+        call_number = int(call.get("call") or 0)
+        for row in call.get("accounting") or ():
+            if not isinstance(row, dict):
+                continue
+            contribution_id = str(row.get("contribution_id") or "")
+            if contribution_id:
+                compiler_by_key[(call_number, contribution_id)] = row
+    dispatched_calls = {
+        int(row.get("call") or 0)
+        for row in receipt.get("model_call_contexts") or ()
+        if isinstance(row, dict)
+        and str(row.get("dispatch_status") or "")
+        in {"dispatched", "invoked", "response_received", "response_error"}
+    }
+    compiler_dispositions = {
+        item.value
+        for item in ContributionDisposition
+        if item
+        not in {
+            ContributionDisposition.SELECTED,
+            ContributionDisposition.STALE_SOURCE_REVISION,
+        }
+    }
+    cap = int(section.get("max_deliveries_per_task") or MAX_OBSERVED_FACTS_PER_TASK)
+    for fact_id, extraction in extraction_by_id.items():
+        rows = decision_by_id.get(fact_id) or []
+        if len(rows) != 1:
+            failures.append(f"terminal_decision_missing:{fact_id}")
+            continue
+        decision = rows[0]
+        disposition = str(decision.get("disposition") or "")
+        call = int(decision.get("call") or 0)
+        if disposition == ContributionDisposition.SELECTED.value:
+            matched = delivery_by_id.get(fact_id) or []
+            if len(matched) != 1:
+                failures.append(f"selected_delivery_join_invalid:{fact_id}:{len(matched)}")
+            elif int(matched[0].get("call") or 0) != call:
+                failures.append(f"selected_delivery_call_mismatch:{fact_id}")
+        elif disposition in compiler_dispositions:
+            contribution_id = str(decision.get("contribution_id") or "")
+            compiler = compiler_by_key.get((call, contribution_id))
+            if (
+                not contribution_id
+                or compiler is None
+                or str(compiler.get("surface") or "") != "observed_execution"
+                or str(compiler.get("disposition") or "") != disposition
+                or tuple(compiler.get("reason_codes") or ())
+                != tuple(decision.get("reason_codes") or ())
+            ):
+                failures.append(f"compiler_decision_join_invalid:{fact_id}")
+        elif disposition == ContributionDisposition.STALE_SOURCE_REVISION.value:
+            if (
+                str(decision.get("source_revision") or "")
+                != str(extraction.get("source_revision") or "")
+                or not str(decision.get("current_source_revision") or "")
+                or str(decision.get("current_source_revision") or "")
+                == str(extraction.get("source_revision") or "")
+                or "stale_source_revision" not in (decision.get("reason_codes") or ())
+            ):
+                failures.append(f"stale_decision_proof_invalid:{fact_id}")
+        elif disposition == "terminal_before_next_provider_request":
+            eligible = int(extraction.get("eligible_call") or 0)
+            if (
+                call != eligible
+                or int(decision.get("eligible_call") or 0) != eligible
+                or any(dispatched >= eligible for dispatched in dispatched_calls)
+                or "trajectory_ended" not in (decision.get("reason_codes") or ())
+            ):
+                failures.append(f"terminal_decision_proof_invalid:{fact_id}")
+        elif disposition == "controller_only_task_delivery_limit":
+            ordinal = int(decision.get("extraction_ordinal") or 0)
+            if ordinal <= cap or "task_delivery_limit" not in (
+                decision.get("reason_codes") or ()
+            ):
+                failures.append(f"delivery_limit_proof_invalid:{fact_id}")
+        else:
+            failures.append(f"decision_disposition_invalid:{fact_id}:{disposition}")
+
+    known_ids = set(extraction_by_id)
+    for fact_id in sorted(set(decision_by_id) - known_ids):
+        failures.append(f"decision_without_extraction:{fact_id}")
+    for fact_id in sorted(set(delivery_by_id) - known_ids):
+        failures.append(f"delivery_without_extraction:{fact_id}")
+    return failures, {
+        "extractions": len(extractions),
+        "extracted_fact_ids": len(extraction_by_id),
+        "decisions": len(decisions),
+        "deliveries": len(deliveries),
+        "terminal_fact_ids": len(decision_by_id),
+    }
+
+
 __all__ = [
     "MAX_OBSERVED_FACTS_PER_TASK",
     "ObservedFact",
+    "audit_observed_fact_lifecycle",
     "extract_observed_facts",
     "observed_fact_payload",
 ]

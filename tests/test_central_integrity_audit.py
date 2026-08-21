@@ -188,7 +188,7 @@ def test_abstention_gap_surfaces_when_observed_fact_marker_present_but_undeliver
     """The recurrence gate: a task whose trajectory contains a mechanically
     recognizable observed fact (source 3) but whose receipt records zero
     observed-fact deliveries must be flagged as an abstention gap, while
-    integrity (no-grader-access) stays certified."""
+    and the combined integrity audit must fail closed."""
     task = tmp_path / "trial-task-demo" / "agent"
     task.mkdir(parents=True)
     trajectory = {
@@ -227,7 +227,7 @@ def test_abstention_gap_surfaces_when_observed_fact_marker_present_but_undeliver
     (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
 
     report = audit_run_root(tmp_path)
-    assert report["audit_status"] == "INTEGRITY_CERTIFIED"
+    assert report["audit_status"] == "INTEGRITY_FAILED"
     assert any("observed_fact_abstention_gap" in gap for gap in report["abstention_gaps"])
 
 
@@ -251,3 +251,116 @@ def test_no_abstention_gap_when_observed_facts_delivered(tmp_path):
     (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
     report = audit_run_root(tmp_path)
     assert report["abstention_gaps"] == []
+
+
+def test_no_abstention_gap_when_current_receipt_accounts_for_rejected_fact(tmp_path):
+    task = tmp_path / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    trajectory = {
+        "messages": [
+            {
+                "role": "tool",
+                "content": "Type: DYN (Position-Independent Executable file)\nClass: ELF64\n",
+                "extra": {
+                    "command": "readelf -h a.out",
+                    "raw_output": "Type: DYN (Position-Independent Executable file)\nClass: ELF64\n",
+                },
+            }
+        ]
+    }
+    (task / "miniswe_trajectory.json").write_text(
+        json.dumps(trajectory), encoding="utf-8"
+    )
+    receipt = {
+        "model_call_contexts": [],
+        "features": {"effect_trace": []},
+        "guidance_deliveries": [],
+        "observed_facts": {
+            "enabled": True,
+            "fact_extractions": [
+                {
+                    "fact_id": "observed-accounted",
+                    "kind": "elf_type",
+                    "eligible_call": 2,
+                }
+            ],
+            "fact_deliveries": [],
+            "fact_decisions": [
+                {
+                    "fact_id": "observed-accounted",
+                    "kind": "elf_type",
+                    "call": 2,
+                    "eligible_call": 2,
+                    "disposition": "terminal_before_next_provider_request",
+                    "reason_codes": ["trajectory_ended"],
+                }
+            ],
+        },
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert report["abstention_gaps"] == []
+    accounting = report["per_task"]["trial-task-demo"]["observed_fact_accounting"]
+    assert accounting["status"] == "fully_accounted"
+
+
+def test_current_receipt_fails_when_an_extracted_fact_has_no_terminal_decision(tmp_path):
+    task = tmp_path / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    (task / "miniswe_trajectory.json").write_text(
+        json.dumps({"messages": []}), encoding="utf-8"
+    )
+    receipt = {
+        "model_call_contexts": [],
+        "features": {"effect_trace": []},
+        "guidance_deliveries": [],
+        "observed_facts": {
+            "enabled": True,
+            "fact_extractions": [
+                {"fact_id": "observed-lost", "kind": "tool_version"}
+            ],
+            "fact_deliveries": [],
+            "fact_decisions": [],
+        },
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "INTEGRITY_FAILED"
+    assert any(
+        "observed_fact_terminal_decision_missing:observed-lost" in item
+        for item in report["abstention_gaps"]
+    )
+
+
+def test_unrelated_fact_decision_cannot_account_for_an_extracted_fact(tmp_path):
+    task = tmp_path / "trial-task-demo" / "agent"
+    task.mkdir(parents=True)
+    (task / "miniswe_trajectory.json").write_text(
+        json.dumps({"messages": []}), encoding="utf-8"
+    )
+    receipt = {
+        "model_call_contexts": [],
+        "features": {"effect_trace": []},
+        "guidance_deliveries": [],
+        "observed_facts": {
+            "enabled": True,
+            "fact_extractions": [{"fact_id": "observed-required"}],
+            "fact_deliveries": [],
+            "fact_decisions": [
+                {"fact_id": "observed-unrelated", "disposition": "selected"}
+            ],
+        },
+    }
+    (task / "central_receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    report = audit_run_root(tmp_path)
+
+    assert report["audit_status"] == "INTEGRITY_FAILED"
+    assert any(
+        "observed_fact_terminal_decision_missing:observed-required" in item
+        for item in report["failures"]
+    )

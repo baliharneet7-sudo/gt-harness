@@ -601,6 +601,13 @@ _GROUNDING_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 
 def feature_payload_grounded(feature_id: str, payload: dict[str, Any]) -> bool:
     """True only when a model-visible payload names concrete evidence."""
+    if feature_id == "recovery":
+        alternate = payload.get("alternate_action")
+        return bool(
+            isinstance(alternate, dict)
+            and tuple(str(path) for path in alternate.get("paths") or () if str(path))
+            and str(payload.get("failure_fingerprint") or "")
+        )
     required = _GROUNDING_REQUIREMENTS.get(feature_id)
     if required is None:
         return False
@@ -3461,24 +3468,35 @@ class CentralFeatureRuntime:
         classified: dict[str, ClassifiedChange] = {}
         for path in transition.changed_paths:
             kind = "f"
+            content: str | bytes | None = transition.after_contents.get(path)
             if snapshot is not None:
                 state = snapshot.entries.get(path)
                 if state is not None:
                     kind = state.kind
+                    if state.content is not None:
+                        content = state.content
+            if path in transition.deleted:
+                content = transition.before_contents.get(path)
             classified[path] = classify_change(
-                path, kind=kind, task_deliverables=self._task_deliverables
+                path,
+                kind=kind,
+                task_deliverables=self._task_deliverables,
+                content=content,
             )
         source_relevant = tuple(
             item.path for item in classified.values() if item.validation_relevant
         )
-        model_authored = tuple(
-            item.path for item in classified.values() if item.origin == ChangeOrigin.MODEL_AUTHORED
+        authored_source = tuple(
+            item.path
+            for item in classified.values()
+            if item.origin in {ChangeOrigin.MODEL_AUTHORED, ChangeOrigin.TASK_DELIVERABLE}
+            and item.validation_relevant
         )
         if transition.changed_paths:
-            if model_authored:
+            if authored_source:
                 # Any authored source change makes prior check results stale.
                 self._source_epoch += 1
-                self._recent_source_paths = tuple(model_authored)
+                self._recent_source_paths = tuple(authored_source)
                 self._last_edit = {
                     "command": normalized,
                     "paths": list(source_relevant),

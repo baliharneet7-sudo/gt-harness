@@ -194,10 +194,6 @@ class RepositorySession:
             RepositoryEvidence,
         ] = {}
         self._owned_directories: tuple[TemporaryDirectory[str], ...] = ()
-        # Armed by a ``refresh_timeout`` invalidation so the host can retry the
-        # next applicable source transition with an escalated timeout budget.
-        # Reset whenever a refresh succeeds.
-        self.refresh_timeout_escalated = False
 
     @classmethod
     def temporary(cls, *, instruction: str) -> RepositorySession:
@@ -227,13 +223,21 @@ class RepositorySession:
             return None
         return target
 
+    def mirrored_path_is_indexable(self, relative_path: str) -> bool:
+        """Resolve prior graph applicability from the exact session mirror."""
+
+        target = self._target(relative_path)
+        if target is None or not target.is_file():
+            return False
+        try:
+            prefix = target.read_bytes()[:65_536]
+        except OSError:
+            return False
+        return is_indexable_source(relative_path, prefix)
+
     def invalidate(self, *, source_revision: str, status: str) -> None:
         self.source_revision = source_revision
         self.fresh = False
-        if status == "refresh_timeout":
-            # Arm escalation so the next applicable source transition retries
-            # with a larger budget instead of failing the task on one slow build.
-            self.refresh_timeout_escalated = True
         self.evidence = RepositoryEvidence(
             project_checks=self.evidence.project_checks,
             status=status,
@@ -257,6 +261,17 @@ class RepositorySession:
             if changed_paths is not None
             else tuple(getattr(transition, "changed_paths", ()) or ())
         )
+        if source_revision != self.source_revision and not selected_paths:
+            # ``source_revision`` is the graph-input revision, not the broad
+            # workspace/source revision.  A changed graph-input identity with
+            # no captured transition is therefore unexplained.  Never take the
+            # source_revision_only refresh path and bind the previous graph to
+            # a new identity merely because an upstream selector missed it.
+            self.invalidate(
+                source_revision=source_revision,
+                status="unexplained_graph_revision",
+            )
+            return False
         for path in selected_paths:
             target = self._target(str(path))
             if target is None:
@@ -312,7 +327,13 @@ class RepositorySession:
         self._query_cache.clear()
         return True
 
-    def refresh(self, *, source_revision: str, limit: int = 8) -> RepositoryEvidence:
+    def refresh(
+        self,
+        *,
+        source_revision: str,
+        limit: int = 8,
+        timeout: float = 600.0,
+    ) -> RepositoryEvidence:
         if source_revision == self.indexed_source_revision and self.evidence.intelligence_valid:
             self.refresh_log.append(
                 {
@@ -335,6 +356,7 @@ class RepositorySession:
                     prior_index.graph_db,
                     tuple(sorted(self._pending_index_paths)),
                     source_revision=source_revision,
+                    timeout=timeout,
                 )
                 evidence = inspect_repository(
                     self.root,
@@ -343,6 +365,7 @@ class RepositorySession:
                     limit=limit,
                     index_receipt=index_receipt,
                     source_revision=source_revision,
+                    timeout=timeout,
                 )
             else:
                 mode = "source_revision_only"
@@ -354,6 +377,7 @@ class RepositorySession:
                 state_dir=self.state_dir,
                 limit=limit,
                 source_revision=source_revision,
+                timeout=timeout,
             )
         evidence = replace(
             evidence,
@@ -369,7 +393,6 @@ class RepositorySession:
         self.indexed_source_revision = source_revision
         self.fresh = evidence.intelligence_valid
         self.evidence = evidence
-        self.refresh_timeout_escalated = False
         self._query_cache.clear()
         self._pending_index_paths.clear()
         self._requires_full_rebuild = False
@@ -386,6 +409,35 @@ class RepositorySession:
             }
         )
         return evidence
+
+    def apply_transition_and_refresh(
+        self,
+        transition: Any,
+        *,
+        source_revision: str,
+        changed_paths: tuple[str, ...] | None = None,
+        limit: int = 8,
+        timeout: float = 600.0,
+    ) -> tuple[bool, RepositoryEvidence]:
+        """Apply one captured transition and finish its graph refresh inline.
+
+        The host calls this synchronously at the postflight boundary.  No
+        worker thread survives a timeout, so the session cannot be invalidated
+        and then mutated later by abandoned indexing work.
+        """
+
+        advanced = self.apply_transition(
+            transition,
+            source_revision=source_revision,
+            changed_paths=changed_paths,
+        )
+        if not advanced:
+            return False, self.evidence
+        return True, self.refresh(
+            source_revision=source_revision,
+            limit=limit,
+            timeout=timeout,
+        )
 
     def query(
         self,
@@ -639,11 +691,15 @@ def inspect_index(
     *,
     state_dir: str | Path | None = None,
     source_revision: str = "",
+    timeout: float = 600.0,
 ) -> IndexBuildReceipt:
     """Build the repository graph while retaining its exact availability status."""
 
     return ensure_index_with_receipt(
-        root, state_dir=state_dir, source_revision=source_revision
+        root,
+        state_dir=state_dir,
+        source_revision=source_revision,
+        timeout=timeout,
     )
 
 
@@ -900,6 +956,7 @@ def inspect_repository(
     source_revision: str = "",
     active_paths: tuple[str, ...] = (),
     boundary: str = "task_start",
+    timeout: float = 600.0,
 ) -> RepositoryEvidence:
     """Index and rank task-specific source anchors without raising.
 
@@ -912,7 +969,10 @@ def inspect_repository(
     checks = discover_project_checks(base, active_paths=active_paths)
     try:
         index_receipt = index_receipt or inspect_index(
-            base, state_dir=state_dir, source_revision=source_revision
+            base,
+            state_dir=state_dir,
+            source_revision=source_revision,
+            timeout=timeout,
         )
         graph_db = index_receipt.graph_db
         if not graph_db:

@@ -6,6 +6,7 @@ import json
 import re
 from collections import Counter
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -269,7 +270,6 @@ _CENSORED_HARBOR_EXCEPTIONS = {
     "AgentSetupTimeoutError",
     "EnvironmentBuildTimeoutError",
     "TaskTimeoutError",
-    "TimeoutError",
     "CancelledError",
     # Provider rejected the request because the assembled conversation
     # exceeded the model context window.  This is an outer-run censor, not a
@@ -288,8 +288,16 @@ _PROVIDER_CONNECTION_PATTERNS = re.compile(
     r"Connection error|ConnectError|RemoteProtocolError|APIConnectionError|"
     r"Connection reset|peer closed connection|incomplete chunked read|"
     r"ReadTimeout|ConnectTimeout|Connection pool is full|"
-    r"maximum number of attempts|timed? ?out",
+    r"maximum number of attempts|connection timed out",
     re.I,
+)
+_PROVIDER_TRANSPORT_EXCEPTIONS = frozenset(
+    {
+        "InternalServerError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "ServiceUnavailableError",
+    }
 )
 
 
@@ -304,13 +312,46 @@ def censor_reason(exception_type: str, exception_message: str, exit_status: str)
     if exception_type in _CENSORED_HARBOR_EXCEPTIONS:
         return exception_type
     if (
-        exception_type == "InternalServerError"
+        exception_type in _PROVIDER_TRANSPORT_EXCEPTIONS
         and _PROVIDER_CONNECTION_PATTERNS.search(exception_message)
     ):
         return "provider_connection_error"
     if exit_status in _CENSORED:
         return exit_status
     return ""
+
+
+class TrialOutcome(StrEnum):
+    SOLVED = "solved"
+    UNSOLVED_GRADED = "unsolved_graded"
+    CENSORED = "censored"
+    ERROR = "error"
+    MISSING_VERIFIER = "missing_verifier"
+
+
+def classify_trial_outcome(trial: dict[str, Any]) -> TrialOutcome:
+    """Classify one Harbor trial into one and only one outcome bucket."""
+
+    rewards = (trial.get("verifier_result") or {}).get("rewards") or {}
+    numeric_rewards = [
+        value for value in rewards.values() if isinstance(value, (int, float))
+    ]
+    if numeric_rewards:
+        return (
+            TrialOutcome.SOLVED
+            if all(value >= 1 for value in numeric_rewards)
+            else TrialOutcome.UNSOLVED_GRADED
+        )
+    exception = trial.get("exception_info") or {}
+    exception_type = str(exception.get("exception_type") or "")
+    exception_message = str(exception.get("exception_message") or "")
+    metadata = (trial.get("agent_result") or {}).get("metadata") or {}
+    exit_status = str(metadata.get("exit_status") or "") if isinstance(metadata, dict) else ""
+    if censor_reason(exception_type, exception_message, exit_status):
+        return TrialOutcome.CENSORED
+    if exception_type or exit_status not in {"", "Submitted", "Completed"}:
+        return TrialOutcome.ERROR
+    return TrialOutcome.MISSING_VERIFIER
 
 
 def normalized_token_cost(cache_miss: int, cache_hit: int, output: int) -> float:

@@ -10,18 +10,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gt_engine.benchmark_parity import audit_runtime_receipt
 from gt_engine.benchmark_reports import build_benchmark_reports
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
-from gt_engine.deep_metrics import censor_reason, extract_trajectory
+from gt_engine.deep_metrics import TrialOutcome, classify_trial_outcome, extract_trajectory
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.intervention_chain import audit_intervention_artifacts
 from gt_engine.treatment_adapter import BenchmarkManifest
 from scripts.central_feature_lifecycle import build_feature_lifecycle_report
+from scripts.central_bootstrap_canary import validate_canary
+from scripts.central_integrity_audit import audit_run_root as audit_integrity_run_root
 from scripts.central_release_gate import audit_treatment_runtime
+from scripts.provider_route_contract import resolve_release_provider_route
 from scripts.release_manifest import load_release_manifest
 from scripts.tb2_promotion_gate import assess_tb2_promotion, treatment_from_merged
 from scripts.tb2_regression_forensics import build_regression_forensics
 
 expected = json.loads(os.environ.get("EXPECTED_TASKS_JSON") or "[]")
 release_manifest = load_release_manifest()
+baseline = json.loads(release_manifest.baseline_path.read_text(encoding="utf-8"))
+baseline_runtime_contract = dict(
+    (baseline.get("manifest") or {}).get("model_identity") or {}
+)
 prediction_path = release_manifest.prediction_path
 prediction_sha256 = (
     hashlib.sha256(prediction_path.read_bytes()).hexdigest()
@@ -84,6 +91,36 @@ provider_free_valid = bool(
 if not provider_free_valid:
     artifact_integrity_failures.append("run:provider_free_certification_invalid")
 
+# Join the live one-call canary to the same immutable route contract used by
+# every task.  Task receipts prove which endpoint was configured; this artifact
+# proves that the pre-fan-out call actually reached a provider that returned
+# the expected model/provider identity.  Neither expected configuration alone
+# is allowed to self-certify the observed route.
+canary_receipts = list(Path("bootstrap-canary").rglob("bootstrap-canary.json"))
+canary_routes = list(
+    Path("bootstrap-canary").rglob("provider-route-contract.json")
+)
+bootstrap_canary = (
+    json.loads(canary_receipts[0].read_text(encoding="utf-8"))
+    if len(canary_receipts) == 1
+    else {}
+)
+bootstrap_route = (
+    json.loads(canary_routes[0].read_text(encoding="utf-8"))
+    if len(canary_routes) == 1
+    else {}
+)
+expected_bootstrap_route = resolve_release_provider_route()
+bootstrap_canary_failures = list(validate_canary(bootstrap_canary))
+bootstrap_route_valid = bool(
+    len(canary_receipts) == 1
+    and len(canary_routes) == 1
+    and not bootstrap_canary_failures
+    and bootstrap_route == expected_bootstrap_route
+)
+if not bootstrap_route_valid:
+    artifact_integrity_failures.append("run:bootstrap_route_certification_invalid")
+
 def solved(t):
     rewards = (t.get("verifier_result") or {}).get("rewards") or {}
     vals = [v for v in rewards.values() if isinstance(v, (int, float))]
@@ -123,6 +160,7 @@ for task_dir in sorted(Path("tasks").glob("*")):
             else {}
         )
         provider_identity = receipt.get("provider_response_identity") or {}
+        provider_route = receipt.get("provider_route") or {}
         executor_identity = provider_identity.get("executor") or {}
         system_fingerprints = list(
             executor_identity.get("system_fingerprints") or ()
@@ -311,6 +349,13 @@ for task_dir in sorted(Path("tasks").glob("*")):
                 and executor_identity.get("stable_model_identity") is True
                 and executor_identity.get("stable_provider_identity") is True
             ),
+            "provider_route_id": str(provider_route.get("route_id") or ""),
+            "provider_api_host": str(provider_route.get("api_host") or ""),
+            "provider_api_base": str(provider_route.get("api_base") or ""),
+            "provider_config_model": str(provider_route.get("model") or ""),
+            "provider_credential_in_receipt": bool(
+                provider_route.get("credential_in_receipt")
+            ),
             "bootstrap_model": str(
                 (provider_identity.get("bootstrap") or {}).get("model") or ""
             ),
@@ -411,21 +456,33 @@ missing.extend(
 )
 missing = list(dict.fromkeys(missing))
 
-graded = [t for t in trials if (t.get("verifier_result") or {}).get("rewards")]
-errored = [
-    t
-    for t in trials
-    if t.get("exception_info") and not (t.get("verifier_result") or {}).get("rewards")
+central_integrity_report = audit_integrity_run_root(Path("tasks"))
+if central_integrity_report.get("receipts_audited") != len(receipt_metrics):
+    artifact_integrity_failures.append(
+        "run:central_integrity_receipt_count:"
+        f"{central_integrity_report.get('receipts_audited')}/{len(receipt_metrics)}"
+    )
+artifact_integrity_failures.extend(
+    f"central_integrity:{failure}"
+    for failure in central_integrity_report.get("failures") or ()
+)
+
+classified_trials = [(trial, classify_trial_outcome(trial)) for trial in trials]
+graded = [
+    trial
+    for trial, outcome in classified_trials
+    if outcome in {TrialOutcome.SOLVED, TrialOutcome.UNSOLVED_GRADED}
 ]
 censored = [
-    t
-    for t in errored
-    if censor_reason(
-        str((t.get("exception_info") or {}).get("exception_type") or ""),
-        str((t.get("exception_info") or {}).get("exception_message") or ""),
-        str((t.get("agent_result") or {}).get("metadata") or {}).get("exit_status") or "",
-    )
+    trial for trial, outcome in classified_trials if outcome is TrialOutcome.CENSORED
 ]
+errored = [trial for trial, outcome in classified_trials if outcome is TrialOutcome.ERROR]
+missing_verifier = [
+    trial
+    for trial, outcome in classified_trials
+    if outcome is TrialOutcome.MISSING_VERIFIER
+]
+outcome_counts = Counter(outcome.value for _, outcome in classified_trials)
 censored_tasks = list(
     dict.fromkeys(
         str(t.get("task_name") or t.get("task") or "")
@@ -506,6 +563,12 @@ observed_executor_providers = sorted({
     for provider in row.get("executor_providers") or ()
     if provider
 })
+observed_route_ids = sorted(
+    {row["provider_route_id"] for row in receipt_metrics if row["provider_route_id"]}
+)
+observed_api_hosts = sorted(
+    {row["provider_api_host"] for row in receipt_metrics if row["provider_api_host"]}
+)
 applicable_rows = [
     row for row in receipt_metrics if row.get("persistent_applicable") is True
 ]
@@ -524,14 +587,31 @@ deterministic_selection = observed_selection_modes == ["deterministic_v1"]
 observed_identity_complete = bool(
     len(receipt_metrics) == len(expected)
     and all(row["executor_identity_complete"] for row in receipt_metrics)
+    and all(
+        row["provider_route_id"]
+        and row["provider_api_host"]
+        and row["provider_api_base"]
+        and not row["provider_credential_in_receipt"]
+        for row in receipt_metrics
+    )
     and (
         deterministic_selection
         or all(row["bootstrap_model"] and row["bootstrap_provider"] for row in applicable_rows)
     )
 )
+expected_response_model = str(baseline_runtime_contract.get("response_model") or "")
+expected_adapter_provider = str(
+    baseline_runtime_contract.get("adapter_provider") or ""
+)
+expected_route_id = str(baseline_runtime_contract.get("route") or "")
+expected_api_host = str(baseline_runtime_contract.get("api_host") or "")
 observed_identity_stable = bool(
-    observed_executor_models == ["deepseek-v4-flash"]
-    and observed_executor_providers == ["openai"]
+    expected_response_model
+    and expected_adapter_provider
+    and observed_executor_models == [expected_response_model]
+    and observed_executor_providers == [expected_adapter_provider]
+    and observed_route_ids == [expected_route_id]
+    and observed_api_hosts == [expected_api_host]
     and (
         (
             deterministic_selection
@@ -539,8 +619,8 @@ observed_identity_stable = bool(
             and not observed_bootstrap_providers
         )
         or (
-            observed_bootstrap_models == ["deepseek-v4-flash"]
-            and observed_bootstrap_providers == ["openai"]
+            observed_bootstrap_models == [expected_response_model]
+            and observed_bootstrap_providers == [expected_adapter_provider]
         )
     )
 )
@@ -557,7 +637,9 @@ out += [
     f"- tasks planned: **{n_expected}**",
     f"- trials returned: **{len(trials)}**",
     f"- graded (verifier produced rewards): **{len(graded)}**",
-    f"- errored (exception, not graded): **{len(errored)}**",
+    f"- censored (provider/outer infrastructure): **{len(censored)}**",
+    f"- errored (non-censor exception): **{len(errored)}**",
+    f"- missing verifier result: **{len(missing_verifier)}**",
 ]
 if graded:
     out.append(f"- **solved: {n_solved}/{len(graded)} "
@@ -641,12 +723,6 @@ for row in sorted(receipt_metrics, key=lambda x: x["task"]):
         f"{row['censored'] or False} |"
     )
 
-baseline = json.loads(
-    release_manifest.baseline_path.read_text(encoding="utf-8")
-)
-baseline_runtime_contract = dict(
-    (baseline.get("manifest") or {}).get("model_identity") or {}
-)
 treatment_runtime_contract = {
     **baseline_runtime_contract,
     "agent_class": "eval.gt_central_agent:MiniSweCentralAgent",
@@ -658,8 +734,11 @@ merged_payload = {
     "n_trials": len(trials),
     "n_graded": len(graded),
     "n_errored": len(errored),
-    "n_censored": len(censored_tasks),
+    "n_censored": len(censored),
     "censored_tasks": censored_tasks,
+    "n_missing_verifier": len(missing_verifier),
+    "central_integrity_audit": central_integrity_report,
+    "outcome_counts": dict(sorted(outcome_counts.items())),
     "n_solved": n_solved,
     "invalid_repository_intelligence_tasks": invalid_intelligence,
     "invalid_dense_backend_tasks": invalid_dense,
@@ -671,6 +750,14 @@ merged_payload = {
         "receipt": provider_free_receipt,
         "mechanical_completeness": provider_free_mechanical_proof,
         "documentation": provider_free_documentation_proof,
+    },
+    "bootstrap_route_certification": {
+        "valid": bootstrap_route_valid,
+        "canary_failures": bootstrap_canary_failures,
+        "route_contract": bootstrap_route,
+        "response_identity": (
+            (bootstrap_canary.get("receipt") or {}).get("response_identity") or {}
+        ),
     },
     "frozen_outcome_prediction": {
         "path": prediction_path.as_posix(),
@@ -717,8 +804,8 @@ merged_payload = {
             ),
             "canary_model": os.environ["CANARY_MODEL"],
             "canary_provider": os.environ["CANARY_PROVIDER"],
-            "route": "deepseek:native:api.deepseek.com",
-            "api_host": "api.deepseek.com",
+            "route": observed_route_ids[0] if len(observed_route_ids) == 1 else "",
+            "api_host": observed_api_hosts[0] if len(observed_api_hosts) == 1 else "",
             "complete": observed_identity_complete,
             "stable": observed_identity_stable,
         },

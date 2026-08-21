@@ -202,6 +202,13 @@ def collect_provider_deliveries(receipt: dict[str, Any]) -> list[dict[str, Any]]
                     "provider_messages_sha256": provider_hash,
                     "chars": int(_first(raw, "chars", "payload_chars") or 0),
                     "claim_ids": list(claims),
+                    # A receipt may carry lower-level fact/effect IDs in
+                    # addition to its explicit provider claim IDs.  Those
+                    # identities remain useful for aggregate accounting, but
+                    # only the first explicit identity family is the delivered
+                    # semantic claim surface and therefore needs a matching
+                    # provider-value/support certificate.
+                    "provider_claim_ids": list(_provider_claims(raw)),
                     "claim_count": len(claims),
                     "selected_evidence": list(selected_evidence),
                     "claim_metadata": list(claim_metadata),
@@ -248,6 +255,7 @@ def audit_provider_deliveries(
                 if call and claim_id:
                     value_certificates.setdefault((call, claim_id), []).append(certificate)
     for index, row in enumerate(rows, start=1):
+        delivery_claim_ids = tuple(row["provider_claim_ids"])
         identity = row["identity"]
         duplicate_identity = identity in identities
         claim_overlap = seen_claims.intersection(_provider_claims(row["raw"]))
@@ -292,6 +300,7 @@ def audit_provider_deliveries(
                     and str(certificate.get("novelty_basis") or "")
                     and str(certificate.get("decision_point") or "")
                     and str(certificate.get("replaces_operation") or "")
+                    and str(certificate.get("materiality_reason") or "")
                 )
                 if not allowed:
                     failures.append(
@@ -418,7 +427,41 @@ def audit_provider_deliveries(
                 f"{task}:delivery_unsafe_provider_origin:{index}:"
                 + ",".join(sorted(unsafe_origins))
             )
-        if row["surface"] == "preemptive_retrieval":
+        if row["surface"] == "task_semantic_substrate":
+            metadata_by_claim = {
+                str(item.get("claim_id") or ""): item
+                for item in row["claim_metadata"]
+                if str(item.get("claim_id") or "")
+            }
+            allowed_kinds = {
+                "binary_format",
+                "secret_location",
+                "required_check",
+                "project_check",
+            }
+            semantic_support_valid = bool(delivery_claim_ids) and all(
+                claim_id in metadata_by_claim
+                and str(metadata_by_claim[claim_id].get("kind") or "")
+                in allowed_kinds
+                and str(metadata_by_claim[claim_id].get("origin") or "")
+                in {"preexisting_repository", "external_runtime"}
+                and str(metadata_by_claim[claim_id].get("authority") or "")
+                == "deterministic_task_semantics"
+                and str(metadata_by_claim[claim_id].get("materiality_reason") or "")
+                in {"task_decisive_evidence", "new_unresolved_task_obligation"}
+                and str(metadata_by_claim[claim_id].get("source_revision") or "")
+                and bool(metadata_by_claim[claim_id].get("gap_text"))
+                and bool(
+                    metadata_by_claim[claim_id].get("path")
+                    or metadata_by_claim[claim_id].get("provider_value_anchors")
+                )
+                for claim_id in delivery_claim_ids
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:task_semantic_delivery_support_missing:{index}"
+                )
+        elif row["surface"] == "preemptive_retrieval":
             selected_evidence = row["selected_evidence"]
             semantic_support_valid = bool(selected_evidence) and all(
                 str(item.get("path") or "").strip()
@@ -446,7 +489,7 @@ def audit_provider_deliveries(
             process_id_rows = tuple(
                 str(item.get("process_id") or "") for item in processes
             )
-            claim_ids = tuple(row["claim_ids"])
+            claim_ids = delivery_claim_ids
             semantic_support_valid = bool(
                 processes
                 and claim_ids
@@ -472,10 +515,10 @@ def audit_provider_deliveries(
             item_claim_ids = tuple(str(item.get("claim_id") or "") for item in items)
             semantic_support_valid = bool(
                 items
-                and row["claim_ids"]
+                and delivery_claim_ids
                 and all(item_claim_ids)
                 and len(item_claim_ids) == len(set(item_claim_ids))
-                and set(item_claim_ids) == set(row["claim_ids"])
+                and set(item_claim_ids) == set(delivery_claim_ids)
                 and str(raw.get("source_revision") or "")
                 and str(raw.get("graph_revision") or "")
                 and all(
@@ -602,7 +645,7 @@ def audit_provider_deliveries(
             coupled_support_failures: list[str] = []
             for item in coupled_items:
                 claim_id = str(item.get("claim_id") or "")
-                if claim_id not in row["claim_ids"]:
+                if claim_id not in delivery_claim_ids:
                     continue
                 changed = item.get("changed") or {}
                 dependent_paths = tuple(
@@ -739,7 +782,7 @@ def audit_provider_deliveries(
             convention_support_failures: list[str] = []
             for item in convention_items:
                 claim_id = str(item.get("claim_id") or "")
-                if claim_id not in row["claim_ids"]:
+                if claim_id not in delivery_claim_ids:
                     continue
                 subject = item.get("subject") or {}
                 callers = tuple(
@@ -796,15 +839,15 @@ def audit_provider_deliveries(
                     for claim_id in convention_support_failures
                 )
             semantic_support_valid = bool(
-                row["claim_ids"]
-                and set(row["claim_ids"]) <= supported_ids
+                delivery_claim_ids
+                and set(delivery_claim_ids) <= supported_ids
                 and str(raw.get("source_revision") or "")
                 and str(raw.get("graph_revision") or "")
                 and str(projection.get("source_revision") or "")
                 == str(raw.get("source_revision") or "")
                 and str(projection.get("graph_revision") or "")
                 == str(raw.get("graph_revision") or "")
-                and set(row["claim_ids"]) <= set(metadata_by_claim)
+                and set(delivery_claim_ids) <= set(metadata_by_claim)
                 and all(
                     str(metadata_by_claim[claim_id].get("origin") or "")
                     in {"preexisting_repository", "execution_observation"}
@@ -813,7 +856,7 @@ def audit_provider_deliveries(
                         metadata_by_claim[claim_id].get("materiality_reason") or ""
                     )
                     and str(metadata_by_claim[claim_id].get("source_revision") or "")
-                    for claim_id in row["claim_ids"]
+                    for claim_id in delivery_claim_ids
                 )
             )
             if not semantic_support_valid:
@@ -832,7 +875,7 @@ def audit_provider_deliveries(
                 "newly_certified_related_file",
                 "related_advisory_obligation",
             }
-            semantic_support_valid = bool(row["claim_ids"]) and all(
+            semantic_support_valid = bool(delivery_claim_ids) and all(
                 claim_id in metadata_by_claim
                 and str(metadata_by_claim[claim_id].get("origin") or "")
                 in {
@@ -872,11 +915,77 @@ def audit_provider_deliveries(
                         )
                     )
                 )
-                for claim_id in row["claim_ids"]
+                for claim_id in delivery_claim_ids
             )
             if not semantic_support_valid:
                 failures.append(
                     f"{task}:persistent_delivery_semantic_authority_invalid:{index}"
+                )
+        elif row["surface"] == "guidance":
+            raw = row["raw"]
+            feature_id = str(raw.get("feature_id") or "")
+            anchors = tuple(
+                str(value) for value in raw.get("claim_anchors") or () if str(value)
+            )
+            evidence_action = _positive_int(raw.get("evidence_action"))
+            certified_relation = bool(raw.get("certified_nonlocal_relation")) and bool(
+                raw.get("relation") or raw.get("relation_endpoint")
+            )
+            certified_gap = bool(raw.get("certified_predecision_gap"))
+            expected_value = (
+                "execution_contradiction"
+                if feature_id
+                in {"syntax_result", "covering_red", "recovery", "submit_refusal"}
+                and evidence_action
+                and anchors
+                else "action_local_relation"
+                if feature_id in {"signature_delta", "newfile_precedent"}
+                and evidence_action
+                and anchors
+                and certified_relation
+                else "certified_predecision_gap"
+                if feature_id == "GT_EDIT_CHECK" and anchors and certified_gap
+                else ""
+            )
+            semantic_support_valid = bool(
+                delivery_claim_ids
+                and expected_value
+            )
+            if not semantic_support_valid:
+                failures.append(f"{task}:guidance_delivery_support_missing:{index}")
+        elif row["surface"] == "repository_frontier":
+            raw = row["raw"]
+            facts = tuple(
+                item for item in raw.get("facts") or () if isinstance(item, dict)
+            )
+            facts_by_claim = {
+                str(item.get("claim_id") or ""): item
+                for item in facts
+                if str(item.get("claim_id") or "")
+            }
+            semantic_support_valid = bool(
+                delivery_claim_ids
+                and set(delivery_claim_ids) == set(facts_by_claim)
+                and str(raw.get("source_revision") or "")
+                and str(raw.get("graph_revision") or "")
+                and all(
+                    str(facts_by_claim[claim_id].get("path") or "")
+                    and str(facts_by_claim[claim_id].get("source_revision") or "")
+                    == str(raw.get("source_revision") or "")
+                    and str(facts_by_claim[claim_id].get("graph_revision") or "")
+                    == str(raw.get("graph_revision") or "")
+                    and isinstance(facts_by_claim[claim_id].get("provenance"), dict)
+                    and str(
+                        (facts_by_claim[claim_id].get("provenance") or {}).get("origin")
+                        or ""
+                    )
+                    in {"task_start", "observed_external"}
+                    for claim_id in delivery_claim_ids
+                )
+            )
+            if not semantic_support_valid:
+                failures.append(
+                    f"{task}:repository_frontier_delivery_support_missing:{index}"
                 )
         row["timing_valid"] = timing_valid
         row["dispatch_valid"] = dispatch_valid

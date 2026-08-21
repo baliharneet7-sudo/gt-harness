@@ -461,7 +461,7 @@ def test_covering_red_records_grounded_failure_and_must_precede_next_action():
     assert "assert error" in row["payload"]["diagnostic"]
 
 
-def test_recovery_proposes_discriminating_alternate_action_after_exact_repeat():
+def test_recovery_without_a_concrete_source_anchor_remains_private():
     runtime = CentralFeatureRuntime(model_visible=True)
     runtime.begin_task("Fix it", revision=WR0, source_revision=SR0)
     for action_id in (1, 2):
@@ -475,13 +475,14 @@ def test_recovery_proposes_discriminating_alternate_action_after_exact_repeat():
 
     _assert_contract(
         runtime, "recovery",
-        model_visible=True, effect_kind=EffectKind.FAILURE_STATE_TRANSITION,
+        model_visible=False, effect_kind=EffectKind.FAILURE_STATE_TRANSITION,
         boundary="test_result", action=2,
     )
     row = _feature_rows(runtime.summary(), "recovery")[0]
     assert row["payload"]["alternate_action"]["discriminator"] == (
         "exact repeat at unchanged source revision"
     )
+    assert row["payload"]["alternate_action"]["paths"] == []
 
 
 def test_signature_delta_schedules_caller_validation_with_symbol():

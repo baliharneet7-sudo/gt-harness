@@ -711,6 +711,7 @@ def ensure_index_with_receipt(
     *,
     state_dir: str | os.PathLike[str] | None = None,
     source_revision: str = "",
+    timeout: float = 600.0,
 ) -> IndexBuildReceipt:
     """Ensure a fresh graph.db exists and preserve the exact abstention reason.
 
@@ -807,7 +808,11 @@ def ensure_index_with_receipt(
         candidate.unlink(missing_ok=True)
         diagnostic_stream = io.StringIO()
         with redirect_stderr(diagnostic_stream):
-            index_ok = run_index(root_text, str(candidate))
+            index_ok = run_index(
+                root_text,
+                str(candidate),
+                timeout=int(max(1.0, float(timeout))),
+            )
         if not index_ok:
             candidate.unlink(missing_ok=True)
             return receipt(

@@ -9,9 +9,29 @@ import re
 from pathlib import Path
 from typing import Any
 
-_DEFAULT_DOCUMENTS = (
+DEFAULT_DOCUMENTS = (
     Path("docs/GT_MECHANICAL_COMPLETENESS_CONTRACT.md"),
     Path("docs/GT_RELEASE_DOSSIER.md"),
+    Path("docs/GT_COMPLETE_IMPLEMENTATION_RECORD_2026-08-21.md"),
+    Path("docs/GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md"),
+    Path("docs/gt_gitnexus_program/01_GT_CURRENT_ARCHITECTURE.md"),
+    Path("docs/gt_gitnexus_program/02_GT_20_TASK_CAUSAL_RECEIPTS.md"),
+    Path("docs/gt_gitnexus_program/03_GT_FEATURE_LEDGER.md"),
+    Path("docs/gt_gitnexus_program/04_GT_NEGATIVE_FLIP_AUTOPSY.md"),
+    Path("docs/gt_gitnexus_program/05_GT_POSITIVE_FLIP_AUTOPSY.md"),
+    Path("docs/gt_gitnexus_program/06_GT_UNUSED_ASSETS.md"),
+    Path("docs/gt_gitnexus_program/07_GITNEXUS_ARCHITECTURE.md"),
+    Path("docs/gt_gitnexus_program/08_GITNEXUS_RESOLUTION_AND_UNCERTAINTY.md"),
+    Path("docs/gt_gitnexus_program/09_GITNEXUS_DELIVERY_AND_LIFECYCLE.md"),
+    Path("docs/gt_gitnexus_program/10_GITNEXUS_BENCHMARK_FORENSICS.md"),
+    Path("docs/gt_gitnexus_program/11_GT_VS_GITNEXUS_CAPABILITY_MATRIX.md"),
+    Path("docs/gt_gitnexus_program/12_FAILURE_TO_MECHANISM_MATRIX.md"),
+    Path("docs/gt_gitnexus_program/13_OUTPERFORMANCE_OPPORTUNITIES.md"),
+    Path("docs/gt_gitnexus_program/14_IMPLEMENTATION_PLAN.md"),
+    Path("docs/gt_gitnexus_program/15_20_TASK_RERUN_REPORT.md"),
+    Path("docs/gt_gitnexus_program/16_NEXT_ABLATION_PLAN.md"),
+    Path("docs/gt_gitnexus_program/17_DIRECT_GITNEXUS_COMPARISON_PLAN.md"),
+    Path("docs/gt_gitnexus_program/20_FINAL_REGRESSION_CONTROL_AND_BENCHMARK_READINESS.md"),
 )
 _REQUIRED_TERMS = {
     "GT_MECHANICAL_COMPLETENESS_CONTRACT.md": (
@@ -48,7 +68,7 @@ def audit_documentation(
     root = root.resolve()
     paths = tuple(
         path if path.is_absolute() else root / path
-        for path in (documents or _DEFAULT_DOCUMENTS)
+        for path in (documents or DEFAULT_DOCUMENTS)
     )
     failures: list[str] = []
     for path in paths:

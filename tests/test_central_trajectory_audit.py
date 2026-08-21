@@ -82,7 +82,7 @@ def _write_bundle(
             "effect_trace": [
                 {
                     "effect_id": "receipt-1",
-                    "feature_id": "GT_LOC_RESLOT",
+                    "feature_id": "syntax_result",
                     "evidence_action": 1,
                     "applied_call": 1,
                     "source_revision": "src-1",
@@ -94,7 +94,8 @@ def _write_bundle(
         },
         "guidance_deliveries": [
             {
-                "feature_id": "GT_LOC_RESLOT",
+                "feature_id": "syntax_result",
+                "claim_anchors": ["app.py:1#x"],
                 "evidence_action": 1,
                 "first_eligible_call": 1,
                 "delivered_before_call": 1,

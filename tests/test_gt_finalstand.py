@@ -51,18 +51,15 @@ def test_single_witness_closes_fs024_without_claiming_population_efficacy() -> N
     )
 
 
-def test_live_todo_is_current_only_and_preserves_history_in_archive() -> None:
-    live = (ROOT / "gt_finalstand" / "LIVE_TODO.md").read_text(encoding="utf-8")
-    history = (ROOT / "gt_finalstand" / "LIVE_TODO_HISTORY.md").read_text(
-        encoding="utf-8"
-    )
-    assert "## Checkpoints" not in live
-    assert "25 `COMPLETE`, 0 `IN_PROGRESS`, 1 `REMOVED`" in live
-    assert "LIVE_TODO_HISTORY.md" in live
-    assert "historical and superseded" in history.lower()
-    assert "### 2026-08-01T20:41:33Z" in history
-    assert "### 2026-08-01T22:25:25Z" in history
-    assert "3 `COMPLETE`, 23 `IN_PROGRESS`, 0 `REMOVED`" not in live
+def test_machine_closeout_inventory_is_unique_and_terminal() -> None:
+    statuses = _load_validator()._rows("closeout_status.csv")
+    assert len(statuses) == 26
+    assert {row["todo"] for row in statuses} == {
+        f"FS-{index:03d}" for index in range(1, 27)
+    }
+    assert len({row["todo"] for row in statuses}) == 26
+    assert [row["status"] for row in statuses].count("COMPLETE") == 25
+    assert [row["status"] for row in statuses].count("REMOVED") == 1
 
 
 def _validate_with_status(module, todo: str, status: str) -> dict[str, object]:
@@ -477,15 +474,19 @@ def test_provider_free_workflow_pins_actions_and_records_immutable_run_identity(
     assert '"receipt_inputs"' in workflow
 
 
-def test_post_audit_and_single_witness_receipts_close_terminal_rows() -> None:
-    appendix = (
-        ROOT / "gt_finalstand" / "POST_AUDIT_HARDENING.md"
-    ).read_text(encoding="utf-8")
-    assert "140/140" in appendix
-    assert "57/57" in appendix
-    assert "No machine receipt is created" in appendix
-    assert "9,980 passed" in appendix
-    assert (ROOT / "gt_finalstand" / "receipts" / "final_codespace_verification.json").is_file()
+def test_historical_codespace_receipt_and_single_witness_rows_are_explicit() -> None:
+    receipt = json.loads(
+        (
+            ROOT
+            / "gt_finalstand"
+            / "receipts"
+            / "final_codespace_verification.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["schema"] == "gt.finalstand.codespace_verification.v1"
+    assert receipt["suites"]["groundtruth_python"]["console"]["passed"] == 9980
+    assert receipt["project_terminal"] is False
+    assert receipt["ok"] is True
 
     statuses = _load_validator()._rows("closeout_status.csv")
     assert {

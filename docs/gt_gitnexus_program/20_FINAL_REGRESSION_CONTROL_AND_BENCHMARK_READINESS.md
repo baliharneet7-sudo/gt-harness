@@ -3,6 +3,13 @@ Wall time: 0.3 seconds
 Output:
 # Final regression control and benchmark-readiness record
 
+> Current-state note (2026-08-21): the source research and historical evidence
+> below remain valid for their named commits/runs, but their candidate-status
+> wording is superseded by the
+> [complete implementation record](../GT_COMPLETE_IMPLEMENTATION_RECORD_2026-08-21.md)
+> and [final handoff](../GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md). The
+> active release identity is always `eval/release/active_release.json`.
+
 Status: **implementation candidate; paid benchmark remains blocked until the
 exact committed candidate passes the source-built Linux provider-free gate.**
 
@@ -91,8 +98,8 @@ exact and belongs to one of three classes:
 2. new execution contradiction or attributable validation state; or
 3. certified pre-decision information gap.
 
-The certificate must name authority, revision, anchors, novelty basis, decision
-point, and the ordinary operation it replaces. Missing proof becomes
+The certificate must name authority, materiality, revision, anchors, novelty
+basis, decision point, and the ordinary operation it replaces. Missing proof becomes
 `value_uncertified`; rejected proof becomes `value_rejected`. Only the former
 is a release-integrity error. Instruction restatements, generic anchors,
 deliverable presence, local file facts already in the tool observation,
@@ -116,7 +123,10 @@ generic persistent state, and partial/ambiguous relations remain private.
   before the shared contribution compiler and records
   `gt.provider_value.v1` in every final-profile receipt.
 - [delivery_audit.py](../../gt_engine/delivery_audit.py) joins every visible
-  claim to exactly one selected admissible certificate.
+  claim to exactly one selected admissible certificate, separates explicit
+  provider claim IDs from lower-level fact/effect IDs, and independently
+  validates task-semantic, feature-guidance, frontier, repository-context, and
+  persistent-state support.
 - [central_release_gate.py](../../scripts/central_release_gate.py) rejects a
   final-profile receipt with a missing contract, an uncertified selected
   contribution, duplicate certificate identity, partial/ambiguous selected
@@ -240,4 +250,3 @@ No repeated 20-task treatment runs are part of this gate. If the single run
 finds a new integrity defect, the release is blocked and repaired using a
 deterministic witness. Outcome variance is handled by paired trajectory and
 mechanism evidence, not by rerunning until a favorable score appears.
-

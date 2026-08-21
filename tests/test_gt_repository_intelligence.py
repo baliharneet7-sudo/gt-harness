@@ -55,7 +55,7 @@ def test_source_less_repository_is_explicitly_not_applicable():
 def test_failed_index_binary_preserves_bounded_diagnostic(tmp_path, monkeypatch):
     (tmp_path / "query.sql").write_text("select 1;\n", encoding="utf-8")
 
-    def fail_index(root, output):
+    def fail_index(root, output, *, timeout=600):
         sys.stderr.write("GroundTruth: gt-index failed: SQL parser exploded on query.sql\n")
         return False
 
@@ -985,6 +985,36 @@ def test_repository_session_invalidates_when_changed_source_was_not_captured(tmp
     assert session.evidence.status == "mirror_incomplete"
 
 
+def test_repository_session_rejects_unexplained_graph_revision_advance(tmp_path: Path):
+    """A new graph-input revision cannot certify an unchanged prior graph."""
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    (mirror / "app.py").write_text("x = 1\n", encoding="utf-8")
+    session = RepositorySession(
+        root=mirror,
+        state_dir=tmp_path / "state",
+        instruction="Change x.",
+    )
+    session.refresh(source_revision="s1")
+    transition = SimpleNamespace(
+        changed_paths=("app.py",),
+        deleted=(),
+        after_contents={"app.py": "x = 2\n"},
+        sensor_healthy=True,
+    )
+
+    # This simulates a caller-side selector defect.  The repository session is
+    # the last authority before publication and must fail closed rather than
+    # rebind the old graph to s2 through the source_revision_only path.
+    assert session.apply_transition(
+        transition,
+        source_revision="s2",
+        changed_paths=(),
+    ) is False
+    assert session.fresh is False
+    assert session.evidence.status == "unexplained_graph_revision"
+
+
 def test_current_graph_with_empty_retrieval_is_healthy_substrate(tmp_path: Path):
     (tmp_path / "decomp.c").write_text(
         "int decode(void) { return 0; }\n",
@@ -1085,22 +1115,6 @@ def test_repository_query_cache_is_scoped_to_boundary_and_diagnostic_state(tmp_p
     assert session.refresh_log[-1]["diagnostic_fingerprint"] == "failure-1"
 
 
-def test_refresh_timeout_invalidation_arms_escalation_and_stays_armed():
-    session = RepositorySession.temporary(instruction="fix the bug")
-    try:
-        assert session.refresh_timeout_escalated is False
-        session.invalidate(source_revision="r1", status="refresh_timeout")
-        assert session.refresh_timeout_escalated is True
-        # a non-timeout invalidation must NOT disarm escalation; only a
-        # successful refresh() resets it (exercised on the integration path).
-        session.invalidate(source_revision="r2", status="sensor_degraded")
-        assert session.refresh_timeout_escalated is True
-        session.invalidate(source_revision="r3", status="refresh_timeout")
-        assert session.refresh_timeout_escalated is True
-    finally:
-        session.close()
-
-
 def test_empty_to_materialized_source_refresh_builds_current_graph(tmp_path):
     """Deterministic reproduction of the count-dataset-tokens transition.
 
@@ -1139,9 +1153,78 @@ def test_empty_to_materialized_source_refresh_builds_current_graph(tmp_path):
         assert evidence.source_revision == "r1-source"
         assert bool(evidence.graph_revision)
         assert session.fresh is True
-        assert session.refresh_timeout_escalated is False
     finally:
         session.close()
+
+
+def test_full_index_forwards_the_host_budget_to_the_binary(monkeypatch, tmp_path):
+    observed: dict[str, object] = {}
+
+    def bounded_index(root, output, *, timeout):
+        observed.update(root=root, output=output, timeout=timeout)
+        return False
+
+    monkeypatch.setattr(binary, "run_index", bounded_index)
+    monkeypatch.setattr(indexer, "_binary_certification", lambda: {
+        "path_sha256": "a" * 64,
+        "binary_sha256": "b" * 64,
+    })
+    (tmp_path / "app.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+
+    receipt = ensure_index_with_receipt(tmp_path, timeout=7.9)
+
+    assert observed["timeout"] == 7
+    assert receipt.status is IndexBuildStatus.BUILD_FAILED
+    assert receipt.error_type == "run_index_false"
+
+
+def test_transition_and_refresh_is_one_synchronous_session_operation(monkeypatch, tmp_path):
+    session = RepositorySession(
+        root=tmp_path / "mirror",
+        state_dir=tmp_path / "state",
+        instruction="fix the bug",
+    )
+    session.root.mkdir(parents=True)
+    transition = SimpleNamespace(
+        sensor_healthy=True,
+        deleted=(),
+        after_contents={"app.py": "def value():\n    return 1\n"},
+        changed_paths=("app.py",),
+    )
+    observed: dict[str, object] = {}
+
+    def bounded_inspection(*args, **kwargs):
+        observed.update(kwargs)
+        return RepositoryEvidence(
+            status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+            source_revision="r1",
+        )
+
+    monkeypatch.setattr(
+        "gt_engine.repository_intelligence.inspect_repository", bounded_inspection
+    )
+
+    advanced, evidence = session.apply_transition_and_refresh(
+        transition,
+        source_revision="r1",
+        changed_paths=("app.py",),
+        timeout=11.5,
+    )
+
+    assert advanced is True
+    assert observed["timeout"] == 11.5
+    assert evidence.status == RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value
+    assert session.source_revision == "r1"
+
+
+def test_central_host_never_wraps_repository_refresh_in_an_abandonable_thread():
+    source = (
+        Path(__file__).resolve().parents[1] / "eval" / "gt_central_agent.py"
+    ).read_text(encoding="utf-8")
+
+    assert "asyncio.to_thread(session.refresh" not in source
+    assert "asyncio.to_thread(\n                                        repository_session.refresh" not in source
+    assert "apply_transition_and_refresh(" in source
 
 
 def test_failed_refresh_never_serves_previous_graph_as_current(tmp_path):
@@ -1159,7 +1242,6 @@ def test_failed_refresh_never_serves_previous_graph_as_current(tmp_path):
 
         session.invalidate(source_revision="r2", status="refresh_timeout")
         assert session.fresh is False
-        assert session.refresh_timeout_escalated is True
 
         queried = session.query(
             source_revision="r2",
@@ -1174,8 +1256,7 @@ def test_failed_refresh_never_serves_previous_graph_as_current(tmp_path):
 
 
 def test_refresh_recovers_after_timeout_invalidation(tmp_path):
-    """After a timed-out refresh, the next source transition retries and the
-    escalated budget is consumed (flag reset on success)."""
+    """After a failed refresh, the same current transition can be rebuilt."""
     session = RepositorySession(
         root=tmp_path / "mirror",
         state_dir=tmp_path / "state",
@@ -1184,7 +1265,6 @@ def test_refresh_recovers_after_timeout_invalidation(tmp_path):
     try:
         session.root.mkdir(parents=True, exist_ok=True)
         session.invalidate(source_revision="r1", status="refresh_timeout")
-        assert session.refresh_timeout_escalated is True
 
         transition = SimpleNamespace(
             sensor_healthy=True,
@@ -1198,6 +1278,5 @@ def test_refresh_recovers_after_timeout_invalidation(tmp_path):
         assert evidence.substrate_ready is True
         assert evidence.intelligence_valid is True
         assert session.fresh is True
-        assert session.refresh_timeout_escalated is False
     finally:
         session.close()

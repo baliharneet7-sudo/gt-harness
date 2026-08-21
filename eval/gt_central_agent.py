@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment, ExecResult
@@ -91,6 +92,7 @@ from gt_engine.context_frontier import (
     compile_incremental_frontier,
 )
 from gt_engine.contributions import (
+    ContributionAccounting,
     ContributionKind,
     ContributionTaskBudget,
     GTContribution,
@@ -130,6 +132,7 @@ from gt_engine.intervention_chain import (
 )
 from gt_engine.mechanical_completeness import evaluate_provider_barrier
 from gt_engine.observed_facts import (
+    MAX_OBSERVED_FACTS_PER_TASK,
     ObservedFact,
     extract_observed_facts,
     observed_fact_payload,
@@ -569,9 +572,12 @@ def _provider_route_configuration(model: Any) -> dict[str, Any]:
     extra_body = dict(kwargs.get("extra_body") or {})
     provider_policy = dict(extra_body.get("provider") or {})
     thinking_mode = str((extra_body.get("thinking") or {}).get("type") or "")
+    api_base = str(kwargs.get("api_base") or "")
     return {
         "model": model_name,
-        "api_base": str(kwargs.get("api_base") or ""),
+        "api_base": api_base,
+        "api_host": str(urlsplit(api_base).hostname or ""),
+        "route_id": str(os.environ.get("GT_PROVIDER_ROUTE_ID") or ""),
         "provider_policy": provider_policy,
         "thinking_mode": thinking_mode,
         "litellm_retry_policy": (
@@ -1479,6 +1485,44 @@ def _provider_visible_claim_ids(
     )
 
 
+def _graph_transition_paths(
+    classified_transition: Iterable[Any],
+    transition: Any,
+    *,
+    task_deliverables: Iterable[str],
+    repository_session: RepositorySession | None = None,
+) -> tuple[str, ...]:
+    """Select paths whose pre- or post-action bytes belong to the graph."""
+
+    current = {
+        str(item.path): bool(item.graph_indexable) for item in classified_transition
+    }
+    before_contents = dict(getattr(transition, "before_contents", {}) or {})
+    selected: list[str] = []
+    for raw_path in tuple(getattr(transition, "changed_paths", ()) or ()):
+        path = str(raw_path)
+        prior = before_contents.get(path)
+        prior_indexable = bool(
+            (
+                prior is not None
+                and classify_change(
+                    path,
+                    kind="f",
+                    task_deliverables=task_deliverables,
+                    content=prior,
+                ).graph_indexable
+            )
+            or (
+                prior is None
+                and repository_session is not None
+                and repository_session.mirrored_path_is_indexable(path)
+            )
+        )
+        if current.get(path, False) or prior_indexable:
+            selected.append(path)
+    return tuple(dict.fromkeys(selected))
+
+
 def _render_decision_evidence(bundle: DecisionEvidenceBundle) -> tuple[str, ...]:
     """Render complete certified claims without truncating source evidence."""
 
@@ -1748,7 +1792,6 @@ class MiniSweCentralAgent(BaseAgent):
         require_graph_ready: bool = False,
         repository_initial_index_timeout_sec: float = 60.0,
         repository_refresh_timeout_sec: float = 35.0,
-        repository_refresh_timeout_escalation: float = 3.0,
         enable_task_start_advisory: bool = False,
         enable_feature_guidance: bool = True,
         enable_context_frontier: bool = True,
@@ -2005,17 +2048,9 @@ class MiniSweCentralAgent(BaseAgent):
         self.repository_initial_index_timeout_sec = max(
             1.0, float(repository_initial_index_timeout_sec)
         )
-        # ``refresh_index_files`` has its own 30-second subprocess budget.
-        # A shorter asyncio deadline abandons the await but cannot stop the
-        # worker thread, allowing stale and current refreshes to race.
+        # The same bound is passed into the synchronous index operation.  The
+        # host never abandons a worker that can mutate the session later.
         self.repository_refresh_timeout_sec = max(35.0, float(repository_refresh_timeout_sec))
-        # After a refresh timeout the session arms escalation so the NEXT
-        # applicable source transition retries with a larger budget instead of
-        # failing the whole task on one slow build. Serialized (never a second
-        # concurrent refresh thread), so stale/current refreshes cannot race.
-        self.repository_refresh_timeout_escalation = max(
-            1.0, float(repository_refresh_timeout_escalation)
-        )
         self.enable_task_start_advisory = enable_task_start_advisory
         self.enable_feature_guidance = bool(enable_feature_guidance)
         self.enable_context_frontier = bool(enable_context_frontier)
@@ -3065,8 +3100,8 @@ class MiniSweCentralAgent(BaseAgent):
             )
             stage = "initial_index"
             index_started = time.perf_counter()
-            evidence = await asyncio.wait_for(
-                asyncio.to_thread(session.refresh, source_revision=source_revision),
+            evidence = session.refresh(
+                source_revision=source_revision,
                 timeout=self.repository_initial_index_timeout_sec,
             )
             self._repository_work_receipts.append(
@@ -3732,7 +3767,10 @@ class MiniSweCentralAgent(BaseAgent):
         # most once per task when new to the provider view.
         observed_fact_ledger: set[str] = set()
         observed_fact_deliveries: list[dict[str, Any]] = []
+        observed_fact_decisions: list[dict[str, Any]] = []
+        observed_fact_extractions: list[dict[str, Any]] = []
         pending_observed_fact: ObservedFact | None = None
+        queued_observed_facts: list[ObservedFact] = []
         if graph_receipt.complete:
             repository_evidence, repository_session = await self._start_repository_session(
                 environment,
@@ -5710,24 +5748,96 @@ class MiniSweCentralAgent(BaseAgent):
                         else ()
                     ),
                 )
-                if pending_observed_fact is not None:
+                observed_fact_batch = tuple(
+                    [
+                        *(
+                            (pending_observed_fact,)
+                            if pending_observed_fact is not None
+                            else ()
+                        ),
+                        *queued_observed_facts,
+                    ]
+                )
+                current_observed_facts = tuple(
+                    fact
+                    for fact in observed_fact_batch
+                    if fact.source_revision == source_revision
+                )
+                stale_observed_facts = tuple(
+                    fact
+                    for fact in observed_fact_batch
+                    if fact.source_revision != source_revision
+                )
+                for stale_fact in stale_observed_facts:
+                    observed_fact_ledger.add(stale_fact.fact_id)
+                    observed_fact_decisions.append(
+                        {
+                            "fact_id": stale_fact.fact_id,
+                            "kind": stale_fact.kind,
+                            "call": calls,
+                            "disposition": "stale_source_revision",
+                            "reason_codes": ["stale_source_revision"],
+                            "source_revision": stale_fact.source_revision,
+                            "current_source_revision": source_revision,
+                        }
+                    )
+                observed_fact_batch = current_observed_facts
+                delivered_observed_fact_count = sum(
+                    len(row.get("fact_ids") or ()) for row in observed_fact_deliveries
+                )
+                observed_capacity = max(
+                    0, MAX_OBSERVED_FACTS_PER_TASK - delivered_observed_fact_count
+                )
+                overflow_observed_facts = observed_fact_batch[observed_capacity:]
+                observed_fact_batch = observed_fact_batch[:observed_capacity]
+                for overflow in overflow_observed_facts:
+                    observed_fact_ledger.add(overflow.fact_id)
+                    observed_fact_decisions.append(
+                        {
+                            "fact_id": overflow.fact_id,
+                            "kind": overflow.kind,
+                            "call": calls,
+                            "disposition": "controller_only_task_delivery_limit",
+                            "reason_codes": ["task_delivery_limit"],
+                            "extraction_ordinal": next(
+                                (
+                                    index
+                                    for index, row in enumerate(
+                                        observed_fact_extractions, start=1
+                                    )
+                                    if row.get("fact_id") == overflow.fact_id
+                                ),
+                                0,
+                            ),
+                        }
+                    )
+                pending_observed_fact = (
+                    observed_fact_batch[0] if observed_fact_batch else None
+                )
+                queued_observed_facts = list(observed_fact_batch[1:])
+                if observed_fact_batch:
                     register_contribution(
                         surface="observed_execution",
-                        payload=observed_fact_payload(pending_observed_fact),
-                        claim_ids=(pending_observed_fact.fact_id,),
-                        fact_ids=(pending_observed_fact.fact_id,),
-                        evidence_action=pending_observed_fact.evidence_action,
-                        eligible_call=pending_observed_fact.eligible_call,
-                        revision=pending_observed_fact.source_revision,
+                        payload="\n".join(
+                            observed_fact_payload(fact) for fact in observed_fact_batch
+                        ),
+                        claim_ids=tuple(fact.fact_id for fact in observed_fact_batch),
+                        fact_ids=tuple(fact.fact_id for fact in observed_fact_batch),
+                        evidence_action=max(
+                            fact.evidence_action for fact in observed_fact_batch
+                        ),
+                        eligible_call=min(fact.eligible_call for fact in observed_fact_batch),
+                        revision=observed_fact_batch[0].source_revision,
                         priority=10,
-                        claim_metadata=(
+                        claim_metadata=tuple(
                             {
-                                "claim_id": pending_observed_fact.fact_id,
+                                "claim_id": fact.fact_id,
                                 "origin": "execution_observation",
                                 "authority": "execution_observation",
                                 "materiality_reason": "observed_execution_fact",
-                                "source_revision": pending_observed_fact.source_revision,
-                            },
+                                "source_revision": fact.source_revision,
+                            }
+                            for fact in observed_fact_batch
                         ),
                     )
                 critical_contribution_pending = any(
@@ -5816,12 +5926,27 @@ class MiniSweCentralAgent(BaseAgent):
                     prepared_progress_fact = None
                 observed_fact_payload_text = ""
                 observed_fact_selected = False
+                observed_fact_accounting: ContributionAccounting | None = None
                 if (
-                    pending_observed_fact is not None
+                    observed_fact_batch
                     and contribution_selected("observed_execution")
                 ):
-                    observed_fact_payload_text = observed_fact_payload(pending_observed_fact)
+                    observed_fact_payload_text = "\n".join(
+                        observed_fact_payload(fact) for fact in observed_fact_batch
+                    )
                     observed_fact_selected = True
+                if observed_fact_batch:
+                    observed_contribution_id = contribution_by_surface.get(
+                        "observed_execution"
+                    )
+                    observed_fact_accounting = next(
+                        (
+                            row
+                            for row in compiled_contributions.accounting
+                            if row.contribution_id == observed_contribution_id
+                        ),
+                        None,
+                    )
                 selected_surface_names = [
                     surface
                     for surface, contribution_id in contribution_by_surface.items()
@@ -6480,14 +6605,29 @@ class MiniSweCentralAgent(BaseAgent):
                     request_dispatch_eligible
                     and runtime_message_index is not None
                     and observed_fact_selected
-                    and pending_observed_fact is not None
+                    and observed_fact_batch
                 ):
                     prepared_observed_fact_delivery = {
-                        "fact_id": pending_observed_fact.fact_id,
-                        "fact_ids": [pending_observed_fact.fact_id],
-                        "kind": pending_observed_fact.kind,
-                        "evidence_action": pending_observed_fact.evidence_action,
-                        "first_eligible_call": pending_observed_fact.eligible_call,
+                        "fact_id": observed_fact_batch[0].fact_id,
+                        "fact_ids": [fact.fact_id for fact in observed_fact_batch],
+                        "kind": (
+                            observed_fact_batch[0].kind
+                            if len(observed_fact_batch) == 1
+                            else "batch"
+                        ),
+                        "kinds": [fact.kind for fact in observed_fact_batch],
+                        "evidence_action": max(
+                            fact.evidence_action for fact in observed_fact_batch
+                        ),
+                        "evidence_actions": [
+                            fact.evidence_action for fact in observed_fact_batch
+                        ],
+                        "first_eligible_call": min(
+                            fact.eligible_call for fact in observed_fact_batch
+                        ),
+                        "first_eligible_calls": [
+                            fact.eligible_call for fact in observed_fact_batch
+                        ],
                         "delivered_before_call": calls,
                         "delivered_before_model_query": True,
                         "message_index": runtime_message_index,
@@ -6495,10 +6635,13 @@ class MiniSweCentralAgent(BaseAgent):
                         "request_payload_sha256": request_payload_sha256,
                         "provider_messages_sha256": provider_messages_sha256,
                         "chars": len(observed_fact_payload_text),
-                        "not_predictive": (
-                            pending_observed_fact.evidence_action <= actions_count
+                        "not_predictive": all(
+                            fact.evidence_action <= actions_count
+                            for fact in observed_fact_batch
                         ),
-                        "one_step_late": (calls != pending_observed_fact.eligible_call),
+                        "one_step_late": any(
+                            calls != fact.eligible_call for fact in observed_fact_batch
+                        ),
                     }
                 else:
                     prepared_observed_fact_delivery = None
@@ -7276,11 +7419,54 @@ class MiniSweCentralAgent(BaseAgent):
                         pending_progress_fact = None
                     if (
                         prepared_observed_fact_delivery is not None
-                        and pending_observed_fact is not None
+                        and observed_fact_batch
                     ):
-                        observed_fact_ledger.add(pending_observed_fact.fact_id)
                         observed_fact_deliveries.append(prepared_observed_fact_delivery)
+                        for delivered_fact in observed_fact_batch:
+                            observed_fact_ledger.add(delivered_fact.fact_id)
+                            observed_fact_decisions.append(
+                                {
+                                    "fact_id": delivered_fact.fact_id,
+                                    "kind": delivered_fact.kind,
+                                    "call": calls,
+                                    "disposition": "selected",
+                                    "reason_codes": [],
+                                    "delivery_call": int(
+                                        prepared_observed_fact_delivery.get("call") or 0
+                                    ),
+                                }
+                            )
                         pending_observed_fact = None
+                        queued_observed_facts = []
+                    elif (
+                        observed_fact_batch
+                        and observed_fact_accounting is not None
+                        and calls
+                        >= min(fact.eligible_call for fact in observed_fact_batch)
+                    ):
+                        # The contribution compiler made the authoritative
+                        # first-eligible decision.  A rejected observed fact is
+                        # already represented by the durable tool observation;
+                        # keeping it pending would emit expired duplicates on
+                        # every later call and starve newer execution facts.
+                        for rejected_fact in observed_fact_batch:
+                            observed_fact_ledger.add(rejected_fact.fact_id)
+                            observed_fact_decisions.append(
+                                {
+                                    "fact_id": rejected_fact.fact_id,
+                                    "kind": rejected_fact.kind,
+                                    "call": calls,
+                                    "disposition": observed_fact_accounting.disposition,
+                                    "reason_codes": list(
+                                        observed_fact_accounting.reason_codes
+                                    ),
+                                    "contribution_id": (
+                                        observed_fact_accounting.contribution_id
+                                    ),
+                                }
+                            )
+                        pending_observed_fact = None
+                        queued_observed_facts = []
                     if (
                         task_semantic_payload
                         and task_semantic_substrate is not None
@@ -8282,53 +8468,41 @@ class MiniSweCentralAgent(BaseAgent):
                         if item.origin
                         in {ChangeOrigin.MODEL_AUTHORED, ChangeOrigin.TASK_DELIVERABLE}
                         and item.graph_indexable
+                        and item.path in after.entries
                     )
                     if model_authored_source_paths:
                         repository_fact_tracker.record_model_authored_paths(
                             model_authored_source_paths,
                             action_id=actions_count,
                         )
+                    graph_changed_paths: tuple[str, ...] = ()
                     if (
                         repository_session is not None
                         and graph_receipt.complete
                         and graph_source_revision != repository_session.source_revision
                     ):
-                        source_paths = tuple(
-                            item.path for item in classified_transition if item.graph_indexable
+                        graph_changed_paths = _graph_transition_paths(
+                            classified_transition,
+                            transition,
+                            task_deliverables=task_deliverables,
+                            repository_session=repository_session,
                         )
                         transition = await self._hydrate_graph_transition(
                             environment,
                             repository_session,
                             transition,
                             snapshot=after,
-                            changed_paths=source_paths,
+                            changed_paths=graph_changed_paths,
                             source_revision=graph_source_revision,
                         )
-                        mirror_advanced = repository_session.apply_transition(
+                        mirror_advanced, repository_evidence = (
+                            repository_session.apply_transition_and_refresh(
                             transition,
                             source_revision=graph_source_revision,
-                            changed_paths=source_paths,
-                        )
+                            changed_paths=graph_changed_paths,
+                            timeout=self.repository_refresh_timeout_sec,
+                        ))
                         if mirror_advanced:
-                            refresh_timeout = self.repository_refresh_timeout_sec * (
-                                self.repository_refresh_timeout_escalation
-                                if repository_session.refresh_timeout_escalated
-                                else 1.0
-                            )
-                            try:
-                                repository_evidence = await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        repository_session.refresh,
-                                        source_revision=graph_source_revision,
-                                    ),
-                                    timeout=refresh_timeout,
-                                )
-                            except TimeoutError:
-                                repository_session.invalidate(
-                                    source_revision=graph_source_revision,
-                                    status="refresh_timeout",
-                                )
-                                repository_evidence = repository_session.evidence
                             if repository_evidence.available:
                                 repository_evidence_action = actions_count
                                 repository_evidence_eligible_call = calls + 1
@@ -8804,14 +8978,14 @@ class MiniSweCentralAgent(BaseAgent):
                                 and item.path in after.entries
                                 and item.path in (*transition.created, *transition.modified)
                             ),
-                            graph_changed_paths=tuple(model_authored_source_paths),
+                            graph_changed_paths=graph_changed_paths,
                             current_source_revision=source_revision,
                             current_graph_source_revision=graph_source_revision,
                             current_graph_revision=repository_evidence.graph_revision,
                             validation_status=classification.status.value,
                             validation_check_id=classification.declared_check_id,
                         )
-                        if model_authored_source_paths:
+                        if graph_changed_paths:
                             persistent_rebase_repository: HybridRepository | None = None
                             if (
                                 repository_session is not None
@@ -8853,7 +9027,7 @@ class MiniSweCentralAgent(BaseAgent):
                                     current_graph_source_revision=graph_source_revision,
                                     current_graph_revision=(repository_evidence.graph_revision),
                                     graph_complete=True,
-                                    changed_paths=tuple(model_authored_source_paths),
+                                    changed_paths=graph_changed_paths,
                                     present_paths=tuple(
                                         document.path
                                         for document in persistent_rebase_repository.documents
@@ -8878,7 +9052,11 @@ class MiniSweCentralAgent(BaseAgent):
                             item.path
                             for item in classified_transition
                             if item.validation_relevant
-                            and item.origin is ChangeOrigin.MODEL_AUTHORED
+                            and item.origin
+                            in {
+                                ChangeOrigin.MODEL_AUTHORED,
+                                ChangeOrigin.TASK_DELIVERABLE,
+                            }
                         )
                     )
                     deliverable_paths = tuple(
@@ -9049,7 +9227,7 @@ class MiniSweCentralAgent(BaseAgent):
                     if self.enable_progress_control:
                         progress_signature = semantic_progress_fingerprint(
                             source_revision=source_revision,
-                            changed_paths=source_paths,
+                            changed_paths=graph_changed_paths,
                             validation_state=classification.status.value,
                             diagnostic_fingerprint=(classification.diagnostic_fingerprint or ""),
                             project_checks=repository_evidence.project_checks,
@@ -9137,15 +9315,28 @@ class MiniSweCentralAgent(BaseAgent):
                             source_revision=source_revision,
                             evidence_action=actions_count,
                             eligible_call=calls + 1,
-                            already_delivered=observed_fact_ledger,
+                            already_delivered={
+                                *observed_fact_ledger,
+                                *(
+                                    (pending_observed_fact.fact_id,)
+                                    if pending_observed_fact is not None
+                                    else ()
+                                ),
+                                *(fact.fact_id for fact in queued_observed_facts),
+                            },
                         )
-                        # Preserve the first pending fact until the next
-                        # provider request.  A later action in the same
-                        # response may have no recognizable fact; clearing
-                        # the slot there would silently lose the earlier
-                        # observation before it can be delivered.
-                        if _observed_facts and pending_observed_fact is None:
-                            pending_observed_fact = _observed_facts[0]
+                        observed_fact_extractions.extend(
+                            fact.as_dict() for fact in _observed_facts
+                        )
+                        # Queue every distinct fact until an actual provider
+                        # compilation gives it a terminal disposition.  The
+                        # existence of raw tool history alone does not prove a
+                        # later compacted provider view retained that history.
+                        for observed in _observed_facts:
+                            if pending_observed_fact is None:
+                                pending_observed_fact = observed
+                            else:
+                                queued_observed_facts.append(observed)
                     if self.preflight_mode is not PreflightMode.OFF:
                         self._features.record_action_postflight(
                             proposed,
@@ -11498,7 +11689,37 @@ class MiniSweCentralAgent(BaseAgent):
                         },
                         "observed_facts": {
                             "enabled": bool(self.enable_observed_facts),
+                            "max_deliveries_per_task": MAX_OBSERVED_FACTS_PER_TASK,
+                            "fact_extractions": observed_fact_extractions,
                             "fact_deliveries": observed_fact_deliveries,
+                            "fact_decisions": [
+                                *observed_fact_decisions,
+                                *(
+                                    [
+                                        {
+                                            "fact_id": pending_observed_fact.fact_id,
+                                            "kind": pending_observed_fact.kind,
+                                            "call": calls + 1,
+                                            "disposition": "terminal_before_next_provider_request",
+                                            "reason_codes": ["trajectory_ended"],
+                                            "eligible_call": pending_observed_fact.eligible_call,
+                                        }
+                                    ]
+                                    if pending_observed_fact is not None
+                                    else []
+                                ),
+                                *(
+                                    {
+                                        "fact_id": fact.fact_id,
+                                        "kind": fact.kind,
+                                        "call": calls + 1,
+                                        "disposition": "terminal_before_next_provider_request",
+                                        "reason_codes": ["trajectory_ended"],
+                                        "eligible_call": fact.eligible_call,
+                                    }
+                                    for fact in queued_observed_facts
+                                ),
+                            ],
                         },
                         "convergence_controller": {
                             "schema": "gt.convergence_controller.v1",

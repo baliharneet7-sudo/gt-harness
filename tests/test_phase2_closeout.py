@@ -569,10 +569,10 @@ def test_promotion_gate_can_select_but_never_mutates_configuration() -> None:
     assert result["mutation_performed"] is False
 
 
-def test_clean_machine_and_rollback_runbooks_are_structurally_complete() -> None:
+def test_current_release_and_handoff_runbooks_are_structurally_complete() -> None:
     offline = _load("finalstand_offline")
     paths = [
-        ROOT / "gt_finalstand" / "CLEAN_MACHINE_RUNBOOK.md",
-        ROOT / "gt_finalstand" / "ROLLBACK_RUNBOOK.md",
+        ROOT / "docs" / "GT_RELEASE_DOSSIER.md",
+        ROOT / "docs" / "GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md",
     ]
     assert offline.validate_runbooks(paths) == []

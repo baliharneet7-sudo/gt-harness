@@ -12,7 +12,7 @@ This document describes two different systems and does not merge their evidence:
 
 The source changes between those commits repair receipt/accounting defects, but there is no exact-`18f95fb` live receipt yet. “Implemented at HEAD” therefore does not mean “validated in the matched run.” Confidence labels mean: **high** = directly established by current code or a typed receipt; **moderate** = consistent evidence from more than one artifact but not a causal experiment; **low** = plausible interpretation; **unknown** = the required observation does not exist.
 
-Benchmark contamination boundary: GT may derive provider-visible facts only from the instruction, repository source in the task workspace, and the agent's already-observed execution results. Post-hoc reward is used below only for outcome accounting. Hidden verifier artifacts, reference solutions, and host verifier output are never admissible runtime evidence. This is the contract in [AGENTS.md](../../AGENTS.md).
+Benchmark contamination boundary: GT may derive provider-visible facts only from the instruction, repository source in the task workspace, and the agent's already-observed execution results. Post-hoc reward is used below only for outcome accounting. Hidden verifier artifacts, reference solutions, and host verifier output are never admissible runtime evidence. This is the contract in the [mechanical completeness contract](../GT_MECHANICAL_COMPLETENESS_CONTRACT.md).
 
 ## A. Current full GT
 
@@ -113,4 +113,3 @@ The following is a source comparison, not live validation:
 ## Architecture conclusion
 
 The current architecture is not missing its core substrate. The latest run proves a working graph-first lifecycle, dense retrieval, repeated persistent state, and exact provider-boundary delivery on most tasks. The active defects are at the composition, relevance, intervention-policy, and proof/accounting boundaries. The biggest underused gap is that full semantic assets—particularly resolved types/LSP/runtime knowledge and higher-level process/change-obligation composition—are not yet proven to reach the benchmark provider view. **Confidence: high on the substrate conclusion; moderate on which missing composition will create solves.**
-

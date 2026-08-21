@@ -36,12 +36,7 @@ on:
       model:
         description: "LLM model identifier"
         required: true
-        default: "openrouter/stealth/ox-alpha"
-
-      api_key:
-        description: "Provider API key, supplied from outside at dispatch time (overrides the repo secret)."
-        required: false
-        default: ""
+        default: "deepseek/deepseek-v4-flash"
       max_iterations:
         description: "Max agent iterations per task"
         required: true

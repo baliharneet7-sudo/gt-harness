@@ -226,6 +226,12 @@ class TaskSemanticSubstrate:
                 {
                     **fact.as_dict(),
                     "evidence_class": _EVIDENCE_CLASS[fact.kind].value,
+                    "authority": "deterministic_task_semantics",
+                    "materiality_reason": (
+                        "new_unresolved_task_obligation"
+                        if fact.kind is DecisiveKind.PROJECT_CHECK
+                        else "task_decisive_evidence"
+                    ),
                     "provider_value_class": "certified_predecision_gap",
                     "provider_value_disposition": "predecision",
                     "provider_value_completeness": "exact",

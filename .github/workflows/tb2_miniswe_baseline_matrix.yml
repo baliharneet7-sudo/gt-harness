@@ -13,14 +13,10 @@ name: TB2 miniswe baseline matrix (no GT)
 on:
   workflow_dispatch:
     inputs:
-      api_key:
-        description: "Provider API key, supplied from outside at dispatch time (overrides the repo secret)."
-        required: false
-        default: ""
       model:
         description: "Model id for harbor -m, passed through verbatim when base_url is set (api.deepseek.com wants bare 'deepseek-v4-flash')"
         type: string
-        default: "openrouter/stealth/ox-alpha"
+        default: "deepseek-v4-flash"
       base_url:
         description: "OpenAI-compatible gateway URL; exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
@@ -49,8 +45,8 @@ jobs:
     outputs:
       tasks: ${{ steps.enum.outputs.tasks }}
     env:
-      ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.api_key || secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
     steps:
@@ -107,7 +103,7 @@ jobs:
           model = os.environ["MODEL"]
           base = os.environ.get("OPENAI_BASE_URL") or ""
           mname, kwargs = model, {"temperature": 1.0}
-          if base and not model.startswith("openai/"):
+          if base and "/" not in model:
               mname = f"openai/{model}"
               kwargs["api_base"] = base
           print(f"model={model!r} -> litellm model={mname!r} "
@@ -184,8 +180,8 @@ jobs:
       matrix:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
-      ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ inputs.api_key || secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
     steps:
@@ -243,7 +239,7 @@ jobs:
             -m "$MODEL" \
             -o results/terminal-bench \
             --job-name "$JOB_NAME" \
-            --agent-timeout-multiplier 1.0 \
+            --agent-timeout-multiplier ${{ inputs.agent_timeout_multiplier }} \
             -n 1 \
             -y \
             -i "$TASK"

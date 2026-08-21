@@ -32,9 +32,11 @@ import ast
 import copy
 import hashlib
 import json
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -42,6 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from gt_engine.delivery_audit import audit_provider_deliveries  # noqa: E402
 from gt_engine.observed_facts import (  # noqa: E402
+    audit_observed_fact_lifecycle,
     extract_observed_facts,
 )
 
@@ -300,21 +303,97 @@ def _trajectory_observed_markers(trajectory: dict) -> int:
     return count
 
 
-def _abstention_gap(receipt: dict, trajectory: dict | None, task: str) -> list[str]:
+def _observed_fact_accounting(
+    receipt: dict, trajectory: dict | None, task: str
+) -> tuple[dict[str, object], list[str]]:
     """Flag tasks where the model observed decision-relevant facts (source 3)
     but GT delivered none of them — the extract-elf recurrence gate."""
 
-    observed = (receipt.get("observed_facts") or {}).get("fact_deliveries") or []
-    if observed:
-        return []
+    observed_section = receipt.get("observed_facts") or {}
+    extractions = observed_section.get("fact_extractions")
+    deliveries = observed_section.get("fact_deliveries") or []
+    decisions = observed_section.get("fact_decisions")
+    markers = _trajectory_observed_markers(trajectory) if trajectory is not None else 0
+
+    def row_fact_ids(rows: Iterable[object]) -> set[str]:
+        fact_ids: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            direct = str(row.get("fact_id") or "")
+            if direct:
+                fact_ids.add(direct)
+            fact_ids.update(
+                str(item)
+                for item in (row.get("fact_ids") or ())
+                if str(item)
+            )
+        return fact_ids
+
+    if isinstance(extractions, list):
+        lifecycle_failures, lifecycle = audit_observed_fact_lifecycle(receipt)
+        gaps = [f"{task}:observed_fact_{failure}" for failure in lifecycle_failures]
+        if trajectory is not None and markers > len(extractions):
+            gaps.append(
+                f"{task}:observed_fact_extraction_gap:{markers}_trajectory_facts_but_"
+                f"{len(extractions)}_runtime_extractions"
+            )
+        return {
+            "status": "fully_accounted" if not gaps else "unaccounted_extractions",
+            "markers": markers,
+            "trajectory_available": trajectory is not None,
+            **lifecycle,
+        }, gaps
     if trajectory is None:
-        return []
-    markers = _trajectory_observed_markers(trajectory)
-    if markers:
-        return [
+        return {
+            "status": "trajectory_unavailable",
+            "markers": 0,
+            "deliveries": len(deliveries),
+            "decisions": len(decisions or ()),
+        }, [f"{task}:observed_fact_extraction_inventory_missing"]
+    legacy_compiler_rows = [
+        row
+        for call in (receipt.get("contribution_compiler") or {}).get("calls") or ()
+        for row in call.get("accounting") or ()
+        if isinstance(row, dict) and row.get("surface") == "observed_execution"
+    ]
+    legacy_fact_ids = row_fact_ids(deliveries)
+    for row in legacy_compiler_rows:
+        for reason in row.get("reason_codes") or ():
+            legacy_fact_ids.update(
+                re.findall(r"observed-[0-9a-f]{8,64}", str(reason), re.I)
+            )
+    if legacy_fact_ids:
+        gaps = []
+        if markers > len(legacy_fact_ids):
+            gaps.append(
+                f"{task}:observed_fact_abstention_gap:{markers}_markers_seen_but_"
+                f"{len(legacy_fact_ids)}_identity_accounted"
+            )
+        return {
+            "status": (
+                "legacy_claim_id_accounted" if not gaps else "unaccounted_markers"
+            ),
+            "markers": markers,
+            "deliveries": len(deliveries),
+            "decisions": 0,
+            "compiler_rows": len(legacy_compiler_rows),
+            "accounted_fact_ids": len(legacy_fact_ids),
+            "limitation": "legacy receipt lacks explicit extraction inventory",
+        }, gaps
+    gaps = (
+        [
             f"{task}:observed_fact_abstention_gap:{markers}_markers_seen_but_0_delivered"
         ]
-    return []
+        if markers
+        else []
+    )
+    return {
+        "status": "unaccounted_markers" if gaps else "no_marker_opportunity",
+        "markers": markers,
+        "deliveries": len(deliveries),
+        "decisions": 0,
+    }, gaps
 
 
 def _receipt_integrity(receipt: dict, task: str) -> tuple[list[dict], list[str]]:
@@ -396,9 +475,12 @@ def audit_run_root(root: Path) -> dict:
                 trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 trajectory = None
-        gap_failures = _abstention_gap(receipt, trajectory, task=task)
+        observed_fact_accounting, gap_failures = _observed_fact_accounting(
+            receipt, trajectory, task=task
+        )
+        per_task[task]["observed_fact_accounting"] = observed_fact_accounting
         per_task[task]["abstention_gap"] = gap_failures
-        receipt_failures.extend(failures)
+        receipt_failures.extend(gap_failures)
 
     all_failures = static_failures + receipt_failures
     abstention_gaps = [

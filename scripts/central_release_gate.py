@@ -13,14 +13,20 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.mechanical_completeness import build_task_execution_certificate
+from gt_engine.observed_facts import audit_observed_fact_lifecycle
 from gt_engine.runtime_gate import audit_runtime_receipt
 
 # Architecture D may send zero PES frames when every dispatched call already
@@ -1042,6 +1048,7 @@ def _provider_value_contract(receipt: dict[str, Any], label: str) -> ReleaseGate
                 or not certificate.get("novelty_basis")
                 or not certificate.get("decision_point")
                 or not certificate.get("replaces_operation")
+                or not certificate.get("materiality_reason")
             ):
                 failures.append(
                     f"{label}:provider_value_certificate_rejected:{call_number}:{claim_id}"
@@ -1504,7 +1511,11 @@ def _audit_treatment_runtime_requirements(
     )
     relational_profile = str(receipt.get("treatment_profile") or "") == "central_relational_v2"
     capability_checks: tuple[ReleaseGateCheck, ...] = (
-        (_repository_context_state(receipt, label),)
+        (
+            _provider_route_integrity(receipt, label),
+            _repository_context_state(receipt, label),
+            _observed_execution_fact_accounting(receipt, label),
+        )
         if relational_profile
         else ()
     )
@@ -1530,6 +1541,63 @@ def _audit_treatment_runtime_requirements(
         _replay_and_intervention_audit(receipt, label),
         _task_artifact_integrity(receipt, label),
         _mechanical_completeness_runtime(receipt, label),
+    )
+
+
+def _provider_route_integrity(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    """Prove the configured endpoint is internally consistent and non-secret."""
+
+    route = receipt.get("provider_route") or {}
+    route_id = str(route.get("route_id") or "")
+    api_base = str(route.get("api_base") or "")
+    api_host = str(route.get("api_host") or "")
+    parts = route_id.split(":")
+    failures: list[str] = []
+    if len(parts) != 3 or parts[1] != "native" or not parts[0]:
+        failures.append(f"{label}:provider_route_id_invalid")
+    configured_host = str(urlsplit(api_base).hostname or "")
+    if not api_base.startswith("https://") or not configured_host:
+        failures.append(f"{label}:provider_api_base_invalid")
+    if configured_host != api_host or (len(parts) == 3 and parts[2] != api_host):
+        failures.append(f"{label}:provider_route_host_mismatch")
+    if route.get("credential_in_receipt") is not False:
+        failures.append(f"{label}:provider_credential_receipted")
+    if str(route.get("executor_retry_policy") or "") != "provider_once_no_retry":
+        failures.append(f"{label}:provider_retry_policy_unverified")
+    return ReleaseGateCheck(
+        "provider_route_integrity",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "route_id": route_id,
+            "api_host": api_host,
+            "model": str(route.get("model") or ""),
+        },
+    )
+
+
+def _observed_execution_fact_accounting(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    """Require an identity-level terminal outcome for every extracted fact."""
+
+    section = receipt.get("observed_facts") or {}
+    failures: list[str] = []
+    if str(receipt.get("treatment_profile") or "") == "central_relational_v2" and not _bool(
+        section.get("enabled")
+    ):
+        failures.append(f"{label}:observed_fact_surface_disabled")
+    lifecycle_failures, details = audit_observed_fact_lifecycle(receipt)
+    failures.extend(f"{label}:observed_fact_{failure}" for failure in lifecycle_failures)
+    return ReleaseGateCheck(
+        "observed_execution_fact_accounting",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            **details,
+        },
     )
 
 

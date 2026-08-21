@@ -7,11 +7,11 @@ import pytest
 
 from scripts.engine_129_audit import (
     CATEGORY_COUNTS,
-    parse_transition_dispositions,
     validate,
     build_transition_rows,
     load_direct_identities,
     load_role_inventory,
+    load_transition_dispositions,
 )
 
 
@@ -75,11 +75,9 @@ def test_removed_rows_are_marked_removed(audit):
             assert row["status"] == "pending"
 
 
-def test_transition_doc_parser_finds_dispositions():
-    from scripts import engine_129_audit
-
-    dispositions = parse_transition_dispositions(engine_129_audit.TRANSITION_MD)
-    assert len(dispositions) >= 100  # most identities carry a disposition
+def test_committed_transition_inventory_finds_dispositions():
+    dispositions = load_transition_dispositions()
+    assert len(dispositions) == 129
     assert dispositions.get("graph_validity") == "MODIFY"
     assert dispositions.get("semantic_embedder") == "REMOVE"
     assert dispositions.get("GT_BRIEF_MINIMAL") == "REMOVE"

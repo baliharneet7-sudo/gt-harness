@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import subprocess
 import sys
@@ -13,7 +14,12 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.documentation_consistency_audit import audit_documentation  # noqa: E402
+from gt_engine.deep_metrics import TrialOutcome, classify_trial_outcome  # noqa: E402
+from scripts.central_integrity_audit import _observed_fact_accounting  # noqa: E402
+from scripts.documentation_consistency_audit import (  # noqa: E402
+    DEFAULT_DOCUMENTS,
+    audit_documentation,
+)
 from scripts.release_manifest import (  # noqa: E402
     ACTIVE_RELEASE_PATH,
     load_release_manifest,
@@ -42,9 +48,11 @@ _REQUIRED_RUNTIME = {
 
 _REQUIRED_TASK_CHECKS = (
     "treatment_runtime_identity",
+    "provider_route_integrity",
     "repository_substrate",
     "dense_backend",
     "delivery_timing_accounting",
+    "observed_execution_fact_accounting",
     "contribution_budget",
     "provider_value_contract",
     "action_lifecycle",
@@ -63,19 +71,104 @@ _REQUIRED_TASK_CHECKS = (
     "mechanical_completeness_runtime",
 )
 
-_REQUIRED_DOCS = (
-    "docs/GT_MECHANICAL_COMPLETENESS_CONTRACT.md",
-    "docs/GT_RELEASE_DOSSIER.md",
-    "docs/gt_gitnexus_program/01_GT_CURRENT_ARCHITECTURE.md",
-    "docs/gt_gitnexus_program/03_GT_FEATURE_LEDGER.md",
-    "docs/gt_gitnexus_program/07_GITNEXUS_ARCHITECTURE.md",
-    "docs/gt_gitnexus_program/09_GITNEXUS_DELIVERY_AND_LIFECYCLE.md",
-    "docs/gt_gitnexus_program/11_GT_VS_GITNEXUS_CAPABILITY_MATRIX.md",
-    "docs/gt_gitnexus_program/12_FAILURE_TO_MECHANISM_MATRIX.md",
-    "docs/gt_gitnexus_program/14_IMPLEMENTATION_PLAN.md",
-    "docs/gt_gitnexus_program/15_20_TASK_RERUN_REPORT.md",
-    "docs/gt_gitnexus_program/20_FINAL_REGRESSION_CONTROL_AND_BENCHMARK_READINESS.md",
-)
+_REQUIRED_DOCS = tuple(path.as_posix() for path in DEFAULT_DOCUMENTS)
+
+
+def _graph_refresh_dispatch_shape(source: str) -> tuple[bool, dict[str, Any]]:
+    """Prove the checked-in call shape; live completion is receipt-gated."""
+
+    tree = ast.parse(source)
+    refresh_calls = 0
+    timeout_bound_calls = 0
+    abandonable_workers = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function_name = (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else node.func.id
+            if isinstance(node.func, ast.Name)
+            else ""
+        )
+        if function_name == "apply_transition_and_refresh":
+            refresh_calls += 1
+            if any(keyword.arg == "timeout" for keyword in node.keywords):
+                timeout_bound_calls += 1
+        if function_name == "to_thread" and node.args:
+            target = node.args[0]
+            target_name = (
+                target.attr
+                if isinstance(target, ast.Attribute)
+                else target.id
+                if isinstance(target, ast.Name)
+                else ""
+            )
+            if "refresh" in target_name:
+                abandonable_workers += 1
+    passed = bool(refresh_calls) and refresh_calls == timeout_bound_calls and not abandonable_workers
+    return passed, {
+        "scope": "source_call_shape_live_receipt_still_required",
+        "refresh_calls": refresh_calls,
+        "timeout_bound_calls": timeout_bound_calls,
+        "abandonable_refresh_workers": abandonable_workers,
+    }
+
+
+def _typed_outcome_witnesses() -> tuple[bool, dict[str, Any]]:
+    witnesses = {
+        "solved": {"verifier_result": {"rewards": {"reward": 1}}},
+        "unsolved_graded": {"verifier_result": {"rewards": {"reward": 0}}},
+        "censored": {"exception_info": {"exception_type": "AgentTimeoutError"}},
+        "error": {"exception_info": {"exception_type": "VerifierTimeoutError"}},
+        "missing_verifier": {},
+    }
+    observed = {
+        name: classify_trial_outcome(payload).value for name, payload in witnesses.items()
+    }
+    expected = {item.value for item in TrialOutcome}
+    return set(observed.values()) == expected and len(set(observed.values())) == len(expected), {
+        "scope": "executable_synthetic_classifier_witnesses",
+        "outcomes": observed,
+    }
+
+
+def _observed_fact_accounting_witnesses() -> tuple[bool, dict[str, Any]]:
+    trajectory = {"messages": []}
+    unaccounted_receipt = {
+        "observed_facts": {
+            "fact_extractions": [
+                {"fact_id": "observed-witness", "eligible_call": 1}
+            ],
+            "fact_deliveries": [],
+            "fact_decisions": [],
+        }
+    }
+    accounted_receipt = {
+        "observed_facts": {
+            "fact_extractions": [
+                {"fact_id": "observed-witness", "eligible_call": 1}
+            ],
+            "fact_deliveries": [
+                {"fact_ids": ["observed-witness"], "call": 1}
+            ],
+            "fact_decisions": [
+                {
+                    "fact_id": "observed-witness",
+                    "call": 1,
+                    "disposition": "selected",
+                }
+            ],
+        }
+    }
+    _, missing = _observed_fact_accounting(unaccounted_receipt, trajectory, "witness")
+    accounted, closed = _observed_fact_accounting(accounted_receipt, trajectory, "witness")
+    passed = bool(missing) and not closed and accounted.get("status") == "fully_accounted"
+    return passed, {
+        "scope": "executable_identity_join_witnesses",
+        "unaccounted_rejected": bool(missing),
+        "exact_identity_accepted": not closed,
+    }
 
 
 def _check(name: str, passed: bool, evidence: dict[str, Any]) -> dict[str, Any]:
@@ -111,7 +204,17 @@ def audit_configuration(
         encoding="utf-8"
     )
     agent_source = (root / "eval/gt_central_agent.py").read_text(encoding="utf-8")
-    documentation = audit_documentation(root)
+    merge_source = (root / "scripts/tb2_merge_results.py").read_text(encoding="utf-8")
+    graph_shape_ok, graph_shape_evidence = _graph_refresh_dispatch_shape(agent_source)
+    outcome_witnesses_ok, outcome_witnesses = _typed_outcome_witnesses()
+    observed_witnesses_ok, observed_witnesses = _observed_fact_accounting_witnesses()
+    workflows = {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted((root / ".github/workflows").glob("*.yml"))
+    }
+    documentation = audit_documentation(
+        root, documents=tuple(Path(path) for path in _REQUIRED_DOCS)
+    )
 
     checks = [
         _check(
@@ -196,6 +299,52 @@ def audit_configuration(
                 "required_documents": list(_REQUIRED_DOCS),
                 "audit": documentation,
             },
+        ),
+        _check(
+            "workflow_secret_and_schedule_safety",
+            all("schedule:" not in text for text in workflows.values())
+            and all("inputs.api_key" not in text for text in workflows.values())
+            and all("\n      api_key:" not in text for text in workflows.values()),
+            {
+                "workflows_checked": len(workflows),
+                "scheduled_workflows": [
+                    path for path, text in workflows.items() if "schedule:" in text
+                ],
+                "secret_value_dispatch_inputs": [
+                    path
+                    for path, text in workflows.items()
+                    if "inputs.api_key" in text or "\n      api_key:" in text
+                ],
+            },
+        ),
+        _check(
+            "frozen_provider_route_contract",
+            "scripts.provider_route_contract" in paid
+            and "inputs.model" not in paid
+            and "inputs.api_base" not in paid
+            and "inputs.api_key" not in paid
+            and "OPENAI_BASE_URL: https://" not in paid
+            and "GT_LITELLM_MODEL: openai/" not in paid
+            and "OPENAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}" not in paid
+            and "--bind-credential" in paid
+            and "baseline_runtime_contract.get(\"response_model\")" in merge_source
+            and "baseline_runtime_contract.get(\"adapter_provider\")" in merge_source,
+            {"identity_source": "frozen_baseline_manifest"},
+        ),
+        _check(
+            "repository_refresh_dispatch_shape",
+            graph_shape_ok,
+            graph_shape_evidence,
+        ),
+        _check(
+            "typed_trial_outcome_witnesses",
+            outcome_witnesses_ok,
+            outcome_witnesses,
+        ),
+        _check(
+            "observed_fact_identity_join_witnesses",
+            observed_witnesses_ok,
+            observed_witnesses,
         ),
     ]
     failures = [check["name"] for check in checks if not check["passed"]]

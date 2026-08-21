@@ -30,6 +30,18 @@ def test_checked_in_final_configuration_is_mechanically_complete() -> None:
     assert report["status"] == "PASS", report["failures"]
     assert report["task_profile"] == "repair20-v1"
     assert all(check["passed"] for check in report["checks"])
+    checks = {check["name"]: check for check in report["checks"]}
+    assert checks["release_documentation"]["evidence"]["audit"][
+        "checked_documents"
+    ] == len(checks["release_documentation"]["evidence"]["required_documents"])
+    assert checks["workflow_secret_and_schedule_safety"]["passed"] is True
+    assert checks["frozen_provider_route_contract"]["passed"] is True
+    assert checks["repository_refresh_dispatch_shape"]["passed"] is True
+    assert checks["typed_trial_outcome_witnesses"]["passed"] is True
+    assert checks["observed_fact_identity_join_witnesses"]["passed"] is True
+    assert checks["repository_refresh_dispatch_shape"]["evidence"]["scope"] == (
+        "source_call_shape_live_receipt_still_required"
+    )
 
 
 def test_gate_is_sensitive_to_replay_and_release_order_mutations(tmp_path) -> None:

@@ -1,14 +1,14 @@
-"""IE-09 executable 129-row migration auditor.
+"""IE-09 historical 129-row structural-inventory auditor.
 
 Loads the frozen 129-row inventory (role_audit.csv), the 17 DIRECT
-capabilities (direct_capabilities.csv), and the per-identity dispositions from
-INLINE_ENGINE_129_TRANSITION.md, and emits the 18-field migration CSV
-engine_129_transition.csv. Mechanically enforces:
+capabilities (direct_capabilities.csv), and the committed transition rows.
+This inventory is legacy crosswalk evidence, not semantic implementation proof
+for the active 17+1 product.  Mechanically enforces:
 
 - exactly 129 unique identities with category counts 12/48/11/58 (ACQ/CAP/FACT/PERF);
 - every target disposition in {BUILD, MODIFY, KEEP, REMOVE} (DEFER forbidden);
 - the 17 DIRECT identities are present and marked;
-- the emitted CSV round-trips.
+- every transition row exactly matches its canonical role/category/direct ID.
 
 Run: python scripts/engine_129_audit.py [--check]
 """
@@ -96,6 +96,39 @@ def parse_transition_dispositions(path: Path) -> dict[str, str]:
     return dispositions
 
 
+def load_transition_dispositions(path: Path = OUTPUT_CSV) -> dict[str, str]:
+    """Load the committed transition inventory used by the live audit.
+
+    ``INLINE_ENGINE_129_TRANSITION.md`` was intentionally removed when the
+    repository's internal planning documents were retired.  Keeping it as an
+    implicit runtime dependency made a clean checkout fail during test
+    collection.  The checked-in CSV is the executable inventory and already
+    carries the normalized four-value disposition for every identity.
+    """
+    rows = load_transition_rows(path)
+    dispositions: dict[str, str] = {}
+    for row in rows:
+        identity = str(row.get("identity") or "")
+        if not identity or identity in dispositions:
+            raise ValueError(f"invalid or duplicate transition identity: {identity!r}")
+        dispositions[identity] = _normalize_disposition(
+            str(row.get("target_disposition") or "")
+        )
+    return dispositions
+
+
+def load_transition_rows(path: Path = OUTPUT_CSV) -> list[dict[str, str]]:
+    """Load the checked-in historical crosswalk without reconstructing it."""
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != COLUMNS:
+            raise ValueError(
+                f"transition columns differ: expected {COLUMNS!r}, got {reader.fieldnames!r}"
+            )
+        return [dict(row) for row in reader]
+
+
 def load_role_inventory(path: Path) -> list[dict]:
     """Load the canonical 129-row inventory."""
     rows: list[dict] = []
@@ -111,60 +144,35 @@ def load_direct_identities(path: Path) -> set[str]:
 
 
 def build_transition_rows() -> tuple[list[dict], list[str]]:
-    """Build the 22-field migration CSV rows + warnings."""
+    """Cross-check and return the committed 22-field historical inventory."""
     role_rows = load_role_inventory(ROLE_CSV)
     direct = load_direct_identities(DIRECT_CSV)
-    dispositions = parse_transition_dispositions(TRANSITION_MD)
+    rows = load_transition_rows()
     warnings: list[str] = []
-    rows: list[dict] = []
-    try:
-        from gt_engine.engine.runner import ENGINE_FACT_OWNERS
-    except Exception:  # noqa: BLE001 - the audit must not depend on engine imports
-        ENGINE_FACT_OWNERS = {}
-    for entry in role_rows:
-        identity = str(entry.get("identity") or "")
-        category = str(entry.get("category") or "")
-        role = str(entry.get("role") or "")
-        direct_identity = str(entry.get("direct_identity") or "").lower() == "true"
-        if identity in direct:
-            direct_identity = True
-        disposition = dispositions.get(identity, "KEEP")
-        if identity not in dispositions:
-            warnings.append(f"{identity}: disposition not found; defaulted to KEEP")
-        byte_owner = role in ("byte_owner", "CAP_OWNER")
-        model_visible = (category == "FACT" and identity in ENGINE_FACT_OWNERS) or (
-            category == "CAP" and byte_owner
-        )
-        rows.append({
-            "identity": identity,
-            "role": role,
-            "category": category,
-            "category_index": str(entry.get("category_index") or ""),
-            "direct_identity": "true" if direct_identity else "false",
-            "current_behavior": "source:to_determine",
-            "target_disposition": disposition,
-            "deterministic_knowledge_semantics": "source:to_determine",
-            "representation": "source:to_determine",
-            "byte_owner": "true" if byte_owner else "false",
-            "timing_class": "source:to_determine",
-            "action_trigger": "source:to_determine",
-            "preflight_postflight_placement": "source:to_determine",
-            "freshness_authority": "source:to_determine",
-            "ambiguity_policy": "source:to_determine",
-            "omission_policy": "source:to_determine",
-            "raw_preservation_rule": "source:to_determine",
-            "decision_eligibility": "source:to_determine",
-            "model_visibility": "true" if model_visible else "false",
-            "migration_work": "source:to_determine",
-            "status": "removed" if disposition == "REMOVE" else "pending",
-            "receipt": "",
-        })
+    role_by_id = {str(row.get("identity") or ""): row for row in role_rows}
+    transition_ids = {str(row.get("identity") or "") for row in rows}
+    if transition_ids != set(role_by_id):
+        warnings.append("transition identities do not exactly match role inventory")
+    for row in rows:
+        identity = str(row.get("identity") or "")
+        canonical = role_by_id.get(identity)
+        if canonical is None:
+            continue
+        for field in ("role", "category", "category_index", "direct_identity"):
+            if str(row.get(field) or "") != str(canonical.get(field) or ""):
+                warnings.append(
+                    f"{identity}: {field} differs from canonical role inventory"
+                )
+        expected_direct = identity in direct
+        if (str(row.get("direct_identity") or "").lower() == "true") != expected_direct:
+            warnings.append(f"{identity}: direct identity differs from direct inventory")
     return rows, warnings
 
 
-def validate(rows: list[dict]) -> tuple[bool, list[str]]:
-    """Enforce inventory integrity. Returns (ok, error list)."""
+def validate(rows: list[dict], *, crosswalk_errors: tuple[str, ...] = ()) -> tuple[bool, list[str]]:
+    """Enforce structural crosswalk integrity; never claim semantic completeness."""
     errors: list[str] = []
+    errors.extend(crosswalk_errors)
     identities = [row["identity"] for row in rows]
     if len(identities) != 129:
         errors.append(f"expected 129 rows, got {len(identities)}")
@@ -201,7 +209,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rows, warnings = build_transition_rows()
-    ok, errors = validate(rows)
+    ok, errors = validate(rows, crosswalk_errors=tuple(warnings))
     for warning in warnings:
         print(f"warning: {warning}")
     if not args.check:
@@ -213,7 +221,8 @@ def main() -> int:
         for error in errors:
             print(f"error: {error}")
         return 1
-    print("OK: inventory integrity holds")
+    print("OK: historical structural inventory integrity holds")
+    print("NOTE: this is not active-product semantic completeness evidence")
     return 0
 
 

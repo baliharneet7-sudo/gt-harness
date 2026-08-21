@@ -638,7 +638,7 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
     state = tmp_path / "private-state"
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
-    def fake_run_index(_root, output):
+    def fake_run_index(_root, output, *, timeout=600):
         import sqlite3
 
         connection = sqlite3.connect(output)
@@ -707,7 +707,7 @@ def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch)
     target.write_bytes(b"known-good")
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
-    def valid_index(_root, output):
+    def valid_index(_root, output, *, timeout=600):
         connection = sqlite3.connect(output)
         connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
         connection.commit()

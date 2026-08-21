@@ -12,7 +12,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from gt_engine.deep_metrics import normalized_token_cost
+from gt_engine.deep_metrics import (
+    TrialOutcome,
+    classify_trial_outcome,
+    normalized_token_cost,
+)
+from scripts.release_manifest import load_release_manifest
 
 RESOURCE_FIELDS = (
     "total_tokens",
@@ -33,26 +38,18 @@ PINNED_BASELINE_PROVENANCE = {
     "source_artifact_sha256": "602fc6ac093ef3a35c25f00b4a4311229f631bb525dec3cc1eee3b5493456f79",
     "token_artifact_sha256": "aea4158aa9e568997b5ae5e5438929bc10ddc71da93dcfaef4a2c660c85f82f4",
 }
-EXPECTED_MODEL_IDENTITY = {
-    "catalog_model": "openai/deepseek-v4-flash",
-    "response_model": "deepseek-v4-flash",
-    "route": "deepseek:native:api.deepseek.com",
-    "api_host": "api.deepseek.com",
-    "adapter_provider": "openai",
-    "mini_version": "2.2.8",
-    "agent_class": "eval.miniswe_agent:MiniSweAgent",
-    "temperature": 1.0,
-    "step_limit": 100,
-    "environment_timeout_sec": 30,
-    "timeout_multiplier": 1.0,
-    "agent_timeout_multiplier": 1.0,
-    "system_template_sha256": "6fb54145bbb1724ce77430ff3852887acbd4a5cce10c86cd8dfbf4c7d55f1091",
-    "instance_template_sha256": "546a89156d7823eb34eb49c5b31a3703df4d27639d034a6d13f0162488d70821",
-    "observation_template_sha256": (
-        "da32186e7f86c2070607e69fdb7465b25cdfd108a4e932a379ea3763161db4a8"
-    ),
-    "tool_contract": "miniswe_bash_command_v1",
-}
+def _load_expected_model_identity() -> dict[str, Any]:
+    """Load the single release-pinned provider/model contract."""
+
+    baseline_path = load_release_manifest().baseline_path
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    identity = (baseline.get("manifest") or {}).get("model_identity")
+    if not isinstance(identity, dict) or not identity:
+        raise ValueError("frozen baseline model identity is missing")
+    return dict(identity)
+
+
+EXPECTED_MODEL_IDENTITY = _load_expected_model_identity()
 EXPECTED_TREATMENT_CONTRACT = {
     **EXPECTED_MODEL_IDENTITY,
     "agent_class": "eval.gt_central_agent:MiniSweCentralAgent",
@@ -454,7 +451,14 @@ def build_frozen_baseline(
     for trial in trials:
         task = str(trial.get("task_name") or "").split("__", 1)[0]
         rewards = (trial.get("verifier_result") or {}).get("rewards") or {}
-        reward = rewards.get("reward")
+        outcome = classify_trial_outcome(trial)
+        reward = (
+            1.0
+            if outcome is TrialOutcome.SOLVED
+            else 0.0
+            if outcome is TrialOutcome.UNSOLVED_GRADED
+            else None
+        )
         resource = usage.get(task)
         if not task or not isinstance(reward, (int, float)) or resource is None:
             raise ValueError(f"incomplete frozen baseline row: {task or '<missing>'}")
@@ -466,6 +470,7 @@ def build_frozen_baseline(
                 "task": task,
                 "solved": float(reward) == 1.0,
                 "reward": float(reward),
+                "raw_rewards": dict(rewards),
                 "exception": (trial.get("exception_info") or {}).get("exception_type"),
                 "provider_calls": provider_calls,
                 "total_tokens": total,
@@ -545,6 +550,8 @@ def treatment_from_merged(merged: dict[str, Any]) -> dict[str, Any]:
         ),
         *(f"missing_task:{task}" for task in merged.get("missing_tasks") or ()),
     ]
+    if (merged.get("bootstrap_route_certification") or {}).get("valid") is not True:
+        integrity.append("bootstrap_route_certification_invalid")
     if len(metric_tasks) != len(set(metric_tasks)):
         integrity.append("receipt_task_duplicate")
     manifest = dict(merged.get("treatment_manifest") or {})
@@ -562,24 +569,31 @@ def treatment_from_merged(merged: dict[str, Any]) -> dict[str, Any]:
     for trial in merged.get("trial_results") or ():
         task = str(trial.get("task_name") or trial.get("trial_name") or "").split("__", 1)[0]
         rewards = (trial.get("verifier_result") or {}).get("rewards") or {}
-        reward = rewards.get("reward")
+        trial_outcome = classify_trial_outcome(trial)
+        reward = (
+            1.0
+            if trial_outcome is TrialOutcome.SOLVED
+            else 0.0
+            if trial_outcome is TrialOutcome.UNSOLVED_GRADED
+            else None
+        )
         row = metrics.get(task) or {}
         if not row:
             integrity.append(f"receipt_missing:{task}")
         receipt_censored = row.get("censored") if "censored" in row else None
-        trial_exception = trial.get("exception_info")
         if not isinstance(receipt_censored, bool):
             integrity.append(f"censor_state_missing:{task}")
             censored: bool | None = None
         else:
             censored = receipt_censored
-            if bool(trial_exception) != censored:
+            if (trial_outcome is TrialOutcome.CENSORED) != censored:
                 integrity.append(f"censor_state_mismatch:{task}")
         rows.append(
             {
                 "task": task,
-                "solved": isinstance(reward, (int, float)) and float(reward) == 1.0,
+                "solved": trial_outcome is TrialOutcome.SOLVED,
                 "reward": reward,
+                "raw_rewards": dict(rewards),
                 "censored": censored,
                 "provider_calls": row.get("api_calls"),
                 "executor_provider_calls": row.get("executor_api_calls"),

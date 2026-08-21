@@ -879,55 +879,15 @@ def validate() -> dict[str, object]:
         errors,
     )
 
-    roadmap = (FINALSTAND / "PHASE_II_IMPLEMENTATION_ROADMAP.md").read_text(
-        encoding="utf-8"
-    )
-    roadmap_ids = re.findall(r"^### (FS-\d{3}):", roadmap, re.M)
-    _require(len(roadmap_ids) == 26 and set(roadmap_ids) == expected_todos,
-             "roadmap must define FS-001 through FS-026 exactly once", errors)
-    live_todo = (FINALSTAND / "LIVE_TODO.md").read_text(encoding="utf-8")
-    live_rows = re.findall(
-        r"^\| (FS-\d{3}) \| (BUILD|MODIFY|KEEP|REMOVE) "
-        r"\| (COMPLETE|IN_PROGRESS|REMOVED) \|",
-        live_todo,
-        re.M,
-    )
+    # Historical planning markdown was intentionally removed from the public
+    # repository.  The executable closeout authority is the committed CSV;
+    # a clean checkout must never depend on deleted narrative files.
+    status_todos = [row.get("todo", "") for row in statuses]
     _require(
-        len(live_rows) == 26 and {todo for todo, _, _ in live_rows} == expected_todos,
-        "LIVE_TODO must contain FS-001 through FS-026 exactly once in its queue",
-        errors,
-    )
-    status_by_todo = {
-        row["todo"]: (row["decision"], row["status"]) for row in statuses
-    }
-    _require(
-        all(status_by_todo[todo] == (decision, status) for todo, decision, status in live_rows),
-        "LIVE_TODO decision/status cells differ from closeout_status.csv",
-        errors,
-    )
-    history_path = FINALSTAND / "LIVE_TODO_HISTORY.md"
-    _require("## Checkpoints" not in live_todo,
-             "LIVE_TODO must not contain superseded checkpoint sections", errors)
-    _require(history_path.is_file(), "LIVE_TODO history archive is missing", errors)
-    history = history_path.read_text(encoding="utf-8") if history_path.is_file() else ""
-    _require(
-        "historical and superseded" in history.lower(),
-        "LIVE_TODO history archive must be labeled historical and superseded",
-        errors,
-    )
-    status_counts = Counter(row["status"] for row in statuses)
-    expected_summary = (
-        f"{status_counts['COMPLETE']} `COMPLETE`, "
-        f"{status_counts['IN_PROGRESS']} `IN_PROGRESS`, "
-        f"{status_counts['REMOVED']} `REMOVED`"
-    )
-    summaries = re.findall(
-        r"\d+ `COMPLETE`, \d+ `IN_PROGRESS`, \d+ `REMOVED`", live_todo
-    )
-    _require(
-        summaries == [expected_summary],
-        "LIVE_TODO must contain exactly one current aggregate: "
-        f"expected={expected_summary!r} found={summaries!r}",
+        len(status_todos) == 26
+        and len(set(status_todos)) == 26
+        and set(status_todos) == expected_todos,
+        "closeout_status.csv must define FS-001 through FS-026 exactly once",
         errors,
     )
     _check_markdown_links(errors)

@@ -64,7 +64,8 @@ def _legacy(*, request: str = "req-1", call: int = 1) -> dict:
         "delivery_id": "guidance-1",
         "feature_id": "syntax_result",
         "claim_ids": ["claim-legacy"],
-        "evidence_action": 0,
+        "evidence_action": 1,
+        "claim_anchors": ["pytest -q"],
         "first_eligible_call": call,
         "delivered_before_call": call,
         "delivered_before_model_query": True,
@@ -94,7 +95,8 @@ def _relational(*, extra_process: bool = False) -> dict:
     return {
         "delivery_id": "relational-1",
         "claim_ids": ["process-1"],
-        "evidence_action": 0,
+        "evidence_action": 1,
+        "claim_anchors": ["pytest -q"],
         "first_eligible_call": 1,
         "delivered_before_call": 1,
         "delivered_before_model_query": True,
@@ -137,6 +139,18 @@ def _receipt(*, include_preemptive: bool = True) -> dict:
                 {
                     "claim_ids": ["claim-frontier"],
                     "fact_ids": ["fact-frontier"],
+                    "source_revision": "source-1",
+                    "graph_revision": "graph-1",
+                    "facts": [
+                        {
+                            "fact_id": "fact-frontier",
+                            "claim_id": "claim-frontier",
+                            "path": "src/worker.py",
+                            "source_revision": "source-1",
+                            "graph_revision": "graph-1",
+                            "provenance": {"origin": "task_start"},
+                        }
+                    ],
                     "first_eligible_call": 1,
                     "delivered_before_call": 1,
                     "delivered_before_model_query": True,
@@ -203,6 +217,7 @@ def test_provider_value_contract_accepts_exact_action_local_certificate():
                         "novelty_basis": "new_execution_state_not_represented",
                         "decision_point": "next_executor_request",
                         "replaces_operation": "failure_or_validation_rediscovery",
+                        "materiality_reason": "current_attributable_failure",
                     }
                 ],
             }
@@ -272,7 +287,14 @@ def test_delivery_timing_uses_completed_action_ordinal_not_call_ordinal():
                 "message_index": 1,
                 "chars": 20,
                 "claim_metadata": [
-                    _claim_meta("task-claim", materiality_reason="task_decisive_evidence")
+                    _claim_meta(
+                        "task-claim",
+                        kind="project_check",
+                        authority="deterministic_task_semantics",
+                        materiality_reason="new_unresolved_task_obligation",
+                        gap_text="Discovered project check: pytest -q",
+                        provider_value_anchors=["pytest -q"],
+                    )
                 ],
             }
         ]
@@ -314,6 +336,43 @@ def test_model_authored_claim_metadata_fails_the_shared_delivery_audit():
     _rows, failures, _totals = audit_provider_deliveries(receipt)
 
     assert "task:delivery_unsafe_provider_origin:1:model_authored" in failures
+
+
+def test_task_semantic_claim_cannot_self_certify_without_authority():
+    receipt = _receipt(include_preemptive=False)
+    receipt["guidance_deliveries"] = []
+    receipt["repository_intelligence"]["frontier_deliveries"] = []
+    receipt["task_semantic_substrate"] = {
+        "deliveries": [
+            {
+                "claim_ids": ["task-claim"],
+                "fact_ids": ["task-fact"],
+                "evidence_action": 0,
+                "first_eligible_call": 1,
+                "delivered_before_call": 1,
+                "delivered_before_model_query": True,
+                "not_predictive": True,
+                "one_step_late": False,
+                "request_payload_sha256": "req-1",
+                "provider_messages_sha256": "provider-1",
+                "message_index": 1,
+                "chars": 20,
+                "claim_metadata": [
+                    _claim_meta(
+                        "task-claim",
+                        kind="project_check",
+                        authority="",
+                        gap_text="Discovered project check: pytest -q",
+                        provider_value_anchors=["pytest -q"],
+                    )
+                ],
+            }
+        ]
+    }
+
+    _rows, failures, _totals = audit_provider_deliveries(receipt)
+
+    assert "task:task_semantic_delivery_support_missing:1" in failures
 
 
 def test_provider_messages_hash_must_match_exact_call_context():

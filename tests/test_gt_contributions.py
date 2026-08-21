@@ -104,6 +104,28 @@ def test_contribution_compiler_keeps_instruction_entailed_truth_controller_only(
     assert result.accounting[0].disposition is ContributionDisposition.VALUE_REJECTED
 
 
+def test_provider_value_certificate_requires_explicit_materiality_reason():
+    from gt_engine.contributions import (
+        ProviderValueCertificate,
+        ProviderValueClass,
+        ProviderValueDisposition,
+    )
+
+    certificate = ProviderValueCertificate(
+        claim_id="claim-a",
+        value_class=ProviderValueClass.ACTION_LOCAL_RELATION,
+        disposition=ProviderValueDisposition.SAME_OBSERVATION,
+        authority="certified_structural",
+        source_revision="rev-1",
+        anchors=("src/a.py",),
+        novelty_basis="nonlocal_relation_absent_from_observation",
+        decision_point="next_executor_request",
+        replaces_operation="repository_relationship_search",
+    )
+
+    assert certificate.provider_visible_allowed is False
+
+
 def test_preemptive_value_certificate_requires_certified_semantic_support():
     from gt_engine.contributions import build_provider_value_certificates
 

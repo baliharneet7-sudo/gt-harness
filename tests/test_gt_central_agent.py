@@ -24,6 +24,7 @@ from eval.gt_central_agent import (
     MiniSweCentralAgent,
     MiniSweCentralShadowAgent,
     _bootstrap_provider_call_kwargs,
+    _graph_transition_paths,
     _graph_gate_degraded_fallback,
     _message_context_chars,
     _partition_recovered_repository_failures,
@@ -50,6 +51,7 @@ from gt_engine.central_runtime import (
     FileState,
     WorkspaceSnapshot,
     WorkspaceTransition,
+    classify_change,
     classify_validation_command,
 )
 from gt_engine.decision_point_eval import (
@@ -553,6 +555,9 @@ def test_openai_compatible_route_preserves_exact_deepseek_checkpoint(monkeypatch
 def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("GT_LITELLM_MODEL", "openai/deepseek-v4-flash")
+    monkeypatch.setenv(
+        "GT_PROVIDER_ROUTE_ID", "deepseek:native:api.deepseek.com"
+    )
     monkeypatch.delenv("GT_OPENROUTER_PROVIDER_ONLY", raising=False)
 
     model = MiniSweCentralAgent(
@@ -563,6 +568,9 @@ def test_native_deepseek_route_uses_explicit_litellm_model(monkeypatch, tmp_path
     assert model.config.model_name == "openai/deepseek-v4-flash"
     assert model.config.model_kwargs["api_base"] == "https://api.deepseek.com"
     assert "extra_body" not in model.config.model_kwargs
+    route = _provider_route_configuration(model)
+    assert route["route_id"] == "deepseek:native:api.deepseek.com"
+    assert route["api_host"] == "api.deepseek.com"
 
 
 def test_provider_response_identity_records_actual_model_route_without_secrets():
@@ -1207,6 +1215,60 @@ async def test_oversized_changed_source_is_hydrated_and_digest_verified(tmp_path
     assert receipt["digest_verified"] is True
 
 
+def test_graph_transition_keeps_source_that_becomes_non_source():
+    before = "#!/usr/bin/env python3\nprint('old')\n"
+    after = "not source anymore\n"
+    classified_after = (
+        classify_change("runner", kind="f", content=after),
+    )
+    assert classified_after[0].graph_indexable is False
+    transition = WorkspaceTransition(
+        action_id=1,
+        command="rewrite runner",
+        before_revision="w0",
+        after_revision="w1",
+        modified=("runner",),
+        before_contents={"runner": before},
+        after_contents={"runner": after},
+    )
+
+    assert _graph_transition_paths(
+        classified_after,
+        transition,
+        task_deliverables=(),
+    ) == ("runner",)
+
+
+def test_graph_transition_uses_session_mirror_when_prior_sensor_text_is_uncaptured():
+    session = RepositorySession.temporary(instruction="repair runner")
+    try:
+        (session.root / "runner").write_text(
+            "#!/usr/bin/env python3\nprint('prior large source')\n",
+            encoding="utf-8",
+        )
+        classified_after = (
+            classify_change("runner", kind="f", content="not source anymore\n"),
+        )
+        transition = WorkspaceTransition(
+            action_id=1,
+            command="rewrite runner",
+            before_revision="w0",
+            after_revision="w1",
+            modified=("runner",),
+            before_contents={},
+            after_contents={"runner": "not source anymore\n"},
+        )
+
+        assert _graph_transition_paths(
+            classified_after,
+            transition,
+            task_deliverables=(),
+            repository_session=session,
+        ) == ("runner",)
+    finally:
+        session.close()
+
+
 def test_stable_provider_prefix_counts_only_exact_append_stable_messages():
     previous = [
         {"role": "system", "content": "system"},
@@ -1325,7 +1387,11 @@ async def test_observed_fact_survives_later_empty_action_until_next_provider_req
             return ExecResult(stdout="", return_code=0)
 
     model = _BatchModel(
-        [["printf-shebang", "true"], ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]]
+        [
+            ["printf-shebang", "true"],
+            ["true"],
+            ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"],
+        ]
     )
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -1349,6 +1415,71 @@ async def test_observed_fact_survives_later_empty_action_until_next_provider_req
         for call in receipt["contribution_compiler"]["calls"]
         for row in call["accounting"]
     )
+    observed_rows = [
+        row
+        for call in receipt["contribution_compiler"]["calls"]
+        for row in call["accounting"]
+        if row["surface"] == "observed_execution"
+    ]
+    assert len(observed_rows) == 1
+    assert len(receipt["observed_facts"]["fact_extractions"]) == 1
+    assert receipt["observed_facts"]["max_deliveries_per_task"] == 4
+    assert receipt["observed_facts"]["fact_decisions"] == [
+        {
+            "fact_id": receipt["observed_facts"]["fact_decisions"][0]["fact_id"],
+            "kind": "shebang",
+            "call": 2,
+            "disposition": "value_rejected",
+            "reason_codes": receipt["observed_facts"]["fact_decisions"][0][
+                "reason_codes"
+            ],
+            "contribution_id": receipt["observed_facts"]["fact_decisions"][0][
+                "contribution_id"
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observed_facts_from_later_batch_actions_are_terminally_accounted(tmp_path):
+    class MultiFactEnvironment(_Environment):
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.commands.append((command, env))
+            if command == "printf-shebang":
+                return ExecResult(stdout="#!/usr/bin/env python3\n", return_code=0)
+            if command == "python-version":
+                return ExecResult(stdout="Python 3.12.0\n", return_code=0)
+            if command == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT":
+                return ExecResult(
+                    stdout="COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n", return_code=0
+                )
+            return ExecResult(stdout="", return_code=0)
+
+    model = _BatchModel(
+        [
+            ["printf-shebang", "python-version"],
+            ["true"],
+            ["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"],
+        ]
+    )
+    agent = MiniSweCentralAgent(
+        logs_dir=tmp_path,
+        model_name="test",
+        enable_observed_facts=True,
+        enable_replay_capture=True,
+    )
+    agent._model_factory = lambda: model
+
+    await agent.run("inspect the environment and submit", MultiFactEnvironment(), AgentContext())
+
+    receipt = json.loads((tmp_path / "central_receipt.json").read_text(encoding="utf-8"))
+    extracted = receipt["observed_facts"]["fact_extractions"]
+    decisions = receipt["observed_facts"]["fact_decisions"]
+    assert {row["kind"] for row in extracted} == {"shebang", "tool_version"}
+    assert {row["kind"] for row in decisions} == {"shebang", "tool_version"}
+    assert next(row for row in decisions if row["kind"] == "tool_version")[
+        "disposition"
+    ] == "value_rejected"
 
 
 @pytest.mark.asyncio
@@ -2588,10 +2719,23 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
     assert all(row["status"] == "PASS" for row in mechanical["provider_barriers"])
     certificate = receipt["task_execution_certificate"]
     assert certificate["schema"] == "gt.task_execution_certificate.v1"
-    assert certificate["status"] == "PASS"
+    # The scripted fixture has no real provider route/transport.  The
+    # repository/process mechanics pass, while the full task certificate must
+    # honestly remain blocked on that missing production-only identity.
+    assert certificate["status"] == "BLOCKED"
+    failed_requirements = {
+        row["requirement_id"]: row
+        for row in certificate["requirements"]
+        if row["status"] == "FAILED"
+    }
+    assert set(failed_requirements) == {"provider_route_integrity"}
     assert certificate["pending_requirement_count"] == 0
-    assert certificate["failed_requirement_count"] == 0
-    assert certificate["failures"] == []
+    assert certificate["failed_requirement_count"] == 1
+    assert set(certificate["failures"]) == {
+        "runtime-task:provider_route_id_invalid",
+        "runtime-task:provider_api_base_invalid",
+        "runtime-task:provider_retry_policy_unverified",
+    }
     assert receipt["task_artifact_integrity"]["status"] == "PASS"
     assert receipt["metrics"]["repository_context_deliveries"] >= 1
     assert receipt["preemptive_retrieval"]["deliveries"] == []

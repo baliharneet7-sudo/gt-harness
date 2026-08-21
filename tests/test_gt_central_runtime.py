@@ -1959,6 +1959,140 @@ def test_effect_timing_consumes_evidence_before_the_next_action():
     assert runtime.summary()["consumer_paths"]
 
 
+def test_source_epoch_tracks_authored_source_not_arbitrary_workspace_files():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task(
+        "Run `pytest -q` and write solution.py.",
+        revision="w0",
+        source_revision="s0",
+        explicit_checks=("pytest -q",),
+        task_deliverables=("solution.py",),
+    )
+    passed = classify_validation_command("pytest -q", ("pytest -q",)).with_result(
+        result_code=0,
+        output="1 passed",
+        source_revision="s0",
+        workspace_revision="w0",
+    )
+    runtime.observe_action(
+        action_id=1,
+        command="pytest -q",
+        output="1 passed",
+        returncode=0,
+        transition=WorkspaceTransition(1, "pytest -q", "w0", "w0"),
+        revision="w0",
+        source_revision="s0",
+        validation=passed,
+    )
+
+    # An ordinary non-source workspace artifact must not invalidate a source-
+    # bound pass or advance the feature runtime's source epoch.
+    notes = FileState("f", 5, "1", "1", "", digest="a" * 64, content="notes")
+    runtime.observe_action(
+        action_id=2,
+        command="printf notes > notes.txt",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(
+            2,
+            "printf notes > notes.txt",
+            "w0",
+            "w1",
+            created=("notes.txt",),
+            after_contents={"notes.txt": "notes"},
+        ),
+        revision="w1",
+        source_revision="s0",
+        snapshot=_snapshot("w1", **{"notes.txt": notes}),
+    )
+    summary = runtime.summary()
+    assert summary["source_epoch"] == 0
+    assert summary["declared_check_states"]["pytest -q"] == "passed"
+
+    # A required deliverable can also be authored source.  Its task role must
+    # not prevent the source lifecycle from invalidating the prior pass.
+    source = "def solve():\n    return 1\n"
+    runtime.observe_action(
+        action_id=3,
+        command="write solution.py",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(
+            3,
+            "write solution.py",
+            "w1",
+            "w2",
+            created=("solution.py",),
+            after_contents={"solution.py": source},
+        ),
+        revision="w2",
+        source_revision="s1",
+        snapshot=_snapshot(
+            "w2",
+            **{
+                "notes.txt": notes,
+                "solution.py": FileState(
+                    "f",
+                    len(source),
+                    "2",
+                    "2",
+                    "",
+                    digest="b" * 64,
+                    content=source,
+                ),
+            },
+        ),
+    )
+    summary = runtime.summary()
+    assert summary["source_epoch"] == 1
+    assert summary["declared_check_states"]["pytest -q"] == "stale"
+
+
+def test_extensionless_source_classification_uses_captured_post_action_bytes():
+    runtime = CentralFeatureRuntime(model_visible=True)
+    runtime.begin_task("Repair runner", revision="w0", source_revision="s0")
+    source = "#!/usr/bin/env python3\nprint('fixed')\n"
+    runtime.observe_action(
+        action_id=1,
+        command="write runner",
+        output="",
+        returncode=0,
+        transition=WorkspaceTransition(
+            1,
+            "write runner",
+            "w0",
+            "w1",
+            created=("runner",),
+            after_contents={"runner": source},
+        ),
+        revision="w1",
+        source_revision="s1",
+        snapshot=_snapshot(
+            "w1",
+            **{
+                "runner": FileState(
+                    "f",
+                    len(source),
+                    "1",
+                    "1",
+                    "",
+                    digest="c" * 64,
+                    content=source,
+                )
+            },
+        ),
+    )
+
+    change_surface = next(
+        row["payload"]
+        for row in runtime.summary()["receipts"]
+        if row["feature_id"] == "GT_CHANGE_SURFACE"
+    )
+    assert change_surface["source_relevant"] == ["runner"]
+    assert change_surface["origins"]["model_authored"] == 1
+    assert runtime.summary()["source_epoch"] == 1
+
+
 def test_documented_direct_census_entrypoint_is_executable():
     root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(

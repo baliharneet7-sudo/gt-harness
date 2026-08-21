@@ -775,11 +775,15 @@ def run_provider_free_battery(
 def validate_runbooks(paths: list[Path]) -> list[str]:
     errors: list[str] = []
     required = {
-        "CLEAN_MACHINE_RUNBOOK.md": (
-            "## Preconditions", "## External workflow", "## Acceptance receipt",
+        "GT_RELEASE_DOSSIER.md": (
+            "## Release status authority",
+            "## Mechanical proof chain",
+            "## Paid-dispatch decision",
         ),
-        "ROLLBACK_RUNBOOK.md": (
-            "## Trigger", "## Procedure", "## Verification", "## Receipt",
+        "GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md": (
+            "## Current truth",
+            "## Remaining no-spend verification",
+            "## Paid benchmark authorization gate",
         ),
     }
     secret_re = re.compile(r"(?:api[_-]?key|token|password)\s*[:=]\s*\S+", re.I)
@@ -857,7 +861,10 @@ def main() -> int:
             result["ok"] = False
     elif args.command == "runbooks":
         errors = validate_runbooks(
-            [FINALSTAND / "CLEAN_MACHINE_RUNBOOK.md", FINALSTAND / "ROLLBACK_RUNBOOK.md"]
+            [
+                ROOT / "docs" / "GT_RELEASE_DOSSIER.md",
+                ROOT / "docs" / "GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md",
+            ]
         )
         result = {
             "schema": "gt.finalstand.runbook_validation.v1",

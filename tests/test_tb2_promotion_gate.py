@@ -232,6 +232,48 @@ def test_merged_treatment_marks_missing_ungraded_and_missing_receipts_invalid():
     assert treatment["rows"][0]["censored"] is None
 
 
+def test_merged_treatment_requires_live_bootstrap_route_certification():
+    treatment = treatment_from_merged(
+        {
+            "expected_tasks": 0,
+            "missing_tasks": [],
+            "n_trials": 0,
+            "n_graded": 0,
+            "trial_results": [],
+            "receipt_metrics": [],
+            "treatment_manifest": {},
+            "bootstrap_route_certification": {"valid": False},
+        }
+    )
+
+    assert "bootstrap_route_certification_invalid" in treatment["integrity_failures"]
+
+
+def test_merged_treatment_uses_one_canonical_multi_reward_outcome():
+    treatment = treatment_from_merged(
+        {
+            "expected_tasks": 1,
+            "missing_tasks": [],
+            "n_trials": 1,
+            "n_graded": 1,
+            "trial_results": [
+                {
+                    "task_name": "mixed__trial",
+                    "verifier_result": {
+                        "rewards": {"reward": 1, "secondary": 0}
+                    },
+                }
+            ],
+            "receipt_metrics": [{"task": "mixed", "censored": False}],
+            "treatment_manifest": {"planned_task_ids": ["mixed"]},
+        }
+    )
+
+    assert treatment["rows"][0]["solved"] is False
+    assert treatment["rows"][0]["reward"] == 0.0
+    assert treatment["rows"][0]["raw_rewards"] == {"reward": 1, "secondary": 0}
+
+
 def test_run_32047133236_is_a_permanent_negative_promotion_witness():
     baseline = json.loads(
         (ROOT / "eval/frozen_baselines/tb2_miniswe_20260731.json").read_text(

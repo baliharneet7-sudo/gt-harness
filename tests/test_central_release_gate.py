@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from scripts.central_release_gate import (
@@ -20,6 +23,20 @@ STATIC = {
     "pre_smoke_approved": True,
     "exact_commit": True,
 }
+
+
+def test_operator_entry_point_loads_from_repository_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "scripts/central_release_gate.py", "--help"],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "Consolidated fail-closed release gate" in completed.stdout
 
 
 def _treatment() -> dict:
@@ -314,6 +331,14 @@ def _off() -> dict:
 def _relational_treatment() -> dict:
     receipt = _treatment()
     receipt["treatment_profile"] = "central_relational_v2"
+    receipt["provider_route"] = {
+        "model": "openai/fixture-model",
+        "api_base": "https://provider.example.invalid",
+        "api_host": "provider.example.invalid",
+        "route_id": "fixture:native:provider.example.invalid",
+        "credential_in_receipt": False,
+        "executor_retry_policy": "provider_once_no_retry",
+    }
     receipt["component_configuration"].update(
         {
             "step_limit": 100,
@@ -743,6 +768,13 @@ def _relational_treatment() -> dict:
         "auto_submit_attempts": 0,
         "auto_submit_count": 0,
     }
+    receipt["observed_facts"] = {
+        "enabled": True,
+        "max_deliveries_per_task": 4,
+        "fact_extractions": [],
+        "fact_deliveries": [],
+        "fact_decisions": [],
+    }
     receipt["task_execution_certificate"] = build_task_certificate(
         receipt, label="fixture"
     )
@@ -760,6 +792,57 @@ def test_release_gate_rejects_missing_or_blocked_provider_barrier():
 
     assert check.passed is False
     assert "task:provider_barrier_blocked:1" in check.failures
+
+
+def test_release_gate_rejects_unaccounted_observed_execution_fact():
+    receipt = _relational_treatment()
+    receipt["observed_facts"]["fact_extractions"] = [
+        {"fact_id": "observed-required", "kind": "elf_type"}
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert (
+        "treatment-1:observed_fact_terminal_decision_missing:observed-required"
+        in report.failures
+    )
+
+
+def test_release_gate_accepts_exact_observed_fact_terminal_decision():
+    receipt = _relational_treatment()
+    receipt["observed_facts"]["fact_extractions"] = [
+        {"fact_id": "observed-required", "kind": "elf_type", "eligible_call": 2}
+    ]
+    receipt["observed_facts"]["fact_decisions"] = [
+        {
+            "fact_id": "observed-required",
+            "kind": "elf_type",
+            "call": 2,
+            "eligible_call": 2,
+            "disposition": "terminal_before_next_provider_request",
+            "reason_codes": ["trajectory_ended"],
+        }
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is True
+
+
+def test_release_gate_rejects_fact_id_only_self_authored_decision():
+    receipt = _relational_treatment()
+    receipt["observed_facts"]["fact_extractions"] = [
+        {"fact_id": "observed-required", "kind": "elf_type", "eligible_call": 2}
+    ]
+    receipt["observed_facts"]["fact_decisions"] = [
+        {"fact_id": "observed-required"}
+    ]
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert any("decision_disposition_invalid" in failure for failure in report.failures)
 
 
 def test_release_gate_requires_current_validation_after_material_change():
