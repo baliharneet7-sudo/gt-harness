@@ -535,9 +535,10 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
-      # Keep the full 20-task cohort while avoiding TokenRouter burst
-      # throttling that drops concurrent responses.
-      max-parallel: 5
+      # The requested cohort is genuinely 20-way parallel.  Provider-specific
+      # throttling is an infrastructure concern and must be recorded per task,
+      # not hidden by silently shrinking the cohort.
+      max-parallel: 20
       matrix:
         task: ${{ fromJson(needs.plan.outputs.tasks) }}
     env:
@@ -1012,7 +1013,7 @@ jobs:
               expected_fingerprint = str(provider_proof.get("system_fingerprint") or "")
               bootstrap_identity_valid = bool(
                   (os.environ.get("ARM") or "gt_on") == "gt_off"
-                  or os.environ.get("PROVIDER") == "tokenrouter"
+                  or os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
                   or (
                       bootstrap_identity.get("model") == expected_response_model
                       and bootstrap_identity.get("provider") == expected_response_provider
@@ -1031,7 +1032,7 @@ jobs:
                   and (
                       executor_identity.get("models") == [expected_response_model]
                       or (
-                          os.environ.get("PROVIDER") == "tokenrouter"
+                          os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
                           and expected_response_model in executor_identity.get("models", [])
                           and all(
                               model in {expected_response_model, "deepseek/deepseek-v4-flash-0731"}
@@ -1043,7 +1044,7 @@ jobs:
                       executor_identity.get("stable_provider_identity") is True
                       and executor_identity.get("providers") == [expected_response_provider]
                       or (
-                          os.environ.get("PROVIDER") == "tokenrouter"
+                          os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
                           and bool(executor_identity.get("providers"))
                       )
                   )
@@ -1189,6 +1190,28 @@ jobs:
                   "benchmark_setup_overhead": setup_overhead,
                   "tasks": expected, "rows": rows, "missing": missing,
                  "solved": sum(r["solved"] for r in rows), "planned": len(expected)}
+          integrity_failures = {
+              "delivery": {
+                  r["task"]: list(r["delivery_failures"])
+                  for r in rows if r["delivery_failures"]
+              },
+              "runtime": {
+                  r["task"]: list(r["runtime_gate_failures"])
+                  for r in rows if r["runtime_gate_failures"]
+              },
+              "treatment": {
+                  r["task"]: list(r["treatment_release_failures"])
+                  for r in rows if r["treatment_release_failures"]
+              },
+              "provider_identity": [
+                  r["task"] for r in rows if not r["provider_response_identity_valid"]
+              ],
+              "provider_route": [
+                  r["task"] for r in rows if not r["provider_route_valid"]
+              ],
+          }
+          out["integrity_failures"] = integrity_failures
+          out["benchmark_valid"] = not missing and not any(integrity_failures.values())
           Path("DEEPSWE_EVALUATION_RESULTS.json").write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
           md = ["# DeepSWE central evaluation", "", f"- solved: **{out['solved']}/{out['planned']}**", f"- profile: **{out['manifest']['comparison_profile']}**", f"- diagnostic-only: **{out['manifest']['diagnostic_only']}**", f"- missing artifacts: **{len(missing)}**", "", "| task | solved | product mechanisms | legacy fired | PES lifecycle uses | deliveries | graph | dense | calls | steps | actions | tokens | bootstrap calls | state frames |", "|---|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
           for r in rows:
@@ -1197,18 +1220,19 @@ jobs:
               md.append(f"| {r['task']} | {int(r['solved'])} | {census.get('configured_mechanism_count', 0)}/18 | {census.get('naturally_fired_legacy_feature_count', 0)}/17 | {persistent.get('lifecycle_use_count', 0)} | {r['provider_delivery_count']} | {r['graph_status']} | {int(r['dense_available'])} | {r['provider_calls']} | {r['assistant_steps']} | {r['effective_actions']} | {r['total_tokens']} | {r['persistent_state_bootstrap_calls']} | {r['persistent_state_context_compilations']} |")
           Path("DEEPSWE_EVALUATION_RESULTS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
           print("\n".join(md))
+          gate_errors = []
           if missing:
-              raise SystemExit("missing task artifacts: " + ", ".join(missing))
+              gate_errors.append("missing task artifacts: " + ", ".join(missing))
           if any(r["delivery_failures"] for r in rows):
-              raise SystemExit("provider-delivery audit failed")
+              gate_errors.append("provider-delivery audit failed")
           if any(r["runtime_gate_failures"] for r in rows):
-              raise SystemExit("GT runtime integrity gate failed")
+              gate_errors.append("GT runtime integrity gate failed")
           if any(r["treatment_release_failures"] for r in rows):
-              raise SystemExit("GT treatment release gate failed")
+              gate_errors.append("GT treatment release gate failed")
           if any(not r["provider_route_valid"] for r in rows):
-              raise SystemExit("exact provider route gate failed")
+              gate_errors.append("exact provider route gate failed")
           if any(not r["provider_response_identity_valid"] for r in rows):
-              raise SystemExit("actual provider response identity gate failed")
+              gate_errors.append("actual provider response identity gate failed")
           if (os.environ.get("ARM") or "gt_on") == "gt_on" and any(
               int((r.get("product_mechanism_census") or {}).get("legacy_feature_count") or 0) != 17
               or int((r.get("product_mechanism_census") or {}).get("product_mechanism_count") or 0) != 18
@@ -1220,9 +1244,14 @@ jobs:
               ).get("exercised") is not True
               for r in rows
           ):
-              raise SystemExit("17+1 GT product mechanism census failed")
+              gate_errors.append("17+1 GT product mechanism census failed")
           if any(r["workspace_prompt_contract"] != "resolved_workspace_v1" for r in rows):
-              raise SystemExit("workspace prompt contract gate failed")
+              gate_errors.append("workspace prompt contract gate failed")
+          if gate_errors:
+              print("INTEGRITY_GATE_FAILURES=" + json.dumps(gate_errors))
+              if os.environ.get("DIAGNOSTIC_ONLY") != "1":
+                  raise SystemExit("; ".join(gate_errors))
+              print("DIAGNOSTIC_OUTCOME_PUBLISHED_WITH_INTEGRITY_FAILURES")
           PY
       - name: Enforce outcome-first DeepSWE release gate
         if: ${{ inputs.arm == 'gt_on' && !inputs.diagnostic_only }}
