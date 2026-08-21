@@ -227,6 +227,7 @@ def audit() -> dict[str, bool]:
                                 "novelty_basis": "nonlocal_relation_absent_from_observation",
                                 "decision_point": "next_executor_request",
                                 "replaces_operation": "repository_relationship_search",
+                                "materiality_reason": "decision_relevant_repository_context",
                             }
                         ],
                     }
