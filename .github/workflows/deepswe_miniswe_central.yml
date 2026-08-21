@@ -23,7 +23,7 @@ on:
         required: true
         default: "20"
       task_ids:
-        description: "Optional comma-separated DeepSWE v1.1 catalog task IDs; empty selects two per language"
+        description: "Comma-separated task IDs; task_count=20 must use the frozen repair20-v1 order"
         type: string
         required: false
         default: ""
@@ -177,6 +177,15 @@ jobs:
           if not 1 <= target <= 113:
               raise SystemExit(f"TASK_COUNT must be between 1 and 113, got {target}")
           explicit = [x.strip() for x in os.environ.get("TASK_IDS", "").split(",") if x.strip()]
+          if target == 20:
+              frozen_path = Path(
+                  "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-20_V20.json"
+              )
+              frozen = json.loads(frozen_path.read_text(encoding="utf-8")).get("task_order")
+              if explicit != frozen:
+                  raise SystemExit(
+                      "20-task release requires the explicit frozen repair20-v1 task order"
+                  )
           rows = []
           for p in sorted(root.iterdir()):
               cfg = p / "task.toml"
