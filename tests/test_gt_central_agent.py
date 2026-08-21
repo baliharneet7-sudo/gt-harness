@@ -663,6 +663,8 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert 'MODEL: ${{ inputs.model }}' in workflow
     assert 'model = f"openai/{model}"' in workflow
     assert 'model = "deepseek/deepseek-v4-flash-0731"' not in workflow
+    assert 'deepseek-v4-flash-0731' not in workflow
+    assert 'deepseek/deepseek-v4-flash-0731' not in workflow
     assert "GT_OPENROUTER_PROVIDER_ONLY" in workflow
     assert "allow_fallbacks" in workflow
     assert "GT_OPENROUTER_DATA_COLLECTION" in workflow

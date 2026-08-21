@@ -452,8 +452,13 @@ def audit() -> dict[str, bool]:
             and '"product_mechanism_census": product_mechanism_census' in run_source
             and '"legacy_feature_count": len(CENTRAL_FEATURE_IDS)' in run_source
             and '"product_mechanism_count": len(PRODUCT_MECHANISM_IDS)' in run_source
-            and 'raise SystemExit("17+1 GT product mechanism census failed")'
+            # The workflow deliberately routes all integrity failures through
+            # one merge-gate accumulator.  Do not pin this readiness check to
+            # an obsolete direct SystemExit spelling: verify the live gate
+            # records the 17+1 failure and fails outside diagnostic mode.
+            and 'gate_errors.append("17+1 GT product mechanism census failed")'
             in deepswe_workflow
+            and 'if os.environ.get("DIAGNOSTIC_ONLY") != "1":' in deepswe_workflow
         ),
         "paid_live_retrieval_matches_arb_profile": all(
             marker in verification_workflow

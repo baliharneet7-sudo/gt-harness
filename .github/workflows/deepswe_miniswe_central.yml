@@ -929,11 +929,17 @@ jobs:
               )
               setup_overheads.append(provider_proof.get("benchmark_setup_overhead") or {})
               provider_route = receipt.get("provider_route") or {}
+              configured_model = str(os.environ.get("MODEL") or "").strip()
+              effective_model = (
+                  configured_model
+                  if configured_model.startswith("openai/")
+                  else f"openai/{configured_model}"
+              )
               route_common = bool(
                   provider_proof.get("requested_model")
-                  == "openai/deepseek/deepseek-v4-flash-0731"
+                  == effective_model
                   and provider_route.get("model")
-                  == "openai/deepseek/deepseek-v4-flash-0731"
+                  == effective_model
                   and provider_route.get("credential_in_receipt") is False
                   and provider_route.get("retry_policy")
                   == "provider_once_no_retry"
@@ -1016,7 +1022,9 @@ jobs:
                           os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
                           and expected_response_model in executor_identity.get("models", [])
                           and all(
-                              model in {expected_response_model, "deepseek/deepseek-v4-flash-0731"}
+                              model == expected_response_model
+                              or model.rsplit("/", 1)[-1]
+                              == expected_response_model.rsplit("/", 1)[-1]
                               for model in executor_identity.get("models", [])
                           )
                       )
@@ -1097,18 +1105,6 @@ jobs:
               else "configured"
           )
           model_identity = os.environ.get("MODEL") or ""
-          if os.environ.get("PROVIDER") == "deepseek":
-              if model_identity in {
-                  "deepseek-v4-flash",
-                  "deepseek-v4-flash-0731",
-                  "deepseek/deepseek-v4-flash-0731",
-              }:
-                  model_identity = "deepseek-v4-flash"
-          elif (
-              provider_identity.startswith(("openrouter", "tokenrouter"))
-              and model_identity in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}
-          ):
-              model_identity = "deepseek/deepseek-v4-flash-0731"
           response_models = sorted({
               model
               for row in rows
