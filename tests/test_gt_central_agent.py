@@ -422,7 +422,7 @@ def test_deepswe_workflow_uses_deepseek_v4_and_pins_v11_catalog_snapshot():
         / "deepswe_miniswe_central.yml"
     ).read_text(encoding="utf-8")
 
-    assert 'default: "deepseek-v4-flash-0731"' in workflow
+    assert 'default: "deepseek-v4-flash"' in workflow
     assert workflow.count("ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9") == 2
     assert "v1.0.0" not in workflow
     assert "v1.1 catalog-compatible" in workflow
@@ -660,7 +660,9 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "GT_OPENROUTER_DATA_COLLECTION: allow" in workflow
     assert 'echo "GT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"' in workflow
     assert "GT_COMMIT: ${{ github.sha }}" not in workflow
-    assert 'model = "deepseek/deepseek-v4-flash-0731"' in workflow
+    assert 'MODEL: ${{ inputs.model }}' in workflow
+    assert 'model = f"openai/{model}"' in workflow
+    assert 'model = "deepseek/deepseek-v4-flash-0731"' not in workflow
     assert "GT_OPENROUTER_PROVIDER_ONLY" in workflow
     assert "allow_fallbacks" in workflow
     assert "GT_OPENROUTER_DATA_COLLECTION" in workflow
@@ -707,7 +709,7 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "BASELINE_APPROVED" in workflow
     assert workflow.count('"workspace_prompt_contract": "resolved_workspace_v1"') == 2
     assert "workspace prompt contract gate failed" in workflow
-    assert "needs: [plan, baseline, run]" in workflow
+    assert "needs: [plan, baseline, provider_free, bootstrap_canary, run]" in workflow
     assert "# DeepSWE central evaluation" in workflow
     assert "ten-task smoke" not in workflow
     assert "diagnostic_only:" in workflow

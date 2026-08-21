@@ -99,7 +99,7 @@ state, obligation logic, exact delivery receipts, and legal-source audit.
 
 ## Historical evidence boundary
 
-The numbered documents under [`docs/gt_gitnexus_program`](gt_gitnexus_program/) are
+The numbered documents under [`docs/gt_gitnexus_program`](gt_gitnexus_program/01_GT_CURRENT_ARCHITECTURE.md) are
 research and run snapshots. Their embedded commit IDs and “live-unverified”
 statements describe the dated evidence they analyze; they are not the active
 release identity. The active manifest and this dossier are the current release
@@ -124,4 +124,3 @@ Do not spend while any of these is absent:
 After those conditions pass, the next action is one matched 20-task treatment
 run—not repeated random smoke runs and not a broader benchmark. Report
 integrity, solves, efficiency, and interventions separately.
-
