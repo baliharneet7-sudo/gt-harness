@@ -106,7 +106,11 @@ def _graph_refresh_dispatch_shape(source: str) -> tuple[bool, dict[str, Any]]:
             )
             if "refresh" in target_name:
                 abandonable_workers += 1
-    passed = bool(refresh_calls) and refresh_calls == timeout_bound_calls and not abandonable_workers
+    passed = (
+        bool(refresh_calls)
+        and refresh_calls == timeout_bound_calls
+        and not abandonable_workers
+    )
     return passed, {
         "scope": "source_call_shape_live_receipt_still_required",
         "refresh_calls": refresh_calls,

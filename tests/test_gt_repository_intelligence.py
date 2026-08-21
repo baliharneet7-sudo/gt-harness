@@ -1223,7 +1223,11 @@ def test_central_host_never_wraps_repository_refresh_in_an_abandonable_thread():
     ).read_text(encoding="utf-8")
 
     assert "asyncio.to_thread(session.refresh" not in source
-    assert "asyncio.to_thread(\n                                        repository_session.refresh" not in source
+    abandonable_call = (
+        "asyncio.to_thread(\n"
+        "                                        repository_session.refresh"
+    )
+    assert abandonable_call not in source
     assert "apply_transition_and_refresh(" in source
 
 

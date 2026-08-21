@@ -263,7 +263,10 @@ def test_no_abstention_gap_when_current_receipt_accounts_for_rejected_fact(tmp_p
                 "content": "Type: DYN (Position-Independent Executable file)\nClass: ELF64\n",
                 "extra": {
                     "command": "readelf -h a.out",
-                    "raw_output": "Type: DYN (Position-Independent Executable file)\nClass: ELF64\n",
+                    "raw_output": (
+                        "Type: DYN (Position-Independent Executable file)\n"
+                        "Class: ELF64\n"
+                    ),
                 },
             }
         ]

@@ -14,8 +14,8 @@ from gt_engine.deep_metrics import TrialOutcome, classify_trial_outcome, extract
 from gt_engine.delivery_audit import audit_provider_deliveries
 from gt_engine.intervention_chain import audit_intervention_artifacts
 from gt_engine.treatment_adapter import BenchmarkManifest
-from scripts.central_feature_lifecycle import build_feature_lifecycle_report
 from scripts.central_bootstrap_canary import validate_canary
+from scripts.central_feature_lifecycle import build_feature_lifecycle_report
 from scripts.central_integrity_audit import audit_run_root as audit_integrity_run_root
 from scripts.central_release_gate import audit_treatment_runtime
 from scripts.provider_route_contract import resolve_release_provider_route
