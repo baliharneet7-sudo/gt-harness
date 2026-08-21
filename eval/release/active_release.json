@@ -5,7 +5,7 @@
   "runtime_commit": "933af7d22f27ab20f18fe1e809e28398ba413892",
   "prediction": {
     "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-20_V20.json",
-    "sha256": "f1672a545291a36904d22ee1a23a77380088737cbe92af8295fd478a5cc16993"
+    "sha256": "e9dd8a5a6cd9af0575fd15be2c1de21d0105015933dabcbc5e8bd829acdcca82"
   },
   "baseline": {
     "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
