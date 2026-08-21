@@ -1099,3 +1099,105 @@ def test_refresh_timeout_invalidation_arms_escalation_and_stays_armed():
         assert session.refresh_timeout_escalated is True
     finally:
         session.close()
+
+
+def test_empty_to_materialized_source_refresh_builds_current_graph(tmp_path):
+    """Deterministic reproduction of the count-dataset-tokens transition.
+
+    A task whose workspace starts empty (no supported source) legitimately
+    reports NOT_APPLICABLE.  When the model materializes source mid-task, the
+    very next refresh must build and certify a current graph bound to the new
+    source revision -- never fail the whole task on the empty start state.
+    """
+    session = RepositorySession(
+        root=tmp_path / "mirror",
+        state_dir=tmp_path / "state",
+        instruction="fix the bug",
+    )
+    try:
+        session.root.mkdir(parents=True, exist_ok=True)
+        evidence = session.refresh(source_revision="r0-empty")
+        assert evidence.substrate_ready is False
+        assert evidence.index is None or not evidence.index.graph_db
+
+        transition = SimpleNamespace(
+            sensor_healthy=True,
+            deleted=(),
+            after_contents={"app.py": "def greet():\n    return 1\n"},
+            changed_paths=("app.py",),
+        )
+        assert session.apply_transition(transition, source_revision="r1-source")
+        evidence = session.refresh(source_revision="r1-source")
+
+        assert evidence.substrate_ready is True
+        assert evidence.substrate_status == RepositorySubstrateStatus.HEALTHY_CURRENT.value
+        assert evidence.index_current is True
+        assert evidence.intelligence_valid is True
+        assert evidence.index is not None
+        assert evidence.index.graph_db
+        assert evidence.index.source_revision == "r1-source"
+        assert evidence.source_revision == "r1-source"
+        assert bool(evidence.graph_revision)
+        assert session.fresh is True
+        assert session.refresh_timeout_escalated is False
+    finally:
+        session.close()
+
+
+def test_failed_refresh_never_serves_previous_graph_as_current(tmp_path):
+    """A refresh timeout must never let the host deliver the prior graph."""
+    session = RepositorySession(
+        root=tmp_path / "mirror",
+        state_dir=tmp_path / "state",
+        instruction="fix the bug",
+    )
+    try:
+        session.root.mkdir(parents=True, exist_ok=True)
+        (session.root / "app.py").write_text("def greet():\n    return 1\n", encoding="utf-8")
+        evidence = session.refresh(source_revision="r1")
+        assert evidence.substrate_ready is True
+
+        session.invalidate(source_revision="r2", status="refresh_timeout")
+        assert session.fresh is False
+        assert session.refresh_timeout_escalated is True
+
+        queried = session.query(
+            source_revision="r2",
+            active_paths=("app.py",),
+            boundary="post_validate",
+        )
+        assert queried.substrate_ready is False
+        assert queried.status == "refresh_timeout"
+        assert queried.graph_revision == ""
+    finally:
+        session.close()
+
+
+def test_refresh_recovers_after_timeout_invalidation(tmp_path):
+    """After a timed-out refresh, the next source transition retries and the
+    escalated budget is consumed (flag reset on success)."""
+    session = RepositorySession(
+        root=tmp_path / "mirror",
+        state_dir=tmp_path / "state",
+        instruction="fix the bug",
+    )
+    try:
+        session.root.mkdir(parents=True, exist_ok=True)
+        session.invalidate(source_revision="r1", status="refresh_timeout")
+        assert session.refresh_timeout_escalated is True
+
+        transition = SimpleNamespace(
+            sensor_healthy=True,
+            deleted=(),
+            after_contents={"app.py": "def greet():\n    return 1\n"},
+            changed_paths=("app.py",),
+        )
+        assert session.apply_transition(transition, source_revision="r2")
+        evidence = session.refresh(source_revision="r2")
+
+        assert evidence.substrate_ready is True
+        assert evidence.intelligence_valid is True
+        assert session.fresh is True
+        assert session.refresh_timeout_escalated is False
+    finally:
+        session.close()
