@@ -1,11 +1,11 @@
 {
   "schema": "gt.release_manifest.v1",
-  "release_id": "gt-final-mechanical-completeness-2026-08-21-v23",
+  "release_id": "gt-final-mechanical-completeness-2026-08-21-v24",
   "task_profile": "repair20-v1",
-  "runtime_commit": "b383a9a781ee3d858d3a5aa08d7c25afad6f1c53",
+  "runtime_commit": "1b901d25ac23ae72fdcc75c4c6ac00075def89ef",
   "prediction": {
-    "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V23.json",
-    "sha256": "3be2cdcb32bc24b7b200a6ae47c17ba427f67c02efdb3b33990c794f9f500224"
+    "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V24.json",
+    "sha256": "dc8a957e7f9a33b8fe66f8ca0329d414e38acf8cb3780b211469d0ecb9d74278"
   },
   "baseline": {
     "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
@@ -17,6 +17,6 @@
   },
   "allowed_post_runtime_paths": [
     "eval/release/active_release.json",
-    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V23.json"
+    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V24.json"
   ]
 }
