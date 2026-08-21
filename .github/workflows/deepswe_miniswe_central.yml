@@ -16,7 +16,7 @@ on:
         description: "DeepSeek V4 Flash model id passed to litellm"
         type: string
         required: true
-        default: "deepseek-v4-flash-0731"
+        default: "deepseek-v4-flash"
       parallel:
         description: "Maximum concurrent DeepSWE tasks"
         type: string
@@ -276,16 +276,12 @@ jobs:
           provider = os.environ.get("PROVIDER") or "openrouter"
           expected_model = os.environ["MODEL"]
           if provider == "deepseek":
-              if expected_model in {
-                  "deepseek-v4-flash",
-                  "deepseek-v4-flash-0731",
-                  "deepseek/deepseek-v4-flash-0731",
-              }:
-                  expected_model = "deepseek-v4-flash"
+              if expected_model.startswith("openai/"):
+                  expected_model = expected_model.removeprefix("openai/")
               expected_provider = "deepseek:native:api.deepseek.com"
           else:
-              if expected_model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-                  expected_model = "deepseek/deepseek-v4-flash-0731"
+              if expected_model.startswith("openai/"):
+                  expected_model = expected_model.removeprefix("openai/")
               expected_provider = "openrouter:deepseek:only:no-fallback"
           required = {
               "benchmark_sha": os.environ["BENCH_SHA"],
@@ -420,8 +416,6 @@ jobs:
                   handle.write(f"{name}={value}\n")
 
           if provider == "openrouter":
-              if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-                  model = "deepseek/deepseek-v4-flash-0731"
               if not model.startswith("openai/"):
                   model = f"openai/{model}"
               export("GT_LITELLM_MODEL", model)
@@ -429,8 +423,6 @@ jobs:
               export("GT_OPENROUTER_PROVIDER_ONLY", "deepseek")
               export("GT_OPENROUTER_DATA_COLLECTION", "allow")
           elif provider == "tokenrouter":
-              if model in {"deepseek-v4-flash", "deepseek-v4-flash-0731"}:
-                  model = "deepseek/deepseek-v4-flash-0731"
               if not model.startswith("openai/"):
                   model = f"openai/{model}"
               tokenrouter_key = os.environ["TOKENROUTER_API_KEY"].strip()
@@ -470,13 +462,7 @@ jobs:
               export("OPENAI_BASE_URL", tokenrouter_base)
               export("OPENAI_API_KEY", tokenrouter_key)
           elif provider == "deepseek":
-              if model in {
-                  "deepseek-v4-flash",
-                  "deepseek-v4-flash-0731",
-                  "deepseek/deepseek-v4-flash-0731",
-              }:
-                  model = "openai/deepseek-v4-flash"
-              elif not model.startswith("openai/"):
+              if not model.startswith("openai/"):
                   model = f"openai/{model}"
               export("GT_LITELLM_MODEL", model)
               export("OPENAI_BASE_URL", os.environ["PROVIDER_BASE_URL"])
@@ -658,6 +644,11 @@ jobs:
                   print(f"::add-mask::{clean}")
                   out.write(f"{name}={clean}\n")
           PY
+          case "$MODEL" in
+            openai/*) executor_model="$MODEL" ;;
+            *) executor_model="openai/$MODEL" ;;
+          esac
+          echo "GT_LITELLM_MODEL=${executor_model}" >> "$GITHUB_ENV"
           if [ "${PROVIDER:-configured}" = "openrouter" ]; then
             # Force Mini-SWE's actual model builder onto OpenRouter.  Merely
             # supplying OPENROUTER_API_KEY is insufficient: a model string
@@ -668,19 +659,9 @@ jobs:
           elif [ "${PROVIDER:-configured}" = "tokenrouter" ]; then
             echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${TOKENROUTER_API_KEY}" >> "$GITHUB_ENV"
-            # Keep the executor on the same OpenAI-compatible model identity
-            # that the bootstrap canary authenticated.  Without this export,
-            # LiteLLM interprets `deepseek/...` as its native DeepSeek route
-            # even though the endpoint is TokenRouter.
-            case "$MODEL" in
-              openai/*) executor_model="$MODEL" ;;
-              *) executor_model="openai/$MODEL" ;;
-            esac
-            echo "GT_LITELLM_MODEL=${executor_model}" >> "$GITHUB_ENV"
           elif [ "${PROVIDER:-configured}" = "deepseek" ]; then
             echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}" >> "$GITHUB_ENV"
             echo "OPENAI_API_KEY=${DEEPSEEK_API_KEY}" >> "$GITHUB_ENV"
-            echo "GT_LITELLM_MODEL=openai/deepseek-v4-flash" >> "$GITHUB_ENV"
           fi
       - name: Resolve exact DeepSWE task budget
         run: |
@@ -849,8 +830,8 @@ jobs:
           if-no-files-found: warn
 
   merge:
-    needs: [plan, baseline, run]
-    if: always()
+    needs: [plan, baseline, provider_free, bootstrap_canary, run]
+    if: ${{ always() && needs.plan.result == 'success' && needs.provider_free.result == 'success' && needs.bootstrap_canary.result == 'success' && needs.run.result != 'skipped' && (inputs.arm == 'gt_off' || inputs.diagnostic_only || needs.baseline.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
