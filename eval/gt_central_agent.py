@@ -6712,14 +6712,32 @@ class MiniSweCentralAgent(BaseAgent):
                         source_revision=graph_source_revision,
                     )
                 if repository_context_projection is not None:
+                    # The projection contains every candidate contribution,
+                    # including rows rejected by the shared compiler budget.
+                    # Only the selected contributions are present in the
+                    # provider payload and may be certified as delivered.
+                    # Publishing the full projection here creates phantom
+                    # claim IDs (and value certificates) in the delivery
+                    # receipt; FEAL exposed this when a budgeted process claim
+                    # was audited as visible although only diagnostics were
+                    # sent to the model.
+                    selected_repository_contributions = tuple(
+                        contribution
+                        for contribution in repository_context_projection.contributions
+                        if contribution_selected(contribution.surface)
+                    )
                     provider_evidence.prepare(
                         surface=ProviderEvidenceSurface.REPOSITORY_CONTEXT,
                         fact_ids=tuple(
                             fact_id
-                            for contribution in repository_context_projection.contributions
+                            for contribution in selected_repository_contributions
                             for fact_id in contribution.fact_ids
                         ),
-                        claim_ids=repository_context_projection.claim_ids,
+                        claim_ids=tuple(
+                            claim_id
+                            for contribution in selected_repository_contributions
+                            for claim_id in contribution.claim_ids
+                        ),
                         evidence_action=retrieval_evidence_action,
                         eligible_call=retrieval_eligible_call,
                         prepared_call=calls,
