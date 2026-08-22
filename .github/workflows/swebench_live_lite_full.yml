@@ -1643,6 +1643,9 @@ jobs:
           fi
 
           # Run the agent directly in the pre-pulled GHCR task image
+          # Ox Alpha is not in LiteLLM's static price table.  The paired
+          # configs use cost_tracking=ignore_errors; the container receives
+          # the same policy so price lookup cannot abort a provider request.
           _GT_AGENT_STARTED_EPOCH=$(date +%s)
           timeout --signal=TERM --kill-after=30s "${GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S}s" \
           docker run --rm=false \
@@ -1675,6 +1678,7 @@ jobs:
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_XSESSION_DIR="/opt/gt_xsession" \
             -e GT_BASELINE=$GT_BASELINE_FLAG \
+            -e MSWEA_COST_TRACKING="ignore_errors" \
             $MODEL_ENV \
             --entrypoint "" \
             "$TASK_IMAGE_IMMUTABLE" \
