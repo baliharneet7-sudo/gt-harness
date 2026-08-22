@@ -60,10 +60,23 @@ class RepositoryMCP:
         if receipt.build_status in {GraphStatus.ABSENT, GraphStatus.STALE}:
             self.service.build()
 
-    def query(self, mode: str, symbol: str, limit: int = 50) -> dict[str, Any]:
+    def query(
+        self,
+        mode: str,
+        symbol: str,
+        limit: int = 50,
+        file_path: str = "",
+        min_confidence: float = 0.5,
+    ) -> dict[str, Any]:
         self._refresh_if_stale()
         try:
-            return self.service.query(mode, symbol, limit=limit)
+            return self.service.query(
+                mode,
+                symbol,
+                limit=limit,
+                file_path=file_path or None,
+                min_confidence=min_confidence,
+            )
         except (GraphNotReadyError, ValueError) as exc:
             receipt = self.service.status()
             return {
@@ -123,10 +136,16 @@ def create_server(root: str | Path, *, state_dir: str | Path | None = None) -> F
         return controller.status(verbose=verbose)
 
     @app.tool(structured_output=False)
-    async def gt_query(mode: str, symbol: str, limit: int = 50) -> dict[str, Any]:
-        """Query definitions, relationships, tests, or impact with source evidence."""
+    async def gt_query(
+        mode: str,
+        symbol: str,
+        limit: int = 50,
+        file_path: str = "",
+        min_confidence: float = 0.5,
+    ) -> dict[str, Any]:
+        """Query exact, confidence-bounded graph relationships with source evidence."""
 
-        return controller.query(mode, symbol, limit)
+        return controller.query(mode, symbol, limit, file_path, min_confidence)
 
     @app.tool(structured_output=False)
     async def gt_context(task: str, limit: int = 12) -> dict[str, Any]:
@@ -135,10 +154,15 @@ def create_server(root: str | Path, *, state_dir: str | Path | None = None) -> F
         return controller.context(task, limit)
 
     @app.tool(structured_output=False)
-    async def gt_impact(symbol: str, limit: int = 50) -> dict[str, Any]:
+    async def gt_impact(
+        symbol: str,
+        limit: int = 50,
+        file_path: str = "",
+        min_confidence: float = 0.5,
+    ) -> dict[str, Any]:
         """Return source-evidenced reverse structural dependencies for a symbol."""
 
-        return controller.query("impact", symbol, limit)
+        return controller.query("impact", symbol, limit, file_path, min_confidence)
 
     return app
 

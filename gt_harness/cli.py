@@ -53,6 +53,13 @@ def _parser() -> argparse.ArgumentParser:
     query.add_argument("--root", default=".")
     query.add_argument("--state-dir", default=None)
     query.add_argument("--limit", type=int, default=50)
+    query.add_argument("--file", default=None, help="Disambiguate a symbol by repository path.")
+    query.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.5,
+        help="Minimum relationship confidence (default: 0.5).",
+    )
     query.add_argument("--refresh", action="store_true")
 
     mcp = sub.add_parser("mcp", help="Serve the production repository-intelligence MCP.")
@@ -164,7 +171,15 @@ def _graph(args: argparse.Namespace) -> int:
     if args.refresh and not service.status().query_ready:
         service.build()
     try:
-        _emit(service.query(args.mode, args.symbol, limit=args.limit))
+        _emit(
+            service.query(
+                args.mode,
+                args.symbol,
+                limit=args.limit,
+                file_path=args.file,
+                min_confidence=args.min_confidence,
+            )
+        )
         return 0
     except (GraphNotReadyError, ValueError) as exc:
         _emit({"schema": "gt.graph_query.v1", "status": "FAILED", "error": str(exc)})

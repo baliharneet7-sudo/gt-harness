@@ -810,7 +810,15 @@ class RepositoryGraphService:
             raise GraphNotReadyError(f"graph is not query-ready: {reasons}")
         return receipt, Path(receipt.persistent_graph_path)
 
-    def query(self, mode: str, symbol: str, *, limit: int = 50) -> dict[str, Any]:
+    def query(
+        self,
+        mode: str,
+        symbol: str,
+        *,
+        limit: int = 50,
+        file_path: str | None = None,
+        min_confidence: float = 0.5,
+    ) -> dict[str, Any]:
         receipt, graph = self._ready_graph()
         requested = str(mode or "").strip().lower()
         normalized = QUERY_MODE_ALIASES.get(requested, requested)
@@ -819,89 +827,136 @@ class RepositoryGraphService:
             raise ValueError(f"unsupported query mode: {mode}; supported modes: {choices}")
         bound = max(1, min(int(limit), 200))
         token = str(symbol or "").strip()
+        selected_file = str(file_path or "").strip().replace("\\", "/")
+        confidence_floor = max(0.0, min(float(min_confidence), 1.0))
         connection = sqlite3.connect(f"file:{graph.as_posix()}?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
+        resolution_status = "READY"
+        resolved_symbol: dict[str, Any] | None = None
+        ambiguous_candidates: list[dict[str, Any]] = []
         try:
             node_projection = (
                 "n.id,n.label,n.name,n.qualified_name,n.file_path,n.start_line,n.end_line,"
                 "n.signature,n.language,n.is_test"
             )
             if normalized == "definition":
+                file_clause = "AND n.file_path=?" if selected_file else ""
+                parameters: tuple[Any, ...] = (token, token, selected_file, token, bound)
+                if not selected_file:
+                    parameters = (token, token, token, bound)
                 rows = connection.execute(
                     f"SELECT {node_projection} FROM nodes n "
-                    "WHERE n.name=? OR n.qualified_name=? "
+                    f"WHERE (n.name=? OR n.qualified_name=?) {file_clause} "
                     "ORDER BY CASE WHEN n.name=? THEN 0 ELSE 1 END,n.file_path,n.start_line "
                     "LIMIT ?",
-                    (token, token, token, bound),
+                    parameters,
                 ).fetchall()
             elif normalized == "search":
+                file_clause = "AND n.file_path=?" if selected_file else ""
+                parameters = (
+                    token,
+                    token,
+                    f"%{token}%",
+                    f"%{token}%",
+                    selected_file,
+                    token,
+                    token,
+                    bound,
+                )
+                if not selected_file:
+                    parameters = (
+                        token,
+                        token,
+                        f"%{token}%",
+                        f"%{token}%",
+                        token,
+                        token,
+                        bound,
+                    )
                 rows = connection.execute(
                     f"SELECT {node_projection} FROM nodes n "
-                    "WHERE n.name=? OR n.qualified_name=? OR n.name LIKE ? "
-                    "OR n.qualified_name LIKE ? "
+                    "WHERE (n.name=? OR n.qualified_name=? OR n.name LIKE ? "
+                    f"OR n.qualified_name LIKE ?) {file_clause} "
                     "ORDER BY CASE WHEN n.name=? THEN 0 WHEN n.qualified_name=? THEN 1 ELSE 2 END,"
                     "n.file_path,n.start_line LIMIT ?",
-                    (token, token, f"%{token}%", f"%{token}%", token, token, bound),
-                ).fetchall()
-            elif normalized in {
-                "callers",
-                "importers",
-                "implementations",
-                "subclasses",
-                "references",
-                "impact",
-                "tests",
-            }:
-                edge_types = {
-                    "callers": ("CALLS",),
-                    "importers": ("IMPORTS", "IMPORTS_FROM"),
-                    "implementations": ("IMPLEMENTS",),
-                    "subclasses": ("EXTENDS", "INHERITS"),
-                    "references": ("REFERENCES", "CALLS", "IMPORTS", "IMPORTS_FROM"),
-                    "impact": (
-                        "CALLS",
-                        "REFERENCES",
-                        "IMPORTS",
-                        "IMPORTS_FROM",
-                        "IMPLEMENTS",
-                        "EXTENDS",
-                        "INHERITS",
-                    ),
-                    "tests": ("CALLS", "REFERENCES", "TESTS"),
-                }[normalized]
-                placeholders = ",".join("?" for _ in edge_types)
-                test_clause = "AND n.is_test=1" if normalized == "tests" else ""
-                rows = connection.execute(
-                    f"SELECT DISTINCT {node_projection},e.type AS relationship,"
-                    "e.source_file,e.source_line,"
-                    "e.confidence,e.resolution_method,e.verification_status "
-                    "FROM nodes target JOIN edges e ON e.target_id=target.id "
-                    "JOIN nodes n ON n.id=e.source_id "
-                    "WHERE (target.name=? OR target.qualified_name=?) "
-                    f"AND e.type IN ({placeholders}) "
-                    f"{test_clause} ORDER BY e.confidence DESC,n.file_path,n.start_line LIMIT ?",
-                    (token, token, *edge_types, bound),
+                    parameters,
                 ).fetchall()
             else:
-                edge_types = ("CALLS",) if normalized == "callees" else ("IMPORTS", "IMPORTS_FROM")
-                placeholders = ",".join("?" for _ in edge_types)
-                rows = connection.execute(
-                    f"SELECT DISTINCT {node_projection},e.type AS relationship,"
-                    "e.source_file,e.source_line,"
-                    "e.confidence,e.resolution_method,e.verification_status "
-                    "FROM nodes source JOIN edges e ON e.source_id=source.id "
-                    "JOIN nodes n ON n.id=e.target_id "
-                    "WHERE (source.name=? OR source.qualified_name=?) "
-                    f"AND e.type IN ({placeholders}) "
-                    "ORDER BY e.confidence DESC,n.file_path,n.start_line LIMIT ?",
-                    (token, token, *edge_types, bound),
+                file_clause = "AND n.file_path=?" if selected_file else ""
+                anchor_parameters: tuple[Any, ...] = (token, token, selected_file)
+                if not selected_file:
+                    anchor_parameters = (token, token)
+                anchor_rows = connection.execute(
+                    f"SELECT {node_projection} FROM nodes n "
+                    f"WHERE (n.name=? OR n.qualified_name=?) {file_clause} "
+                    "ORDER BY n.file_path,n.start_line",
+                    anchor_parameters,
                 ).fetchall()
+                exact_qualified = [row for row in anchor_rows if row["qualified_name"] == token]
+                anchors = exact_qualified if exact_qualified else list(anchor_rows)
+                if not anchors:
+                    resolution_status = "NOT_FOUND"
+                    rows = []
+                elif len(anchors) > 1:
+                    resolution_status = "AMBIGUOUS"
+                    ambiguous_candidates = [dict(row) for row in anchors[:bound]]
+                    rows = []
+                else:
+                    resolved_symbol = dict(anchors[0])
+                    anchor_id = int(anchors[0]["id"])
+                    reverse = normalized in {
+                        "callers",
+                        "importers",
+                        "implementations",
+                        "subclasses",
+                        "references",
+                        "impact",
+                        "tests",
+                    }
+                    edge_types = {
+                        "callers": ("CALLS",),
+                        "callees": ("CALLS",),
+                        "imports": ("IMPORTS", "IMPORTS_FROM"),
+                        "importers": ("IMPORTS", "IMPORTS_FROM"),
+                        "implementations": ("IMPLEMENTS",),
+                        "subclasses": ("EXTENDS", "INHERITS"),
+                        "references": ("REFERENCES", "CALLS", "IMPORTS", "IMPORTS_FROM"),
+                        "impact": (
+                            "CALLS",
+                            "REFERENCES",
+                            "IMPORTS",
+                            "IMPORTS_FROM",
+                            "IMPLEMENTS",
+                            "EXTENDS",
+                            "INHERITS",
+                        ),
+                        "tests": ("CALLS", "REFERENCES", "TESTS"),
+                    }[normalized]
+                    placeholders = ",".join("?" for _ in edge_types)
+                    test_clause = "AND n.is_test=1" if normalized == "tests" else ""
+                    edge_column = "target_id" if reverse else "source_id"
+                    node_column = "source_id" if reverse else "target_id"
+                    rows = connection.execute(
+                        f"SELECT DISTINCT {node_projection},e.type AS relationship,"
+                        "e.source_file,e.source_line,"
+                        "e.confidence,e.resolution_method,e.verification_status "
+                        f"FROM edges e JOIN nodes n ON n.id=e.{node_column} "
+                        f"WHERE e.{edge_column}=? AND e.type IN ({placeholders}) "
+                        f"AND e.confidence>=? {test_clause} "
+                        "ORDER BY e.confidence DESC,n.file_path,n.start_line LIMIT ?",
+                        (anchor_id, *edge_types, confidence_floor, bound),
+                    ).fetchall()
         finally:
             connection.close()
+        if normalized in {"definition", "search"}:
+            resolution_status = "READY" if rows else "NOT_FOUND"
         return {
             "schema": "gt.graph_query.v1",
+            "status": resolution_status,
             "mode": normalized,
             "symbol": token,
+            "file_path": selected_file,
+            "min_confidence": confidence_floor,
             "repository": receipt.repository,
             "commit_sha": receipt.commit_sha,
             "source_revision": receipt.source_revision,
@@ -909,6 +964,8 @@ class RepositoryGraphService:
             "build_status": receipt.build_status.value,
             "evidence": [dict(row) for row in rows],
             "count": len(rows),
+            "resolved_symbol": resolved_symbol,
+            "ambiguous_candidates": ambiguous_candidates,
             "degraded_reasons": list(receipt.degraded_reasons),
         }
 

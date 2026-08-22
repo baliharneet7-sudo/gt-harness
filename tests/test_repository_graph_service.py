@@ -63,7 +63,11 @@ def _database(path: Path) -> None:
             );
             INSERT INTO nodes VALUES
               (1,'function','answer','answer','app.py',1,2,'answer()','',1,0,'python',NULL,'repo'),
-              (2,'method','helper','Answer.answer','app.py',4,5,'helper()','',0,0,'python',NULL,'repo');
+              (2,'method','helper','Answer.answer','app.py',4,5,'helper()','',0,0,'python',NULL,'repo'),
+              (3,'function','invoke','invoke','app.py',7,8,'invoke()','',0,0,'python',NULL,'repo');
+            INSERT INTO edges VALUES
+              (1,2,1,'CALLS',4,'app.py','name_match',0.2,'','low',2,'name_match','unverified','repo'),
+              (2,3,1,'CALLS',8,'app.py','same_file',1.0,'','high',1,'same_file','verified','repo');
             """
         )
         connection.commit()
@@ -133,6 +137,42 @@ def test_definition_query_is_exact_and_accepts_documented_plural_alias(tmp_path:
 
     assert result["mode"] == "definition"
     assert [row["name"] for row in result["evidence"]] == ["answer"]
+
+    default_callers = service.query("callers", "answer")
+    forensic_callers = service.query("callers", "answer", min_confidence=0.0)
+    assert [row["name"] for row in default_callers["evidence"]] == ["invoke"]
+    assert [row["name"] for row in forensic_callers["evidence"]] == ["invoke", "helper"]
+
+
+def test_relationship_query_refuses_to_merge_ambiguous_symbols(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    connection = sqlite3.connect(graph)
+    try:
+        connection.execute(
+            "INSERT INTO nodes VALUES "
+            "(4,'function','answer','answer','other.py',1,2,'answer()','',1,0,'python',NULL,'repo')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    service = RepositoryGraphService(root, state_dir=state)
+
+    ambiguous = service.query("callers", "answer")
+    selected = service.query("callers", "answer", file_path="app.py")
+
+    assert ambiguous["status"] == "AMBIGUOUS"
+    assert ambiguous["evidence"] == []
+    assert len(ambiguous["ambiguous_candidates"]) == 2
+    assert selected["status"] == "READY"
+    assert [row["name"] for row in selected["evidence"]] == ["invoke"]
 
 
 def test_cli_receipt_is_compact_by_default_and_lossless_when_verbose(tmp_path: Path) -> None:
