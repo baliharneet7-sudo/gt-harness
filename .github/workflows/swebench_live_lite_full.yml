@@ -1260,7 +1260,7 @@ jobs:
             exit 1
           fi
           PROOF_STATE=$(python3 - <<'PY'
-          import json, pathlib
+          import json, os, pathlib
           p = pathlib.Path("/tmp/gt/proof_status.json")
           if not p.exists():
               print("missing")
@@ -1728,10 +1728,14 @@ jobs:
               # (system pip + uv tool venv), else every task rewards 0 at step 1. The GT_PY-targeted
               # belt AFTER interpreter resolution (below) is the load-bearing guarantee; these --with/
               # pip additions cover the happy path. GUARD: single-quoted docker block — NO apostrophe.
-              python -m pip install --quiet datacurve-pier mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || python -m pip install --quiet mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || {
+            # Pin LiteLLM: unbounded transitive installs pulled a broken
+            # reasoning-message model (Message.model_rebuild failure) in the
+            # smoke.  This is a runtime compatibility pin, not a model/provider
+            # selection, and is applied in the same environment as the runner.
+            python -m pip install --quiet "litellm==1.82.3" datacurve-pier mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || python -m pip install --quiet "litellm==1.82.3" mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || {
                 curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
                 export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null
+                uv tool install --python 3.11 --with "litellm==1.82.3" --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null || uv tool install --with "litellm==1.82.3" --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null
               }
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
@@ -1793,6 +1797,11 @@ jobs:
                   && echo "[GT] litellm dep OK in GT_PY: $_dep" \
                   || echo "[GT] WARN litellm dep MISSING in GT_PY: $_dep"
               done
+              # Fail before dispatch if the exact LiteLLM/Pydantic combination
+              # cannot construct the response model.  A late step-1 provider
+              # exception is an infrastructure failure, not an unsolved task.
+              "$GT_PY" -c "import litellm; from litellm.types.utils import ModelResponse; ModelResponse(); print('[GT] litellm response model probe OK')" \
+                || { echo "FATAL: incompatible LiteLLM response-model runtime"; exit 1; }
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
@@ -3212,8 +3221,8 @@ jobs:
               "pre_specified": True,
           }), encoding="utf-8")
           (d / "system_identity.json").write_text(json.dumps({
-              "model": "deepseek-chat",
-              "provider": "deepseek",
+              "model": os.environ.get("INPUT_MODEL", ""),
+              "provider": os.environ.get("INPUT_MODEL", "").split("/", 1)[0],
               "scaffold": "mini-swe-agent",
               "tools": "fixed tool contract",
               "gt_profile": "2",
