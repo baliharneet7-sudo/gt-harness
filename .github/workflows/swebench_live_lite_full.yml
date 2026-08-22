@@ -1937,7 +1937,7 @@ jobs:
               # RepeatedFormatError).  This prevents a model/runner failure
               # from becoming an indistinguishable missing-artifact failure.
               if [ "${GT_RUNNER_RC:-0}" -ne 0 ]; then
-                python3 -c 'import json,sys; print(json.dumps({"schema":"gt.runner_failure.v1","instance_id":sys.argv[2],"exit_code":int(sys.argv[1]),"classification":"agent_or_model_failure","artifact_complete":True}))' "$GT_RUNNER_RC" "$MTASK" > /gt_out/runner_failure.json
+                python3 -c "import json,sys; print(json.dumps({'schema':'gt.runner_failure.v1','instance_id':sys.argv[2],'exit_code':int(sys.argv[1]),'classification':'agent_or_model_failure','artifact_complete':True}))" "$GT_RUNNER_RC" "$MTASK" > /gt_out/runner_failure.json
               fi
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
