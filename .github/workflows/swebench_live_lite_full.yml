@@ -1150,6 +1150,7 @@ jobs:
           INPUT_MODEL: ${{ inputs.model }}
           INPUT_BASELINE: ${{ inputs.baseline }}
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
+          GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_API_KEY }}
           REPO_OWNER: ${{ github.repository_owner }}
