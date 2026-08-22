@@ -1172,6 +1172,7 @@ jobs:
           canonical = re.compile(r'^[0-9a-f]{40,64}$')
           digest = re.compile(r'^[0-9a-f]{64}$')
           file_sha = lambda path: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+          baseline = os.environ.get('GT_ID_BASELINE') == '1'
           required = {
               'schema': doc.get('schema') == 'gt.run_identity.v1',
               'gt_ref_prepared_sha': bool(canonical.fullmatch(str(doc.get('gt_ref_prepared_sha') or ''))),
