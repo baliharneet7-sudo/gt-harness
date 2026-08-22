@@ -35,6 +35,10 @@ on:
         description: "Provider API key supplied at dispatch time; falls back to the repository secret when omitted."
         required: false
         default: ""
+      base_url:
+        description: "OpenAI-compatible provider base URL for OpenAI-compatible model IDs (for example, OpenRouter)."
+        required: false
+        default: ""
       mode:
         description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (300)"
         required: true
@@ -699,6 +703,7 @@ jobs:
           TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_API_KEY }}
+          INPUT_BASE_URL: ${{ inputs.base_url }}
         shell: bash
         run: |
           set -e
@@ -708,6 +713,9 @@ jobs:
           if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
             [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
             echo "  OPENROUTER_API_KEY present (${#OPENROUTER_API_KEY} chars)"
+          elif echo "$INPUT_MODEL" | grep -qiE "^openai/" && [ -n "$INPUT_BASE_URL" ]; then
+            [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::provider API key missing (model=$INPUT_MODEL, base_url=$INPUT_BASE_URL)"; exit 1; }
+            echo "  OpenAI-compatible provider key present (${#OPENROUTER_API_KEY} chars), base_url=$INPUT_BASE_URL"
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
             echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
@@ -1148,6 +1156,7 @@ jobs:
           MTASK: ${{ matrix.task }}
           MLANG: ${{ matrix.language }}
           INPUT_MODEL: ${{ inputs.model }}
+          INPUT_BASE_URL: ${{ inputs.base_url }}
           INPUT_BASELINE: ${{ inputs.baseline }}
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
           GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
@@ -1471,6 +1480,10 @@ jobs:
             export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
             GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
             echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
+          elif echo "$INPUT_MODEL" | grep -qiE "^openai/" && [ -n "$INPUT_BASE_URL" ]; then
+            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+            export OPENAI_BASE_URL="$INPUT_BASE_URL"
+            echo "=== Model routed via OpenAI-compatible endpoint: $INPUT_MODEL @ $INPUT_BASE_URL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             export DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
             GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
@@ -1623,6 +1636,8 @@ jobs:
           MODEL_ENV=""
           if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
             MODEL_ENV="-e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
+          elif echo "$INPUT_MODEL" | grep -qiE "^openai/" && [ -n "$INPUT_BASE_URL" ]; then
+            MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_BASE_URL=$INPUT_BASE_URL"
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
           fi
@@ -1757,7 +1772,7 @@ jobs:
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
-              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
+              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\nOPENAI_BASE_URL=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
               # Also use mini-extra to set model non-interactively
               mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
