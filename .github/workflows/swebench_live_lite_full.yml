@@ -51,6 +51,10 @@ on:
         description: "Concurrent jobs (default 20; lower if runner ceiling below 20)"
         required: true
         default: "20"
+      worker_parallel:
+        description: "Internal reusable-worker matrix width; public dispatch must remain 20"
+        required: false
+        default: "20"
       shadow_rate:
         description: "Deterministic SS shadow-holdout fraction in [0,1]. Exact request is validated and sealed; default 0 withholds nothing."
         required: true
@@ -88,6 +92,32 @@ on:
         description: "Git ref (branch/tag/SHA) to CHECK OUT for the GT code seam. The SYNCED seam — gt_mini_patch.py + src/groundtruth/{runtime,delivery,pretask} + gt_ae_block.sh — is staged from THIS ref at runtime (SPEED-OPT E), so pointing it at an RL-adherence commit evaluates that code WITHOUT a substrate rebake. NOTE: the step-0 brief is BAKED into the substrate (brief.txt), so brief-CONTENT changes still need a rebake; only the seam follows this ref. Default gt-trial (prior behaviour)."
         required: false
         default: "gt-trial"
+
+  # Reusable worker entry point for the bounded coordinator. The dispatch path
+  # remains unchanged. A coordinator passes a comma-separated five-task batch
+  # and worker_parallel=5; global benchmark concurrency is still 20.
+  workflow_call:
+    inputs:
+      model: {type: string, required: true}
+      api_key: {type: string, required: false, default: ""}
+      base_url: {type: string, required: false, default: ""}
+      mode: {type: string, required: true, default: "full"}
+      instance_ids: {type: string, required: false, default: ""}
+      max_parallel: {type: string, required: true, default: "20"}
+      shadow_rate: {type: string, required: true, default: "0"}
+      live_cohort_mde: {type: string, required: false, default: ""}
+      assets_repo: {type: string, required: true, default: "harneet2512/groundtruth"}
+      gt_substrate_digest: {type: string, required: false, default: ""}
+      require_pinned_substrate: {type: string, required: true, default: "0"}
+      language: {type: string, required: false, default: "all"}
+      shard: {type: string, required: false, default: ""}
+      baseline: {type: boolean, required: false, default: true}
+      gt_ref: {type: string, required: false, default: "main"}
+      worker_parallel: {type: number, required: false, default: 20}
+    secrets:
+      OPENROUTER_API_KEY: {required: false}
+      DEEPSEEK_API_KEY: {required: false}
+      TOKENROUTER_API_KEY: {required: false}
 
 permissions:
   contents: read
@@ -664,7 +694,10 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
       fail-fast: false
-      max-parallel: 20
+      # Public dispatches use 20. The coordinator invokes this reusable worker
+      # with five task rows and worker_parallel=5, then allows four workers at a
+      # time, preserving the same global 20-task ceiling.
+      max-parallel: ${{ inputs.worker_parallel || 20 }}
     steps:
       - name: Mark authoritative trial-job start epoch
         run: echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"

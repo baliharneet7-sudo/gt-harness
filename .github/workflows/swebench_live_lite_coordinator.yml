@@ -1,0 +1,181 @@
+name: "SWE-bench Live Lite: 300-task coordinator (Mini-SWE, GT-OFF)"
+
+# One benchmark run, represented as 60 reusable five-task workers. Four
+# workers may run at once and each worker runs at most five task jobs, so the
+# global task concurrency is exactly 20. This avoids the GitHub 256-job matrix
+# ceiling without creating arbitrary benchmark shards or changing the task
+# contract.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "OpenAI-compatible model ID"
+        required: true
+        default: "openai/stealth/ox-alpha"
+      api_key:
+        description: "Provider key supplied at dispatch time; never committed"
+        required: false
+        default: ""
+      base_url:
+        description: "OpenAI-compatible provider base URL"
+        required: true
+        default: "https://openrouter.ai/api/v1"
+      mode:
+        description: "Task population"
+        required: true
+        type: choice
+        options: [smoke, pilot20, pilot100, full300]
+        default: full300
+      max_parallel:
+        description: "Global concurrent task jobs; official contract is 20"
+        required: true
+        default: "20"
+      tasks_per_worker:
+        description: "Tasks per reusable worker; fixed at 5 for the official 20-way ceiling"
+        required: true
+        default: "5"
+      gt_ref:
+        description: "Exact repository ref/SHA evaluated by the worker"
+        required: true
+        default: "fix/live-lite-task-language"
+      assets_repo:
+        description: "Repository hosting the pinned pipeline assets"
+        required: true
+        default: "harneet2512/groundtruth"
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+jobs:
+  prepare:
+    name: "Prepare deterministic task batches"
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      total_tasks: ${{ steps.matrix.outputs.total_tasks }}
+      total_batches: ${{ steps.matrix.outputs.total_batches }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gt_ref }}
+          lfs: false
+
+      - name: Validate official coordinator contract
+        env:
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
+          TASKS_PER_WORKER: ${{ inputs.tasks_per_worker }}
+          MODE: ${{ inputs.mode }}
+          BASE_URL: ${{ inputs.base_url }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          [ "$MAX_PARALLEL" = "20" ] || { echo "max_parallel must be exactly 20" >&2; exit 1; }
+          [ "$TASKS_PER_WORKER" = "5" ] || { echo "tasks_per_worker must be exactly 5" >&2; exit 1; }
+          case "$MODE" in smoke|pilot20|pilot100|full300) ;; *) echo "invalid mode=$MODE" >&2; exit 1 ;; esac
+          case "$BASE_URL" in http://*|https://*) ;; *) echo "base_url must be an HTTP(S) URL" >&2; exit 1 ;; esac
+          [ -n "$MODEL" ] || { echo "model is required" >&2; exit 1; }
+          echo "GT-OFF contract: model=$MODEL base_url=$BASE_URL mode=$MODE global_parallel=20 worker_tasks=5"
+
+      - name: Build 5-task worker matrix
+        id: matrix
+        env:
+          MODE: ${{ inputs.mode }}
+          TASKS_PER_WORKER: ${{ inputs.tasks_per_worker }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          mode = os.environ["MODE"]
+          per = int(os.environ["TASKS_PER_WORKER"])
+          ids_path = Path("benchmarks/live_lite_300_ids.json")
+          doc = json.loads(ids_path.read_text(encoding="utf-8"))
+          ids = list(doc.get("instance_ids", []))
+          limits = {"smoke": 5, "pilot20": 20, "pilot100": 100, "full300": 300}
+          selected = ids[:limits[mode]]
+          if len(selected) != limits[mode]:
+              raise SystemExit(f"manifest has {len(ids)} IDs, cannot select {limits[mode]}")
+          if len(set(selected)) != len(selected):
+              raise SystemExit("manifest contains duplicate instance IDs")
+          batches = [
+              {"batch_id": i // per, "tasks": ",".join(selected[i:i + per])}
+              for i in range(0, len(selected), per)
+          ]
+          matrix = json.dumps({"include": batches}, separators=(",", ":"))
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as f:
+              f.write("matrix<<MATRIX\n" + matrix + "\nMATRIX\n")
+              f.write(f"total_tasks={len(selected)}\n")
+              f.write(f"total_batches={len(batches)}\n")
+          print(f"selected={len(selected)} tasks batches={len(batches)} tasks_per_worker={per}")
+          PY
+
+      - name: Publish coordinator identity
+        run: |
+          {
+            echo "## Live Lite coordinator"
+            echo "- arm: GT-OFF (baseline=true)"
+            echo "- model: `${{ inputs.model }}`"
+            echo "- base URL: `${{ inputs.base_url }}`"
+            echo "- mode: `${{ inputs.mode }}`"
+            echo "- tasks: ${{ steps.matrix.outputs.total_tasks }}"
+            echo "- reusable workers: ${{ steps.matrix.outputs.total_batches }}"
+            echo "- global task concurrency: 20 (4 workers x 5 task rows)"
+            echo "- task contract: GT_STEP_LIMIT=150, task timeout=150 minutes, one rollout/task"
+            echo "- timeout rows are retained and classified, never dropped"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  worker:
+    name: "Batch ${{ matrix.batch_id }}"
+    needs: prepare
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    uses: ./.github/workflows/swebench_live_lite_full.yml
+    with:
+      model: ${{ inputs.model }}
+      api_key: ${{ inputs.api_key }}
+      base_url: ${{ inputs.base_url }}
+      mode: full
+      instance_ids: ${{ matrix.tasks }}
+      max_parallel: "20"
+      shadow_rate: "0"
+      live_cohort_mde: ""
+      assets_repo: ${{ inputs.assets_repo }}
+      gt_substrate_digest: ""
+      require_pinned_substrate: "0"
+      language: all
+      shard: ""
+      baseline: true
+      gt_ref: ${{ inputs.gt_ref }}
+      worker_parallel: 5
+    secrets: inherit
+
+  report:
+    name: "Coordinator completion report"
+    if: always()
+    needs: [prepare, worker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report batch-level result without hiding task outcomes
+        env:
+          WORKER_RESULT: ${{ needs.worker.result }}
+          TOTAL_TASKS: ${{ needs.prepare.outputs.total_tasks }}
+          TOTAL_BATCHES: ${{ needs.prepare.outputs.total_batches }}
+        run: |
+          {
+            echo "## Live Lite coordinator result"
+            echo "- scheduled tasks: $TOTAL_TASKS"
+            echo "- scheduled reusable workers: $TOTAL_BATCHES"
+            echo "- worker aggregate: $WORKER_RESULT"
+            echo "- task-level solved/failed/infra/timeout counts are read from each worker artifact"
+            echo "- no task was removed from the denominator because of a timeout or provider error"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # A failed worker is visible and must not be relabeled as a model
+          # failure. The worker's per-task artifacts remain authoritative.
+          [ "$WORKER_RESULT" = "success" ]
