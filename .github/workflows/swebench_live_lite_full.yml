@@ -1331,8 +1331,22 @@ jobs:
           echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
 
           export GT_C_OUT=/gt_out
-          source artifact_deepswe/gt_integration/gt_ae_block.sh
-          echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+          # The baseline/control arm is a pure Mini-SWE run.  Its staging path
+          # deliberately omits the GT-only super-mode seam, so never source a
+          # GT-only helper in that arm.  Sourcing it unconditionally made a
+          # valid baseline fail before Docker/agent startup when the helper was
+          # absent (the v6 smoke witness).
+          if [ "${GT_BASELINE_FLAG:-0}" = "1" ]; then
+            GT_AE_ARGS=()
+            echo "GT_AE_ARGS (baseline): skipped GT-only block"
+          else
+            if [ ! -f artifact_deepswe/gt_integration/gt_ae_block.sh ]; then
+              echo "GT_AE_BLOCK_MISSING: GT-on seam is absent; refusing GT-on task" | tee -a trial_output.log
+              exit 1
+            fi
+            source artifact_deepswe/gt_integration/gt_ae_block.sh
+            echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+          fi
 
           # Bounded swap: only create a small swap file when disk can afford it.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
