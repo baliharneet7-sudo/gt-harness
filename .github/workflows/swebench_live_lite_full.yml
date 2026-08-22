@@ -696,7 +696,9 @@ jobs:
       # Public dispatches use 20. The coordinator invokes this reusable worker
       # with five task rows and worker_parallel=5, then allows four workers at a
       # time, preserving the same global 20-task ceiling.
-      max-parallel: ${{ inputs.worker_parallel || 20 }}
+      # Convert the dispatch string to a number; GitHub rejects a string-valued
+      # dynamic max-parallel expression and silently creates no matrix jobs.
+      max-parallel: ${{ fromJSON(inputs.worker_parallel || '20') }}
     steps:
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
