@@ -54,9 +54,9 @@ on:
         type: string
         default: ""
       task_ids:
-        description: "Comma-separated trigger-opportunity smoke slice; overrides n_tasks"
+        description: "Comma-separated task IDs; use ALL to select the complete 89-task dataset"
         type: string
-        default: "build-cython-ext,headless-terminal,llm-inference-batching-scheduler,reshard-c4-data,sanitize-git-repo"
+        default: "ALL"
       timeout_multiplier:
         description: "harbor --agent-timeout-multiplier. MUST match the baseline arm being paired against (frozen full-89 baseline = 1.0; early smokes = 2.0)"
         type: string
@@ -288,6 +288,21 @@ jobs:
           print("binary:", GTNanoAgent._gt_binary_host())
           EOF
 
+      - name: Verify complete TB2 task cardinality
+        if: ${{ inputs.n_tasks == 'all' && inputs.task_ids == 'ALL' }}
+        run: |
+          set -euo pipefail
+          harbor dataset download terminal-bench@2.0 -o tb2-cardinality --export
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path("tb2-cardinality/terminal-bench")
+          tasks = sorted(path.name for path in root.iterdir() if path.is_dir())
+          if len(tasks) != 89:
+              raise SystemExit(f"expected exactly 89 TB2 tasks, found {len(tasks)}")
+          print(f"TB2 task cardinality verified: {len(tasks)}")
+          PY
+
       - name: Disk before run
         run: df -h /
 
@@ -322,7 +337,7 @@ jobs:
             -n "$CONCURRENCY"
             -y
           )
-          if [ -n "$TASK_IDS" ]; then
+          if [ -n "$TASK_IDS" ] && [ "$TASK_IDS" != "ALL" ]; then
             IFS=',' read -ra ids <<< "$TASK_IDS"
             for id in "${ids[@]}"; do
               id="$(echo "$id" | xargs)"   # trim whitespace
