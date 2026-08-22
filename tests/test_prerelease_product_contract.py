@@ -94,3 +94,9 @@ def test_indexer_source_identity_is_stable_across_git_line_endings(
     module_file.write_bytes(module_file.read_bytes().replace(b"\n", b"\r\n"))
 
     assert indexer_setup._source_tree_identity() == lf_identity
+
+
+def test_repository_pins_source_line_endings_for_reproducible_builds() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    for pattern in ("*.go text eol=lf", "*.c text eol=lf", "*.h text eol=lf"):
+        assert pattern in attributes

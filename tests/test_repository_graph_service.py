@@ -18,6 +18,7 @@ from gt_engine.repository_graph_service import (
     _GraphBuildStats,
     compute_repository_identity,
 )
+from gt_harness.cli import _graph_receipt_output
 
 
 def _git(root: Path, *args: str) -> str:
@@ -61,7 +62,8 @@ def _database(path: Path) -> None:
                 evidence_type TEXT, verification_status TEXT, repo_id TEXT
             );
             INSERT INTO nodes VALUES
-              (1,'function','answer','answer','app.py',1,2,'answer()','',1,0,'python',NULL,'repo');
+              (1,'function','answer','answer','app.py',1,2,'answer()','',1,0,'python',NULL,'repo'),
+              (2,'method','helper','Answer.answer','app.py',4,5,'helper()','',0,0,'python',NULL,'repo');
             """
         )
         connection.commit()
@@ -113,6 +115,40 @@ def test_source_revision_includes_dirty_and_untracked_graph_inputs(tmp_path: Pat
     (root / "new.py").write_text("from app import answer\n", encoding="utf-8")
     untracked = compute_repository_identity(root)
     assert untracked.source_revision != modified.source_revision
+
+
+def test_definition_query_is_exact_and_accepts_documented_plural_alias(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    service = RepositoryGraphService(root, state_dir=state)
+
+    result = service.query("definitions", "answer")
+
+    assert result["mode"] == "definition"
+    assert [row["name"] for row in result["evidence"]] == ["answer"]
+
+
+def test_cli_receipt_is_compact_by_default_and_lossless_when_verbose(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    graph = tmp_path / "graph.db"
+    _database(graph)
+    service = RepositoryGraphService(root, state_dir=tmp_path / "state")
+    receipt = _receipt(root, graph)
+
+    summary = _graph_receipt_output(service, receipt, verbose=False)
+    verbose = _graph_receipt_output(service, receipt, verbose=True)
+
+    assert summary["query_ready"] is True
+    assert summary["receipt_path"] == str(service.receipt_path)
+    assert "graph_input_hashes" not in summary
+    assert "graph_input_hashes" in verbose
 
 
 def test_query_refuses_graph_after_worktree_changes(tmp_path: Path) -> None:

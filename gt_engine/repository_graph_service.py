@@ -26,6 +26,32 @@ from gt_harness.indexer_setup import GT_INDEX_BUILD_ID
 
 GRAPH_BUILDER_VERSION = f"gt-index-{GT_INDEX_BUILD_ID}"
 GRAPH_RECEIPT_SCHEMA = "gt.graph_receipt.v2"
+CANONICAL_QUERY_MODES = (
+    "definition",
+    "callers",
+    "callees",
+    "imports",
+    "importers",
+    "implementations",
+    "subclasses",
+    "references",
+    "impact",
+    "tests",
+    "search",
+)
+QUERY_MODE_ALIASES = {
+    "definitions": "definition",
+    "caller": "callers",
+    "callee": "callees",
+    "import": "imports",
+    "importer": "importers",
+    "implementation": "implementations",
+    "subclass": "subclasses",
+    "reference": "references",
+    "test": "tests",
+    "refs": "references",
+}
+SUPPORTED_QUERY_MODES = tuple((*CANONICAL_QUERY_MODES, *QUERY_MODE_ALIASES))
 _READY = frozenset({"READY", "READY_WITH_DECLARED_LIMITATIONS"})
 _SKIP_DIRS = frozenset(
     {
@@ -786,22 +812,11 @@ class RepositoryGraphService:
 
     def query(self, mode: str, symbol: str, *, limit: int = 50) -> dict[str, Any]:
         receipt, graph = self._ready_graph()
-        normalized = str(mode or "").strip().lower()
-        supported = {
-            "definition",
-            "callers",
-            "callees",
-            "imports",
-            "importers",
-            "implementations",
-            "subclasses",
-            "references",
-            "impact",
-            "tests",
-            "search",
-        }
-        if normalized not in supported:
-            raise ValueError(f"unsupported query mode: {mode}")
+        requested = str(mode or "").strip().lower()
+        normalized = QUERY_MODE_ALIASES.get(requested, requested)
+        if normalized not in CANONICAL_QUERY_MODES:
+            choices = ", ".join(CANONICAL_QUERY_MODES)
+            raise ValueError(f"unsupported query mode: {mode}; supported modes: {choices}")
         bound = max(1, min(int(limit), 200))
         token = str(symbol or "").strip()
         connection = sqlite3.connect(f"file:{graph.as_posix()}?mode=ro", uri=True)
@@ -811,7 +826,15 @@ class RepositoryGraphService:
                 "n.id,n.label,n.name,n.qualified_name,n.file_path,n.start_line,n.end_line,"
                 "n.signature,n.language,n.is_test"
             )
-            if normalized in {"definition", "search"}:
+            if normalized == "definition":
+                rows = connection.execute(
+                    f"SELECT {node_projection} FROM nodes n "
+                    "WHERE n.name=? OR n.qualified_name=? "
+                    "ORDER BY CASE WHEN n.name=? THEN 0 ELSE 1 END,n.file_path,n.start_line "
+                    "LIMIT ?",
+                    (token, token, token, bound),
+                ).fetchall()
+            elif normalized == "search":
                 rows = connection.execute(
                     f"SELECT {node_projection} FROM nodes n "
                     "WHERE n.name=? OR n.qualified_name=? OR n.name LIKE ? "
@@ -891,10 +914,12 @@ class RepositoryGraphService:
 
 
 __all__ = [
+    "CANONICAL_QUERY_MODES",
     "GraphNotReadyError",
     "GraphReceipt",
     "GraphStatus",
     "RepositoryGraphService",
     "RepositoryIdentity",
+    "SUPPORTED_QUERY_MODES",
     "compute_repository_identity",
 ]

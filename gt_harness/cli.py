@@ -9,7 +9,12 @@ import shutil
 import sys
 from pathlib import Path
 
-from gt_engine.repository_graph_service import GraphNotReadyError, RepositoryGraphService
+from gt_engine.repository_graph_service import (
+    SUPPORTED_QUERY_MODES,
+    GraphNotReadyError,
+    GraphReceipt,
+    RepositoryGraphService,
+)
 from gt_harness.indexer_setup import ensure_source_indexer, find_go
 
 
@@ -34,11 +39,16 @@ def _parser() -> argparse.ArgumentParser:
         item = graph_sub.add_parser(name)
         item.add_argument("--root", default=".")
         item.add_argument("--state-dir", default=None)
+        item.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Emit the complete persisted graph receipt.",
+        )
         if name == "build":
             item.add_argument("--force", action="store_true")
             item.add_argument("--timeout", type=float, default=600.0)
     query = graph_sub.add_parser("query")
-    query.add_argument("mode")
+    query.add_argument("mode", choices=SUPPORTED_QUERY_MODES)
     query.add_argument("symbol")
     query.add_argument("--root", default=".")
     query.add_argument("--state-dir", default=None)
@@ -100,15 +110,56 @@ def _doctor(*, build: bool) -> int:
     return 0 if ready else 1
 
 
+def _graph_receipt_output(
+    service: RepositoryGraphService, receipt: GraphReceipt, *, verbose: bool
+) -> dict[str, object]:
+    value = receipt.as_dict()
+    if verbose:
+        return value
+    keys = (
+        "receipt_schema",
+        "repository",
+        "commit_sha",
+        "working_tree_state",
+        "source_revision",
+        "graph_schema_version",
+        "graph_builder_version",
+        "build_started",
+        "build_completed",
+        "build_status",
+        "files_discovered",
+        "files_attempted",
+        "files_indexed",
+        "files_skipped",
+        "files_failed",
+        "symbols",
+        "nodes_by_type",
+        "edges_by_type",
+        "coverage",
+        "build_duration_ms",
+        "persistent_graph_path",
+        "graph_checksum_or_identity",
+        "query_ready",
+        "degraded_reasons",
+        "skipped_reasons",
+        "update_mode",
+        "graph_bytes",
+        "source_bytes",
+    )
+    output = {key: value[key] for key in keys}
+    output["receipt_path"] = str(service.receipt_path)
+    return output
+
+
 def _graph(args: argparse.Namespace) -> int:
     service = RepositoryGraphService(args.root, state_dir=args.state_dir)
     if args.graph_command == "build":
         receipt = service.build(force=args.force, timeout=args.timeout)
-        _emit(receipt.as_dict())
+        _emit(_graph_receipt_output(service, receipt, verbose=args.verbose))
         return 0 if receipt.query_ready else 1
     if args.graph_command == "status":
         receipt = service.status()
-        _emit(receipt.as_dict())
+        _emit(_graph_receipt_output(service, receipt, verbose=args.verbose))
         return 0 if receipt.query_ready else 1
     if args.refresh and not service.status().query_ready:
         service.build()
