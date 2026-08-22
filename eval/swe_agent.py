@@ -29,10 +29,8 @@ Usage (host needs Docker running):
         -a eval.swe_agent:NanoSweAgent \
         -m anthropic/claude-opus-4-8 \
         -l 5 -n 2 -o results/swebench --job-name swe-smoke -y
-    # GT arm (full container plumbing — wheel, binary, gt_engine, smoke):
-    #   -a eval.swe_agent:GTNanoSweAgent   (gt_root defaults ON to /testbed;
-    #   needs vendor/groundtruth_mcp-*.whl + vendor/gt-index-linux-amd64 —
-    #   the swe_gt.yml workflow stages both, see eval/tb_agent.py:GTNanoAgent)
+    # GT arm (first-party source, source-built indexer, and runtime smoke):
+    #   -a eval.swe_agent:GTNanoSweAgent
 
 Results land in results/swebench/<job-name>/; per-task agent stdout in
 <task>/agent/nano.txt, the staged model patch in <task>/agent/model_patch.diff,
@@ -77,8 +75,8 @@ _ENSURE_CURL = (
 )
 
 def _install_nano_cmd(extra_uv_args: str = "") -> str:
-    """The uv-tool install command. ``extra_uv_args`` (e.g. ``--with <wheel>``)
-    lets the GT arm add packages into the SAME tool venv nano runs from;
+    """The uv-tool install command. ``extra_uv_args`` adds dependencies into
+    the SAME tool venv the first-party source installation runs from;
     baseline passes nothing and gets the byte-identical historical command."""
     return (
         "set -eu; "
@@ -127,11 +125,9 @@ class NanoSweAgent(BaseInstalledAgent):
     """nano-harness as a SWE-bench (Harbor) agent. The loop, tools, and system
     prompt are exactly what `nano run` ships locally — no benchmark forks.
 
-    GT arm: use :class:`GTNanoSweAgent` below (full container plumbing;
-    ``gt_root`` defaults ON to /testbed there). On THIS baseline class
-    ``gt_root`` (agent kwarg ``--ak gt_root=/testbed`` or env ``NANO_GT_ROOT``)
-    only appends the flag — without the GT payloads nano degrades fail-open to
-    stock. Default is OFF — a run without the flag is byte-identical stock nano.
+    GT arm: use :class:`GTNanoSweAgent` below. On this baseline class the
+    optional repository root changes location only; the GroundTruth treatment
+    remains off. A run without the flag is byte-identical stock nano.
     """
 
     # gt_root rides Harbor's declarative flag machinery: --ak gt_root=/testbed on
@@ -200,7 +196,7 @@ class NanoSweAgent(BaseInstalledAgent):
             f"cd {_WORKDIR} && {marker}"
             f'"$HOME/.local/bin/gt-harness" run {shlex.quote(task)} '
             f"--model {shlex.quote(model)} --max-iterations 100 "
-            f"{gt_flags} "
+            f"--output /logs/agent/gt-run.json {gt_flags} "
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
         )
 
@@ -210,7 +206,7 @@ class NanoSweAgent(BaseInstalledAgent):
     ) -> None:
         model, env = self._model_and_env()
         task = _TASK_TEMPLATE.format(workdir=_WORKDIR, issue=instruction)
-        gt_flags = self.build_cli_flags()  # "" (baseline) or "--gt-root <path>"
+        gt_flags = self.build_cli_flags()  # "" (baseline) or "--root <path>"
         await self.exec_as_agent(
             environment, self._run_command(task, model, gt_flags), env=env
         )
@@ -220,41 +216,33 @@ class NanoSweAgent(BaseInstalledAgent):
 class GTNanoSweAgent(NanoSweAgent):
     """nano-harness + GroundTruth as a SWE-bench (Harbor) agent.
 
-    The container plumbing is :class:`eval.tb_agent.GTNanoAgent`'s, ported
-    verbatim (that arm is proven live in containers — TB2 run 30501483446):
-    upload gt_engine/ + the vendored ``groundtruth`` wheel + a Linux
-    ``gt-index`` binary, install wheel+numpy into nano's OWN uv tool venv,
-    fail-closed install smoke (gateway import + a real index run), forward
-    every host ``GT_*`` var, resolve ``GT_RL_PROFILE`` kwarg > env > "2", pin
-    ``GT_INDEX_BINARY`` to the staged binary. See GTNanoAgent's docstring for
-    the wheel/binary provenance rationale (no public release assets exist).
+    The container plumbing is :class:`eval.tb_agent.GTNanoAgent`'s: upload the
+    checked-in first-party source plus a source-built Linux ``gt-index``,
+    install source+numpy into nano's own uv tool venv, run an install smoke,
+    forward every host ``GT_*`` var, resolve ``GT_RL_PROFILE`` kwarg > env > "2", and pin
+    ``GT_INDEX_BINARY`` to the staged binary.
 
     SWE-specific deltas, each with a reason:
 
-    - ``--gt-root /testbed`` (literal, not ``"$PWD"``): SWE-bench bakes the
+    - ``--root /testbed`` (literal, not ``"$PWD"``): SWE-bench bakes the
       repo location into the task images (WORKDIR /testbed) and the verifier
       grades /testbed in place — the root is a benchmark constant, and the
       run command already ``cd``'s there. The CliFlag stays, so
       ``--ak gt_root=...`` / ``NANO_GT_ROOT`` still override; only the
       default flips ON.
-    - GT artifacts vs grading: gt_engine's delivery ledger goes to
-      ``/logs/agent/gt_ledger.jsonl`` (bridge._ledger_path prefers /logs/agent,
-      which exists in every harbor container) so it survives in the results
-      artifact. GT's ``.gt/`` index dir DOES live in /testbed, but it is
-      self-gitignored at creation (indexer.ensure_index writes ``.gt/.gitignore``
-      before the first index run; the L6 mid-task re-index reuses the same
-      path) and _SNAPSHOT ``rm -rf``'s it before ``git add -A`` — it can reach
-      neither model_patch.diff nor the graded tree.
+    - GT artifacts vs grading: graph state lives at ``/tmp/.nano-gt-state``
+      and the durable treatment receipt lives at ``/logs/agent/gt-run.json``.
+      Neither can reach the staged model patch or the graded tree.
 
     Baselines cannot be contaminated: nothing here runs unless harbor is
     pointed at ``eval.swe_agent:GTNanoSweAgent`` explicitly.
     """
 
-    # gt_root defaults ON to the SWE-bench workdir; kwarg/env still win.
+    # Repository root defaults to the SWE-bench workdir; kwarg/env still win.
     CLI_FLAGS = [
         CliFlag(
             kwarg="gt_root",
-            cli="--gt-root",
+            cli="--root",
             type="str",
             default=_WORKDIR,
             env_fallback="NANO_GT_ROOT",
@@ -335,6 +323,7 @@ class GTNanoSweAgent(NanoSweAgent):
         env.update({k: v for k, v in os.environ.items() if k.startswith("GT_")})
         env.update(self.resolve_env_vars())
         env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
+        env["GT_STATE_DIR"] = "/tmp/.nano-gt-state"
         task = _TASK_TEMPLATE.format(workdir=_WORKDIR, issue=instruction)
         gt_flags = "--treatment groundtruth " + self.build_cli_flags()
         await self.exec_as_agent(

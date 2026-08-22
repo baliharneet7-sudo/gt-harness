@@ -82,6 +82,15 @@ def test_groundtruth_failure_is_explicit_and_nonblocking(tmp_path: Path) -> None
     assert receipt["delivery_count"] == 0
 
 
+def test_groundtruth_honors_private_state_directory(tmp_path: Path, monkeypatch) -> None:
+    state = tmp_path / "private-state"
+    monkeypatch.setenv("GT_STATE_DIR", str(state))
+
+    treatment = GroundTruthTreatment(tmp_path / "repository")
+
+    assert treatment.service.state_dir == state.resolve()
+
+
 def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -121,6 +130,7 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
         "temperature": 0.0,
         "run_id": None,
         "output": None,
+        "state_dir": None,
     }
     assert _run_agent(SimpleNamespace(**common, treatment="bare")) == 0
     assert _run_agent(SimpleNamespace(**common, treatment="groundtruth")) == 0

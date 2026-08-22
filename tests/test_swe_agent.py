@@ -49,16 +49,19 @@ def test_baseline_run_command_uses_official_cli_without_gt_treatment():
     assert "--model claude-opus-4-8 --max-iterations 100" in cmd
     assert "--treatment groundtruth" not in cmd
     assert "--root /testbed" not in cmd
+    assert "--output /logs/agent/gt-run.json" in cmd
 
 
 def test_gt_arm_defaults_and_overrides():
     g = GTNanoSweAgent(logs_dir=".", model_name="anthropic/claude-opus-4-8")
-    assert g.build_cli_flags() == "--gt-root /testbed"
+    assert g.build_cli_flags() == "--root /testbed"
     assert g.resolve_env_vars() == {"GT_RL_PROFILE": "2"}
     g2 = GTNanoSweAgent(
         logs_dir=".", model_name="m", gt_root="/elsewhere", gt_profile="0"
     )
-    assert g2.build_cli_flags() == "--gt-root /elsewhere"
+    assert g2.build_cli_flags() == "--root /elsewhere"
     assert g2.resolve_env_vars() == {"GT_RL_PROFILE": "0"}
     assert NanoSweAgent.name() == "nano-swe"
     assert GTNanoSweAgent.name() == "nano-swe-gt"
+    command = g._run_command("task", "claude-opus-4-8", "--treatment groundtruth --root /testbed")
+    assert "--output /logs/agent/gt-run.json" in command

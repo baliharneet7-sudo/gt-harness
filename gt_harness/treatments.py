@@ -8,6 +8,7 @@ calls.  This keeps model, prompt, tool policy, and step budget arm-neutral.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,10 @@ class GroundTruthTreatment(BareTreatment):
     receipts: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.state_dir is None:
+            override = str(os.environ.get("GT_STATE_DIR") or "").strip()
+            if override:
+                self.state_dir = override
         self.service = RepositoryGraphService(self.root, state_dir=self.state_dir)
 
     @staticmethod

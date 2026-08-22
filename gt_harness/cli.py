@@ -83,6 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--time-budget-seconds", type=float, default=None)
     run.add_argument("--treatment", choices=("bare", "groundtruth"), default="bare")
     run.add_argument("--root", default=".")
+    run.add_argument("--state-dir", default=None, help="Private graph/runtime state directory.")
     run.add_argument("--run-id", default=None)
     run.add_argument(
         "--output",
@@ -228,6 +229,7 @@ def _run_agent(args: argparse.Namespace) -> int:
     temperature = getattr(args, "temperature", None)
     requested_run_id = getattr(args, "run_id", None)
     output_value = getattr(args, "output", None)
+    state_dir = getattr(args, "state_dir", None)
     generated_run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:12]}"
     run_id = str(requested_run_id or generated_run_id)
     output_path = (
@@ -236,7 +238,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         else root / ".groundtruth" / "runs" / f"{run_id}.json"
     )
     treatment = (
-        GroundTruthTreatment(root)
+        GroundTruthTreatment(root, state_dir=state_dir)
         if args.treatment == "groundtruth"
         else BareTreatment()
     )

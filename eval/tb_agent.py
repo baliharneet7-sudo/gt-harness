@@ -18,9 +18,9 @@ Results land in results/terminal-bench/<timestamp>/result.json; per-task agent
 stdout in <task>/agent/nano.txt.
 
 GT arm: `--agent-import-path eval.tb_agent:GTNanoAgent` (see the class
-docstring; needs vendor/groundtruth_mcp-*.whl and a Linux gt-index binary at
-vendor/gt-index-linux-amd64 or $GT_INDEX_BINARY_HOST — the tb2_gt.yml
-workflow stages both). Baseline NanoAgent is untouched by GT.
+docstring). It installs the checked-in first-party source and uploads the
+source-built host indexer selected by `$GT_INDEX_BINARY_HOST`. Baseline
+NanoAgent is untouched by GT.
 """
 from __future__ import annotations
 
@@ -62,8 +62,8 @@ _ENSURE_CURL = (
 )
 
 def _install_nano_cmd(extra_uv_args: str = "") -> str:
-    """The uv-tool install command. ``extra_uv_args`` (e.g. ``--with <wheel>``)
-    lets the GT arm add packages into the SAME tool venv nano runs from;
+    """The uv-tool install command. ``extra_uv_args`` adds dependencies into
+    the SAME tool venv the first-party source installation runs from;
     baseline passes nothing and gets the byte-identical historical command."""
     return (
         "set -eu; "
@@ -93,7 +93,7 @@ class NanoAgent(BaseInstalledAgent):
     async def install(self, environment: BaseEnvironment) -> None:
         # GT container plumbing lives in GTNanoAgent below — this baseline
         # install stays frozen (no gt_engine upload, no groundtruth package,
-        # no binary, no --gt-root) so baseline runs remain reproducible.
+        # no binary, no GroundTruth treatment) so baseline runs remain reproducible.
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
         await environment.upload_dir(_REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine")
@@ -137,7 +137,7 @@ class NanoAgent(BaseInstalledAgent):
         return (
             f'"$HOME/.local/bin/gt-harness" run {shlex.quote(instruction)} '
             f"--model {shlex.quote(model)} --max-iterations 100 "
-            f"{temperature_arg}{extra_args}"
+            f"--output /logs/agent/gt-run.json {temperature_arg}{extra_args}"
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
         )
 
@@ -155,26 +155,16 @@ class GTNanoAgent(NanoAgent):
     """nano-harness + GroundTruth as a Terminal-Bench 2.0 agent.
 
     Same loop and model routing as :class:`NanoAgent`; additionally the task
-    container gets gt_engine/, the ``groundtruth`` package (vendored wheel —
-    see below), and a Linux ``gt-index`` binary, and nano runs with
-    ``--gt-root "$PWD"`` (the container's WORKDIR = the task's working
-    directory; harbor exec commands run through ``sh -c`` with no explicit
+    container gets the checked-in GroundTruth packages and a source-built
+    Linux ``gt-index`` binary, and the official CLI runs with ``--treatment
+    groundtruth --root "$PWD"`` (the container's WORKDIR is the task's working
+    directory; Harbor exec commands run through ``sh -c`` with no explicit
     cwd, so ``$PWD`` resolves IN-CONTAINER, which is exactly what we want).
 
-    Why a vendored wheel (``vendor/groundtruth_mcp-*.whl``), not a git URL:
-    the public github.com/harneet2512/groundtruth repo does NOT contain the
-    gateway runtime (no runtime/gateway.py, evidence_envelope.py, rl_profile.py,
-    native_render.py, adapters/miniswe.py on branch gt-trial, checked
-    2026-07-29), and no release ships them either (release v1.1.0 does not
-    exist; only gt-runtime-models / pipeline-assets-v1). The wheel is built
-    from the local D:\\Groundtruth checkout gt_engine was developed against.
-
-    Why an uploaded binary + $GT_INDEX_BINARY, not _binary.py auto-download:
-    same finding — there are no gt-index release assets to download, and the
-    downloader targets the nonexistent v1.1.0 tag. The workflow builds
-    linux-amd64 from ``vendor/gt-index-src`` (CGO + ``-tags sqlite_fts5``)
-    into ``vendor/gt-index-linux-amd64``; install() uploads it and run()
-    pins ``GT_INDEX_BINARY`` so find_binary() never touches the network.
+    The Python and Go sources are content-addressed in ``vendor/*.toml``.
+    Workflows build the platform binary from that checked-in source and pin
+    ``GT_INDEX_BINARY``; no opaque wheel, prebuilt binary, or download path is
+    part of the treatment.
 
     GT flags: run() forwards every host ``GT_*`` env var into the container
     and resolves ``GT_RL_PROFILE`` via the ``gt_profile`` kwarg (harbor
@@ -287,7 +277,7 @@ class GTNanoAgent(NanoAgent):
         # task container is isolated per trial, so this private tmp location
         # cannot collide across the five concurrent tasks.
         env["GT_STATE_DIR"] = "/tmp/.nano-gt-state"
-        # --gt-root "$PWD": single point of GT activation. Deliberately NOT
+        # --root "$PWD": repository selection. Deliberately NOT
         # shlex-quoted — the $PWD must survive into the container's shell and
         # expand THERE (harbor prefixes `set -o pipefail; ` and execs the
         # string through the container shell with no explicit cwd, i.e. the

@@ -38,3 +38,4 @@ def test_gt_run_uses_external_private_state_directory(monkeypatch, tmp_path):
 
     assert captured["env"]["GT_STATE_DIR"] == "/tmp/.nano-gt-state"
     assert '--treatment groundtruth --root "$PWD"' in captured["command"]
+    assert "--output /logs/agent/gt-run.json" in captured["command"]
