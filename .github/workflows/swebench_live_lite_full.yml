@@ -1,6 +1,6 @@
 name: "SWE-bench Live Lite: Full 300-task (mini-swe-agent, GT substrate)"
 
-# Runs the WHOLE SWE-bench Pro benchmark in parallel — one task per job,
+# Runs the WHOLE SWE-bench Live Lite benchmark in parallel — one task per job,
 # fanned across max-parallel runners — using the EXACT same substrate-consume
 # proof path as deepswe_full.yml: pinned substrate by @sha256, gt-run-proof
 # inside the container, GTMiniSweAgent via pier, 8-artifact collection.
@@ -85,6 +85,7 @@ permissions:
   contents: read
   packages: read
   checks: write
+  actions: read
 
 env:
   PYTHONUTF8: "1"
@@ -122,9 +123,14 @@ env:
   GT_CONTAINERIZED: "1"
   GT_RUNTIME_STRATEGY: "unified_substrate"
   GT_LSP_READY_BUDGET_S_OVERRIDE: ${{ vars.GT_LSP_READY_BUDGET_S_OVERRIDE }}
-  # Verification horizon (step budget — same as DeepSWE).
-  GT_STEP_LIMIT: "300"
-  GT_SELF_VERIFY_ATTEMPTS: "2"
+  # Benchmark-owned Mini-SWE contract.  Live Lite's paired agent config
+  # (artifact_deepswe/gt_integration/deepswe_gt_pier*.yaml) is step_limit=150.
+  # DeepSWE is a separate benchmark and remains step_limit=300 in its own
+  # workflow.  Do not let a GT-internal horizon silently change the agent cap.
+  GT_STEP_LIMIT: "150"
+  # Official paired runs are one rollout per task.  GT verification is
+  # observational here; it must not create a second model attempt.
+  GT_SELF_VERIFY_ATTEMPTS: "0"
   GT_VERIFICATION_CYCLE_COST: "25"
   # Model routing — per-model API keys are set in the trial step's model-aware
   # routing block (DeepSeek/OpenRouter/TokenRouter). No top-level key needed.
@@ -157,12 +163,12 @@ jobs:
           GT_INPUT_BASELINE: ${{ inputs.baseline }}
           GT_INPUT_MAX_PARALLEL: ${{ inputs.max_parallel }}
         run: |
-          if [ "$GT_INPUT_BASELINE" != "true" ] && [ "$GT_INPUT_MAX_PARALLEL" != "20" ]; then
-            echo "GT_PAID_IDENTITY_PRECHECK_FAILED: max_parallel must be exactly 20" >&2
+          if [ "$GT_INPUT_MAX_PARALLEL" != "20" ]; then
+            echo "GT_BENCHMARK_IDENTITY_PRECHECK_FAILED: max_parallel must be exactly 20 for both arms" >&2
             exit 1
           fi
           if [ "$GT_INPUT_BASELINE" = "true" ]; then
-            echo "GT_BASELINE_IDENTITY_PRECHECK_OK: arm=GT-off"
+            echo "GT_BASELINE_IDENTITY_PRECHECK_OK: arm=GT-off max_parallel=20"
           else
             echo "GT_PAID_IDENTITY_PRECHECK_OK: arm=GT-on max_parallel=20"
           fi
@@ -278,10 +284,17 @@ jobs:
       - name: Cost guard — step_limit + cost_limit MUST be set
         shell: bash
         run: |
-          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml python3 << 'PYEOF'
+          GT_PIER_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier.yaml \
+          GT_BASELINE_CFG=artifact_deepswe/gt_integration/deepswe_gt_pier_baseline.yaml \
+          python3 << 'PYEOF'
           import os, re, sys
           cfg = os.environ["GT_PIER_CFG"]
+          baseline_cfg = os.environ["GT_BASELINE_CFG"]
+          for required in (cfg, baseline_cfg):
+              if not os.path.isfile(required):
+                  sys.exit(f"FATAL: required Live Lite agent config missing: {required}")
           txt = open(cfg, encoding="utf-8").read()
+          baseline_txt = open(baseline_cfg, encoding="utf-8").read()
           # Allow a trailing YAML inline comment (e.g. `step_limit: 150  # PAIRED-CONTROL ...`);
           # the old `\s*$` anchored right after the digits, so the PAIRED-CONTROL comment made the
           # match fail and the guard aborted with "missing/zero" though the value was set (150).
@@ -291,7 +304,13 @@ jobs:
               sys.exit(f"FATAL: agent.step_limit missing/zero in {cfg}")
           if not cl or float(cl.group(1)) <= 0:
               sys.exit(f"FATAL: agent.cost_limit missing/zero in {cfg}")
-          print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)}")
+          baseline_sl = re.search(r"^\s*step_limit:\s*([0-9]+)\s*(?:#.*)?$", baseline_txt, re.M)
+          baseline_cl = re.search(r"^\s*cost_limit:\s*([0-9.]+)\s*(?:#.*)?$", baseline_txt, re.M)
+          if not baseline_sl or baseline_sl.group(1) != sl.group(1):
+              sys.exit(f"FATAL: GT-on/baseline step_limit mismatch: {sl.group(1)} vs {baseline_sl.group(1) if baseline_sl else 'missing'}")
+          if not baseline_cl or baseline_cl.group(1) != cl.group(1):
+              sys.exit(f"FATAL: GT-on/baseline cost_limit mismatch: {cl.group(1)} vs {baseline_cl.group(1) if baseline_cl else 'missing'}")
+          print(f"cost guard OK: step_limit={sl.group(1)} cost_limit=${cl.group(1)} paired_baseline=true")
           PYEOF
 
       - name: Skip Pro-OS clone (Live Lite uses dataset problem_statement)
@@ -694,7 +713,6 @@ jobs:
           else
             echo "  model=$INPUT_MODEL — no specific API key check (will use litellm auto-detection)"
           fi
-          echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
           docker --version 2>/dev/null || true
           echo "  Docker CLI pre-check done"
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
@@ -1133,7 +1151,7 @@ jobs:
           GH_TOKEN_SECRET: ${{ secrets.GITHUB_TOKEN }}
           GT_LIVE_CHECK_TOKEN: ${{ github.token }}
         run: |
-          echo "=== SWE-bench Pro GT Trial: $MTASK (lang=$MLANG model=$INPUT_MODEL) ==="
+          echo "=== SWE-bench Live Lite GT Trial: $MTASK (lang=$MLANG model=$INPUT_MODEL) ==="
           echo "HOST  GT_CERT_DIR=${GT_CERT_DIR:-<unset>}  GT_HOST_GRAPH_DB=${GT_HOST_GRAPH_DB:-<unset>}"
           # At max_parallel=20, 120s stays below the repository GITHUB_TOKEN
           # REST budget while still exposing progress during a locked job view.
@@ -2836,6 +2854,17 @@ jobs:
           rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/swebench-pro-os.tar.gz 2>/dev/null || true
 
   # ── Summarize ────────────────────────────────────────────────────────────────
+  task_progress:
+    name: Task progress
+    needs: [prepare]
+    if: always()
+    uses: ./.github/workflows/task_progress.yml
+    with:
+      expected_total: ${{ needs.prepare.outputs.total }}
+      task_job_regex: '^.+ \(.+\)$'
+      monitor_timeout_minutes: "150"
+    secrets: inherit
+
   summarize:
     needs: [prepare, trial]
     if: always()
@@ -3282,7 +3311,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Aggregate SWE-bench Pro results
+      - name: Aggregate SWE-bench Live Lite results
         run: |
           GT_COMMIT="$(python3 - <<'PY'
           import glob, json, os, re
@@ -3308,7 +3337,7 @@ jobs:
           print(next(iter(values)))
           PY
           )"
-          echo "## SWE-bench Pro full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
+          echo "## SWE-bench Live Lite full benchmark — ${{ needs.prepare.outputs.total }} tasks" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Provenance** — GT commit: \`$GT_COMMIT\` | Pro-OS clone SHA: \`${{ needs.prepare.outputs.bench_sha }}\` | substrate digest: \`${GT_SUBSTRATE_DIGEST:-<unset>}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -3331,9 +3360,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: Classification tally (INFRA > GT > RESOLVED > AGENT, infra-excluded denominator)
+        env:
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
         run: |
           python3 << 'PYEOF' >> "$GITHUB_STEP_SUMMARY"
-          import glob, json, sys
+          import glob, json, os, sys
           sys.path.insert(0, "scripts/verify")
           from deepswe_outcome import tally_classes
           recs, missing = [], []
@@ -3345,16 +3376,42 @@ jobs:
               except (OSError, ValueError):
                   missing.append(task)
           t = tally_classes(recs)
+          expected_total = int(os.environ.get("EXPECTED_TOTAL") or 0)
+          official_denominator = expected_total or (len(recs) + len(missing))
+          official_rate = (t["counts"].get("RESOLVED", 0) / official_denominator) if official_denominator else None
           print("### Outcome classification (per-task `outcome.json`)")
           print()
           print("| class | count |")
           print("|---|---:|")
           for k in ("RESOLVED", "AGENT", "GT", "INFRA", "UNKNOWN"):
               print(f"| {k} | {t['counts'].get(k, 0)} |")
+          passed = t["counts"].get("RESOLVED", 0)
+          failed = t["counts"].get("AGENT", 0) + t["counts"].get("GT", 0)
+          infra = t["counts"].get("INFRA", 0)
+          infra_timeout = sum(
+              1 for r in recs
+              if r.get("failure_class") == "INFRA"
+              and (
+                  "TIMEOUT" in str(r.get("infra_subtype") or r.get("exception_type") or "").upper()
+                  or any("TIMEOUT" in str(marker).upper() for marker in (r.get("infra_markers") or []))
+              )
+          )
+          print()
+          print("### Operational status (no denominator changes)")
+          print()
+          print("| status | count |")
+          print("|---|---:|")
+          print(f"| passed (RESOLVED) | {passed} |")
+          print(f"| failed (AGENT + GT) | {failed} |")
+          print(f"| infrastructure timeout | {infra_timeout} |")
+          print(f"| other infrastructure failure | {infra - infra_timeout} |")
+          print(f"| unknown / missing verdict | {t['counts'].get('UNKNOWN', 0)} |")
           print()
           print(f"**resolved_rate = {t['resolved_rate']}** over denominator "
                 f"{t['denominator_excluding_infra']} (INFRA/UNKNOWN excluded: "
                 f"{t['excluded_from_denominator']})")
+          print(f"**official_raw_resolution_rate = {official_rate:.8f}** over submitted/planned "
+                f"denominator {official_denominator} (errors remain counted)")
           if missing:
               print()
               print(f"outcome.json MISSING for {len(missing)} task(s): "
