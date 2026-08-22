@@ -1890,8 +1890,14 @@ jobs:
                 GT_PRO_TRAJ_DIR=/gt_out \
                 GT_PRO_INSTANCE_ID="$MTASK" \
                 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_pro_runner.py 2>&1 || GT_RUNNER_RC=$?
+                # gt_pro_runner writes the task-scoped native trajectory as
+                # task.traj.json; older adapters used <instance>.traj.json.
+                # Accept both names, but always publish the canonical native
+                # filename consumed by metrics and outcome classification.
                 if [ -f "/gt_out/${MTASK}.traj.json" ]; then
                   cp "/gt_out/${MTASK}.traj.json" /gt_out/mini-swe-agent.trajectory.json
+                elif [ -f "/gt_out/task.traj.json" ]; then
+                  cp "/gt_out/task.traj.json" /gt_out/mini-swe-agent.trajectory.json
                 fi
               else
                 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
