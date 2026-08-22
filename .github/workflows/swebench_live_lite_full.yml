@@ -2527,12 +2527,17 @@ jobs:
 
           # TASK_TRUTH_INITIAL: deep metrics consumes this outcome authority. Build it only after
           # the explicit task root contains both the evaluator verdict and the native trajectory.
-          GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
-            GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
-            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
-            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
-            python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
-            || echo "TASK_TRUTH_INITIAL_WARN"
+          if [ "${GT_BASELINE_FLAG:-0}" = "1" ]; then
+            python3 scripts/swebench/baseline_task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" "${GT_TASK_ID}" \
+              || echo "TASK_TRUTH_INITIAL_WARN"
+          else
+            GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
+              GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+              GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
+              GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
+              python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
+              || echo "TASK_TRUTH_INITIAL_WARN"
+          fi
 
           # Deep 8-dp metrics.
           cp /tmp/gt/gt_run_summary*.json "trial_results/" 2>/dev/null || true
@@ -2600,13 +2605,18 @@ jobs:
           # TASK_TRUTH_FINAL: regenerate after deep metrics and outcome exist. Only this finalized
           # ledger is uploaded, so pre-metrics null enrichment cannot survive collection.
           rm -f "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json
-          GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
-            GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
-            GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
-            GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
-            GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
-            python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
-            || echo "TASK_TRUTH_FINAL_WARN"
+          if [ "${GT_BASELINE_FLAG:-0}" = "1" ]; then
+            python3 scripts/swebench/baseline_task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" "${GT_TASK_ID}" \
+              || echo "TASK_TRUTH_FINAL_WARN"
+          else
+            GT_INSTANCE_ID="${GT_TASK_ID}" GT_MATRIX_TASK="${GT_TASK_ID}" \
+              GT_TASK_DIR="$TASK_ARTIFACT_ROOT" GT_TRIAL_LOG=trial_output.log GT_CERT_DIR=/tmp/gt \
+              GT_RUNTIME_LEDGER="$TASK_ARTIFACT_ROOT/gt_runtime_ledger_${GT_TASK_ID}.jsonl" \
+              GT_ORACLE_EVENTS="$TASK_ARTIFACT_ROOT/gt_oracle_events_${GT_TASK_ID}.jsonl" \
+              GT_DEEPSWE_OUTCOME_JSON=trial_results/outcome.json \
+              python3 scripts/swebench/task_truth.py "$TASK_ARTIFACT_ROOT" "$TASK_ARTIFACT_ROOT/task_truth.json" \
+              || echo "TASK_TRUTH_FINAL_WARN"
+          fi
           cp "$TASK_ARTIFACT_ROOT/task_truth.json" trial_results/task_truth.json 2>/dev/null || true
           cp "$TASK_ARTIFACT_ROOT/reconciled_substrate_verdict.json" trial_results/reconciled_substrate_verdict.json 2>/dev/null || true
           find trial_results -type f 2>/dev/null | head -40 || true
