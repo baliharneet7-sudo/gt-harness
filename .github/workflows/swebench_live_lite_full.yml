@@ -1071,6 +1071,7 @@ jobs:
               doc = json.load(f)
           canonical = re.compile(r'^[0-9a-f]{40,64}$')
           digest = re.compile(r'^[0-9a-f]{64}$')
+          baseline = os.environ.get('GT_ID_BASELINE') == '1'
           required = {
               'schema': doc.get('schema') == 'gt.run_identity.v1',
               'gt_ref_prepared_sha': bool(canonical.fullmatch(str(doc.get('gt_ref_prepared_sha') or ''))),
@@ -1080,10 +1081,10 @@ jobs:
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
               'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
               'workflow_dispatch_matches_prepared': doc.get('workflow_dispatch_sha') == doc.get('gt_ref_prepared_sha'),
-              'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
-              'seam_matches_checkout': doc.get('seam_sha256') == os.environ.get('GT_ID_SEAM'),
-              'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
-              'runner_matches_checkout': doc.get('runner_sha256') == os.environ.get('GT_ID_RUNNER'),
+              'seam_sha256': baseline or bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
+              'seam_matches_checkout': baseline or doc.get('seam_sha256') == os.environ.get('GT_ID_SEAM'),
+              'runner_sha256': baseline or bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
+              'runner_matches_checkout': baseline or doc.get('runner_sha256') == os.environ.get('GT_ID_RUNNER'),
               'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
               'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GT_ID_WORKFLOW_RUN_ID'),
               'shadow_rate_requested': doc.get('shadow_rate_requested') == os.environ.get('GT_SS_SHADOW_RATE_REQUESTED'),
@@ -1251,12 +1252,18 @@ jobs:
           HOST_GT_INJECT=/tmp/gt_inject/opt/gt
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
-          cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          if [ "$INPUT_BASELINE" = "true" ]; then
+            cp artifact_deepswe/gt_pro_runner.py "${HOST_GT_INJECT}/"
+          else
+            cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          fi
           # Headless agent runner (B5 fix): the non-interactive core of run/mini.py. The bare
           # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
           # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
-          cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
-          cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
+          if [ "$INPUT_BASELINE" != "true" ]; then
+            cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
+            cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
+          fi
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1835,7 +1842,20 @@ jobs:
               # above), PYTHONPATH=/opt/gt so the runner imports both minisweagent AND gt_mini_patch
               # (in-process delivery), PYTHONUNBUFFERED so the runner breadcrumbs survive a hang/kill.
               GT_RUNNER_RC=0
-              PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
+              if [ "${GT_BASELINE:-0}" = "1" ]; then
+                GT_PRO_MODEL="$INPUT_MODEL" \
+                GT_PRO_ISSUE=/gt_out/issue.txt \
+                GT_PRO_REPO="$GT_ROOT" \
+                GT_PRO_PATCH_OUT=/gt_out/agent_patch.diff \
+                GT_PRO_TRAJ_DIR=/gt_out \
+                GT_PRO_INSTANCE_ID="$MTASK" \
+                PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_pro_runner.py 2>&1 || GT_RUNNER_RC=$?
+                if [ -f "/gt_out/${MTASK}.traj.json" ]; then
+                  cp "/gt_out/${MTASK}.traj.json" /gt_out/mini-swe-agent.trajectory.json
+                fi
+              else
+                PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
+              fi
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
               # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
