@@ -1907,11 +1907,14 @@ jobs:
               # (in-process delivery), PYTHONUNBUFFERED so the runner breadcrumbs survive a hang/kill.
               GT_RUNNER_RC=0
               if [ "${GT_BASELINE:-0}" = "1" ]; then
-                 # INPUT_MODEL is a host-side workflow variable; it is not
-                 # implicitly present inside the task container.  Splice the
-                 # validated model value into the env assignment at the
-                 # Docker-shell boundary so the GT-off runner receives the
-                 # exact requested model instead of an empty string.
+                # Baseline means the stock Mini-SWE runner: no GT injection,
+                # no GT profile, and no GT-specific artifact contract.
+                PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
+              else
+                # INPUT_MODEL is a host-side workflow variable; it is not
+                # implicitly present inside the task container.  Splice the
+                # validated model value into the env assignment at the
+                # Docker-shell boundary for the GT runner.
                  GT_PRO_MODEL="'"$INPUT_MODEL"'" \
                 GT_PRO_ISSUE=/gt_out/issue.txt \
                 GT_PRO_REPO="$GT_ROOT" \
@@ -1928,8 +1931,6 @@ jobs:
                 elif [ -f "/gt_out/task.traj.json" ]; then
                   cp "/gt_out/task.traj.json" /gt_out/mini-swe-agent.trajectory.json
                 fi
-              else
-                PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
               fi
 
               # Preserve a typed terminal receipt even when the agent exits
