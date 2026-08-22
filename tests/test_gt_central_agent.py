@@ -80,6 +80,9 @@ from gt_engine.preflight import (
     PreflightMode,
     adapt_proposed_action,
 )
+from gt_engine.replay_bundle import load_replay_bundle
+from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
+from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.snowflake_onnx import (
     SNOWFLAKE_MAX_LENGTH,
     SNOWFLAKE_MODEL_NAME,
@@ -87,9 +90,6 @@ from gt_engine.snowflake_onnx import (
     SNOWFLAKE_MODEL_SHA256,
     SNOWFLAKE_TOKENIZER_SHA256,
 )
-from gt_engine.replay_bundle import load_replay_bundle
-from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
-from gt_engine.repository_mirror import SourceMirrorPlan
 from gt_engine.uplift_policy import GTPolicyMode
 from scripts.central_bootstrap_canary import production_shaped_catalog, validate_canary
 from scripts.central_release_gate import audit_treatment_runtime
