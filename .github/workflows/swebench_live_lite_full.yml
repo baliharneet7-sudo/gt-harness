@@ -1604,7 +1604,7 @@ jobs:
           # = a subtraction of NameErrors -- every Live-Lite id contains hyphens) -> the -c crashed ->
           # ISSUE_TEXT empty -> the agent ran BLIND on the literal placeholder -> guaranteed unresolved.
           ISSUE_TEXT=$(python3 -c "
-          import json, sys
+          import json, os, sys
           task = sys.argv[1]
           for line in open('benchmarks/data/swebench_live_lite.jsonl', encoding='utf-8'):
               r = json.loads(line)
@@ -2647,7 +2647,7 @@ jobs:
             "trial_results/gt_deep_metrics_${GT_TASK_ID}.json" \
             "trial_results/gt_performance_metrics_${GT_TASK_ID}.json" \
             "trial_results/gt_behavioral_impact_${GT_TASK_ID}.json" <<'PY'
-          import json, sys
+          import json, os, sys
           from gt_run_metrics import validate_task_performance_record
 
           try:
@@ -2658,6 +2658,15 @@ jobs:
               print("performance_detail_invalid behavioral_detail_invalid", file=sys.stderr)
               raise SystemExit(1)
           performance_issues = validate_task_performance_record(performance)
+          # The GT-OFF control has no GT delivery denominator.  Metrics that
+          # are explicitly UNMEASURED for that arm remain valid control data;
+          # structural/schema/parity failures must still fail closed.  GT-ON
+          # keeps the strict mandatory-measurement contract.
+          if os.environ.get("GT_BASELINE_FLAG") == "1":
+              performance_issues = [
+                  issue for issue in performance_issues
+                  if not issue.endswith(":unmeasured")
+              ]
           if performance_issues:
               print(
                   "performance_detail_invalid:" + ",".join(performance_issues),
