@@ -33,6 +33,10 @@ on:
         description: "OpenAI-compatible gateway URL; when set, exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
         default: ""
+      provider_secret:
+        description: "Repository Actions secret name containing the provider key; value is never a dispatch input"
+        type: string
+        default: "OPENAI_API_KEY"
       n_tasks:
         description: "Slice size (harbor -l). 'all' = full 89-task dataset"
         type: string
@@ -88,7 +92,7 @@ jobs:
       # Set whichever your model needs: `gh secret set ANTHROPIC_API_KEY` etc.
       # Unset secrets resolve to "" and are simply absent for the agent.
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets[inputs.provider_secret] }}
       # Input beats secret; empty means "no gateway" (direct provider APIs).
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       # GTNanoAgent resolves GT_RL_PROFILE as kwarg > host env > default "2"
@@ -341,6 +345,7 @@ jobs:
           MIN_ACTION_CONSISTENT: ${{ inputs.min_action_consistent }}
           EXPECTED_TASKS: ${{ inputs.expected_tasks }}
           EXPECTED_TEMPERATURE: ${{ inputs.temperature }}
+          EXPECTED_MODEL: ${{ inputs.model }}
         run: |
           set -uo pipefail
           run_dir="results/terminal-bench/${JOB_NAME}"
@@ -361,7 +366,7 @@ jobs:
               --min-exercised "$MIN_EXERCISED" \
               --min-action-consistent "$MIN_ACTION_CONSISTENT" \
               --expected-tasks "$EXPECTED_TASKS" \
-              --expected-model "deepseek-v4-flash" \
+              --expected-model "$EXPECTED_MODEL" \
               --expected-temperature "$EXPECTED_TEMPERATURE" \
               --require-complete-census \
               --require-complete-profile \
