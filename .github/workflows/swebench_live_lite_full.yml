@@ -31,6 +31,10 @@ on:
         description: "LLM model (litellm-compatible)"
         required: true
         default: "deepseek/deepseek-v4-flash"
+      api_key:
+        description: "Provider API key supplied at dispatch time; falls back to the repository secret when omitted."
+        required: false
+        default: ""
       mode:
         description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (300)"
         required: true
@@ -694,7 +698,7 @@ jobs:
         env:
           TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_API_KEY }}
         shell: bash
         run: |
           set -e
@@ -1146,7 +1150,7 @@ jobs:
           INPUT_BASELINE: ${{ inputs.baseline }}
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_API_KEY }}
           REPO_OWNER: ${{ github.repository_owner }}
           GH_TOKEN_SECRET: ${{ secrets.GITHUB_TOKEN }}
           GT_LIVE_CHECK_TOKEN: ${{ github.token }}
