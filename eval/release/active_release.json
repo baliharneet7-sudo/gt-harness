@@ -1,11 +1,10 @@
 {
   "schema": "gt.release_manifest.v1",
-  "release_id": "gt-final-mechanical-completeness-2026-08-21-v26",
+  "release_id": "gt-final-mechanical-completeness-2026-08-22-v27",
   "task_profile": "repair20-v1",
-  "runtime_commit": "bcc1543d6d050cb54820baeccc15c3c8f2e230cc",
+  "runtime_commit": "1af8f04f3f70bc982253a19a608830883ea2bc7b",
   "benchmark_authorized": false,
   "authorization_blockers": [
-    "candidate runtime is newer than the active release identity",
     "exact-commit Linux provider-free proof is pending",
     "exact-commit replay and release-gate audit is pending"
   ],
@@ -14,8 +13,8 @@
     "deepswe_miniswe_central.yml"
   ],
   "prediction": {
-    "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V26.json",
-    "sha256": "c68d1d95abf48079f4ec6b5e89ed2c22fb5269a8f2d051eb2b7e8b37db2f5ecf"
+    "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-22_V27.json",
+    "sha256": "90c93a31b299c919f0f8278aaaa6607264c4242cc3cc5d6a34da03c925922364"
   },
   "baseline": {
     "path": "eval/frozen_baselines/tb2_miniswe_20260731.json",
@@ -27,6 +26,6 @@
   },
   "allowed_post_runtime_paths": [
     "eval/release/active_release.json",
-    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V26.json"
+    "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-22_V27.json"
   ]
 }
