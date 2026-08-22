@@ -307,14 +307,23 @@ jobs:
 
           for task_dir in sorted(Path("tasks").glob("*")):
               results = list(task_dir.rglob("result.json"))
-              if not results:
-                  missing.append(task_dir.name)
-                  continue
+              task_trials = []
               for rp in results:
                   r = json.loads(rp.read_text(encoding="utf-8"))
+                  # Harbor writes an outer run summary and one nested trial
+                  # result.  The outer file has stats but no trial_results;
+                  # only nested records carry verifier rewards/exceptions.
                   got = r.get("trial_results", []) or []
-                  trials.extend(got)
-                  per_task.append((task_dir.name, len(got)))
+                  if not got and r.get("task_name") and (
+                      "verifier_result" in r or "exception_info" in r
+                  ):
+                      got = [r]
+                  task_trials.extend(got)
+              if not task_trials:
+                  missing.append(task_dir.name)
+                  continue
+              trials.extend(task_trials)
+              per_task.append((task_dir.name, len(task_trials)))
 
           def solved(t):
               rewards = (t.get("verifier_result") or {}).get("rewards") or {}
