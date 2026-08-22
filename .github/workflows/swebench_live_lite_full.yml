@@ -1,4 +1,5 @@
 name: "SWE-bench Live Lite: Full 300-task (mini-swe-agent, GT substrate)"
+# GitHub Actions registration touch: preserve workflow semantics.
 
 # Runs the WHOLE SWE-bench Pro benchmark in parallel — one task per job,
 # fanned across max-parallel runners — using the EXACT same substrate-consume
