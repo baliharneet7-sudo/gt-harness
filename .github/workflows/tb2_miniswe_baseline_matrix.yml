@@ -257,6 +257,16 @@ jobs:
         if: always()
         run: df -h /
 
+      - name: Normalize task artifact permissions
+        if: always()
+        run: |
+          # Harbor's container can leave gt-state files owned by root.  The
+          # runner must be able to read every receipt before upload; this does
+          # not alter the task workspace, model, evaluator, or score.
+          if [ -d results/terminal-bench ]; then
+            chmod -R a+rX results/terminal-bench || true
+          fi
+
       - name: Upload task result
         if: always()
         uses: actions/upload-artifact@v4
