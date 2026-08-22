@@ -80,6 +80,13 @@ from gt_engine.preflight import (
     PreflightMode,
     adapt_proposed_action,
 )
+from gt_engine.snowflake_onnx import (
+    SNOWFLAKE_MAX_LENGTH,
+    SNOWFLAKE_MODEL_NAME,
+    SNOWFLAKE_MODEL_REVISION,
+    SNOWFLAKE_MODEL_SHA256,
+    SNOWFLAKE_TOKENIZER_SHA256,
+)
 from gt_engine.replay_bundle import load_replay_bundle
 from gt_engine.repository_intelligence import RepositoryEvidence, RepositorySession
 from gt_engine.repository_mirror import SourceMirrorPlan
@@ -406,6 +413,8 @@ def test_deepswe_workflow_sets_a_nontrivial_initial_index_timeout():
     assert workflow.count("--ak enable_decision_sufficiency=true") == 2
     assert workflow.count("--ak enable_decision_sufficiency=false") == 1
     assert "audit_treatment_runtime" in workflow
+    assert "audit_intervention_artifacts" in workflow
+    assert "artifact_root=receipts[0].parent" in workflow
     assert "GT treatment release gate failed" in workflow
     assert "--ak enable_context_compaction=true" in workflow
     assert "--ak enable_completion_controller=true" in workflow
@@ -476,6 +485,9 @@ def test_deepswe_workflow_provider_preflight_matches_gateway_model_routing():
     assert fingerprint_gate in workflow
     assert 'echo "OPENAI_BASE_URL=${PROVIDER_BASE_URL}"' in workflow
     assert "openai/deepseek-v4-flash" in workflow
+    assert 'executor_identity.get("models") == [expected_response_model]' in workflow
+    assert 'executor_identity.get("providers") == [expected_response_provider]' in workflow
+    assert 'model.rsplit("/", 1)[-1]' not in workflow
     assert "deepseek_native" in workflow
     readiness = (
         Path(__file__).resolve().parents[1] / "scripts" / "central_readiness_audit.py"
@@ -2654,11 +2666,16 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
             return tuple((1.0, 0.0) for _ in texts)
 
         def receipt(self):
-            return {
-                "backend": "snowflake_onnx",
-                "model_name": "fixture-dense",
-                "model_sha256": "d" * 64,
-                "available": True,
+                return {
+                    "backend": "snowflake_onnx",
+                    "model_name": SNOWFLAKE_MODEL_NAME,
+                    "model_revision": SNOWFLAKE_MODEL_REVISION,
+                    "model_sha256": SNOWFLAKE_MODEL_SHA256,
+                    "tokenizer_sha256": SNOWFLAKE_TOKENIZER_SHA256,
+                    "pooling": "cls",
+                    "normalization": "l2",
+                    "max_length": SNOWFLAKE_MAX_LENGTH,
+                    "available": True,
                 "failed": False,
                 "network_calls": 0,
                 "provider_calls": 0,
@@ -2704,6 +2721,7 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
         "max_execution_views": 3,
         "max_relation_facts": 3,
         "max_semantic_items": 3,
+        "max_edge_expansions": 256,
         "delivery_mode": "integrated_same_observation",
     }
     assert receipt["relational_context"]["deliveries"] == []

@@ -24,6 +24,8 @@ def _barrier(**overrides: object) -> dict[str, object]:
         "context_accounted_count": 3,
         "contribution_candidate_count": 2,
         "contribution_accounted_count": 2,
+        "selected_contribution_ids": ("one", "two"),
+        "provider_value_contribution_ids": ("one", "two"),
         "replay_capture_enabled": True,
     }
     values.update(overrides)
@@ -44,6 +46,13 @@ def test_provider_barrier_rejects_stale_graph_and_unfinalized_action() -> None:
         "graph_not_current",
         "previous_action_not_finalized",
     }
+
+
+def test_provider_barrier_rejects_selected_contribution_without_value_proof() -> None:
+    barrier = _barrier(provider_value_contribution_ids=("one",))
+
+    assert barrier["status"] == "BLOCKED"
+    assert barrier["failures"] == ["provider_value_certificate_mismatch"]
 
 
 def test_provider_barrier_blocks_incomplete_mandatory_substrate() -> None:

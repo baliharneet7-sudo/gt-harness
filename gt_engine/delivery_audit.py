@@ -364,13 +364,18 @@ def audit_provider_deliveries(
             row["predictive"] = row["evidence_action"] > completed_actions
         if context is None:
             failures.append(f"{task}:delivery_call_context_missing:{index}")
-        dispatch_valid = bool(
-            context
-            and str(context.get("dispatch_status") or "")
-            in {"invoked", "response_received", "response_error"}
-        )
-        if context is not None and not dispatch_valid:
+        dispatch_status = str((context or {}).get("dispatch_status") or "")
+        transport_started = dispatch_status in {
+            "invoked",
+            "response_received",
+            "response_error",
+        }
+        exposure_confirmed = dispatch_status == "response_received"
+        dispatch_valid = bool(context and exposure_confirmed)
+        if context is not None and not transport_started:
             failures.append(f"{task}:delivery_request_not_dispatched:{index}")
+        elif context is not None and not exposure_confirmed:
+            failures.append(f"{task}:delivery_provider_response_missing:{index}")
         request_hash = row["request_payload_sha256"]
         if not request_hash:
             failures.append(f"{task}:delivery_missing_provider_request_hash:{index}")
@@ -988,6 +993,8 @@ def audit_provider_deliveries(
                     f"{task}:repository_frontier_delivery_support_missing:{index}"
                 )
         row["timing_valid"] = timing_valid
+        row["transport_started"] = transport_started
+        row["provider_exposure_confirmed"] = exposure_confirmed
         row["dispatch_valid"] = dispatch_valid
         row["semantic_support_valid"] = semantic_support_valid
         row["message_index_valid"] = message_index_valid
@@ -1017,10 +1024,12 @@ def audit_provider_deliveries(
         if row["claim_count"] == 0:
             failures.append(f"{task}:delivery_without_claims:{index}:{row['surface']}")
 
+    exposed_rows = [row for row in rows if row.get("provider_exposure_confirmed")]
     totals: dict[str, Any] = {
-        "delivery_count": len(rows),
-        "visible_chars": sum(row["chars"] for row in rows),
-        "claim_count": sum(row["claim_count"] for row in rows),
+        "attempted_delivery_count": len(rows),
+        "delivery_count": len(exposed_rows),
+        "visible_chars": sum(row["chars"] for row in exposed_rows),
+        "claim_count": sum(row["claim_count"] for row in exposed_rows),
         "timely_count": sum(bool(row.get("timing_valid")) for row in rows),
         "late_count": sum(bool(row.get("one_step_late")) for row in rows),
         "predictive_count": sum(bool(row.get("predictive")) for row in rows),
@@ -1029,10 +1038,12 @@ def audit_provider_deliveries(
     }
     for surface in sorted({row["surface"] for row in rows}):
         selected = [row for row in rows if row["surface"] == surface]
+        exposed = [row for row in selected if row.get("provider_exposure_confirmed")]
         totals["surfaces"][surface] = {
-            "delivery_count": len(selected),
-            "visible_chars": sum(row["chars"] for row in selected),
-            "claim_count": sum(row["claim_count"] for row in selected),
+            "attempted_delivery_count": len(selected),
+            "delivery_count": len(exposed),
+            "visible_chars": sum(row["chars"] for row in exposed),
+            "claim_count": sum(row["claim_count"] for row in exposed),
             "timely_count": sum(bool(row.get("timing_valid")) for row in selected),
             "late_count": sum(bool(row.get("one_step_late")) for row in selected),
             "predictive_count": sum(bool(row.get("predictive")) for row in selected),

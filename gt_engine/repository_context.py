@@ -364,6 +364,7 @@ class RepositoryContextEngine:
         max_impact_facts: int = 8,
         max_semantic_items: int = 6,
         max_tokens: int = 256,
+        max_edge_expansions: int = 256,
     ) -> None:
         self.max_depth = max(1, int(max_depth))
         self.max_branching = max(1, int(max_branching))
@@ -371,6 +372,9 @@ class RepositoryContextEngine:
         self.max_impact_facts = max(1, int(max_impact_facts))
         self.max_tokens = max(1, int(max_tokens))
         self.max_semantic_items = max(1, int(max_semantic_items))
+        self.max_edge_expansions = max(1, int(max_edge_expansions))
+        self._process_graph_revision = ""
+        self._process_graph_cache: dict[str, Any] = {}
         self._semantic = SemanticEvidenceBridge(
             max_items=self.max_semantic_items, max_tokens=max_tokens
         )
@@ -386,148 +390,202 @@ class RepositoryContextEngine:
         links: tuple[StructuralLink, ...],
         anchor_paths: frozenset[str],
         anchor_symbols: frozenset[str],
+        graph_revision: str,
     ) -> tuple[tuple[ExecutionView, ...], int, dict[str, int]]:
-        calls = tuple(
-            link for link in links if link.relation.upper() == "CALLS" and _certified(link)
-        )
-        rejected = sum(
-            1
-            for link in links
-            if link.relation.upper() == "CALLS" and not _certified(link)
-        )
-        adjacency: dict[SymbolRef, list[tuple[SymbolRef, StructuralLink]]] = defaultdict(list)
-        incoming: set[SymbolRef] = set()
-        for link in calls:
-            source, target = _node(True, link), _node(False, link)
-            adjacency[source].append((target, link))
-            incoming.add(target)
-        for rows in adjacency.values():
-            rows.sort(key=lambda row: (row[0].path.lower(), row[0].symbol, row[0].line))
-        route_entries: dict[SymbolRef, str] = {}
-        for link in links:
-            if link.relation.upper() != "HANDLES_ROUTE" or not _certified(link):
-                continue
-            route_entries[_node(True, link)] = link.route
-        entries = [
-            (node, "route_entry", route_entries[node]) for node in sorted(route_entries)
-        ]
-        entries.extend(
-            (node, "declared_main", "")
-            for node in sorted(set(adjacency) - incoming)
-            if node.symbol in {"main", "Main"} and node not in route_entries
-        )
-        entries.extend(
-            (node, "graph_root", "")
-            for node in sorted(set(adjacency) - incoming)
-            if node not in route_entries and node.symbol not in {"main", "Main"}
-        )
-        if not entries:
-            entries = [
-                (node, "anchored_seed", "")
-                for node in sorted(set(adjacency) | incoming)
-                if self._matches(node, anchor_paths, anchor_symbols)
-            ]
+        if graph_revision != self._process_graph_revision:
+            adjacency: dict[SymbolRef, list[tuple[SymbolRef, StructuralLink]]] = defaultdict(list)
+            reverse: dict[SymbolRef, list[tuple[SymbolRef, StructuralLink]]] = defaultdict(list)
+            nodes: set[SymbolRef] = set()
+            route_entries: dict[SymbolRef, str] = {}
+            rejected = 0
+            for link in links:
+                relation = link.relation.upper()
+                if relation == "CALLS":
+                    if not _certified(link):
+                        rejected += 1
+                        continue
+                    source, target = _node(True, link), _node(False, link)
+                    adjacency[source].append((target, link))
+                    reverse[target].append((source, link))
+                    nodes.update((source, target))
+                elif relation == "HANDLES_ROUTE" and _certified(link):
+                    source = _node(True, link)
+                    route_entries[source] = link.route
+                    nodes.add(source)
+            def ordering(row: tuple[SymbolRef, StructuralLink]) -> tuple[str, str, int]:
+                return (row[0].path.lower(), row[0].symbol, row[0].line)
 
-        views: list[ExecutionView] = []
+            for mapping in (adjacency, reverse):
+                for rows in mapping.values():
+                    rows.sort(key=ordering)
+            self._process_graph_revision = graph_revision
+            self._process_graph_cache = {
+                "adjacency": adjacency,
+                "reverse": reverse,
+                "nodes": frozenset(nodes),
+                "route_entries": route_entries,
+                "rejected": rejected,
+            }
+        adjacency = self._process_graph_cache.get("adjacency", {})
+        reverse = self._process_graph_cache.get("reverse", {})
+        nodes = self._process_graph_cache.get("nodes", frozenset())
+        route_entries = self._process_graph_cache.get("route_entries", {})
+        rejected = int(self._process_graph_cache.get("rejected", 0))
+        anchor_nodes = tuple(
+            node
+            for node in sorted(nodes)
+            if self._matches(node, anchor_paths, anchor_symbols)
+        )[:5]
+
         paths_considered = 0
         branch_truncated = 0
-        queue: deque[
-            tuple[
-                SymbolRef,
-                tuple[DirectedExecutionStep, ...],
-                frozenset[SymbolRef],
-                str,
-                str,
-            ]
-        ]
-        queue = deque(
-            (entry, (), frozenset({entry}), entry_kind, route)
-            for entry, entry_kind, route in entries
-        )
-        while queue:
-            current, steps, visited, entry_kind, route = queue.popleft()
-            all_rows = adjacency.get(current, ())
-            rows = all_rows[: self.max_branching]
-            branch_truncated += max(0, len(all_rows) - len(rows))
-            expanded = False
-            for target, link in rows:
-                paths_considered += 1
-                step = DirectedExecutionStep(
-                    source=current,
-                    target=target,
-                    confidence=float(link.confidence),
-                    provenance=tuple(link.provenance),
-                    resolution_method=link.resolution_method,
-                    receiver_type=link.receiver_type,
-                    source_return_type=link.source_return_type,
-                    target_return_type=link.target_return_type,
-                )
-                next_steps = (*steps, step)
-                contains_anchor = any(
-                    self._matches(node, anchor_paths, anchor_symbols)
-                    for node in (next_steps[0].source, *(item.target for item in next_steps))
-                )
-                if target in visited:
-                    if contains_anchor:
-                        views.append(
-                            ExecutionView(
-                                _stable_id(
-                                    "gt-execution-",
-                                    *(
-                                        s.source.rendered + ">" + s.target.rendered
-                                        for s in next_steps
-                                    ),
-                                ),
-                                next_steps,
-                                cycle_terminated=True,
-                                entry_kind=entry_kind,
-                                route=route,
-                            )
+        expansion_truncated = False
+
+        def bounded_rows(rows: tuple[Any, ...] | list[Any]) -> tuple[Any, ...]:
+            nonlocal paths_considered, branch_truncated, expansion_truncated
+            remaining = max(0, self.max_edge_expansions - paths_considered)
+            limit = min(self.max_branching, remaining)
+            selected = tuple(rows[:limit])
+            branch_truncated += max(0, len(rows) - len(selected))
+            paths_considered += len(selected)
+            if len(selected) < len(rows) and remaining <= self.max_branching:
+                expansion_truncated = True
+            return selected
+
+        def step(
+            source: SymbolRef,
+            target: SymbolRef,
+            link: StructuralLink,
+        ) -> DirectedExecutionStep:
+            return DirectedExecutionStep(
+                source=source,
+                target=target,
+                confidence=float(link.confidence),
+                provenance=tuple(link.provenance),
+                resolution_method=link.resolution_method,
+                receiver_type=link.receiver_type,
+                source_return_type=link.source_return_type,
+                target_return_type=link.target_return_type,
+            )
+
+        views: list[ExecutionView] = []
+        entry_candidates = 0
+        candidate_limit = self.max_execution_views * 8
+        for anchor in anchor_nodes:
+            upstream: list[tuple[tuple[DirectedExecutionStep, ...], str, str, bool, bool]] = []
+            queue = deque([(anchor, (), frozenset({anchor}))])
+            while queue and paths_considered < self.max_edge_expansions:
+                current, steps, visited = queue.popleft()
+                rows = bounded_rows(reverse.get(current, ()))
+                if not rows:
+                    if steps:
+                        first = steps[0].source
+                        kind = (
+                            "route_entry"
+                            if first in route_entries
+                            else "declared_main"
+                            if first.symbol in {"main", "Main"}
+                            else "graph_root"
                         )
+                        upstream.append((steps, kind, route_entries.get(first, ""), False, False))
                     continue
-                expanded = True
-                terminal = len(next_steps) >= self.max_depth or not adjacency.get(target)
-                if terminal:
-                    if contains_anchor:
-                        views.append(
-                            ExecutionView(
-                                _stable_id(
-                                    "gt-execution-",
-                                    *(
-                                        s.source.rendered + ">" + s.target.rendered
-                                        for s in next_steps
-                                    ),
-                                ),
+                for predecessor, link in rows:
+                    next_steps = (step(predecessor, current, link), *steps)
+                    cycle = predecessor in visited
+                    depth_limited = len(next_steps) >= self.max_depth
+                    is_entry = (
+                        predecessor in route_entries
+                        or predecessor.symbol in {"main", "Main"}
+                        or not reverse.get(predecessor)
+                    )
+                    if cycle or depth_limited or is_entry:
+                        kind = (
+                            "route_entry"
+                            if predecessor in route_entries
+                            else "declared_main"
+                            if predecessor.symbol in {"main", "Main"}
+                            else "graph_root"
+                            if not reverse.get(predecessor)
+                            else "anchored_seed"
+                        )
+                        upstream.append(
+                            (
                                 next_steps,
-                                truncated=len(next_steps) >= self.max_depth,
-                                entry_kind=entry_kind,
-                                route=route,
+                                kind,
+                                route_entries.get(predecessor, ""),
+                                depth_limited,
+                                cycle,
                             )
                         )
-                else:
-                    queue.append(
-                        (target, next_steps, visited | {target}, entry_kind, route)
+                    else:
+                        queue.append(
+                            (predecessor, next_steps, visited | {predecessor})
+                        )
+            if not upstream:
+                upstream.append(
+                    (
+                        (),
+                        "route_entry"
+                        if anchor in route_entries
+                        else "declared_main"
+                        if anchor.symbol in {"main", "Main"}
+                        else "anchored_seed",
+                        route_entries.get(anchor, ""),
+                        False,
+                        False,
                     )
-            if steps and not expanded:
-                contains_anchor = any(
-                    self._matches(node, anchor_paths, anchor_symbols)
-                    for node in (steps[0].source, *(item.target for item in steps))
                 )
-                if contains_anchor and not any(view.steps == steps for view in views):
+            entry_candidates += len(upstream)
+
+            downstream: list[tuple[tuple[DirectedExecutionStep, ...], bool, bool]] = []
+            queue = deque([(anchor, (), frozenset({anchor}))])
+            while queue and paths_considered < self.max_edge_expansions:
+                current, steps, visited = queue.popleft()
+                rows = bounded_rows(adjacency.get(current, ()))
+                if not rows:
+                    if steps:
+                        downstream.append((steps, False, False))
+                    continue
+                for target, link in rows:
+                    next_steps = (*steps, step(current, target, link))
+                    cycle = target in visited
+                    depth_limited = len(next_steps) >= self.max_depth
+                    is_test = target.path.lower().startswith(("test/", "tests/"))
+                    terminal = cycle or depth_limited or is_test or not adjacency.get(target)
+                    if terminal:
+                        downstream.append((next_steps, depth_limited, cycle))
+                    else:
+                        queue.append((target, next_steps, visited | {target}))
+            if not downstream:
+                downstream.append(((), False, False))
+
+            for upstream_steps, entry_kind, route, up_truncated, up_cycle in upstream:
+                for downstream_steps, down_truncated, down_cycle in downstream:
+                    combined = (*upstream_steps, *downstream_steps)
+                    if not combined:
+                        continue
                     views.append(
                         ExecutionView(
                             _stable_id(
                                 "gt-execution-",
                                 *(
-                                    s.source.rendered + ">" + s.target.rendered
-                                    for s in steps
+                                    item.source.rendered + ">" + item.target.rendered
+                                    for item in combined
                                 ),
                             ),
-                            steps,
+                            combined,
+                            truncated=up_truncated or down_truncated,
+                            cycle_terminated=up_cycle or down_cycle,
                             entry_kind=entry_kind,
                             route=route,
                         )
                     )
+                    if len(views) >= candidate_limit:
+                        break
+                if len(views) >= candidate_limit:
+                    break
+            if len(views) >= candidate_limit or paths_considered >= self.max_edge_expansions:
+                break
         unique = {view.view_id: view for view in views}
 
         def score(view: ExecutionView) -> tuple[Any, ...]:
@@ -571,11 +629,14 @@ class RepositoryContextEngine:
             "max_depth": self.max_depth,
             "max_branching": self.max_branching,
             "max_execution_views": self.max_execution_views,
-            "entries_considered": len(entries),
+            "max_edge_expansions": self.max_edge_expansions,
+            "anchor_nodes_considered": len(anchor_nodes),
+            "entries_considered": entry_candidates,
             "paths_considered": paths_considered,
             "returned_views": len(selected),
             "candidate_views": len(ranked),
             "branch_truncated": branch_truncated,
+            "expansion_truncated": int(expansion_truncated),
             "depth_truncated": sum(1 for view in ranked if view.truncated),
             "cycle_terminated": sum(1 for view in ranked if view.cycle_terminated),
             "deduplicated_paths": max(0, len(views) - len(unique)),
@@ -1088,7 +1149,10 @@ class RepositoryContextEngine:
                     ),
                 )
         execution_views, rejected_edges, process_coverage = self._execution_views(
-            snapshot.structural_links, anchor_paths, anchor_symbols
+            snapshot.structural_links,
+            anchor_paths,
+            anchor_symbols,
+            snapshot.graph_revision,
         )
         impact, rejected_impact_edges = self._impact(
             snapshot.structural_links, anchor_paths, anchor_symbols

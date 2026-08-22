@@ -120,7 +120,24 @@ def test_forbidden_path_evidence_uses_neutral_task_language():
     assert "grader" not in rendered
 
 
-def test_budget_risk_returns_only_broad_non_progress_exploration():
+def test_forbidden_paths_cannot_hide_behind_relative_or_static_shell_syntax():
+    for command in (
+        "cat ../solution/answer.txt",
+        'p=/solution; cat "$p"/answer.txt',
+        'python -c "open(\'/solution/answer.txt\').read()"',
+        "cat $(printf /solution/answer.txt)",
+    ):
+        decision = convergence_preflight(
+            _proposal(command),
+            cwd="/app",
+            source_revision="source-1",
+        )
+
+        assert decision.disposition is ActionDisposition.RETURN_TO_MODEL
+        assert "forbidden_benchmark_artifact_path" in decision.reason_codes
+
+
+def test_budget_risk_never_adds_a_provider_reasoning_loop():
     broad = convergence_preflight(
         _proposal("find /app -type f"),
         cwd="/app",
@@ -136,9 +153,7 @@ def test_budget_risk_returns_only_broad_non_progress_exploration():
         unresolved_anchors=("pytest -q", "out.json"),
     )
 
-    assert broad.disposition is ActionDisposition.RETURN_TO_MODEL
-    assert "convergence_budget_requires_verification" in broad.reason_codes
-    assert "pytest -q" in " ".join(broad.evidence)
+    assert broad.disposition is ActionDisposition.PASS
     assert focused.disposition is ActionDisposition.PASS
 
 

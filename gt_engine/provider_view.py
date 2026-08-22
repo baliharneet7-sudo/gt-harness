@@ -76,6 +76,9 @@ class ProviderViewMetrics:
     duplicate_turns_removed: int
     exact_duplicate_chars_removed: int
     unique_assistant_reasoning_chars_removed: int
+    assistant_messages_input_sha256: str
+    assistant_messages_output_sha256: str
+    assistant_messages_preserved_exactly: bool
     candidate_fact_count: int
     selected_fact_count: int
     represented_fact_count: int
@@ -114,6 +117,9 @@ class ProviderViewMetrics:
             "unique_assistant_reasoning_chars_removed": (
                 self.unique_assistant_reasoning_chars_removed
             ),
+            "assistant_messages_input_sha256": self.assistant_messages_input_sha256,
+            "assistant_messages_output_sha256": self.assistant_messages_output_sha256,
+            "assistant_messages_preserved_exactly": self.assistant_messages_preserved_exactly,
             "candidate_fact_count": self.candidate_fact_count,
             "selected_fact_count": self.selected_fact_count,
             "represented_fact_count": self.represented_fact_count,
@@ -304,6 +310,7 @@ class ProviderViewSession:
             raw_input_chars=_chars(messages),
             input_chars=_chars(messages),
             view=view,
+            source_messages=messages,
             preserved_recent_messages=len(view),
             state_text=state_text if state_frame_message_index is not None else "",
             duplicate_turns_removed=0,
@@ -1644,12 +1651,28 @@ def _assistant_reasoning_chars(messages: list[dict[str, Any]]) -> int:
     )
 
 
+def _assistant_messages_sha256(messages: list[dict[str, Any]]) -> str:
+    assistant_messages = [
+        item for item in messages if item.get("role") == "assistant"
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            assistant_messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8", "surrogatepass")
+    ).hexdigest()
+
+
 def _provider_metrics(
     *,
     compacted: bool,
     raw_input_chars: int,
     input_chars: int,
     view: list[dict[str, Any]],
+    source_messages: list[dict[str, Any]],
     preserved_recent_messages: int,
     state_text: str,
     duplicate_turns_removed: int,
@@ -1676,6 +1699,8 @@ def _provider_metrics(
         for row in accounting
         if row["disposition"] not in {"selected_state_frame", "represented_message"}
     }
+    assistant_input_sha256 = _assistant_messages_sha256(source_messages)
+    assistant_output_sha256 = _assistant_messages_sha256(view)
     return ProviderViewMetrics(
         compiler_ran=True,
         compacted=compacted,
@@ -1689,6 +1714,11 @@ def _provider_metrics(
         exact_duplicate_chars_removed=max(0, exact_duplicate_chars_removed),
         unique_assistant_reasoning_chars_removed=max(
             0, assistant_reasoning_input_chars - _assistant_reasoning_chars(view)
+        ),
+        assistant_messages_input_sha256=assistant_input_sha256,
+        assistant_messages_output_sha256=assistant_output_sha256,
+        assistant_messages_preserved_exactly=(
+            assistant_input_sha256 == assistant_output_sha256
         ),
         candidate_fact_count=len(accounting),
         selected_fact_count=dispositions.count("selected_state_frame"),
@@ -1799,6 +1829,7 @@ def build_provider_view(
             raw_input_chars=raw_input_chars,
             input_chars=raw_input_chars,
             view=untouched,
+            source_messages=messages,
             preserved_recent_messages=len(untouched),
             state_text="",
             duplicate_turns_removed=0,
@@ -1897,6 +1928,7 @@ def build_provider_view(
         raw_input_chars=raw_input_chars,
         input_chars=input_chars,
         view=view,
+        source_messages=messages,
         preserved_recent_messages=len(view),
         state_text=state_text if state_frame_message_index is not None else "",
         duplicate_turns_removed=0,

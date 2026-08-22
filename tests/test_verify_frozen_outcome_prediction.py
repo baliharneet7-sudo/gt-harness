@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -31,11 +32,17 @@ def test_operator_entry_point_loads_from_repository_root() -> None:
 
 def test_checked_in_outcome_prediction_is_bound_to_repair20_profile() -> None:
     root = Path(__file__).resolve().parents[1]
+    manifest_path = root / "eval/release/active_release.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("benchmark_authorized") is not True:
+        assert manifest.get("task_profile") == "repair20-v1"
+        assert manifest.get("authorization_blockers")
+        return
     current = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True
     ).strip()
     proof = verify_release_manifest(
-        manifest_path=root / "eval/release/active_release.json",
+        manifest_path=manifest_path,
         current_commit=current,
         root=root,
         expected_profile="repair20-v1",

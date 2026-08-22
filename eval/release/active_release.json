@@ -3,6 +3,16 @@
   "release_id": "gt-final-mechanical-completeness-2026-08-21-v26",
   "task_profile": "repair20-v1",
   "runtime_commit": "bcc1543d6d050cb54820baeccc15c3c8f2e230cc",
+  "benchmark_authorized": false,
+  "authorization_blockers": [
+    "candidate runtime is newer than the active release identity",
+    "exact-commit Linux provider-free proof is pending",
+    "exact-commit replay and release-gate audit is pending"
+  ],
+  "authorized_workflows": [
+    "tb2_miniswe_central.yml",
+    "deepswe_miniswe_central.yml"
+  ],
   "prediction": {
     "path": "docs/benchmarks/GT_FINAL_20_TASK_OUTCOME_PREDICTION_2026-08-21_V26.json",
     "sha256": "c68d1d95abf48079f4ec6b5e89ed2c22fb5269a8f2d051eb2b7e8b37db2f5ecf"

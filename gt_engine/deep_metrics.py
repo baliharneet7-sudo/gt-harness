@@ -269,7 +269,7 @@ _CENSORED_HARBOR_EXCEPTIONS = {
     "AgentTimeoutError",
     "AgentSetupTimeoutError",
     "EnvironmentBuildTimeoutError",
-    "TaskTimeoutError",
+    "EnvironmentStartTimeoutError",
     "CancelledError",
     # Provider rejected the request because the assembled conversation
     # exceeded the model context window.  This is an outer-run censor, not a
@@ -301,7 +301,13 @@ _PROVIDER_TRANSPORT_EXCEPTIONS = frozenset(
 )
 
 
-def censor_reason(exception_type: str, exception_message: str, exit_status: str) -> str:
+def censor_reason(
+    exception_type: str,
+    exception_message: str,
+    exit_status: str,
+    *,
+    stage: str = "",
+) -> str:
     """Return a typed censor reason for a harbor exception/exit, or ``""``.
 
     A task is censored (excluded from solve accounting, kept in the planned
@@ -309,6 +315,9 @@ def censor_reason(exception_type: str, exception_message: str, exit_status: str)
     cancelled agent, an exhausted context window, or a provider transport
     failure.  Verifier- or task-level failures are *not* censors.
     """
+    normalized_stage = str(stage or "").strip().lower().replace("-", "_")
+    if normalized_stage in {"task", "task_execution", "verifier", "grading"}:
+        return ""
     if exception_type in _CENSORED_HARBOR_EXCEPTIONS:
         return exception_type
     if (
@@ -345,9 +354,20 @@ def classify_trial_outcome(trial: dict[str, Any]) -> TrialOutcome:
     exception = trial.get("exception_info") or {}
     exception_type = str(exception.get("exception_type") or "")
     exception_message = str(exception.get("exception_message") or "")
+    exception_stage = str(
+        exception.get("stage")
+        or exception.get("exception_stage")
+        or exception.get("component")
+        or ""
+    )
     metadata = (trial.get("agent_result") or {}).get("metadata") or {}
     exit_status = str(metadata.get("exit_status") or "") if isinstance(metadata, dict) else ""
-    if censor_reason(exception_type, exception_message, exit_status):
+    if censor_reason(
+        exception_type,
+        exception_message,
+        exit_status,
+        stage=exception_stage,
+    ):
         return TrialOutcome.CENSORED
     if exception_type or exit_status not in {"", "Submitted", "Completed"}:
         return TrialOutcome.ERROR
@@ -674,7 +694,18 @@ def extract_trajectory(
     exception_message = str(
         ((harbor_result or {}).get("exception_info") or {}).get("exception_message") or ""
     )
-    censored_reason = censor_reason(exception_type, exception_message, exit_status)
+    exception_stage = str(
+        ((harbor_result or {}).get("exception_info") or {}).get("stage")
+        or ((harbor_result or {}).get("exception_info") or {}).get("exception_stage")
+        or ((harbor_result or {}).get("exception_info") or {}).get("component")
+        or ""
+    )
+    censored_reason = censor_reason(
+        exception_type,
+        exception_message,
+        exit_status,
+        stage=exception_stage,
+    )
     agent_execution = (harbor_result or {}).get("agent_execution") or {}
     agent_wall_time = _elapsed_seconds(
         agent_execution.get("started_at"), agent_execution.get("finished_at")
@@ -700,6 +731,7 @@ def extract_trajectory(
         "censored": bool(censored_reason),
         "censored_reason": censored_reason,
         "harbor_exception_type": exception_type,
+        "outcome_stage": exception_stage or "unknown",
         "agent_wall_time_seconds": agent_wall_time,
         "trial_wall_time_seconds": trial_wall_time,
         "input_tokens": input_tokens,

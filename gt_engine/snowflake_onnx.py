@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 SNOWFLAKE_MODEL_NAME = "Snowflake/snowflake-arctic-embed-m"
+SNOWFLAKE_MODEL_REVISION = "7802add0519e4bf94c46ef23552176697c7a1ac7"
 SNOWFLAKE_MODEL_SHA256 = (
     "564e6c65ee0c739a486702e9e3e9b33c3f697c19c34dbe886bce9eec497ce971"
 )
@@ -55,6 +56,7 @@ class _SnowflakeOnnxModel:
         model_path: Path,
         tokenizer_path: Path,
         model_sha256: str,
+        tokenizer_sha256: str,
         batch_size: int = 32,
     ) -> None:
         try:
@@ -92,6 +94,13 @@ class _SnowflakeOnnxModel:
         self._batch_size = max(1, int(batch_size))
         self._lock = threading.Lock()
         self.model_sha256 = model_sha256
+        self.tokenizer_sha256 = tokenizer_sha256
+        output_shape = tuple(self._session.get_outputs()[0].shape or ())
+        self.embedding_dimension = (
+            int(output_shape[-1])
+            if output_shape and isinstance(output_shape[-1], int)
+            else None
+        )
 
     def encode(
         self, texts: tuple[str, ...], *, is_query: bool
@@ -187,6 +196,7 @@ class SnowflakeOnnxDenseBackend:
                 model_path=model_path,
                 tokenizer_path=tokenizer_path,
                 model_sha256=actual_sha256,
+                tokenizer_sha256=actual_tokenizer_sha256,
                 batch_size=batch_size,
             )
         )
@@ -236,7 +246,17 @@ class SnowflakeOnnxDenseBackend:
         return {
             "backend": "snowflake_onnx",
             "model_name": str(self._model.model_name),
+            "model_revision": SNOWFLAKE_MODEL_REVISION,
             "model_sha256": str(self._model.model_sha256),
+            "tokenizer_sha256": str(
+                getattr(self._model, "tokenizer_sha256", "")
+            ),
+            "pooling": "cls",
+            "normalization": "l2",
+            "max_length": SNOWFLAKE_MAX_LENGTH,
+            "embedding_dimension": getattr(
+                self._model, "embedding_dimension", None
+            ),
             "document_cache_hits": self._document_cache_hits,
             "document_cache_misses": self._document_cache_misses,
             "query_cache_hits": self._query_cache_hits,
@@ -255,6 +275,7 @@ class SnowflakeOnnxDenseBackend:
 __all__ = [
     "SNOWFLAKE_MAX_LENGTH",
     "SNOWFLAKE_MODEL_NAME",
+    "SNOWFLAKE_MODEL_REVISION",
     "SNOWFLAKE_MODEL_SHA256",
     "SNOWFLAKE_QUERY_PREFIX",
     "SNOWFLAKE_TOKENIZER_SHA256",

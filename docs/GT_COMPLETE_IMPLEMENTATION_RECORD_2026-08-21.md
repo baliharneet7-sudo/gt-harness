@@ -1,5 +1,9 @@
 # GroundTruth complete implementation record
 
+> Historical record. Current status and authorization steps are defined by
+> [GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md](GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md).
+> This file does not authorize benchmark spend.
+
 Date: 2026-08-21  
 Repository: `harneet2512/gt-harness`  
 Branch: `baseline-swe-live-lite-v4flash0731`

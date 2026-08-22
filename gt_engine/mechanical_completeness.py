@@ -66,6 +66,8 @@ def evaluate_provider_barrier(
     context_accounted_count: int,
     contribution_candidate_count: int,
     contribution_accounted_count: int,
+    selected_contribution_ids: Iterable[str],
+    provider_value_contribution_ids: Iterable[str],
     replay_capture_enabled: bool,
 ) -> dict[str, Any]:
     """Evaluate the last host-owned barrier before a provider invocation."""
@@ -180,6 +182,22 @@ def evaluate_provider_barrier(
         evidence={
             "candidate_count": int(contribution_candidate_count),
             "accounted_count": int(contribution_accounted_count),
+        },
+    )
+    selected_ids = tuple(str(item) for item in selected_contribution_ids if str(item))
+    value_ids = {
+        str(item) for item in provider_value_contribution_ids if str(item)
+    }
+    add(
+        "provider_value_certification",
+        satisfied=(
+            len(selected_ids) == len(set(selected_ids))
+            and set(selected_ids) <= value_ids
+        ),
+        failure="provider_value_certificate_mismatch",
+        evidence={
+            "selected_contribution_ids": list(selected_ids),
+            "certified_contribution_ids": sorted(value_ids),
         },
     )
     add(

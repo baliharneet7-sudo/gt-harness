@@ -102,6 +102,8 @@ def test_stale_read_body_elided_after_reread_at_current_revision():
     assert old_body not in joined
     assert new_body in joined
     assert metrics.unique_assistant_reasoning_chars_removed == 0
+    assert metrics.assistant_messages_preserved_exactly is True
+    assert metrics.assistant_messages_input_sha256 == metrics.assistant_messages_output_sha256
     assistant_messages = [m for m in view if m.get("role") == "assistant"]
     assert all(m["content"] == "act" for m in assistant_messages)
 
@@ -395,6 +397,8 @@ def test_compaction_epoch_receipt_records_elision_and_recap():
     assert receipt.recap_receipts == metrics.recap_receipts
     assert receipt.recap_fallbacks == metrics.recap_fallbacks
     assert metrics.unique_assistant_reasoning_chars_removed == 0
+    assert metrics.assistant_messages_preserved_exactly is True
+    assert metrics.assistant_messages_input_sha256 == metrics.assistant_messages_output_sha256
 
 
 def _ledger_read(

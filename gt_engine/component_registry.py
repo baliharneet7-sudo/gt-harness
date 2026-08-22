@@ -71,7 +71,7 @@ ACTIVE_GT_COMPONENTS: dict[str, ComponentContract] = {
             ComponentStage.PRE_ACTION,
             "typed proposal decision and receipt",
             DefaultVisibility.PRIVATE,
-            "ordered preflight tests; paid mode remains SHADOW",
+            "ordered preflight tests plus active release-profile contract",
         ),
         ComponentContract(
             "postflight_features",

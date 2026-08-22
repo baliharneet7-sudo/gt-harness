@@ -6,7 +6,7 @@ import hashlib
 import posixpath
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -210,6 +210,7 @@ def classify_workspace_impact(
     proposed: ProposedAction,
     *,
     cwd: str,
+    monitored_external_paths: Iterable[str] = (),
 ) -> WorkspaceImpact:
     """Classify sensor necessity without trusting an opaque program body."""
 
@@ -229,6 +230,15 @@ def classify_workspace_impact(
     if not targets:
         return WorkspaceImpact.MAY_CHANGE_WORKSPACE
     normalized_cwd = posixpath.normpath(str(cwd or "/").replace("\\", "/"))
+    monitored = tuple(
+        sorted(
+            {
+                posixpath.normpath(str(path).replace("\\", "/"))
+                for path in monitored_external_paths
+                if str(path or "").startswith("/")
+            }
+        )
+    )
 
     def inside_workspace(path: str) -> bool:
         if not path.startswith("/"):
@@ -236,6 +246,24 @@ def classify_workspace_impact(
         normalized = posixpath.normpath(path)
         return normalized == normalized_cwd or normalized.startswith(
             normalized_cwd.rstrip("/") + "/"
+        )
+
+    def touches_monitored_external(path: str) -> bool:
+        if not path.startswith("/"):
+            return False
+        normalized = posixpath.normpath(path)
+        return any(
+            normalized == watched
+            or normalized.startswith(watched.rstrip("/") + "/")
+            or watched.startswith(normalized.rstrip("/") + "/")
+            for watched in monitored
+        )
+
+    if any(touches_monitored_external(path) for path in targets):
+        return (
+            WorkspaceImpact.PROVEN_WORKSPACE_CHANGE
+            if proposed.mutation_certainty is MutationCertainty.PROVEN_MUTATING
+            else WorkspaceImpact.MAY_CHANGE_WORKSPACE
         )
 
     if all(path.startswith("/") and not inside_workspace(path) for path in targets):

@@ -7,11 +7,21 @@ import sys
 from pathlib import Path
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
+from gt_engine.mechanical_completeness import evaluate_provider_barrier
+from gt_engine.snowflake_onnx import (
+    SNOWFLAKE_MAX_LENGTH,
+    SNOWFLAKE_MODEL_NAME,
+    SNOWFLAKE_MODEL_REVISION,
+    SNOWFLAKE_MODEL_SHA256,
+    SNOWFLAKE_TOKENIZER_SHA256,
+)
 from scripts.central_release_gate import (
     _completion_integrity,
     _contribution_budget,
+    _dense,
     _mechanical_completeness_runtime,
     _replay_and_intervention_audit,
+    _substrate,
     audit_release,
     audit_treatment_runtime,
     build_task_certificate,
@@ -64,7 +74,16 @@ def _treatment() -> dict:
             "dense_backend": {
                 "available": True,
                 "failed": False,
-                "backend_identity": "snowflake_onnx:model@sha256:abc",
+                "backend": "snowflake_onnx",
+                "model_name": SNOWFLAKE_MODEL_NAME,
+                "model_revision": SNOWFLAKE_MODEL_REVISION,
+                "model_sha256": SNOWFLAKE_MODEL_SHA256,
+                "tokenizer_sha256": SNOWFLAKE_TOKENIZER_SHA256,
+                "pooling": "cls",
+                "normalization": "l2",
+                "max_length": SNOWFLAKE_MAX_LENGTH,
+                "network_calls": 0,
+                "provider_calls": 0,
             },
             "dense_backend_error": "",
             "decisions": [],
@@ -190,8 +209,8 @@ def _treatment() -> dict:
                     "delivered_before_model_query": True,
                     "not_predictive": True,
                     "one_step_late": False,
-                    "request_payload_sha256": "request-1",
-                    "provider_messages_sha256": "provider-1",
+                    "request_payload_sha256": "a" * 64,
+                    "provider_messages_sha256": "b" * 64,
                     "message_index": 1,
                     "chars": 30,
                     "claim_metadata": [
@@ -272,8 +291,8 @@ def _treatment() -> dict:
         "model_call_contexts": [
             {
                 "call": 1,
-                "request_payload_sha256": "request-1",
-                "provider_messages_sha256": "provider-1",
+                "request_payload_sha256": "a" * 64,
+                "provider_messages_sha256": "b" * 64,
                 "stock_provider_messages_sha256": "stock-1",
                 "provider_view_changed": True,
                 "provider_message_count": 2,
@@ -322,7 +341,7 @@ def _off() -> dict:
     receipt["metrics"]["persistent_state_bootstrap_calls"] = 0
     receipt["metrics"]["persistent_state_initial_retrieval_calls"] = 0
     receipt["metrics"]["bootstrap_api_calls"] = 0
-    receipt["model_call_contexts"][0]["stock_provider_messages_sha256"] = "provider-1"
+    receipt["model_call_contexts"][0]["stock_provider_messages_sha256"] = "b" * 64
     receipt["model_call_contexts"][0]["provider_view_changed"] = False
     receipt["model_call_contexts"][0]["provider_changed_message_indices"] = []
     return receipt
@@ -331,6 +350,24 @@ def _off() -> dict:
 def _relational_treatment() -> dict:
     receipt = _treatment()
     receipt["treatment_profile"] = "central_relational_v2"
+    receipt["repository_evidence"] = {
+        "substrate_ready": True,
+        "index_current": True,
+        "intelligence_valid": True,
+        "source_revision": "source-1",
+        "graph_revision": "1" * 64,
+        "index": {
+            "graph_revision": "1" * 64,
+            "graph_db_sha256": "1" * 64,
+            "graph_manifest_sha256": "2" * 64,
+            "binary_sha256": "3" * 64,
+            "schema_valid": True,
+            "source_revision": "source-1",
+            "source_files": 1,
+            "indexable_files": 1,
+            "parser_failures": 0,
+        },
+    }
     receipt["provider_route"] = {
         "model": "openai/fixture-model",
         "api_base": "https://provider.example.invalid",
@@ -446,8 +483,8 @@ def _relational_treatment() -> dict:
                 "delivered_before_model_query": True,
                 "not_predictive": True,
                 "one_step_late": False,
-                "request_payload_sha256": "request-1",
-                "provider_messages_sha256": "provider-1",
+                "request_payload_sha256": "a" * 64,
+                "provider_messages_sha256": "b" * 64,
                 "message_index": 1,
                 "chars": 40,
                 "tokens": 12,
@@ -491,8 +528,8 @@ def _relational_treatment() -> dict:
                 "delivered_before_model_query": True,
                 "not_predictive": True,
                 "one_step_late": False,
-                "request_payload_sha256": "request-1",
-                "provider_messages_sha256": "provider-1",
+                "request_payload_sha256": "a" * 64,
+                "provider_messages_sha256": "b" * 64,
                 "message_index": 1,
                 "chars": 35,
                 "tokens": 10,
@@ -536,8 +573,8 @@ def _relational_treatment() -> dict:
                 "delivered_before_model_query": True,
                 "not_predictive": True,
                 "one_step_late": False,
-                "request_payload_sha256": "request-1",
-                "provider_messages_sha256": "provider-1",
+                "request_payload_sha256": "a" * 64,
+                "provider_messages_sha256": "b" * 64,
                 "message_index": 1,
                 "chars": 70,
                 "tokens": 20,
@@ -677,27 +714,8 @@ def _relational_treatment() -> dict:
                 "reason_codes": [],
             },
             "repository_context_delivered": True,
-            "mechanical_completeness_barrier": {
-                "schema": "gt.provider_mechanical_barrier.v1",
-                "call": 1,
-                "status": "PASS",
-                "requirements": [
-                    {
-                        "requirement_id": "fixture",
-                        "status": "SATISFIED",
-                        "evidence": {},
-                    }
-                ],
-                "failures": [],
-            },
         }
     )
-    receipt["mechanical_completeness"] = {
-        "schema": "gt.mechanical_completeness_runtime.v1",
-        "provider_barriers": [
-            receipt["model_call_contexts"][0]["mechanical_completeness_barrier"]
-        ],
-    }
     receipt["component_configuration"].update(
         replay_capture=True,
         persistent_state_selection_mode="deterministic_v1",
@@ -738,6 +756,47 @@ def _relational_treatment() -> dict:
         "trajectory_replay_ready": True,
         "call_count": len(receipt["model_call_contexts"]),
         "path": "gt_replay",
+    }
+    receipt["semantic_source_revision"] = {
+        "revision": "source-1",
+        "complete": True,
+        "source_paths": ["src/a.py"],
+        "missing_digest_paths": [],
+    }
+    context = receipt["model_call_contexts"][0]
+    context["context_compiler"] = {
+        "assistant_messages_input_sha256": "e" * 64,
+        "assistant_messages_output_sha256": "e" * 64,
+        "assistant_messages_preserved_exactly": True,
+    }
+    compiler = receipt["contribution_compiler"]["calls"][0]
+    barrier = evaluate_provider_barrier(
+        call=1,
+        request_payload_sha256=context["request_payload_sha256"],
+        provider_messages_sha256=context["provider_messages_sha256"],
+        source_snapshot_complete=True,
+        runtime_contract_ready=True,
+        task_semantic_ready=True,
+        graph_applicable=True,
+        graph_current=True,
+        repository_intelligence_ready=True,
+        retrieval_ready=True,
+        persistent_state_ready=True,
+        previous_actions_finalized=True,
+        context_candidate_count=context["context_fact_candidates"],
+        context_accounted_count=context["context_facts_accounted"],
+        contribution_candidate_count=compiler["candidate_count"],
+        contribution_accounted_count=compiler["accounted_count"],
+        selected_contribution_ids=compiler["selected_ids"],
+        provider_value_contribution_ids=[
+            row["contribution_id"] for row in compiler["value_certificates"]
+        ],
+        replay_capture_enabled=True,
+    )
+    context["mechanical_completeness_barrier"] = barrier
+    receipt["mechanical_completeness"] = {
+        "schema": "gt.mechanical_completeness_runtime.v1",
+        "provider_barriers": [barrier],
     }
     receipt["intervention_chain"] = {
         "schema": "gt.intervention_chain.v2",
@@ -1176,9 +1235,15 @@ def test_release_gate_accepts_content_hashed_runtime_dense_identity():
     receipt = _relational_treatment()
     receipt["preemptive_retrieval"]["dense_backend"] = {
         "available": True,
+        "failed": False,
         "backend": "snowflake_onnx",
-        "model_name": "Snowflake/snowflake-arctic-embed-m",
-        "model_sha256": "a" * 64,
+        "model_name": SNOWFLAKE_MODEL_NAME,
+        "model_revision": SNOWFLAKE_MODEL_REVISION,
+        "model_sha256": SNOWFLAKE_MODEL_SHA256,
+        "tokenizer_sha256": SNOWFLAKE_TOKENIZER_SHA256,
+        "pooling": "cls",
+        "normalization": "l2",
+        "max_length": SNOWFLAKE_MAX_LENGTH,
         "network_calls": 0,
         "provider_calls": 0,
     }
@@ -1262,6 +1327,92 @@ def test_completion_integrity_rejects_stale_or_partial_auto_submit_proof():
     assert "task:completion_partial_plan_submitted" in check.failures
 
 
+def test_completion_integrity_rejects_unrelated_self_authored_predicate_proof():
+    receipt = {
+        "treatment_profile": "central_relational_v2",
+        "completion": {
+            "plan": {
+                "schema": "gt.completion_plan.v1",
+                "status": "complete",
+                "executable": True,
+                "predicates": [
+                    {
+                        "predicate_id": "p-real",
+                        "kind": "command",
+                        "command": "false",
+                        "obligation_ids": ["o-real"],
+                        "target_paths": [],
+                        "dependency_paths": [],
+                    }
+                ],
+                "obligation_ids": ["o-real"],
+                "uncovered_obligation_ids": [],
+                "target_paths": [],
+                "uncovered_obligation_texts": [],
+            },
+            "certificates": [
+                {
+                    "schema": "gt.completion_certificate.v1",
+                    "status": "complete",
+                    "auto_submit_eligible": True,
+                    "workspace_revision": "w1",
+                    "action_id": 1,
+                    "observations": [
+                        {
+                            "schema": "gt.completion_predicate_observation.v1",
+                            "predicate_id": "unrelated",
+                            "workspace_revision": "w1",
+                            "returncode": 0,
+                            "output_sha256": "not-a-hash",
+                        }
+                    ],
+                    "missing_predicate_ids": [],
+                    "failing_predicate_ids": [],
+                    "stale_predicate_ids": [],
+                    "reason_codes": ["all_executable_predicates_current_and_passing"],
+                }
+            ],
+            "auto_submit_attempts": 1,
+            "auto_submit_count": 1,
+        },
+    }
+
+    check = _completion_integrity(receipt, "task")
+
+    assert check.passed is False
+    assert "task:completion_observation_set_mismatch:1" in check.failures
+    assert "task:completion_observation_hash_invalid:1:unrelated" in check.failures
+
+
+def test_dense_gate_rejects_valid_looking_wrong_model_identity():
+    receipt = {
+        "treatment_profile": "central_relational_v2",
+        "repository_intelligence": {"required": True},
+        "preemptive_retrieval": {
+            "dense_backend": {
+                "available": True,
+                "failed": False,
+                "backend": "snowflake_onnx",
+                "model_name": "attacker/wrong-model",
+                "model_sha256": "0" * 64,
+                "tokenizer_sha256": "1" * 64,
+                "pooling": "cls",
+                "normalization": "l2",
+                "max_length": 512,
+                "network_calls": 0,
+                "provider_calls": 0,
+            },
+            "dense_backend_error": "",
+        },
+    }
+
+    check = _dense(receipt, "task")
+
+    assert check.passed is False
+    assert "task:dense_backend_model_name_mismatch" in check.failures
+    assert "task:dense_backend_model_sha256_mismatch" in check.failures
+
+
 def test_release_gate_requires_graph_independent_semantic_context():
     receipt = _treatment()
     receipt["component_configuration"]["task_semantic_substrate"] = False
@@ -1331,6 +1482,33 @@ def test_source_less_treatment_does_not_require_repository_or_dense_substrate():
         "bootstrap_calls": 0,
         "correctly_abstained": True,
     }
+    context = receipt["model_call_contexts"][0]
+    compiler = receipt["contribution_compiler"]["calls"][0]
+    barrier = evaluate_provider_barrier(
+        call=1,
+        request_payload_sha256=context["request_payload_sha256"],
+        provider_messages_sha256=context["provider_messages_sha256"],
+        source_snapshot_complete=True,
+        runtime_contract_ready=True,
+        task_semantic_ready=True,
+        graph_applicable=False,
+        graph_current=True,
+        repository_intelligence_ready=True,
+        retrieval_ready=True,
+        persistent_state_ready=True,
+        previous_actions_finalized=True,
+        context_candidate_count=context["context_fact_candidates"],
+        context_accounted_count=context["context_facts_accounted"],
+        contribution_candidate_count=compiler["candidate_count"],
+        contribution_accounted_count=compiler["accounted_count"],
+        selected_contribution_ids=compiler["selected_ids"],
+        provider_value_contribution_ids=[
+            row["contribution_id"] for row in compiler["value_certificates"]
+        ],
+        replay_capture_enabled=True,
+    )
+    context["mechanical_completeness_barrier"] = barrier
+    receipt["mechanical_completeness"]["provider_barriers"] = [barrier]
     receipt["task_execution_certificate"] = build_task_certificate(
         receipt, label="fixture"
     )
@@ -1509,14 +1687,19 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
     receipt["model_call_contexts"].append(
         {
             "call": 2,
-            "request_payload_sha256": "request-2",
-            "provider_messages_sha256": "provider-2",
-            "stock_provider_messages_sha256": "provider-2",
+            "request_payload_sha256": "c" * 64,
+            "provider_messages_sha256": "d" * 64,
+            "stock_provider_messages_sha256": "d" * 64,
             "provider_view_changed": False,
             "provider_message_count": 2,
             "provider_changed_message_indices": [],
             "context_fact_candidates": 0,
             "context_facts_accounted": 0,
+            "context_compiler": {
+                "assistant_messages_input_sha256": "f" * 64,
+                "assistant_messages_output_sha256": "f" * 64,
+                "assistant_messages_preserved_exactly": True,
+            },
             "dispatch_status": "response_received",
             "persistent_execution_state_delivered": False,
             "persistent_execution_state": {
@@ -1540,10 +1723,27 @@ def test_release_gate_accepts_materiality_accounted_persistent_abstention():
             "selected_surfaces": [],
         }
     )
-    second_barrier = {
-        **receipt["model_call_contexts"][0]["mechanical_completeness_barrier"],
-        "call": 2,
-    }
+    second_barrier = evaluate_provider_barrier(
+        call=2,
+        request_payload_sha256="c" * 64,
+        provider_messages_sha256="d" * 64,
+        source_snapshot_complete=True,
+        runtime_contract_ready=True,
+        task_semantic_ready=True,
+        graph_applicable=True,
+        graph_current=True,
+        repository_intelligence_ready=True,
+        retrieval_ready=True,
+        persistent_state_ready=True,
+        previous_actions_finalized=True,
+        context_candidate_count=0,
+        context_accounted_count=0,
+        contribution_candidate_count=0,
+        contribution_accounted_count=0,
+        selected_contribution_ids=(),
+        provider_value_contribution_ids=(),
+        replay_capture_enabled=True,
+    )
     receipt["model_call_contexts"][1]["mechanical_completeness_barrier"] = (
         second_barrier
     )
@@ -1884,6 +2084,39 @@ def test_replay_and_intervention_audit_cannot_be_disabled_for_final_profile():
 
     assert check.passed is False
     assert "task:replay_capture_disabled" in check.failures
+
+
+def test_relational_substrate_rejects_boolean_only_graph_claim() -> None:
+    receipt = _relational_treatment()
+    receipt["repository_evidence"]["index"].pop("graph_manifest_sha256")
+
+    check = _substrate(receipt, "task")
+
+    assert check.passed is False
+    assert "task:repository_graph_manifest_identity_invalid" in check.failures
+
+
+def test_runtime_barrier_is_recomputed_from_provider_and_compiler_receipts() -> None:
+    receipt = _relational_treatment()
+    receipt["contribution_compiler"]["calls"][0]["selected_ids"] = ["unproved"]
+
+    check = _mechanical_completeness_runtime(receipt, "task")
+
+    assert check.passed is False
+    assert "task:provider_barrier_reconstruction_mismatch:1" in check.failures
+
+
+def test_release_rejects_equal_length_assistant_history_mutation() -> None:
+    receipt = _relational_treatment()
+    receipt["model_call_contexts"][0]["context_compiler"].update(
+        assistant_messages_output_sha256="f" * 64,
+        assistant_messages_preserved_exactly=False,
+    )
+
+    report = audit_release([receipt], static_evidence=STATIC, off_receipts=[_off()])
+
+    assert report.passed is False
+    assert any("assistant_provider_history_not_exact:1" in item for item in report.failures)
 
 
 def test_product_census_accepts_final_deterministic_selection_without_bootstrap():

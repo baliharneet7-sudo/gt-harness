@@ -97,6 +97,8 @@ class IndexBuildReceipt:
     status: IndexBuildStatus
     graph_db: str | None = None
     graph_revision: str = ""
+    graph_db_sha256: str = ""
+    graph_manifest_sha256: str = ""
     binary_sha256: str = ""
     elapsed_ms: float = 0.0
     error_type: str | None = None
@@ -728,6 +730,8 @@ def ensure_index_with_receipt(
         *,
         graph_db: str | None = None,
         graph_revision: str = "",
+        graph_db_sha256: str = "",
+        graph_manifest_sha256: str = "",
         binary_sha256: str = "",
         error_type: str | None = None,
         error_diagnostic: str = "",
@@ -743,6 +747,8 @@ def ensure_index_with_receipt(
             status=status,
             graph_db=graph_db,
             graph_revision=graph_revision,
+            graph_db_sha256=graph_db_sha256,
+            graph_manifest_sha256=graph_manifest_sha256,
             binary_sha256=binary_sha256,
             elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
             error_type=error_type,
@@ -873,6 +879,8 @@ def ensure_index_with_receipt(
             coverage.status,
             graph_db=str(db),
             graph_revision=graph_sha256,
+            graph_db_sha256=graph_sha256,
+            graph_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
             binary_sha256=str(manifest["binary_sha256"]),
             coverage=coverage,
             schema_valid=True,
@@ -915,6 +923,8 @@ def refresh_index_files(
         status: IndexBuildStatus,
         *,
         graph_revision: str = "",
+        graph_db_sha256: str = "",
+        graph_manifest_sha256: str = "",
         schema_valid: bool = False,
         node_count: int = 0,
         edge_count: int = 0,
@@ -926,6 +936,8 @@ def refresh_index_files(
             status=status,
             graph_db=os.fspath(graph_db) if schema_valid else None,
             graph_revision=graph_revision,
+            graph_db_sha256=graph_db_sha256,
+            graph_manifest_sha256=graph_manifest_sha256,
             binary_sha256=certification["binary_sha256"],
             elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
             error_type=error_type,
@@ -1014,6 +1026,14 @@ def refresh_index_files(
             coverage.status if schema_valid else IndexBuildStatus.INVALID_DATABASE,
             graph_revision=(
                 hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
+            ),
+            graph_db_sha256=(
+                hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
+            ),
+            graph_manifest_sha256=(
+                hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+                if schema_valid and manifest_path.is_file()
+                else ""
             ),
             schema_valid=schema_valid,
             node_count=nodes,
@@ -1111,6 +1131,8 @@ def refresh_index_files(
         return result(
             coverage.status,
             graph_revision=graph_revision,
+            graph_db_sha256=graph_revision,
+            graph_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
             schema_valid=True,
             node_count=nodes,
             edge_count=edges,

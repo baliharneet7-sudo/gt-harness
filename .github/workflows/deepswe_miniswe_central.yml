@@ -145,6 +145,11 @@ jobs:
       - name: Resolve exact GT revision
         id: gt
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Enforce active release authorization
+        run: |
+          python -m scripts.release_workflow_guard \
+            --workflow deepswe_miniswe_central.yml \
+            --runtime-sha "$(git rev-parse HEAD)"
       - name: Checkout pinned DeepSWE task set
         uses: actions/checkout@v4
         with:
@@ -889,6 +894,7 @@ jobs:
           import json, os
           from pathlib import Path
           from gt_engine.delivery_audit import audit_provider_deliveries
+          from gt_engine.intervention_chain import audit_intervention_artifacts
           from gt_engine.runtime_gate import audit_runtime_receipt
           from scripts.central_release_gate import audit_treatment_runtime
 
@@ -916,8 +922,13 @@ jobs:
               _, failures, totals = audit_provider_deliveries(receipt, task=task)
               if (os.environ.get("ARM") or "gt_on") == "gt_off":
                   runtime_failures, runtime_gate, treatment_failures = [], {}, []
+                  artifact_failures, artifact_summary = [], {}
               else:
                   runtime_failures, runtime_gate = audit_runtime_receipt(receipt, task=task)
+                  artifact_failures, artifact_summary = audit_intervention_artifacts(
+                      receipt,
+                      artifact_root=receipts[0].parent,
+                  )
                   treatment_checks = audit_treatment_runtime(
                       receipt,
                       label=task,
@@ -928,6 +939,9 @@ jobs:
                       for check in treatment_checks
                       for failure in check.failures
                   ]
+                  treatment_failures.extend(
+                      f"{task}:artifact:{failure}" for failure in artifact_failures
+                  )
               rewards = (result.get("verifier_result") or {}).get("rewards") or {}
               exception = result.get("exception_info")
               solved = rewards.get("reward") == 1 and not exception
@@ -1004,12 +1018,13 @@ jobs:
               )
               executor_identity = response_identity.get("executor") or {}
               bootstrap_identity = response_identity.get("bootstrap") or {}
+              bootstrap = (receipt.get("persistent_execution_state") or {}).get("bootstrap") or {}
               expected_response_model = str(provider_proof.get("response_model") or "")
               expected_response_provider = str(provider_proof.get("response_provider") or "")
               expected_fingerprint = str(provider_proof.get("system_fingerprint") or "")
               bootstrap_identity_valid = bool(
                   (os.environ.get("ARM") or "gt_on") == "gt_off"
-                  or os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
+                  or int(bootstrap.get("provider_calls") or 0) == 0
                   or (
                       bootstrap_identity.get("model") == expected_response_model
                       and bootstrap_identity.get("provider") == expected_response_provider
@@ -1025,27 +1040,9 @@ jobs:
                   and expected_response_provider
                   and executor_identity.get("response_count")
                   and executor_identity.get("stable_model_identity") is True
-                  and (
-                      executor_identity.get("models") == [expected_response_model]
-                      or (
-                          os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
-                          and expected_response_model in executor_identity.get("models", [])
-                          and all(
-                              model == expected_response_model
-                              or model.rsplit("/", 1)[-1]
-                              == expected_response_model.rsplit("/", 1)[-1]
-                              for model in executor_identity.get("models", [])
-                          )
-                      )
-                  )
-                  and (
-                      executor_identity.get("stable_provider_identity") is True
-                      and executor_identity.get("providers") == [expected_response_provider]
-                      or (
-                          os.environ.get("PROVIDER") in {"tokenrouter", "deepseek"}
-                          and bool(executor_identity.get("providers"))
-                      )
-                  )
+                  and executor_identity.get("models") == [expected_response_model]
+                  and executor_identity.get("stable_provider_identity") is True
+                  and executor_identity.get("providers") == [expected_response_provider]
                   and bootstrap_identity_valid
                   and (
                       not expected_fingerprint
@@ -1080,6 +1077,8 @@ jobs:
                            "delivery_failures": failures,
                            "runtime_gate_failures": runtime_failures,
                            "runtime_gate": runtime_gate,
+                           "artifact_integrity_failures": artifact_failures,
+                           "artifact_integrity": artifact_summary,
                            "treatment_release_failures": treatment_failures,
                            "provider_calls": metrics.get("api_calls"),
                            "assistant_steps": metrics.get("assistant_steps"),

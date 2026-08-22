@@ -215,6 +215,50 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     assert result.contributions[0].unsafe_provider_origins == ()
 
 
+def test_process_composition_is_anchor_centered_and_globally_bounded() -> None:
+    unrelated = tuple(
+        _link(
+            f"src/root_{root}.py" if depth == 0 else f"src/n_{root}_{depth}.py",
+            f"src/n_{root}_{depth + 1}.py",
+            "CALLS",
+            f"f_{root}_{depth}",
+            f"f_{root}_{depth + 1}",
+        )
+        for root in range(80)
+        for depth in range(20)
+    )
+    relevant = (
+        _link("src/entry.py", "src/core.py", "CALLS", "run", "work"),
+        _link("src/core.py", "tests/test_core.py", "CALLS", "work", "test_work"),
+    )
+    engine = RepositoryContextEngine(
+        max_tokens=320,
+        max_depth=4,
+        max_edge_expansions=64,
+    )
+
+    result = engine.project(
+        DecisionOpportunity(
+            kind="post_mutation",
+            evidence_action=2,
+            eligible_call=3,
+            source_revision="source-1",
+            graph_revision="graph-1",
+            anchors=("src/core.py",),
+            changed_paths=("src/core.py",),
+            changed_symbols=("work",),
+        ),
+        _snapshot(*unrelated, *relevant),
+    )
+
+    assert result.process_coverage["paths_considered"] <= 64
+    assert result.process_coverage["anchor_nodes_considered"] == 1
+    assert result.execution_views
+    assert "src/entry.py#run -> src/core.py#work -> tests/test_core.py#test_work" in (
+        result.execution_views[0].rendered
+    )
+
+
 def test_post_read_search_suppresses_same_file_process_and_impact_echoes() -> None:
     """A read already exposes local bytes; local graph facts add no information."""
 

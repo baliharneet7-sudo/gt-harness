@@ -1,5 +1,9 @@
 # GT provider-free closeout note — 2026-08-21
 
+> Historical proof for an earlier SHA. It does not certify the current
+> candidate. See
+> [GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md](GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md).
+
 ## Goal
 
 This note is a documentation closeout for the latest mechanical proof run and the

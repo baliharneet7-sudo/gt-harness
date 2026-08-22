@@ -397,6 +397,18 @@ def test_prepared_or_marker_failed_request_cannot_authorize_a_visible_delivery()
     assert all(row["deterministic_status"] == "INVALID" for row in rows)
 
 
+def test_provider_error_is_attempted_transport_not_confirmed_exposure():
+    receipt = _receipt()
+    receipt["model_call_contexts"][0]["dispatch_status"] = "response_error"
+
+    rows, failures, totals = audit_provider_deliveries(receipt)
+
+    assert any("delivery_provider_response_missing" in item for item in failures)
+    assert all(row["dispatch_valid"] is False for row in rows)
+    assert totals["attempted_delivery_count"] == 3
+    assert totals["delivery_count"] == 0
+
+
 def test_delivery_requires_an_in_range_gt_changed_provider_message_index():
     receipt = _receipt()
     receipt["preemptive_retrieval"]["deliveries"][0]["provider_message_indices"] = [9]

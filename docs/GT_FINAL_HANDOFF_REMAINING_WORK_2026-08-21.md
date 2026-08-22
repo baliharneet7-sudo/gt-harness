@@ -1,5 +1,10 @@
 # GroundTruth final handoff — remaining work
 
+> Historical handoff. The evidence risks below were repaired in the subsequent
+> candidate. Use
+> [GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md](GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md)
+> as the sole current status and authorization sequence.
+
 ## Current truth
 
 The implementation repairs are present in the working candidate. Candidate SHA

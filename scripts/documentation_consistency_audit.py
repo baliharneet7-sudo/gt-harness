@@ -14,6 +14,7 @@ DEFAULT_DOCUMENTS = (
     Path("docs/GT_RELEASE_DOSSIER.md"),
     Path("docs/GT_COMPLETE_IMPLEMENTATION_RECORD_2026-08-21.md"),
     Path("docs/GT_FINAL_HANDOFF_REMAINING_WORK_2026-08-21.md"),
+    Path("docs/GT_BENCHMARK_READINESS_AUTHORITY_2026-08-21.md"),
     Path("docs/gt_gitnexus_program/01_GT_CURRENT_ARCHITECTURE.md"),
     Path("docs/gt_gitnexus_program/02_GT_20_TASK_CAUSAL_RECEIPTS.md"),
     Path("docs/gt_gitnexus_program/03_GT_FEATURE_LEDGER.md"),

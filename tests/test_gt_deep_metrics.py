@@ -384,6 +384,34 @@ def test_generic_verifier_timeout_exception_is_not_a_censor():
     assert classify_trial_outcome(trial) is TrialOutcome.ERROR
 
 
+def test_ambiguous_task_timeout_is_not_excluded_as_infrastructure_censor():
+    from gt_engine.deep_metrics import TrialOutcome, censor_reason, classify_trial_outcome
+
+    trial = {
+        "exception_info": {
+            "exception_type": "TaskTimeoutError",
+            "exception_message": "task timed out",
+        }
+    }
+
+    assert censor_reason("TaskTimeoutError", "task timed out", "") == ""
+    assert classify_trial_outcome(trial) is TrialOutcome.ERROR
+
+
+def test_explicit_verifier_stage_overrides_timeout_like_exception_name():
+    from gt_engine.deep_metrics import censor_reason
+
+    assert (
+        censor_reason(
+            "AgentTimeoutError",
+            "verifier timeout",
+            "",
+            stage="verifier",
+        )
+        == ""
+    )
+
+
 def test_typed_provider_timeout_with_transport_evidence_is_a_censor():
     from gt_engine.deep_metrics import censor_reason
 

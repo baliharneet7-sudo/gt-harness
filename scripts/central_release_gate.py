@@ -25,9 +25,19 @@ if __package__ in {None, ""}:
 
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.delivery_audit import audit_provider_deliveries
-from gt_engine.mechanical_completeness import build_task_execution_certificate
+from gt_engine.mechanical_completeness import (
+    build_task_execution_certificate,
+    evaluate_provider_barrier,
+)
 from gt_engine.observed_facts import audit_observed_fact_lifecycle
 from gt_engine.runtime_gate import audit_runtime_receipt
+from gt_engine.snowflake_onnx import (
+    SNOWFLAKE_MAX_LENGTH,
+    SNOWFLAKE_MODEL_NAME,
+    SNOWFLAKE_MODEL_REVISION,
+    SNOWFLAKE_MODEL_SHA256,
+    SNOWFLAKE_TOKENIZER_SHA256,
+)
 
 # Architecture D may send zero PES frames when every dispatched call already
 # recorded a legal non-material abstention.  The empty-trajectory gate must
@@ -154,6 +164,31 @@ def _substrate(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
             failures.append(f"{label}:repository_index_not_current")
         if evidence.get("intelligence_valid") is not True:
             failures.append(f"{label}:repository_evidence_invalid")
+        if str(receipt.get("treatment_profile") or "") == "central_relational_v2":
+            index = evidence.get("index") or {}
+            sha = re.compile(r"[0-9a-f]{64}")
+            graph_revision = str(index.get("graph_revision") or "")
+            graph_sha = str(index.get("graph_db_sha256") or "")
+            manifest_sha = str(index.get("graph_manifest_sha256") or "")
+            binary_sha = str(index.get("binary_sha256") or "")
+            if sha.fullmatch(graph_sha) is None or graph_sha != graph_revision:
+                failures.append(f"{label}:repository_graph_content_identity_invalid")
+            if sha.fullmatch(manifest_sha) is None:
+                failures.append(f"{label}:repository_graph_manifest_identity_invalid")
+            if sha.fullmatch(binary_sha) is None:
+                failures.append(f"{label}:repository_indexer_identity_invalid")
+            if index.get("schema_valid") is not True:
+                failures.append(f"{label}:repository_graph_schema_invalid")
+            if str(index.get("source_revision") or "") != str(
+                evidence.get("source_revision") or ""
+            ):
+                failures.append(f"{label}:repository_graph_source_identity_mismatch")
+            if int(index.get("source_files") or 0) != int(
+                index.get("indexable_files") or 0
+            ):
+                failures.append(f"{label}:repository_source_coverage_incomplete")
+            if int(index.get("parser_failures") or 0) != 0:
+                failures.append(f"{label}:repository_parser_failures_present")
     else:
         # Legacy receipts did not separate graph health from downstream GT
         # mechanism health. Keep their strict fallback without allowing a
@@ -216,6 +251,20 @@ def _dense(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
             failures.append(f"{label}:dense_backend_network_calls")
         if int(backend.get("provider_calls") or 0) != 0:
             failures.append(f"{label}:dense_backend_provider_calls")
+        if str(receipt.get("treatment_profile") or "") == "central_relational_v2":
+            expected = {
+                "backend": "snowflake_onnx",
+                "model_name": SNOWFLAKE_MODEL_NAME,
+                "model_revision": SNOWFLAKE_MODEL_REVISION,
+                "model_sha256": SNOWFLAKE_MODEL_SHA256,
+                "tokenizer_sha256": SNOWFLAKE_TOKENIZER_SHA256,
+                "pooling": "cls",
+                "normalization": "l2",
+                "max_length": SNOWFLAKE_MAX_LENGTH,
+            }
+            for field, expected_value in expected.items():
+                if backend.get(field) != expected_value:
+                    failures.append(f"{label}:dense_backend_{field}_mismatch")
     return ReleaseGateCheck(
         "dense_backend",
         not failures,
@@ -1239,6 +1288,24 @@ def _outcome_preservation(receipt: dict[str, Any], label: str) -> ReleaseGateChe
             if isinstance(row, dict)
         ):
             failures.append(f"{label}:soft_character_compaction_forbidden")
+        for context in receipt.get("model_call_contexts") or ():
+            if context.get("dispatch_status") not in {
+                "invoked",
+                "response_received",
+                "response_error",
+            }:
+                continue
+            compiler = context.get("context_compiler") or {}
+            input_hash = str(compiler.get("assistant_messages_input_sha256") or "")
+            output_hash = str(compiler.get("assistant_messages_output_sha256") or "")
+            if (
+                compiler.get("assistant_messages_preserved_exactly") is not True
+                or re.fullmatch(r"[0-9a-f]{64}", input_hash) is None
+                or input_hash != output_hash
+            ):
+                failures.append(
+                    f"{label}:assistant_provider_history_not_exact:{int(context.get('call') or 0)}"
+                )
     return ReleaseGateCheck(
         "outcome_preservation_controls",
         not failures,
@@ -1270,6 +1337,20 @@ def _completion_integrity(receipt: dict[str, Any], label: str) -> ReleaseGateChe
     failures: list[str] = []
     if plan.get("schema") != "gt.completion_plan.v1":
         failures.append(f"{label}:completion_plan_schema_missing")
+    predicates = tuple(
+        row for row in plan.get("predicates") or () if isinstance(row, dict)
+    )
+    expected_predicate_ids = tuple(
+        str(row.get("predicate_id") or "") for row in predicates
+    )
+    if plan.get("executable") is True and (
+        plan.get("status") != "complete"
+        or not expected_predicate_ids
+        or any(not item for item in expected_predicate_ids)
+        or len(expected_predicate_ids) != len(set(expected_predicate_ids))
+        or any(not str(row.get("command") or "") for row in predicates)
+    ):
+        failures.append(f"{label}:completion_executable_plan_invalid")
     eligible_count = 0
     for index, certificate in enumerate(certificates, start=1):
         if certificate.get("schema") != "gt.completion_certificate.v1":
@@ -1283,6 +1364,25 @@ def _completion_integrity(receipt: dict[str, Any], label: str) -> ReleaseGateChe
                 if isinstance(row, dict)
             )
             workspace_revision = str(certificate.get("workspace_revision") or "")
+            observed_ids = tuple(
+                str(row.get("predicate_id") or "") for row in observations
+            )
+            if (
+                len(observed_ids) != len(set(observed_ids))
+                or set(observed_ids) != set(expected_predicate_ids)
+            ):
+                failures.append(
+                    f"{label}:completion_observation_set_mismatch:{index}"
+                )
+            for row in observations:
+                predicate_id = str(row.get("predicate_id") or "missing")
+                if re.fullmatch(
+                    r"[0-9a-f]{64}", str(row.get("output_sha256") or "")
+                ) is None:
+                    failures.append(
+                        f"{label}:completion_observation_hash_invalid:"
+                        f"{index}:{predicate_id}"
+                    )
             if (
                 certificate.get("status") != "complete"
                 or not observations
@@ -1746,6 +1846,26 @@ def _mechanical_completeness_runtime(
     barrier_by_call = {int(row.get("call") or 0): row for row in barriers}
     if len(barrier_by_call) != len(barriers):
         failures.append(f"{label}:provider_barrier_duplicate_call")
+    contribution_by_call = {
+        int(row.get("call") or 0): row
+        for row in (receipt.get("contribution_compiler") or {}).get("calls") or []
+    }
+    required_ids = {
+        "request_identity",
+        "provider_view_identity",
+        "runtime_contract",
+        "task_semantic_substrate",
+        "source_snapshot_complete",
+        "graph_current",
+        "repository_intelligence",
+        "retrieval",
+        "persistent_state",
+        "previous_action_finalized",
+        "context_fact_accounting",
+        "contribution_accounting",
+        "provider_value_certification",
+        "replay_capture",
+    }
     for context in barrier_contexts:
         call = int(context.get("call") or 0)
         embedded = context.get("mechanical_completeness_barrier") or {}
@@ -1763,11 +1883,89 @@ def _mechanical_completeness_runtime(
         if barrier.get("status") != "PASS" or barrier.get("failures"):
             failures.append(f"{label}:provider_barrier_blocked:{call}")
         requirements = barrier.get("requirements") or []
+        requirement_ids = [str(row.get("requirement_id") or "") for row in requirements]
+        if (
+            len(requirement_ids) != len(set(requirement_ids))
+            or set(requirement_ids) != required_ids
+        ):
+            failures.append(f"{label}:provider_barrier_requirement_set_invalid:{call}")
         if not requirements or any(
             row.get("status") not in {"SATISFIED", "PROVEN_NOT_APPLICABLE"}
             for row in requirements
         ):
             failures.append(f"{label}:provider_barrier_requirement_invalid:{call}")
+        compiler = contribution_by_call.get(call) or {}
+        evidence = receipt.get("repository_evidence") or {}
+        graph_applicable = (
+            (receipt.get("repository_intelligence") or {}).get("denominator_excluded")
+            is not True
+        )
+        persistent = receipt.get("persistent_execution_state") or {}
+        persistent_state = persistent.get("state") or {}
+        action_accounting = receipt.get("action_accounting") or {}
+        selected_ids = [str(item) for item in compiler.get("selected_ids") or ()]
+        value_ids = [
+            str(row.get("contribution_id") or "")
+            for row in compiler.get("value_certificates") or ()
+        ]
+        expected = evaluate_provider_barrier(
+            call=call,
+            request_payload_sha256=str(context.get("request_payload_sha256") or ""),
+            provider_messages_sha256=str(context.get("provider_messages_sha256") or ""),
+            source_snapshot_complete=bool(
+                (receipt.get("semantic_source_revision") or {}).get("complete")
+            ),
+            runtime_contract_ready=(
+                (receipt.get("treatment_runtime_contract") or {}).get("schema")
+                == "gt.treatment_runtime_arguments.v1"
+            ),
+            task_semantic_ready=(
+                (receipt.get("task_semantic_substrate") or {}).get("schema")
+                == "gt.task_semantic_substrate.v1"
+            ),
+            graph_applicable=graph_applicable,
+            graph_current=bool(
+                not graph_applicable
+                or (
+                    evidence.get("substrate_ready") is True
+                    and evidence.get("index_current") is True
+                )
+            ),
+            repository_intelligence_ready=bool(
+                not graph_applicable
+                or (
+                    evidence.get("substrate_ready") is True
+                    and evidence.get("index_current") is True
+                    and evidence.get("intelligence_valid") is True
+                )
+            ),
+            retrieval_ready=bool(
+                not graph_applicable
+                or ((receipt.get("preemptive_retrieval") or {}).get("dense_backend") or {}).get(
+                    "available"
+                )
+            ),
+            persistent_state_ready=bool(
+                not graph_applicable
+                or (
+                    persistent_state.get("graph_current") is True
+                    and persistent_state.get("bootstrap_status") == "selected"
+                )
+            ),
+            previous_actions_finalized=bool(
+                action_accounting.get("selected_equals_processed_plus_cancelled") is True
+                and action_accounting.get("processed_equals_executed_plus_returned") is True
+            ),
+            context_candidate_count=int(context.get("context_fact_candidates") or 0),
+            context_accounted_count=int(context.get("context_facts_accounted") or 0),
+            contribution_candidate_count=int(compiler.get("candidate_count") or 0),
+            contribution_accounted_count=int(compiler.get("accounted_count") or 0),
+            selected_contribution_ids=selected_ids,
+            provider_value_contribution_ids=value_ids,
+            replay_capture_enabled=bool((receipt.get("replay_bundle") or {}).get("enabled")),
+        )
+        if barrier != expected:
+            failures.append(f"{label}:provider_barrier_reconstruction_mismatch:{call}")
     return ReleaseGateCheck(
         "mechanical_completeness_runtime",
         not failures,

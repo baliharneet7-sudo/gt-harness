@@ -51,6 +51,23 @@ def test_workspace_impact_skips_vcs_inspection_and_proven_external_writes():
     )
 
 
+def test_workspace_impact_never_skips_instruction_owned_external_mutation():
+    proposal = adapt_proposed_action(
+        {"command": "touch /etc/nginx/conf.d/benchmark-site.conf"},
+        source_revision="s1",
+        workspace_revision="w1",
+        model_call=1,
+        batch_index=0,
+        batch_size=1,
+    )
+
+    assert classify_workspace_impact(
+        proposal,
+        cwd="/app",
+        monitored_external_paths=("/etc/nginx/conf.d/benchmark-site.conf",),
+    ) is WorkspaceImpact.PROVEN_WORKSPACE_CHANGE
+
+
 def test_workspace_impact_keeps_builds_unknown_programs_and_repo_edits_conservative():
     for command in (
         "pytest -q",

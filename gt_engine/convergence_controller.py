@@ -8,7 +8,6 @@ import re
 
 from gt_engine.preflight import (
     ActionDisposition,
-    ActionOperation,
     EvidenceGrade,
     PreflightDecision,
     ProposedAction,
@@ -19,7 +18,13 @@ _FORBIDDEN_ROOTS = ("/logs", "/solution")
 _FORBIDDEN_LOWERCASE_BASENAMES = frozenset(
     {"reward" + ".txt", "ctrf" + ".json", "test_outputs" + ".py"}
 )
-_RISK_STATES = frozenset({"STALLED", "CONTRADICTED", "BUDGET_RISK"})
+_STATIC_ASSIGNMENT_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)="
+    r"(?P<quote>['\"]?)(?P<value>/[A-Za-z0-9_./-]+)(?P=quote)(?=\s|;|&|\||$)"
+)
+_PATH_LITERAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:/|\.\.?/)[A-Za-z0-9_./-]+"
+)
 _ACTIONABLE_PATH_ANCHOR = re.compile(
     r"^(?:/?[A-Za-z0-9_.-]+)(?:/[A-Za-z0-9_.-]+)*$"
 )
@@ -31,13 +36,33 @@ _ACTIONABLE_CHECK_ANCHOR = re.compile(
 )
 
 
-def _paths(proposed: ProposedAction) -> tuple[str, ...]:
+def _paths(proposed: ProposedAction, *, cwd: str) -> tuple[str, ...]:
+    assignments = {
+        match.group("name"): posixpath.normpath(match.group("value"))
+        for match in _STATIC_ASSIGNMENT_RE.finditer(proposed.raw_command)
+    }
+
+    def normalize(raw: str) -> str:
+        value = raw.strip("'\"").replace("\\", "/")
+        for name, replacement in assignments.items():
+            value = value.replace("${" + name + "}", replacement)
+            value = value.replace("$" + name, replacement)
+        if value.startswith("/"):
+            return posixpath.normpath(value)
+        if value.startswith(("./", "../")):
+            return posixpath.normpath(posixpath.join(cwd, value))
+        return value
+
     values: list[str] = []
     for operation in proposed.operations:
         for target in operation.targets:
-            raw = target.path.strip("'\"").replace("\\", "/")
+            raw = normalize(target.path)
             if raw and raw not in values:
                 values.append(raw)
+    for match in _PATH_LITERAL_RE.finditer(proposed.raw_command):
+        raw = normalize(match.group(0).rstrip(".,:;"))
+        if raw and raw not in values:
+            values.append(raw)
     return tuple(values)
 
 
@@ -146,7 +171,7 @@ def convergence_preflight(
 ) -> PreflightDecision:
     """Return only mechanically certified integrity or convergence blockers."""
 
-    paths = _paths(proposed)
+    paths = _paths(proposed, cwd=posixpath.normpath(str(cwd or "/")))
     forbidden = tuple(path for path in paths if _forbidden_path(path))
     forbidden_selectors = _forbidden_search_selectors(proposed)
     if forbidden or forbidden_selectors:
@@ -162,37 +187,11 @@ def convergence_preflight(
             ),
         )
 
-    root = posixpath.normpath(str(cwd or "/"))
-    pure_search = bool(proposed.operations) and all(
-        operation.operation is ActionOperation.SEARCH
-        for operation in proposed.operations
-    )
-    broad_search = bool(
-        pure_search
-        and any(posixpath.normpath(path) in {"/", root} for path in paths)
-    )
-    anchors = tuple(
-        str(item) for item in unresolved_anchors if _actionable_anchor(str(item))
-    )[:2]
-    if (
-        str(progress_state or "").upper() in _RISK_STATES
-        and broad_search
-        and anchors
-    ):
-        suffix = (
-            " Resolve or run: " + ", ".join(anchors) + "."
-            if anchors
-            else " Perform a focused validation or deliverable check."
-        )
-        return _decision(
-            proposed,
-            source_revision=source_revision,
-            reason="convergence_budget_requires_verification",
-            evidence=(
-                "The trajectory is at deterministic budget risk; another workspace-wide "
-                "search does not close an unresolved obligation." + suffix,
-            ),
-        )
+    # Progress and budget state remain private controller signals.  Returning
+    # broad-search advice here spends another provider decision and historically
+    # caused harness-oriented exploration.  Only a proven evidence-boundary
+    # violation is allowed to return an action from this controller.
+    del progress_state, unresolved_anchors
     return pass_decision(proposed, "convergence_policy_pass")
 
 

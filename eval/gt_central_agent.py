@@ -7161,6 +7161,13 @@ class MiniSweCentralAgent(BaseAgent):
                         contribution_accounted_count=(
                             compiled_contributions.accounted_count
                         ),
+                        selected_contribution_ids=(
+                            compiled_contributions.selected_ids
+                        ),
+                        provider_value_contribution_ids=tuple(
+                            str(row.get("contribution_id") or "")
+                            for row in compiled_contributions.value_certificates
+                        ),
                         replay_capture_enabled=replay_bundle.enabled,
                     )
                     model_call_contexts[-1]["mechanical_completeness_barrier"] = (
@@ -8355,6 +8362,7 @@ class MiniSweCentralAgent(BaseAgent):
                     workspace_impact = classify_workspace_impact(
                         proposed,
                         cwd=self.cwd,
+                        monitored_external_paths=external_paths,
                     )
                     if workspace_impact is WorkspaceImpact.PROVEN_NO_WORKSPACE_CHANGE:
                         self._host_executions.record_cache_hit(
@@ -11501,6 +11509,7 @@ class MiniSweCentralAgent(BaseAgent):
                                 ),
                                 "max_relation_facts": 3,
                                 "max_semantic_items": 3,
+                                "max_edge_expansions": 256,
                                 "delivery_mode": "integrated_same_observation",
                             },
                             "decision_sufficiency": self.enable_decision_sufficiency,
