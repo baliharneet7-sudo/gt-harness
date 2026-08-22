@@ -1932,6 +1932,14 @@ jobs:
                 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
               fi
 
+              # Preserve a typed terminal receipt even when the agent exits
+              # before producing its normal trajectory (for example a
+              # RepeatedFormatError).  This prevents a model/runner failure
+              # from becoming an indistinguishable missing-artifact failure.
+              if [ "${GT_RUNNER_RC:-0}" -ne 0 ]; then
+                python3 -c 'import json,sys; print(json.dumps({"schema":"gt.runner_failure.v1","instance_id":sys.argv[2],"exit_code":int(sys.argv[1]),"classification":"agent_or_model_failure","artifact_complete":True}))' "$GT_RUNNER_RC" "$MTASK" > /gt_out/runner_failure.json
+              fi
+
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
               # ROOT-CAUSE FIX (2026-07-08): the agent submission (`cat /tmp/patch.txt`) is captured
               # through the mini-swe-agent PTY (~80 cols) so long diff lines WRAP — the continuation
@@ -2284,7 +2292,8 @@ jobs:
           for a in runtime_context.json lsp_certificate.json graph_certificate.json \
                    embedder_certificate.json foundational_gate_report.json run_manifest.json \
                    brief.txt gt_issue_anchors.json gt_scope_files.txt gt_lsp_metrics.txt \
-                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json; do
+                   proof_progress.json proof_failure.json proof_status.json dep_store_manifest.json \
+                   runner_failure.json; do
             cp "/tmp/gt/$a" "trial_results/gt_artifacts/$a" 2>/dev/null || true
           done
           if [ -e "/tmp/gt/brief_determinism_mismatch.json" ]; then
