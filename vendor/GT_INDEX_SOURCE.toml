@@ -1,0 +1,6 @@
+source_repository = "https://github.com/harneet2512/groundtruth"
+upstream_source_commit = "61cfdbce2c42751c11028e46e863b3231f0bb70e"
+upstream_tree_git_object = "e8a1b6cf6243ec12715626879884388ddd26845c"
+source_tree_sha256 = "27714cd0ca8c6add1623665e5250bbfb049ec5bb8863c80860e03e6e9aaa9301"
+source_files = 80
+overlay = "GT-Harness v0.9 discovery accounting, fail-closed graph receipt metadata, and removal of an unreferenced duplicate internal/types package."

@@ -53,12 +53,9 @@ def test_miniswe_agent_version_rejects_every_other_value(monkeypatch):
 async def test_installer_uses_historical_version_in_install_and_assertion(
     monkeypatch, tmp_path
 ):
-    wheel = tmp_path / "groundtruth_mcp-1.0.0-py3-none-any.whl"
-    binary = tmp_path / "gt-index-linux-amd64"
-    wheel.write_bytes(b"wheel")
+    binary = tmp_path / "gt-index"
     binary.write_bytes(b"binary")
     monkeypatch.setenv("MINISWE_AGENT_VERSION", "2.2.8")
-    monkeypatch.setattr(MiniSweAgent, "_gt_wheel", staticmethod(lambda: wheel))
     monkeypatch.setattr(MiniSweAgent, "_gt_binary_host", staticmethod(lambda: binary))
 
     commands: list[str] = []
@@ -85,3 +82,5 @@ async def test_installer_uses_historical_version_in_install_and_assertion(
     install = commands[-1]
     assert '--with "mini-swe-agent==2.2.8"' in install
     assert "m.version('mini-swe-agent') == '2.2.8'" in install
+    assert "m.version('gt-harness') == '0.9.0'" in install
+    assert "groundtruth_mcp" not in install

@@ -62,7 +62,7 @@ from eval.tb_agent import _REMOTE_GT_BINARY
 from eval.tb_agent import GTNanoAgent as _GTNanoTB
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_REMOTE_DIR = "/installed-agent/nano-harness"
+_REMOTE_DIR = "/installed-agent/gt-harness"
 _WORKDIR = "/testbed"  # SWE-bench convention, baked into the task images/verifiers
 
 # SWE-bench images are conda-based Ubuntu, but keep the tb_agent hardening: make
@@ -84,7 +84,7 @@ def _install_nano_cmd(extra_uv_args: str = "") -> str:
         "set -eu; "
         "curl -LsSf https://astral.sh/uv/install.sh | sh && "
         f'"$HOME/.local/bin/uv" tool install --python 3.12 {extra_uv_args}{_REMOTE_DIR} && '
-        '"$HOME/.local/bin/nano" --help >/dev/null'
+        '"$HOME/.local/bin/gt-harness" --help >/dev/null'
     )
 
 
@@ -114,7 +114,7 @@ resolves the issue.
 # the model patch for analysis.
 _SNAPSHOT = (
     f"cd {_WORKDIR} && "
-    "rm -rf .gt && "
+    "rm -rf .gt .groundtruth && "
     "git add -A -- . "
     "':(exclude,glob)**/*.pyc' ':(exclude,glob)**/__pycache__' ':(exclude)node_modules' "
     "2>/dev/null; "
@@ -137,7 +137,7 @@ class NanoSweAgent(BaseInstalledAgent):
     # gt_root rides Harbor's declarative flag machinery: --ak gt_root=/testbed on
     # the CLI, NANO_GT_ROOT as the env fallback, absent by default (baseline arm).
     CLI_FLAGS = [
-        CliFlag(kwarg="gt_root", cli="--gt-root", type="str", env_fallback="NANO_GT_ROOT"),
+        CliFlag(kwarg="gt_root", cli="--root", type="str", env_fallback="NANO_GT_ROOT"),
     ]
 
     @staticmethod
@@ -159,6 +159,11 @@ class NanoSweAgent(BaseInstalledAgent):
         # _run_command().
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
+        await environment.upload_dir(_REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine")
+        await environment.upload_dir(_REPO_ROOT / "gt_harness", f"{_REMOTE_DIR}/gt_harness")
+        await environment.upload_dir(
+            _REPO_ROOT / "src" / "groundtruth", f"{_REMOTE_DIR}/src/groundtruth"
+        )
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
@@ -193,7 +198,7 @@ class NanoSweAgent(BaseInstalledAgent):
         # before grading. The snapshot runs unconditionally for the same reason.
         return (
             f"cd {_WORKDIR} && {marker}"
-            f'"$HOME/.local/bin/nano" run {shlex.quote(task)} '
+            f'"$HOME/.local/bin/gt-harness" run {shlex.quote(task)} '
             f"--model {shlex.quote(model)} --max-iterations 100 "
             f"{gt_flags} "
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
@@ -270,26 +275,26 @@ class GTNanoSweAgent(NanoSweAgent):
 
     # Shared vendored-artifact discovery (fail-fast messages included) —
     # plain-function re-exports so classmethod-style calls work here too.
-    _gt_wheel = staticmethod(_GTNanoTB._gt_wheel)
     _gt_binary_host = staticmethod(_GTNanoTB._gt_binary_host)
 
     async def install(self, environment: BaseEnvironment) -> None:
         # Fail fast (before any container work) if the GT artifacts are absent:
         # a GT run without an indexer or the groundtruth package silently
         # degrades to baseline behavior — a wasted paid run, not an experiment.
-        wheel = self._gt_wheel()
         binary = self._gt_binary_host()
 
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
+        await environment.upload_dir(_REPO_ROOT / "gt_harness", f"{_REMOTE_DIR}/gt_harness")
         await environment.upload_dir(
             _REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine"
+        )
+        await environment.upload_dir(
+            _REPO_ROOT / "src" / "groundtruth", f"{_REMOTE_DIR}/src/groundtruth"
         )
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
-        remote_wheel = f"{_REMOTE_DIR}/{wheel.name}"
-        await environment.upload_file(wheel, remote_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
 
         await self.exec_as_root(
@@ -301,7 +306,7 @@ class GTNanoSweAgent(NanoSweAgent):
         # the task's /testbed conda env).
         await self.exec_as_agent(
             environment,
-            _install_nano_cmd(f"--with {shlex.quote(remote_wheel)} --with numpy "),
+            _install_nano_cmd("--with numpy "),
             env=dict(UTF8_ENV),
         )
         # Smoke the stack inside the container, fail-closed at install time:
@@ -311,7 +316,7 @@ class GTNanoSweAgent(NanoSweAgent):
         await self.exec_as_agent(
             environment,
             "set -eu; "
-            '"$HOME/.local/share/uv/tools/nano-harness/bin/python" -c '
+            '"$HOME/.local/share/uv/tools/gt-harness/bin/python" -c '
             "'import groundtruth.runtime.gateway, gt_engine' && "
             f'"{_REMOTE_GT_BINARY}" -root {_REMOTE_DIR}/gt_engine '
             "-output /tmp/gt-install-smoke.db >/dev/null && "
@@ -331,7 +336,7 @@ class GTNanoSweAgent(NanoSweAgent):
         env.update(self.resolve_env_vars())
         env.setdefault("GT_INDEX_BINARY", _REMOTE_GT_BINARY)
         task = _TASK_TEMPLATE.format(workdir=_WORKDIR, issue=instruction)
-        gt_flags = self.build_cli_flags()  # "--gt-root /testbed" by default
+        gt_flags = "--treatment groundtruth " + self.build_cli_flags()
         await self.exec_as_agent(
             environment, self._run_command(task, model, gt_flags), env=env
         )

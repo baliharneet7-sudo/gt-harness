@@ -39,20 +39,16 @@ def test_snapshot_removes_gt_dir_before_staging():
     assert rm < add < diff, "must be: rm .gt -> stage -> snapshot the patch"
 
 
-def test_baseline_run_command_is_byte_identical_to_historical():
+def test_baseline_run_command_uses_official_cli_without_gt_treatment():
     issue = "Widget crashes when frobnicating\nwith a 'quote' and $dollar"
     task = _TASK_TEMPLATE.format(workdir=_WORKDIR, issue=issue)
     a = NanoSweAgent(logs_dir=".", model_name="anthropic/claude-opus-4-8")
     assert a.build_cli_flags() == ""  # baseline: GT flag absent by default
     cmd = a._run_command(task, "claude-opus-4-8", a.build_cli_flags())
-    # The exact pre-refactor inline string (eval/swe_agent.py @ a2e3bfa).
-    assert cmd == (
-        f"cd {_WORKDIR} && "
-        f'"$HOME/.local/bin/nano" run {shlex.quote(task)} '
-        f"--model claude-opus-4-8 --max-iterations 100 "
-        " "  # empty gt_flags slot
-        "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
-    )
+    assert f'"$HOME/.local/bin/gt-harness" run {shlex.quote(task)} ' in cmd
+    assert "--model claude-opus-4-8 --max-iterations 100" in cmd
+    assert "--treatment groundtruth" not in cmd
+    assert "--root /testbed" not in cmd
 
 
 def test_gt_arm_defaults_and_overrides():

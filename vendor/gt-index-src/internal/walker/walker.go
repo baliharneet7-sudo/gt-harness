@@ -3,9 +3,12 @@ package walker
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
@@ -14,6 +17,14 @@ import (
 // skipDirs are directories to always skip.
 var skipDirs = map[string]bool{
 	".git":          true,
+	".gt":           true,
+	".groundtruth":  true,
+	".hg":           true,
+	".idea":         true,
+	".pytest_cache": true,
+	".ruff_cache":   true,
+	".svn":          true,
+	".vscode":       true,
 	"__pycache__":   true,
 	"node_modules":  true,
 	".tox":          true,
@@ -24,12 +35,14 @@ var skipDirs = map[string]bool{
 	"dist":          true,
 	"build":         true,
 	".next":         true,
-	"vendor":        true, // Go vendor — can optionally include
 	"target":        true, // Rust/Java build output
-	"gen":           true, // Generated code (protobuf, gRPC)
-	"generated":     true,
-	"__generated__": true,
-	"_generated":    true,
+}
+
+// SkipRecord explains why a repository file was not offered to the parser.
+// Path is always slash-normalized and relative to the repository root.
+type SkipRecord struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 // SourceFile represents a discovered source file.
@@ -43,8 +56,12 @@ type SourceFile struct {
 
 // WalkResult contains discovered files and metadata about the walk.
 type WalkResult struct {
-	Files        []SourceFile
-	FilesSkipped int // number of files beyond maxFiles that were not indexed
+	Files              []SourceFile
+	FilesDiscovered    int
+	FilesSkipped       int // number of eligible files beyond maxFiles
+	Skipped            []SkipRecord
+	SkippedDirectories []SkipRecord
+	DiscoveryMethod    string
 }
 
 // Walk discovers all source files under root that have a registered language spec.
@@ -54,83 +71,150 @@ func Walk(root string, maxFiles int) ([]SourceFile, error) {
 	return result.Files, err
 }
 
-// WalkWithMeta is like Walk but also returns metadata (files skipped count).
+// WalkWithMeta is like Walk but also returns a complete discovery receipt.
+// Git repositories use git's tracked plus non-ignored working-tree file set so
+// nested .gitignore rules and negations are authoritative. Non-Git directories
+// use a deterministic filesystem fallback with the legacy root ignore matcher.
 func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 	root, _ = filepath.Abs(root)
 
-	// Load .gitignore patterns
-	ignorePatterns := loadGitignore(filepath.Join(root, ".gitignore"))
-
-	var files []SourceFile
-	skipped := 0
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Skip hidden and known directories
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if skipDirs[base] || strings.HasPrefix(base, ".") {
-				return filepath.SkipDir
+	relPaths, method, skippedDirs, err := repositoryFiles(root)
+	if err != nil {
+		return WalkResult{}, err
+	}
+	result := WalkResult{
+		FilesDiscovered:    len(relPaths),
+		SkippedDirectories: skippedDirs,
+		DiscoveryMethod:    method,
+	}
+	for _, relPath := range relPaths {
+		path := filepath.Join(root, filepath.FromSlash(relPath))
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			reason := "metadata_access_failed"
+			if os.IsNotExist(statErr) {
+				reason = "working_tree_deleted"
 			}
-			return nil
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: reason})
+			continue
 		}
-
-		// Skip large files (>500KB)
-		if info.Size() > 500*1024 {
-			return nil
+		if !info.Mode().IsRegular() {
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "non_regular_file"})
+			continue
 		}
-
-		// Check if file has a registered language spec
-		// Source suffixes are canonicalized by the host registry.  Preserve that
-		// contract for repositories containing conventional upper-case COBOL
-		// extensions (for example .CBL) instead of silently omitting them from
-		// the structural graph.
-		relPath, _ := filepath.Rel(root, path)
-		relPath = filepath.ToSlash(relPath)
-
-		// Check gitignore
-		if isIgnored(relPath, ignorePatterns) {
-			return nil
-		}
-
 		if !specs.HasCandidatePath(path) {
-			return nil
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "unsupported_path"})
+			continue
+		}
+		if info.Size() > 500*1024 {
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "too_large"})
+			continue
 		}
 		var prefix []byte
 		if specs.ResolutionNeedsContent(path) {
-			var readErr error
-			prefix, readErr = readPrefix(path, 65536)
-			if readErr != nil {
-				return readErr
+			prefix, err = readPrefix(path, 65536)
+			if err != nil {
+				result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "content_read_failed"})
+				continue
 			}
 		}
 		spec, resolutionReason := specs.ResolveSource(path, prefix)
 		if spec == nil {
-			return nil
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "language_unresolved"})
+			continue
 		}
-
-		// Skip generated files (check first line for codegen markers)
 		if isGeneratedFile(path) {
-			return nil
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "generated"})
+			continue
 		}
-		if maxFiles > 0 && len(files) >= maxFiles {
-			skipped++
-			return nil
+		if maxFiles > 0 && len(result.Files) >= maxFiles {
+			result.FilesSkipped++
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "max_files"})
+			continue
 		}
-
-		files = append(files, SourceFile{
+		result.Files = append(result.Files, SourceFile{
 			Path:             relPath,
 			AbsPath:          path,
 			Language:         spec.Name,
 			Spec:             spec,
 			ResolutionReason: resolutionReason,
 		})
+	}
+	sort.Slice(result.Skipped, func(i, j int) bool {
+		if result.Skipped[i].Path == result.Skipped[j].Path {
+			return result.Skipped[i].Reason < result.Skipped[j].Reason
+		}
+		return result.Skipped[i].Path < result.Skipped[j].Path
+	})
+	return result, nil
+}
+
+func repositoryFiles(root string) ([]string, string, []SkipRecord, error) {
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+	if output, err := command.Output(); err == nil {
+		seen := make(map[string]bool)
+		var paths []string
+		var skippedDirs []SkipRecord
+		for _, raw := range bytes.Split(output, []byte{0}) {
+			if len(raw) == 0 {
+				continue
+			}
+			relPath := filepath.ToSlash(string(raw))
+			if directory := skippedDirectory(relPath); directory != "" {
+				skippedDirs = append(skippedDirs, SkipRecord{Path: relPath, Reason: "excluded_directory:" + directory})
+				continue
+			}
+			if !seen[relPath] {
+				seen[relPath] = true
+				paths = append(paths, relPath)
+			}
+		}
+		sort.Strings(paths)
+		sort.Slice(skippedDirs, func(i, j int) bool { return skippedDirs[i].Path < skippedDirs[j].Path })
+		return paths, "git_ls_files", skippedDirs, nil
+	}
+
+	ignorePatterns := loadGitignore(filepath.Join(root, ".gitignore"))
+	var paths []string
+	var skippedDirs []SkipRecord
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			if path != root && skipDirs[filepath.Base(path)] {
+				relPath, _ := filepath.Rel(root, path)
+				skippedDirs = append(skippedDirs, SkipRecord{Path: filepath.ToSlash(relPath), Reason: "excluded_directory:" + filepath.Base(path)})
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relPath, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relPath = filepath.ToSlash(relPath)
+		if isIgnored(relPath, ignorePatterns) {
+			return nil
+		}
+		paths = append(paths, relPath)
 		return nil
 	})
+	sort.Strings(paths)
+	return paths, "filesystem_fallback", skippedDirs, err
+}
 
-	return WalkResult{Files: files, FilesSkipped: skipped}, err
+func skippedDirectory(relPath string) string {
+	parts := strings.Split(filepath.ToSlash(relPath), "/")
+	for index, part := range parts {
+		if index == len(parts)-1 {
+			break
+		}
+		if skipDirs[part] {
+			return part
+		}
+	}
+	return ""
 }
 
 func readPrefix(path string, limit int64) ([]byte, error) {

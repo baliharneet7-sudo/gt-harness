@@ -6,14 +6,14 @@ def test_gt_adapter_version_does_not_require_staged_checkout():
 
     assert command is not None
     assert "/installed-agent/nano-harness" not in command
-    assert "$HOME/.local/share/uv/tools/nano-harness/bin/python" in command
+    assert "$HOME/.local/share/uv/tools/gt-harness/bin/python" in command
 
 
 def test_gt_staged_source_cleanup_is_exact_and_guarded():
     assert _GT_STAGED_SOURCE_CLEANUP == (
-        "test \"$(readlink -f /installed-agent/nano-harness)\" = "
-        "\"/installed-agent/nano-harness\" && "
-        "rm -rf -- /installed-agent/nano-harness"
+        "test \"$(readlink -f /installed-agent/gt-harness)\" = "
+        "\"/installed-agent/gt-harness\" && "
+        "rm -rf -- /installed-agent/gt-harness"
     )
 
 
@@ -37,4 +37,4 @@ def test_gt_run_uses_external_private_state_directory(monkeypatch, tmp_path):
     asyncio.run(agent.run("task", _Environment(), object()))
 
     assert captured["env"]["GT_STATE_DIR"] == "/tmp/.nano-gt-state"
-    assert '--gt-root "$PWD"' in captured["command"]
+    assert '--treatment groundtruth --root "$PWD"' in captured["command"]

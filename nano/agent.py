@@ -90,6 +90,7 @@ class Agent:
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
     gt_root: str | None = None  # codebase root for GroundTruth; None = GT off
+    treatment: Any | None = None  # official non-blocking benchmark treatment
     time_budget_seconds: float | None = None
     finalization_reserve_seconds: float = 180.0
     clock: Callable[[], float] = field(
@@ -105,6 +106,8 @@ class Agent:
         # None (no gt_root, non-code root, GT unavailable) leaves every code
         # path below byte-identical to stock nano-harness.
         self._gt = None
+        if self.treatment is not None and self.gt_root:
+            raise ValueError("choose the treatment interface or legacy gt_root, not both")
         if self.gt_root:
             try:
                 from gt_engine import create_bridge
@@ -140,6 +143,13 @@ class Agent:
             else None
         )
         task_content = task
+        if self.treatment is not None:
+            try:
+                treatment_context = self.treatment.prepare(task)
+            except Exception:  # noqa: BLE001 - treatment failure degrades to bare
+                treatment_context = ""
+            if treatment_context:
+                task_content = task + "\n\n" + treatment_context
         if self._gt is not None:
             self._gt.issue_text = task  # B-4: thread the real task text into GT
             self._gt.iteration_budget = self.max_iterations
@@ -181,6 +191,18 @@ class Agent:
                 ))
 
             self._sync_gt_budget()
+            if self.treatment is not None:
+                try:
+                    treatment_context = self.treatment.before_model_call(iteration)
+                except Exception:  # noqa: BLE001 - treatment failure is non-blocking
+                    treatment_context = ""
+                if treatment_context:
+                    messages.append({"role": "user", "content": treatment_context})
+                    transcript.append({
+                        "type": "user",
+                        "content": treatment_context,
+                        "treatment": "groundtruth",
+                    })
             if self._gt is not None and hasattr(self._gt, "progress_control"):
                 try:
                     gt_control = self._gt.progress_control(iteration)
@@ -389,6 +411,13 @@ class Agent:
         if self._gt is not None:
             try:
                 self._gt.trace_run_completed(result)
+            except Exception:  # noqa: BLE001 - telemetry never changes completion
+                pass
+        if self.treatment is not None:
+            try:
+                receipt = self.treatment.finalize(result)
+                result.transcript.append({"type": "treatment_receipt", "receipt": receipt})
+                self._emit({"type": "treatment_receipt", "receipt": receipt})
             except Exception:  # noqa: BLE001 - telemetry never changes completion
                 pass
         return result
@@ -613,6 +642,13 @@ class Agent:
                 # not crash the whole run.
                 output = f"ERROR: {type(e).__name__}: {e}"
                 is_error = True
+            if self.treatment is not None:
+                try:
+                    self.treatment.after_action(
+                        call.name, effective_arguments, output, is_error
+                    )
+                except Exception:  # noqa: BLE001 - observation is non-blocking
+                    pass
             # GT integration point 2: complete the observation with at most one
             # evidence dose, appended as a pure suffix. Any GT fault returns
             # the raw output unchanged (enrich also guards internally).

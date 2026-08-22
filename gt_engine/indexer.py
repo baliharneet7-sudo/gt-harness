@@ -45,7 +45,9 @@ from gt_engine.language_registry import (
 # least one of these is a code repository worth indexing.
 SOURCE_EXTS = INDEXABLE_SOURCE_SUFFIXES
 
-# Never descend into these (vendored/build/VCS trees are not the task's code).
+# Never descend into these generated/build/VCS trees. A tracked directory
+# named vendor can contain the product's own source, so name alone is not a
+# sound exclusion rule.
 _SKIP_DIRS = frozenset(
     {
         ".git",
@@ -65,15 +67,7 @@ _SKIP_DIRS = frozenset(
         ".idea",
         ".vscode",
         "target",
-        "vendor",
     }
-)
-
-# Known local gt-index builds probed only when nothing else resolves.
-_LOCAL_BINARY_CANDIDATES = (
-    str(Path(__file__).resolve().parents[1] / "vendor" / "gt-index-src" / "gt-index.exe"),
-    r"D:\Groundtruth\gt-index\gt-index.exe",
-    "/opt/groundtruth/gt-index/gt-index",
 )
 
 _MAX_SCAN_FILES = 50_000  # detection bound; a hit returns immediately
@@ -201,8 +195,7 @@ def inspect_source_coverage(root: str | os.PathLike[str]) -> SourceCoverage:
                             unsupported.add(os.path.splitext(filename)[1].lower())
                             unsupported_paths.add(relative)
                 elif (
-                    resolution.status is LanguageResolutionStatus.AMBIGUOUS
-                    and required_candidates
+                    resolution.status is LanguageResolutionStatus.AMBIGUOUS and required_candidates
                 ):
                     source_files += 1
                     suffix = os.path.splitext(filename)[1].lower()
@@ -257,13 +250,18 @@ def is_code_repo(root: str) -> bool:
 
 
 def _seed_binary_env() -> None:
-    """Make find_binary() succeed offline when a known local build exists."""
-    if os.environ.get("GT_INDEX_BINARY") or shutil.which("gt-index"):
+    """Make find_binary() use the checked-in source build, never an opaque artifact."""
+    if os.environ.get("GT_INDEX_BINARY"):
         return
-    for cand in _LOCAL_BINARY_CANDIDATES:
-        if Path(cand).exists():
-            os.environ["GT_INDEX_BINARY"] = cand
-            return
+    try:
+        from gt_harness.indexer_setup import ensure_source_indexer
+
+        built = ensure_source_indexer()
+        if built.status == "READY" and built.binary_path:
+            os.environ["GT_INDEX_BINARY"] = built.binary_path
+    except (ImportError, OSError, RuntimeError, subprocess.SubprocessError):
+        # The caller converts an unavailable binary into an explicit receipt.
+        return
 
 
 def _binary_certification() -> dict[str, str]:
@@ -278,16 +276,10 @@ def _binary_certification() -> dict[str, str]:
 
 
 def _resolved_binary_path() -> str:
-    candidate = os.environ.get("GT_INDEX_BINARY") or shutil.which("gt-index") or ""
+    candidate = os.environ.get("GT_INDEX_BINARY") or ""
     if not candidate:
-        try:
-            from groundtruth._binary import CACHE_DIR, GT_INDEX_VERSION
-
-            name = "gt-index.exe" if os.name == "nt" else "gt-index"
-            cached = Path(CACHE_DIR) / GT_INDEX_VERSION / name
-            candidate = str(cached) if cached.is_file() else ""
-        except (ImportError, AttributeError):
-            candidate = ""
+        _seed_binary_env()
+        candidate = os.environ.get("GT_INDEX_BINARY") or ""
     return candidate
 
 
@@ -302,8 +294,7 @@ def _atomic_write(path: Path, payload: bytes) -> None:
     try:
         _durable_replace(temporary, path)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        temporary.unlink(missing_ok=True)
 
 
 def _fsync_file(path: Path) -> None:
@@ -412,14 +403,26 @@ _REQUIRED_GRAPH_TABLE_COLUMNS: dict[str, frozenset[str]] = {
         {"passage_id", "node_id", "start_line", "end_line", "content", "content_hash", "repo_id"}
     ),
 }
-_REQUIRED_GRAPH_FTS_TABLES = frozenset(
-    {"nodes_fts", "symbol_content_fts", "content_passages_fts"}
-)
+_REQUIRED_GRAPH_FTS_TABLES = frozenset({"nodes_fts", "symbol_content_fts", "content_passages_fts"})
 _REQUIRED_GRAPH_META_KEYS = frozenset(
     {"schema_version", "file_count", "parse_failures", "post_revision"}
 )
+_REQUIRED_DISCOVERY_META_KEYS = frozenset(
+    {
+        "files_parsed",
+        "parse_failure_details",
+        "discovery_method",
+        "discovery_files_seen",
+        "discovery_skipped_count",
+        "discovery_skipped_reasons",
+        "discovery_skipped_paths",
+        "discovery_skipped_directories",
+        "file_hash_failures",
+        "file_hash_failure_details",
+    }
+)
 _SUPPORTED_GRAPH_SCHEMA_VERSIONS = frozenset(
-    {"v15.2-trust-tier", "v16-multirepo"}
+    {"v15.2-trust-tier", "v15.3-discovery-receipt", "v16-multirepo"}
 )
 
 
@@ -434,28 +437,21 @@ def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], 
                     "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
                 )
             }
-            required = set(_REQUIRED_GRAPH_TABLE_COLUMNS) | set(
-                _REQUIRED_GRAPH_FTS_TABLES
-            )
+            required = set(_REQUIRED_GRAPH_TABLE_COLUMNS) | set(_REQUIRED_GRAPH_FTS_TABLES)
             missing_tables = required - tables
             missing_columns: list[str] = []
             if not missing_tables:
                 for table, expected_columns in _REQUIRED_GRAPH_TABLE_COLUMNS.items():
                     actual_columns = {
-                        str(row[1])
-                        for row in connection.execute(f'PRAGMA table_info("{table}")')
+                        str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")')
                     }
                     for column in sorted(expected_columns - actual_columns):
                         missing_columns.append(f"{table}.{column}")
             metadata_keys = (
-                {
-                    str(row[0])
-                    for row in connection.execute("SELECT key FROM project_meta")
-                }
+                {str(row[0]) for row in connection.execute("SELECT key FROM project_meta")}
                 if "project_meta" in tables
                 else set()
             )
-            missing_meta = _REQUIRED_GRAPH_META_KEYS - metadata_keys
             schema_version_row = (
                 connection.execute(
                     "SELECT value FROM project_meta WHERE key='schema_version'"
@@ -464,13 +460,13 @@ def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], 
                 else None
             )
             schema_version = str(schema_version_row[0] if schema_version_row else "")
-            unsupported_schema_version = (
-                schema_version not in _SUPPORTED_GRAPH_SCHEMA_VERSIONS
-            )
+            required_meta = set(_REQUIRED_GRAPH_META_KEYS)
+            if schema_version == "v15.3-discovery-receipt":
+                required_meta.update(_REQUIRED_DISCOVERY_META_KEYS)
+            missing_meta = required_meta - metadata_keys
+            unsupported_schema_version = schema_version not in _SUPPORTED_GRAPH_SCHEMA_VERSIONS
             foreign_key_violations = (
-                list(connection.execute("PRAGMA foreign_key_check"))
-                if not missing_tables
-                else []
+                list(connection.execute("PRAGMA foreign_key_check")) if not missing_tables else []
             )
             schema_valid = bool(
                 quick_check.lower() == "ok"
@@ -539,8 +535,7 @@ def _graph_logical_revision(path: Path) -> str:
     revision = str(row[0] if row else "").strip().lower()
     return (
         revision
-        if len(revision) == 64
-        and all(character in "0123456789abcdef" for character in revision)
+        if len(revision) == 64 and all(character in "0123456789abcdef" for character in revision)
         else ""
     )
 
@@ -566,9 +561,7 @@ def _cleanup_graph_publication_journal(database: Path, journal: dict[str, object
     _fsync_directory(database.parent)
 
 
-def _recover_interrupted_graph_publication(
-    database: Path, manifest_path: Path
-) -> tuple[bool, str]:
+def _recover_interrupted_graph_publication(database: Path, manifest_path: Path) -> tuple[bool, str]:
     """Complete or roll back a durable two-file publication transaction."""
 
     journal_path = _graph_publication_journal_path(database)
@@ -596,9 +589,7 @@ def _recover_interrupted_graph_publication(
         candidate = database.parent / candidate_name if candidate_name else None
 
         actual_hash = (
-            hashlib.sha256(database.read_bytes()).hexdigest()
-            if database.is_file()
-            else ""
+            hashlib.sha256(database.read_bytes()).hexdigest() if database.is_file() else ""
         )
         if actual_hash and actual_hash == new_hash:
             _atomic_write(manifest_path, new_manifest)
@@ -665,9 +656,7 @@ def _certify_published_graph(
             return False, "publication_lock_timeout"
 
     if _recover_pending:
-        recovered, recovery_error = _recover_interrupted_graph_publication(
-            database, manifest_path
-        )
+        recovered, recovery_error = _recover_interrupted_graph_publication(database, manifest_path)
         if not recovered:
             return False, recovery_error
     if not database.is_file() or not manifest_path.is_file():
@@ -684,25 +673,22 @@ def _certify_published_graph(
         graph_bytes = database.read_bytes()
         if int(manifest.get("graph_bytes") or -1) != len(graph_bytes):
             return False, "graph_bytes_mismatch"
-        if str(manifest.get("graph_sha256") or "") != hashlib.sha256(
-            graph_bytes
-        ).hexdigest():
+        if str(manifest.get("graph_sha256") or "") != hashlib.sha256(graph_bytes).hexdigest():
             return False, "graph_sha256_mismatch"
-        if expected_source_revision and str(
-            manifest.get("source_revision") or ""
-        ) != str(expected_source_revision):
+        if expected_source_revision and str(manifest.get("source_revision") or "") != str(
+            expected_source_revision
+        ):
             return False, "source_revision_mismatch"
-        if expected_binary_sha256 and str(
-            manifest.get("binary_sha256") or ""
-        ) != expected_binary_sha256:
+        if (
+            expected_binary_sha256
+            and str(manifest.get("binary_sha256") or "") != expected_binary_sha256
+        ):
             return False, "binary_identity_mismatch"
         if not bool(manifest.get("binary_certified")):
             return False, "binary_not_certified"
         if str(manifest.get("sqlite_quick_check") or "").lower() != "ok":
             return False, "manifest_sqlite_quick_check_invalid"
-        schema_valid, _nodes, _edges, _fts, schema_detail = _graph_schema_receipt(
-            database
-        )
+        schema_valid, _nodes, _edges, _fts, schema_detail = _graph_schema_receipt(database)
         if not schema_valid:
             return False, "graph_schema_invalid:" + schema_detail[:80]
         manifest_logical_revision = str(manifest.get("logical_graph_revision") or "")
@@ -783,9 +769,7 @@ def _publish_graph_pair(
             )
 
     manifest_path = database.with_suffix(".manifest.json")
-    recovered, recovery_error = _recover_interrupted_graph_publication(
-        database, manifest_path
-    )
+    recovered, recovery_error = _recover_interrupted_graph_publication(database, manifest_path)
     if not recovered:
         raise OSError("graph_publication_recovery_" + recovery_error)
     previous_manifest = manifest_path.read_bytes() if manifest_path.is_file() else None
@@ -868,12 +852,15 @@ def ensure_index_with_receipt(
     state_dir: str | os.PathLike[str] | None = None,
     source_revision: str = "",
     timeout: float = 600.0,
+    exact_state_dir: bool = False,
 ) -> IndexBuildReceipt:
     """Ensure a fresh graph.db exists and preserve the exact abstention reason.
 
     When ``GT_STATE_DIR`` is set, the db lives in a root-identity subdirectory
     there, completely outside the indexed/graded repository. The local default
-    remains ``<root>/.gt/graph.db`` with a self-ignoring ``.gitignore``.
+    remains ``<root>/.groundtruth/graph.db`` with a self-ignoring
+    ``.gitignore``. The canonical product service passes ``exact_state_dir``;
+    legacy multi-repository state roots retain their root-identity partition.
     Re-indexed on every call (a stale graph would violate correct-or-quiet;
     gt-index is fast). Never raises.
     """
@@ -949,13 +936,21 @@ def ensure_index_with_receipt(
 
         external = str(state_dir or os.environ.get("GT_STATE_DIR") or "").strip()
         if external:
-            root_key = hashlib.sha256(
-                os.path.realpath(root_text).encode("utf-8", "surrogatepass")
-            ).hexdigest()[:16]
-            gt_dir = Path(external) / root_key
+            if exact_state_dir:
+                gt_dir = Path(external)
+            else:
+                root_key = hashlib.sha256(
+                    os.path.realpath(root_text).encode("utf-8", "surrogatepass")
+                ).hexdigest()[:16]
+                gt_dir = Path(external) / root_key
             gt_dir.mkdir(parents=True, exist_ok=True)
+            local_state = (Path(root_text).resolve() / ".groundtruth").resolve()
+            if gt_dir.resolve() == local_state:
+                ignore = gt_dir / ".gitignore"
+                if not ignore.exists():
+                    ignore.write_text("*\n", encoding="utf-8")
         else:
-            gt_dir = Path(root) / ".gt"
+            gt_dir = Path(root) / ".groundtruth"
             gt_dir.mkdir(exist_ok=True)
             ignore = gt_dir / ".gitignore"
             if not ignore.exists():
@@ -1149,17 +1144,33 @@ def refresh_index_files(
             IndexBuildStatus.INVALID_DATABASE,
             error_type="certification:" + publication_error,
         )
+    try:
+        connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+        try:
+            indexed_paths = {
+                str(row[0]).replace("\\", "/")
+                for row in connection.execute("SELECT file_path FROM file_hashes")
+            }
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return result(IndexBuildStatus.INVALID_DATABASE, error_type="file_hash_inventory_failed")
     selected: list[str] = []
     for raw in changed_paths:
-        normalized = str(raw or "").replace("\\", "/").lstrip("./")
+        normalized = str(raw or "").replace("\\", "/")
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        if not normalized or normalized.startswith("/"):
+            return result(IndexBuildStatus.BUILD_FAILED, error_type="unsafe_incremental_path")
         target = (root_path / normalized).resolve()
         try:
             target.relative_to(root_path)
         except ValueError:
             return result(IndexBuildStatus.BUILD_FAILED, error_type="unsafe_incremental_path")
-        if not target.is_file() or not is_indexable_source(
-            target, _read_language_prefix(target)
-        ):
+        if target.is_file():
+            if not is_indexable_source(target, _read_language_prefix(target)):
+                continue
+        elif normalized not in indexed_paths:
             continue
         if normalized not in selected:
             selected.append(normalized)
@@ -1178,9 +1189,7 @@ def refresh_index_files(
                 error_type="certification:" + current_error,
             )
         schema_valid, nodes, edges, fts, check = _graph_schema_receipt(database)
-        graph_db_sha256 = (
-            hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
-        )
+        graph_db_sha256 = hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
         return result(
             coverage.status if schema_valid else IndexBuildStatus.INVALID_DATABASE,
             graph_revision=_graph_logical_revision(database) if schema_valid else "",
@@ -1216,6 +1225,7 @@ def refresh_index_files(
                     relative,
                     "-closure=false",
                 ],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1237,6 +1247,7 @@ def refresh_index_files(
                 str(candidate),
                 "-rebuild-closure",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

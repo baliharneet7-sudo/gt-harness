@@ -8,7 +8,7 @@ from scripts.release_manifest import load_release_manifest
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _write_fixture(tmp_path: Path) -> Path:
@@ -53,6 +53,17 @@ def test_release_manifest_rejects_stale_content_hash(tmp_path: Path) -> None:
     (tmp_path / "prediction.json").write_text('{"stale": true}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="prediction sha256 mismatch"):
         load_release_manifest(path, root=tmp_path)
+
+
+def test_release_manifest_text_identity_is_independent_of_git_line_endings(
+    tmp_path: Path,
+) -> None:
+    path = _write_fixture(tmp_path)
+    prediction = tmp_path / "prediction.json"
+    canonical = prediction.read_bytes().replace(b"\r\n", b"\n")
+    prediction.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    assert load_release_manifest(path, root=tmp_path).prediction_path == prediction
 
 
 def test_release_manifest_rejects_paths_outside_repository(tmp_path: Path) -> None:

@@ -37,18 +37,18 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from eval._env import UTF8_ENV, provider_env
+from gt_harness.indexer_setup import ensure_source_indexer
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_REMOTE_DIR = "/installed-agent/nano-harness"
+_REMOTE_DIR = "/installed-agent/gt-harness"
 # GT arm: container path for the Linux gt-index binary (staged by the workflow
 # into vendor/, uploaded by GTNanoAgent.install; /installed-agent exists after
 # BaseInstalledAgent.setup()). find_binary() honors $GT_INDEX_BINARY first.
 _REMOTE_GT_BINARY = "/installed-agent/gt-index"
-_VENDOR_DIR = _REPO_ROOT / "vendor"
 _GT_STAGED_SOURCE_CLEANUP = (
-    "test \"$(readlink -f /installed-agent/nano-harness)\" = "
-    "\"/installed-agent/nano-harness\" && "
-    "rm -rf -- /installed-agent/nano-harness"
+    "test \"$(readlink -f /installed-agent/gt-harness)\" = "
+    "\"/installed-agent/gt-harness\" && "
+    "rm -rf -- /installed-agent/gt-harness"
 )
 
 # Task images vary (debian, alpine, ...); make sure curl exists, then let uv
@@ -69,7 +69,7 @@ def _install_nano_cmd(extra_uv_args: str = "") -> str:
         "set -eu; "
         "curl -LsSf https://astral.sh/uv/install.sh | sh && "
         f'"$HOME/.local/bin/uv" tool install --python 3.12 {extra_uv_args}{_REMOTE_DIR} && '
-        '"$HOME/.local/bin/nano" --help >/dev/null'
+        '"$HOME/.local/bin/gt-harness" --help >/dev/null'
     )
 
 
@@ -86,7 +86,7 @@ class NanoAgent(BaseInstalledAgent):
 
     def get_version_command(self) -> str | None:
         return (
-            '"$HOME/.local/bin/uv" tool run --from /installed-agent/nano-harness '
+            '"$HOME/.local/bin/uv" tool run --from /installed-agent/gt-harness '
             "python -c \"import nano; print(nano.__version__)\""
         )
 
@@ -96,6 +96,11 @@ class NanoAgent(BaseInstalledAgent):
         # no binary, no --gt-root) so baseline runs remain reproducible.
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
+        await environment.upload_dir(_REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine")
+        await environment.upload_dir(_REPO_ROOT / "gt_harness", f"{_REMOTE_DIR}/gt_harness")
+        await environment.upload_dir(
+            _REPO_ROOT / "src" / "groundtruth", f"{_REMOTE_DIR}/src/groundtruth"
+        )
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
@@ -130,7 +135,7 @@ class NanoAgent(BaseInstalledAgent):
             f"--temperature {shlex.quote(temperature)} " if temperature else ""
         )
         return (
-            f'"$HOME/.local/bin/nano" run {shlex.quote(instruction)} '
+            f'"$HOME/.local/bin/gt-harness" run {shlex.quote(instruction)} '
             f"--model {shlex.quote(model)} --max-iterations 100 "
             f"{temperature_arg}{extra_args}"
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
@@ -195,30 +200,23 @@ class GTNanoAgent(NanoAgent):
         # The staged checkout is intentionally removed after the non-editable
         # uv installation, so version discovery uses the installed venv.
         return (
-            '"$HOME/.local/share/uv/tools/nano-harness/bin/python" '
+            '"$HOME/.local/share/uv/tools/gt-harness/bin/python" '
             "-c \"import nano; print(nano.__version__)\""
         )
 
     @staticmethod
-    def _gt_wheel() -> Path:
-        wheels = sorted(_VENDOR_DIR.glob("groundtruth_mcp-*.whl"))
-        if not wheels:
-            raise FileNotFoundError(
-                f"GT arm needs the vendored groundtruth wheel in {_VENDOR_DIR} "
-                "(build with: pip wheel --no-deps -w vendor D:\\Groundtruth)"
-            )
-        return wheels[-1]  # highest version wins if several are present
-
-    @staticmethod
     def _gt_binary_host() -> Path:
         override = os.environ.get("GT_INDEX_BINARY_HOST", "")
-        path = Path(override) if override else _VENDOR_DIR / "gt-index-linux-amd64"
-        if not path.is_file():
+        if override:
+            path = Path(override)
+        else:
+            setup = ensure_source_indexer()
+            path = Path(setup.binary_path) if setup.status == "READY" else Path()
+        if not path.is_file() or not str(path):
             raise FileNotFoundError(
-                f"GT arm needs a Linux gt-index binary at {path} (or set "
-                "GT_INDEX_BINARY_HOST). In CI the tb2_gt.yml build step creates "
-                "it; locally: cd vendor/gt-index-src && CGO_ENABLED=1 go build "
-                "-tags sqlite_fts5 -o ../gt-index-linux-amd64 ./cmd/gt-index/"
+                "GT arm could not build gt-index from checked-in source; run "
+                "`gt-harness doctor` or set GT_INDEX_BINARY_HOST to a source-built "
+                "binary for the target platform"
             )
         return path
 
@@ -226,19 +224,20 @@ class GTNanoAgent(NanoAgent):
         # Fail fast (before any container work) if the GT artifacts are absent:
         # a GT run without an indexer or the groundtruth package silently
         # degrades to baseline behavior — a wasted paid run, not an experiment.
-        wheel = self._gt_wheel()
         binary = self._gt_binary_host()
 
         await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
+        await environment.upload_dir(_REPO_ROOT / "gt_harness", f"{_REMOTE_DIR}/gt_harness")
         await environment.upload_dir(
             _REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine"
+        )
+        await environment.upload_dir(
+            _REPO_ROOT / "src" / "groundtruth", f"{_REMOTE_DIR}/src/groundtruth"
         )
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
-        remote_wheel = f"{_REMOTE_DIR}/{wheel.name}"
-        await environment.upload_file(wheel, remote_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
 
         await self.exec_as_root(
@@ -249,7 +248,7 @@ class GTNanoAgent(NanoAgent):
         # that one leg abstains. Install both into nano's OWN tool venv.
         await self.exec_as_agent(
             environment,
-            _install_nano_cmd(f"--with {shlex.quote(remote_wheel)} --with numpy "),
+            _install_nano_cmd("--with numpy "),
             env=dict(UTF8_ENV),
         )
         # Smoke the stack inside the container, fail-closed at install time:
@@ -259,7 +258,7 @@ class GTNanoAgent(NanoAgent):
         await self.exec_as_agent(
             environment,
             "set -eu; "
-            '"$HOME/.local/share/uv/tools/nano-harness/bin/python" -c '
+            '"$HOME/.local/share/uv/tools/gt-harness/bin/python" -c '
             "'import groundtruth.runtime.gateway, gt_engine' && "
             f'"{_REMOTE_GT_BINARY}" -root {_REMOTE_DIR}/gt_engine '
             "-output /tmp/gt-install-smoke.db >/dev/null && "
@@ -298,7 +297,7 @@ class GTNanoAgent(NanoAgent):
             instruction,
             model,
             extra_args=(
-                '--gt-root "$PWD" '
+                '--treatment groundtruth --root "$PWD" '
                 f"--time-budget-seconds "
                 f"{shlex.quote(os.environ.get('GT_AGENT_TIMEOUT_SECONDS', '1800'))} "
             ),

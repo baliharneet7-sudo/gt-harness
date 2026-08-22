@@ -26,14 +26,14 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from eval._env import UTF8_ENV, provider_env
+from gt_harness.indexer_setup import ensure_source_indexer
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _REMOTE_DIR = "/installed-agent/miniswe"
 _REMOTE_RUNNER = "/installed-agent/miniswe_run.py"
 _REMOTE_REPRO = "/installed-agent/miniswe_repro.py"
 _REMOTE_GT_BINARY = "/installed-agent/gt-index"
-_VENDOR_DIR = _REPO_ROOT / "vendor"
-_REMOTE_PY = "$HOME/.local/share/uv/tools/nano-harness/bin/python"
+_REMOTE_PY = "$HOME/.local/share/uv/tools/gt-harness/bin/python"
 _UV_VERSION = "0.11.32"
 _PYTHON_VERSION = "3.12.13"
 _DEFAULT_MINISWE_AGENT_VERSION = "2.3.0"
@@ -86,41 +86,40 @@ class MiniSweAgent(BaseInstalledAgent):
         return f'"{_REMOTE_PY}" -c "import minisweagent; print(minisweagent.__version__)"'
 
     @staticmethod
-    def _gt_wheel() -> Path:
-        wheels = sorted(_VENDOR_DIR.glob("groundtruth_mcp-*.whl"))
-        if not wheels:
-            raise FileNotFoundError(
-                f"Mini-SWE treatment bundle needs the vendored GroundTruth "
-                f"wheel in {_VENDOR_DIR} (build with: pip wheel --no-deps "
-                "-w vendor D:\\Groundtruth)"
-            )
-        return wheels[-1]
-
-    @staticmethod
     def _gt_binary_host() -> Path:
         override = os.environ.get("GT_INDEX_BINARY_HOST", "")
-        path = Path(override) if override else _VENDOR_DIR / "gt-index-linux-amd64"
-        if not path.is_file():
+        if override:
+            path = Path(override)
+        else:
+            setup = ensure_source_indexer()
+            path = Path(setup.binary_path) if setup.status == "READY" else Path()
+        if not path.is_file() or not str(path):
             raise FileNotFoundError(
-                f"Mini-SWE treatment bundle needs a Linux gt-index binary at "
-                f"{path} (or set GT_INDEX_BINARY_HOST)"
+                "Mini-SWE treatment bundle could not build gt-index from the "
+                "checked-in source; run `gt-harness doctor` or set "
+                "GT_INDEX_BINARY_HOST to a source-built binary for the target platform"
             )
         return path
 
     async def install(self, environment: BaseEnvironment) -> None:
-        wheel = self._gt_wheel()
         binary = self._gt_binary_host()
         miniswe_version = _miniswe_agent_version()
         await environment.upload_dir(_REPO_ROOT / "scripts", f"{_REMOTE_DIR}/scripts")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
+        await environment.upload_dir(_REPO_ROOT / "nano", f"{_REMOTE_DIR}/nano")
+        await environment.upload_dir(
+            _REPO_ROOT / "gt_harness", f"{_REMOTE_DIR}/gt_harness"
+        )
         await environment.upload_dir(
             _REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine"
+        )
+        await environment.upload_dir(
+            _REPO_ROOT / "src" / "groundtruth",
+            f"{_REMOTE_DIR}/src/groundtruth",
         )
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
-        remote_wheel = f"{_REMOTE_DIR}/{wheel.name}"
-        await environment.upload_file(wheel, remote_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
         await self.exec_as_root(
             environment, _ENSURE_CURL, env={"DEBIAN_FRONTEND": "noninteractive"}
@@ -131,12 +130,12 @@ class MiniSweAgent(BaseInstalledAgent):
             f"curl -LsSf {_UV_INSTALL} | sh && "
             f'"$HOME/.local/bin/uv" tool install --python {_PYTHON_VERSION} '
             f'--with "mini-swe-agent=={miniswe_version}" '
-            f"--with {shlex.quote(remote_wheel)} --with 'numpy==2.5.1' "
+            f"--with 'numpy==2.5.1' "
             f"{_REMOTE_DIR} && "
             f'"{_REMOTE_PY}" -c "import importlib.metadata as m, sys; '
             "assert sys.version_info[:3] == (3, 12, 13); "
             f"assert m.version('mini-swe-agent') == '{miniswe_version}'; "
-            "assert m.version('groundtruth-mcp') == '1.0.0'; "
+            "assert m.version('gt-harness') == '0.9.0'; "
             "assert m.version('numpy') == '2.5.1'; "
             "import minisweagent, groundtruth, gt_engine" + '" && '
             f'"{_REMOTE_GT_BINARY}" -root {_REMOTE_DIR}/gt_engine '

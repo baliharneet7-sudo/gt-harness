@@ -1,0 +1,7 @@
+source_repository = "https://github.com/harneet2512/groundtruth"
+source_commit = "61cfdbce2c42751c11028e46e863b3231f0bb70e"
+source_tree_git_object = "bb61b11dcec95fceded6d99c1dd46669159c2fca"
+source_tree_sha256 = "ade6579457da60f4850b0a553a4ce1e9387c18eb30a228be2c1af8d74f8f7901"
+source_files = 311
+import_note = "Pinned src/groundtruth tree with audited GT-Harness prerelease overlays."
+overlay = "GroundTruth subprocesses isolate MCP stdin; the unreferenced pretask._deprecated package was removed after import-graph classification."

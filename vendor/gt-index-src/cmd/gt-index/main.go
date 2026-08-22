@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -55,7 +56,7 @@ var (
 
 // FINAL_ARCH_V2 schema contract.
 // Bump when edges/nodes columns change; Python readers gate on >= this.
-const schemaVersion = "v15.2-trust-tier"
+const schemaVersion = "v15.3-discovery-receipt"
 
 // fileParseResult holds the output of parsing a single file.
 type fileParseResult struct {
@@ -244,17 +245,22 @@ func main() {
 	// here used to be dropped on the floor — a repo where N% of files failed to parse
 	// produced a thin graph with zero warning. Now it is surfaced + fail-closed.)
 	parseFailures := 0
-	var failSample []string
+	var failDetails []string
 	for pr := range resultCh {
 		if pr.err == nil && pr.result != nil {
 			results[pr.fileIdx] = pr.result
-		} else if pr.err != nil {
+		} else {
 			parseFailures++
-			if len(failSample) < 10 && pr.fileIdx >= 0 && pr.fileIdx < len(files) {
-				failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
+			if pr.fileIdx >= 0 && pr.fileIdx < len(files) {
+				detail := "nil_parse_result"
+				if pr.err != nil {
+					detail = pr.err.Error()
+				}
+				failDetails = append(failDetails, fmt.Sprintf("%s: %s", files[pr.fileIdx].Path, detail))
 			}
 		}
 	}
+	sort.Strings(failDetails)
 
 	parseElapsed := time.Since(parseStart)
 	parsedOK := len(files) - parseFailures
@@ -265,22 +271,26 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  Parsed %d/%d files in %s (%d parse failures, %.1f%%)\n",
 		parsedOK, len(files), parseElapsed.Round(time.Millisecond), parseFailures, failRate*100)
 	if parseFailures > 0 {
-		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d, IDENTIFY the cause):\n", len(failSample))
-		for _, s := range failSample {
+		sampleSize := len(failDetails)
+		if sampleSize > 10 {
+			sampleSize = 10
+		}
+		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d, IDENTIFY the cause):\n", sampleSize)
+		for _, s := range failDetails[:sampleSize] {
 			fmt.Fprintf(os.Stderr, "    - %s\n", s)
 		}
 	}
 	// Fail-closed on a catastrophic index — a non-zero exit lets the runtime RETRY,
 	// and the log above IDENTIFIES the cause. A silent thin graph is forbidden.
 	if len(files) > 0 && parsedOK == 0 {
-		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (details: %v)", len(files), failDetails)
 	}
 	if reqRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); reqRate != "" {
 		var minRate float64
 		fmt.Sscanf(reqRate, "%f", &minRate)
 		if minRate > 0 && len(files) >= 20 && (1.0-failRate) < minRate {
 			log.Fatalf("GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)",
-				minRate, (1.0-failRate)*100, len(files), failSample)
+				minRate, (1.0-failRate)*100, len(files), failDetails)
 		}
 	}
 
@@ -845,7 +855,23 @@ func main() {
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
 	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
+	db.SetMeta("files_parsed", fmt.Sprintf("%d", parsedOK))
 	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
+	parseFailureJSON, _ := json.Marshal(failDetails)
+	db.SetMeta("parse_failure_details", string(parseFailureJSON))
+	db.SetMeta("discovery_method", walkResult.DiscoveryMethod)
+	db.SetMeta("discovery_files_seen", fmt.Sprintf("%d", walkResult.FilesDiscovered))
+	db.SetMeta("discovery_skipped_count", fmt.Sprintf("%d", len(walkResult.Skipped)))
+	discoverySkipReasons := make(map[string]int)
+	for _, skipped := range walkResult.Skipped {
+		discoverySkipReasons[skipped.Reason]++
+	}
+	discoverySkipReasonsJSON, _ := json.Marshal(discoverySkipReasons)
+	discoverySkippedPathsJSON, _ := json.Marshal(walkResult.Skipped)
+	discoverySkippedDirectoriesJSON, _ := json.Marshal(walkResult.SkippedDirectories)
+	db.SetMeta("discovery_skipped_reasons", string(discoverySkipReasonsJSON))
+	db.SetMeta("discovery_skipped_paths", string(discoverySkippedPathsJSON))
+	db.SetMeta("discovery_skipped_directories", string(discoverySkippedDirectoriesJSON))
 	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
 	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
 	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
@@ -880,18 +906,25 @@ func main() {
 	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
 	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))
 	hashErrors := 0
+	var hashFailureDetails []string
 	for _, sf := range files {
 		content, err := os.ReadFile(sf.AbsPath)
 		if err != nil {
 			hashErrors++
+			hashFailureDetails = append(hashFailureDetails, fmt.Sprintf("%s: read: %v", sf.Path, err))
 			continue
 		}
 		sum := sha256.Sum256(content)
 		h := hex.EncodeToString(sum[:])
 		if err := db.InsertFileHash(sf.Path, h, sf.Language); err != nil {
 			hashErrors++
+			hashFailureDetails = append(hashFailureDetails, fmt.Sprintf("%s: store: %v", sf.Path, err))
 		}
 	}
+	sort.Strings(hashFailureDetails)
+	db.SetMeta("file_hash_failures", fmt.Sprintf("%d", hashErrors))
+	hashFailureJSON, _ := json.Marshal(hashFailureDetails)
+	db.SetMeta("file_hash_failure_details", string(hashFailureJSON))
 	if hashErrors > 0 {
 		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
 	}
@@ -968,6 +1001,125 @@ func main() {
 	fmt.Println()
 }
 
+// refreshDiscoveryMetadata makes incremental publication obey the same
+// fail-closed accounting contract as a cold build. The caller has successfully
+// repaired repairedPath, so any historical failure detail for that path is
+// removed; failures for untouched files remain explicit.
+func refreshDiscoveryMetadata(db *store.DB, root, repairedPath string) error {
+	walkResult, err := walker.WalkWithMeta(root, 0)
+	if err != nil {
+		return fmt.Errorf("refresh discovery receipt: %w", err)
+	}
+	repairedPath = filepath.ToSlash(repairedPath)
+	filterDetails := func(key string) []string {
+		var details []string
+		if raw := db.GetMeta(key); raw != "" {
+			_ = json.Unmarshal([]byte(raw), &details)
+		}
+		filtered := details[:0]
+		for _, detail := range details {
+			if !strings.HasPrefix(detail, repairedPath+":") {
+				filtered = append(filtered, detail)
+			}
+		}
+		sort.Strings(filtered)
+		return filtered
+	}
+	parseDetails := filterDetails("parse_failure_details")
+	hashDetails := filterDetails("file_hash_failure_details")
+	parsed := len(walkResult.Files) - len(parseDetails)
+	if parsed < 0 {
+		parsed = 0
+	}
+	skipReasons := make(map[string]int)
+	for _, skipped := range walkResult.Skipped {
+		skipReasons[skipped.Reason]++
+	}
+	parseJSON, _ := json.Marshal(parseDetails)
+	hashJSON, _ := json.Marshal(hashDetails)
+	skipReasonsJSON, _ := json.Marshal(skipReasons)
+	skippedPathsJSON, _ := json.Marshal(walkResult.Skipped)
+	skippedDirectoriesJSON, _ := json.Marshal(walkResult.SkippedDirectories)
+	db.SetMeta("file_count", strconv.Itoa(len(walkResult.Files)))
+	db.SetMeta("files_parsed", strconv.Itoa(parsed))
+	db.SetMeta("parse_failures", strconv.Itoa(len(parseDetails)))
+	db.SetMeta("parse_failure_details", string(parseJSON))
+	db.SetMeta("file_hash_failures", strconv.Itoa(len(hashDetails)))
+	db.SetMeta("file_hash_failure_details", string(hashJSON))
+	db.SetMeta("discovery_method", walkResult.DiscoveryMethod)
+	db.SetMeta("discovery_files_seen", strconv.Itoa(walkResult.FilesDiscovered))
+	db.SetMeta("discovery_skipped_count", strconv.Itoa(len(walkResult.Skipped)))
+	db.SetMeta("discovery_skipped_reasons", string(skipReasonsJSON))
+	db.SetMeta("discovery_skipped_paths", string(skippedPathsJSON))
+	db.SetMeta("discovery_skipped_directories", string(skippedDirectoriesJSON))
+	return nil
+}
+
+func runIncrementalDeletion(db *store.DB, root, relSlash string, startWall time.Time) error {
+	preRev, err := db.ComputeRevision()
+	if err != nil {
+		return fmt.Errorf("compute pre-delete revision: %w", err)
+	}
+	tx, err := db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("begin delete tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+	edgesDeleted, nodesDeleted, err := store.DeleteFileEdgesAndNodesTx(tx, relSlash)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM file_hashes WHERE file_path = ?`, relSlash); err != nil {
+		return fmt.Errorf("delete file hash for %s: %w", relSlash, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit file deletion: %w", err)
+	}
+	committed = true
+
+	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
+		log.Printf("WARNING: delete property->edge promotion: %v", promErr)
+	}
+	if err := db.PopulateEdgeMetadata(); err != nil {
+		log.Printf("WARNING: delete populate edge_metadata: %v", err)
+	}
+	db.SetMeta("schema_version", schemaVersion)
+	db.SetMeta("indexer_version", "v16-multilang")
+	db.SetMeta("git_commit", commitSHA)
+	db.SetMeta("build_time_utc", buildTimeUTC)
+	db.SetMeta("go_toolchain", goToolchain)
+	if err := refreshDiscoveryMetadata(db, root, relSlash); err != nil {
+		return err
+	}
+	if err := db.PopulateFTS5(); err != nil {
+		log.Printf("[WARN] FTS5 refresh after file deletion: %v", err)
+	}
+	if err := db.RepopulateContentFTSForFile(root, relSlash); err != nil {
+		log.Printf("[WARN] content FTS refresh after file deletion: %v", err)
+	}
+	postRev, err := db.StampCompositeRevision()
+	if err != nil {
+		return fmt.Errorf("compute/stamp post-delete revision: %w", err)
+	}
+	if os.Getenv("GT_VALIDATE_FK") == "1" {
+		if err := db.ValidateForeignKeys(); err != nil {
+			return fmt.Errorf("file deletion foreign-key validation: %w", err)
+		}
+	}
+	db.CheckpointWAL()
+	duration := time.Since(startWall)
+	fmt.Printf(
+		`{"file":%q,"changed":%v,"deleted":true,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":false,"post_revision":%q}`+"\n",
+		relSlash, postRev != preRev, nodesDeleted, edgesDeleted, duration.Milliseconds(), postRev,
+	)
+	return nil
+}
+
 // runIncremental performs a file-keyed delete-and-replace reindex of a
 // single file inside an existing graph.db. Steps follow the Track B0 spec:
 //
@@ -1003,6 +1155,9 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 2 — sha256 of file contents.
 	contents, err := os.ReadFile(absPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return runIncrementalDeletion(db, root, relSlash, startWall)
+		}
 		return fmt.Errorf("read file %s: %w", absPath, err)
 	}
 	spec, resolutionReason := specs.ResolveSource(relpath, contents)
@@ -1487,6 +1642,9 @@ func runIncremental(root, relpath, dbPath string) error {
 	db.SetMeta("git_commit", commitSHA)
 	db.SetMeta("build_time_utc", buildTimeUTC)
 	db.SetMeta("go_toolchain", goToolchain)
+	if err := refreshDiscoveryMetadata(db, root, relSlash); err != nil {
+		return err
+	}
 
 	// NOTE (B-29): post_revision is now stamped AFTER the FTS/content refresh below (not
 	// here), because the COMPOSITE revision hashes the content_fts surface — it must see the

@@ -12,7 +12,10 @@ ACTIVE_RELEASE_PATH = Path("eval/release/active_release.json")
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Release inputs are JSON/text. Git may materialize them as CRLF on Windows,
+    # but the content address is defined over canonical LF bytes so the same
+    # commit has one identity on every supported operating system.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _full_sha(value: object, *, field: str) -> str:
