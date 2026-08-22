@@ -1,0 +1,248 @@
+"""Strict, provider-free comparison of completed benchmark run receipts."""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from statistics import fmean
+from typing import Any
+
+
+class ComparisonError(ValueError):
+    """Raised when receipts cannot support a controlled paired comparison."""
+
+
+def _json_documents(path: Path) -> list[Any]:
+    if path.is_dir():
+        documents: list[Any] = []
+        for candidate in sorted(path.rglob("*.json")):
+            try:
+                documents.append(json.loads(candidate.read_text(encoding="utf-8")))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+        return documents
+    try:
+        return [json.loads(path.read_text(encoding="utf-8"))]
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ComparisonError(f"cannot read comparison input: {path}") from exc
+
+
+def load_run_receipts(path: str | Path) -> list[dict[str, Any]]:
+    source = Path(path).resolve()
+    rows: list[dict[str, Any]] = []
+    for document in _json_documents(source):
+        candidates: list[Any]
+        if isinstance(document, list):
+            candidates = document
+        elif isinstance(document, dict) and isinstance(document.get("runs"), list):
+            candidates = document["runs"]
+        else:
+            candidates = [document]
+        for candidate in candidates:
+            if isinstance(candidate, dict) and candidate.get("schema") == "gt.run_receipt.v1":
+                rows.append(dict(candidate))
+    if not rows:
+        raise ComparisonError(f"no gt.run_receipt.v1 documents found: {source}")
+    return rows
+
+
+def _pair_key(receipt: dict[str, Any]) -> str:
+    task = str(receipt.get("task_id") or "").strip()
+    trial = str(receipt.get("trial_id") or "").strip()
+    if not task or not trial:
+        raise ComparisonError("every run requires non-empty task_id and trial_id")
+    return f"{task}::{trial}"
+
+
+def _indexed(rows: list[dict[str, Any]], expected_treatment: str) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        treatment = str(row.get("treatment") or "")
+        if treatment != expected_treatment:
+            raise ComparisonError(f"expected treatment {expected_treatment!r}, found {treatment!r}")
+        if row.get("status") != "COMPLETED":
+            raise ComparisonError(f"run {_pair_key(row)} did not complete successfully")
+        if not isinstance(row.get("resolved"), bool):
+            raise ComparisonError(f"run {_pair_key(row)} has no boolean evaluator outcome")
+        key = _pair_key(row)
+        if key in result:
+            raise ComparisonError(f"duplicate paired run: {key}")
+        result[key] = row
+    return result
+
+
+def _wilson(successes: int, total: int) -> list[float]:
+    if total <= 0:
+        return [0.0, 0.0]
+    z = 1.959963984540054
+    proportion = successes / total
+    denominator = 1 + z * z / total
+    centre = (proportion + z * z / (2 * total)) / denominator
+    margin = (
+        z
+        * math.sqrt(proportion * (1 - proportion) / total + z * z / (4 * total * total))
+        / denominator
+    )
+    return [round(max(0.0, centre - margin), 6), round(min(1.0, centre + margin), 6)]
+
+
+def _exact_discordant_p(treatment_only: int, baseline_only: int) -> float:
+    discordant = treatment_only + baseline_only
+    if discordant == 0:
+        return 1.0
+    tail = min(treatment_only, baseline_only)
+    probability = sum(math.comb(discordant, value) for value in range(tail + 1)) / (2**discordant)
+    return round(min(1.0, 2 * probability), 8)
+
+
+def _mean(rows: list[dict[str, Any]], field: str) -> float | None:
+    values = [float(row[field]) for row in rows if isinstance(row.get(field), (int, float))]
+    return round(fmean(values), 6) if values else None
+
+
+def compare_receipts(
+    baseline_rows: list[dict[str, Any]], treatment_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    baseline = _indexed(baseline_rows, "bare")
+    treatment = _indexed(treatment_rows, "groundtruth")
+    if baseline.keys() != treatment.keys():
+        missing_treatment = sorted(baseline.keys() - treatment.keys())
+        missing_baseline = sorted(treatment.keys() - baseline.keys())
+        raise ComparisonError(
+            "paired task mismatch: "
+            f"missing_treatment={missing_treatment}; missing_baseline={missing_baseline}"
+        )
+
+    pairs = sorted(baseline)
+    configuration_mismatches: list[str] = []
+    delivery_failures: list[str] = []
+    both = baseline_only = treatment_only = neither = 0
+    for key in pairs:
+        left = baseline[key]
+        right = treatment[key]
+        for field in (
+            "task_fingerprint",
+            "model",
+            "base_url_configured",
+            "base_url_sha256",
+            "temperature",
+            "max_iterations",
+            "time_budget_seconds",
+            "agent_scaffold",
+            "system_prompt_sha256",
+            "tool_policy_sha256",
+            "repository_start",
+        ):
+            if left.get(field) != right.get(field):
+                configuration_mismatches.append(f"{key}:{field}")
+        left_solved = bool(left["resolved"])
+        right_solved = bool(right["resolved"])
+        if left_solved and right_solved:
+            both += 1
+        elif left_solved:
+            baseline_only += 1
+        elif right_solved:
+            treatment_only += 1
+        else:
+            neither += 1
+        gt = right.get("treatment_receipt")
+        if not right.get("treatment_receipt_present") or not isinstance(gt, dict):
+            delivery_failures.append(f"{key}:treatment_receipt_missing")
+        elif gt.get("schema") != "gt.treatment_receipt.v1":
+            delivery_failures.append(f"{key}:treatment_receipt_schema")
+        elif gt.get("treatment") != "groundtruth":
+            delivery_failures.append(f"{key}:treatment_receipt_identity")
+        elif not gt.get("graph_available"):
+            delivery_failures.append(f"{key}:graph_unavailable")
+        elif gt.get("graph_status") not in {"READY", "READY_WITH_DECLARED_LIMITATIONS"}:
+            delivery_failures.append(f"{key}:graph_status")
+        elif gt.get("graph_commit_sha") != (right.get("repository_end") or {}).get("commit_sha"):
+            delivery_failures.append(f"{key}:graph_commit_mismatch")
+        elif gt.get("source_revision") != (right.get("repository_end") or {}).get(
+            "source_revision"
+        ):
+            delivery_failures.append(f"{key}:graph_source_revision_mismatch")
+        elif int(gt.get("delivery_count") or 0) < 1:
+            delivery_failures.append(f"{key}:evidence_not_delivered")
+        elif int(gt.get("evidence_items_delivered") or 0) < 1:
+            delivery_failures.append(f"{key}:evidence_items_not_delivered")
+
+    count = len(pairs)
+    baseline_solved = both + baseline_only
+    treatment_solved = both + treatment_only
+    baseline_rate = baseline_solved / count
+    treatment_rate = treatment_solved / count
+    efficiency_fields = (
+        "iterations",
+        "provider_calls",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "duration_ms",
+        "total_cost",
+    )
+    delta = treatment_rate - baseline_rate
+    discordant_p = _exact_discordant_p(treatment_only, baseline_only)
+    if delta == 0:
+        interpretation = "parity"
+    elif discordant_p < 0.05:
+        interpretation = (
+            "statistically_credible_improvement"
+            if delta > 0
+            else "statistically_credible_regression"
+        )
+    else:
+        interpretation = "directionally_positive" if delta > 0 else "directionally_negative"
+    report = {
+        "schema": "gt.paired_comparison.v1",
+        "status": (
+            "INVALID_EXPERIMENT"
+            if configuration_mismatches
+            else "INVALID_TREATMENT"
+            if delivery_failures
+            else "COMPLETE"
+        ),
+        "sample_size": count,
+        "baseline_solved": baseline_solved,
+        "treatment_solved": treatment_solved,
+        "baseline_solve_rate": round(baseline_rate, 6),
+        "treatment_solve_rate": round(treatment_rate, 6),
+        "absolute_delta": round(delta, 6),
+        "relative_delta": (round(delta / baseline_rate, 6) if baseline_rate else None),
+        "baseline_wilson_95": _wilson(baseline_solved, count),
+        "treatment_wilson_95": _wilson(treatment_solved, count),
+        "pairwise": {
+            "both_solve": both,
+            "bare_only_solve": baseline_only,
+            "groundtruth_only_solve": treatment_only,
+            "neither_solve": neither,
+            "groundtruth_regressions": baseline_only,
+        },
+        "discordant_exact_p": discordant_p,
+        "interpretation": interpretation,
+        "configuration_mismatches": configuration_mismatches,
+        "treatment_delivery_failures": delivery_failures,
+        "efficiency": {
+            field: {
+                "bare_mean": _mean(list(baseline.values()), field),
+                "groundtruth_mean": _mean(list(treatment.values()), field),
+            }
+            for field in efficiency_fields
+        },
+        "provider_credentials_inspected": False,
+        "provider_calls_performed_by_comparison": 0,
+    }
+    return report
+
+
+def compare_receipt_paths(baseline: str | Path, treatment: str | Path) -> dict[str, Any]:
+    return compare_receipts(load_run_receipts(baseline), load_run_receipts(treatment))
+
+
+__all__ = [
+    "ComparisonError",
+    "compare_receipt_paths",
+    "compare_receipts",
+    "load_run_receipts",
+]

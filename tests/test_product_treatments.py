@@ -141,10 +141,15 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
     assert isinstance(captures[0]["treatment"], BareTreatment)
     assert isinstance(captures[1]["treatment"], GroundTruthTreatment)
     run_root = tmp_path / ".groundtruth" / "runs"
-    receipts = [
-        json.loads(path.read_text(encoding="utf-8")) for path in run_root.glob("*.json")
-    ]
+    receipts = [json.loads(path.read_text(encoding="utf-8")) for path in run_root.glob("*.json")]
     assert len(receipts) == 2
     assert {receipt["treatment"] for receipt in receipts} == {"bare", "groundtruth"}
     assert all(receipt["treatment_receipt_present"] for receipt in receipts)
     assert all(receipt["resolved"] is None for receipt in receipts)
+    assert all(receipt["task_fingerprint"] for receipt in receipts)
+    assert all(receipt["task_id"].startswith("task-") for receipt in receipts)
+    assert all(receipt["trial_id"] == "1" for receipt in receipts)
+    assert all(receipt["agent_scaffold"] == "nano.agent.Agent" for receipt in receipts)
+    assert len({receipt["system_prompt_sha256"] for receipt in receipts}) == 1
+    assert len({receipt["tool_policy_sha256"] for receipt in receipts}) == 1
+    assert len({receipt["repository_start"]["source_revision"] for receipt in receipts}) == 1
