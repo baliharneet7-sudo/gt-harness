@@ -10,8 +10,9 @@ The sole product executable is `gt-harness` (`gt_harness.cli:main`). Its support
 - `gt-harness graph build|status|query`: operates the canonical repository graph.
 - `gt-harness mcp`: exposes the canonical graph through stdio, SSE, or streamable HTTP.
 - `gt-harness run --treatment bare|groundtruth`: runs one common model-agnostic coding-agent scaffold. The two arms use the same prompt, tools, limits, provider adapter, and action semantics. The GroundTruth arm may only add bounded deterministic evidence and record observations.
+- `gt-harness compare`: performs a provider-free, strictly paired comparison of completed evaluator receipts and rejects scaffold, repository, or treatment-delivery mismatches.
 
-`compare` and `certify` intentionally exit nonzero until their evidence gates exist. They do not fabricate success.
+`certify` intentionally exits nonzero until its evidence gate exists. It does not fabricate success.
 
 ## Repository-to-agent execution path
 
@@ -43,6 +44,7 @@ current commit == receipt commit
 current graph-input revision == receipt source revision
 current builder == receipt builder
 SQLite checksum and quick_check are valid
+every graph component reports success
 discovery + skipped == repository files seen by the indexer
 parsed + parse failures == files attempted
 file hashes + hash failures == files attempted
@@ -55,9 +57,8 @@ The explicit non-ready states are `ABSENT`, `BUILDING`, `DEGRADED`, `FAILED`, an
 ## Lifecycle
 
 - Cold build publishes a candidate database and receipt atomically.
-- Warm start recomputes repository identity, validates the receipt/database, and reuses the graph.
-- Same-commit additions, modifications, and deletions use atomic incremental publication.
-- Rename-like delete/add pairs and commit changes use a full rebuild because incoming-edge re-resolution is not yet sound as a file-local operation.
+- Warm start verifies Git HEAD/status and scans the complete tracked plus non-ignored graph-input inventory. Files whose filesystem fingerprints and Git state are unchanged reuse stored content hashes; changed candidates are rehashed. The database checksum and SQLite integrity seal are reused only while its path, size, modification time, and expected digest remain unchanged in that process.
+- Additions, modifications, deletions, renames, and commit changes currently use atomic full publication. The file-keyed indexer is retained but is not canonical because parity for whole-repository relationship passes has not been proven.
 - An interrupted build leaves `BUILDING` and cannot be queried; the next build repairs it.
 - Publication is serialized with a cross-process lock and journaled rollback.
 
@@ -71,7 +72,7 @@ The explicit non-ready states are `ABSENT`, `BUILDING`, `DEGRADED`, `FAILED`, an
 | `src/groundtruth/` | PRODUCTION SUPPORT / MIGRATION SOURCE | First-party GT capabilities retained; only code reached from the canonical service is production until migration finishes |
 | `nano/` | PRODUCTION | Common model/provider/tool agent scaffold |
 | `eval/miniswe_agent.py`, `eval/swe_agent.py`, `eval/tb_agent.py` | BENCHMARK | Adapters must invoke `gt-harness run`, not a substitute graph path |
-| `gt_engine/bridge.py`, central runtime and historical control layers | LEGACY / RESEARCH pending parity audit | Not the official CLI/MCP path; do not delete until consumers and unique behavior are classified |
+| `gt_engine/indexer.py:refresh_index_files`, `gt_engine/bridge.py`, central runtime and historical control layers | LEGACY / RESEARCH pending parity audit | File-keyed refresh and older control paths are not the official CLI/MCP lifecycle; do not delete until consumers and unique behavior are classified |
 | historical workflows, `gt_finalstand/`, historical reports | BENCHMARK / LEGACY evidence | Cannot certify the prerelease; cleanup remains gated on classification |
 | vendored wheel and prebuilt Linux binary | DELETE (completed) | Removed; frozen tag retains recovery history |
 

@@ -1,0 +1,61 @@
+name: GT prerelease real-repository matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact GT commit to audit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  real_repository_matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      PYTHONUTF8: "1"
+      GT_HARNESS_CACHE_DIR: ${{ runner.temp }}/gt-harness-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/gt-index-src/go.mod
+          cache-dependency-path: vendor/gt-index-src/go.sum
+
+      - name: Install exact prerelease source
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Verify source-built product runtime
+        run: gt-harness doctor
+
+      - name: Run frozen real-repository matrix
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gt-product-receipts"
+          python scripts/product_repository_matrix.py \
+            --workspace "$RUNNER_TEMP/gt-product-matrix" \
+            --output "$RUNNER_TEMP/gt-product-receipts/real-repository-matrix.json" \
+            --timeout 900
+
+      - name: Upload observed matrix receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gt-real-repository-matrix-${{ github.run_id }}
+          path: ${{ runner.temp }}/gt-product-receipts/
+          if-no-files-found: error
+          retention-days: 30

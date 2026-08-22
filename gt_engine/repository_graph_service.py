@@ -20,12 +20,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from gt_engine.graph_inputs import is_graph_input, is_graph_metadata
-from gt_engine.indexer import ensure_index_with_receipt, refresh_index_files
+from gt_engine.graph_inputs import is_graph_input
+from gt_engine.indexer import ensure_index_with_receipt
 from gt_harness.indexer_setup import GT_INDEX_BUILD_ID
 
-GRAPH_BUILDER_VERSION = f"gt-index-{GT_INDEX_BUILD_ID}"
-GRAPH_RECEIPT_SCHEMA = "gt.graph_receipt.v2"
+GRAPH_BUILDER_VERSION = f"gt-index-{GT_INDEX_BUILD_ID}-repository-identity-v3"
+GRAPH_RECEIPT_SCHEMA = "gt.graph_receipt.v4"
 CANONICAL_QUERY_MODES = (
     "definition",
     "callers",
@@ -60,7 +60,15 @@ _SKIP_DIRS = frozenset(
         ".svn",
         ".gt",
         ".groundtruth",
+        ".idea",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".vscode",
         ".venv",
+        ".eggs",
         "venv",
         "__pycache__",
         "node_modules",
@@ -96,6 +104,10 @@ class RepositoryIdentity:
     graph_input_files: int
     source_bytes: int
     graph_input_hashes: dict[str, str]
+    graph_input_sizes: dict[str, int]
+    graph_input_fingerprints: dict[str, str]
+    git_status_paths: tuple[str, ...]
+    submodule_state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +143,11 @@ class GraphReceipt:
     failed_paths: tuple[str, ...] = ()
     excluded_directories: tuple[dict[str, str], ...] = ()
     graph_input_hashes: dict[str, str] = field(default_factory=dict)
+    graph_input_sizes: dict[str, int] = field(default_factory=dict)
+    graph_input_fingerprints: dict[str, str] = field(default_factory=dict)
+    git_status_paths: tuple[str, ...] = ()
+    submodule_state: str = ""
+    component_failures: tuple[str, ...] = ()
     update_mode: str = ""
     parser_runtime: str = "gt-index/tree-sitter"
     graph_bytes: int = 0
@@ -184,6 +201,17 @@ class GraphReceipt:
             str(path): str(digest)
             for path, digest in dict(row.get("graph_input_hashes", {})).items()
         }
+        row["graph_input_sizes"] = {
+            str(path): int(size) for path, size in dict(row.get("graph_input_sizes", {})).items()
+        }
+        row["graph_input_fingerprints"] = {
+            str(path): str(fingerprint)
+            for path, fingerprint in dict(row.get("graph_input_fingerprints", {})).items()
+        }
+        row["git_status_paths"] = tuple(str(path) for path in row.get("git_status_paths", ()))
+        row["component_failures"] = tuple(
+            str(component) for component in row.get("component_failures", ())
+        )
         row["nodes_by_type"] = {
             str(key): int(count) for key, count in dict(row.get("nodes_by_type", {})).items()
         }
@@ -213,6 +241,7 @@ class _GraphBuildStats:
     file_hash_failure_details: tuple[str, ...]
     excluded_directories: tuple[dict[str, str], ...]
     receipt_complete: bool
+    component_failures: tuple[str, ...] = ()
 
 
 def _run_git(root: Path, *args: str) -> tuple[int, str]:
@@ -247,63 +276,272 @@ def _iter_files(root: Path) -> Iterable[Path]:
                 yield path
 
 
-def compute_repository_identity(root: str | os.PathLike[str]) -> RepositoryIdentity:
-    """Hash the actual graph inputs, including modified and untracked files."""
+def _repository_paths(root: Path) -> tuple[str, ...]:
+    """Mirror the indexer's tracked plus non-ignored repository discovery set."""
 
-    repository = _repository_root(root)
-    code, commit = _run_git(repository, "rev-parse", "HEAD")
-    commit_sha = commit if code == 0 else "NO_COMMIT"
-    code, branch = _run_git(repository, "symbolic-ref", "--short", "-q", "HEAD")
-    branch_name = branch if code == 0 and branch else "DETACHED"
-    status_code, status = _run_git(
-        repository, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        discovered: set[str] = set()
+        for raw in result.stdout.split(b"\0"):
+            if not raw:
+                continue
+            relative = os.fsdecode(raw).replace("\\", "/")
+            parts = relative.split("/")
+            if any(part in _SKIP_DIRS for part in parts[:-1]):
+                continue
+            discovered.add(relative)
+        return tuple(sorted(discovered))
+    return tuple(path.relative_to(root).as_posix() for path in _iter_files(root))
+
+
+@dataclass(frozen=True, slots=True)
+class _GitSnapshot:
+    commit_sha: str
+    branch: str
+    working_tree_state: str
+    changed_paths: tuple[str, ...]
+
+
+def _git_snapshot(repository: Path) -> _GitSnapshot | None:
+    code, output = _run_git(
+        repository,
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
     )
-    working_tree_state = "dirty" if status_code == 0 and status else "clean"
-    if status_code != 0:
-        working_tree_state = "not_git"
+    if code != 0:
+        return None
+    commit_sha = "NO_COMMIT"
+    branch = "DETACHED"
+    changed: list[str] = []
+    records = output.split("\0") if output else []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if record.startswith("# branch.oid "):
+            commit_sha = record.removeprefix("# branch.oid ").strip()
+            if commit_sha == "(initial)":
+                commit_sha = "NO_COMMIT"
+            continue
+        if record.startswith("# branch.head "):
+            value = record.removeprefix("# branch.head ").strip()
+            branch = "DETACHED" if value == "(detached)" else value
+            continue
+        path = ""
+        if record.startswith("1 "):
+            fields = record.split(" ", 8)
+            path = fields[8] if len(fields) == 9 else ""
+        elif record.startswith("2 "):
+            fields = record.split(" ", 9)
+            path = fields[9] if len(fields) == 10 else ""
+            if index < len(records):
+                original = records[index]
+                index += 1
+                if original:
+                    changed.append(original.replace("\\", "/"))
+        elif record.startswith("u "):
+            fields = record.split(" ", 10)
+            path = fields[10] if len(fields) == 11 else ""
+        elif record.startswith("? "):
+            path = record[2:]
+        if path:
+            changed.append(path.replace("\\", "/"))
+    return _GitSnapshot(
+        commit_sha=commit_sha,
+        branch=branch,
+        working_tree_state="dirty" if changed else "clean",
+        changed_paths=tuple(dict.fromkeys(changed)),
+    )
 
-    framed: list[tuple[str, bytes]] = []
-    files_discovered = 0
-    source_bytes = 0
-    graph_input_hashes: dict[str, str] = {}
-    for path in _iter_files(repository):
-        files_discovered += 1
-        relative = path.relative_to(repository).as_posix()
-        try:
-            if path.is_symlink():
-                payload = ("SYMLINK\0" + os.readlink(path)).encode("utf-8", "surrogatepass")
-            else:
-                payload = path.read_bytes()
-        except OSError as exc:
-            payload = f"UNREADABLE\0{type(exc).__name__}".encode()
-        prefix = payload[:65_536]
-        if relative == ".gitmodules" or is_graph_input(relative, prefix):
-            framed.append((relative, payload))
-            graph_input_hashes[relative] = hashlib.sha256(payload).hexdigest()
-            source_bytes += len(payload)
 
-    _, submodules = _run_git(repository, "submodule", "status", "--recursive")
+def _graph_input_payload(path: Path) -> bytes:
+    try:
+        if path.is_symlink():
+            return ("SYMLINK\0" + os.readlink(path)).encode("utf-8", "surrogatepass")
+        return path.read_bytes()
+    except OSError as exc:
+        return f"UNREADABLE\0{type(exc).__name__}".encode()
+
+
+def _graph_input_prefix(path: Path) -> bytes:
+    try:
+        if path.is_symlink():
+            return ("SYMLINK\0" + os.readlink(path)).encode("utf-8", "surrogatepass")
+        with path.open("rb") as handle:
+            return handle.read(65_536)
+    except OSError as exc:
+        return f"UNREADABLE\0{type(exc).__name__}".encode()
+
+
+def _graph_input_fingerprint(path: Path) -> str:
+    """Return a cheap mutation detector; content hashes remain authoritative."""
+
+    try:
+        stat = path.lstat()
+        target = os.readlink(path) if path.is_symlink() else ""
+        return ":".join(
+            (
+                str(int(stat.st_mode)),
+                str(int(stat.st_size)),
+                str(int(stat.st_mtime_ns)),
+                str(int(stat.st_ctime_ns)),
+                target,
+            )
+        )
+    except OSError as exc:
+        return f"UNREADABLE:{type(exc).__name__}"
+
+
+def _source_revision(
+    commit_sha: str, submodule_state: str, graph_input_hashes: dict[str, str]
+) -> str:
     digest = hashlib.sha256()
-    for value in (commit_sha, submodules):
+    for value in (commit_sha, submodule_state):
         encoded = value.encode("utf-8", "surrogatepass")
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
-    for relative, payload in sorted(framed):
+    for relative, content_sha256 in sorted(graph_input_hashes.items()):
         name = relative.encode("utf-8", "surrogatepass")
+        content_digest = bytes.fromhex(content_sha256)
         digest.update(len(name).to_bytes(8, "big"))
         digest.update(name)
-        digest.update(len(payload).to_bytes(8, "big"))
-        digest.update(payload)
+        digest.update(len(content_digest).to_bytes(8, "big"))
+        digest.update(content_digest)
+    return digest.hexdigest()
+
+
+def compute_repository_identity(
+    root: str | os.PathLike[str], *, canonical_root: bool = False
+) -> RepositoryIdentity:
+    """Hash the actual graph inputs, including modified and untracked files."""
+
+    repository = Path(root).resolve() if canonical_root else _repository_root(root)
+    snapshot = _git_snapshot(repository)
+    commit_sha = snapshot.commit_sha if snapshot is not None else "NO_COMMIT"
+    branch_name = snapshot.branch if snapshot is not None else "DETACHED"
+    working_tree_state = snapshot.working_tree_state if snapshot is not None else "not_git"
+    git_status_paths = snapshot.changed_paths if snapshot is not None else ()
+
+    files_discovered = 0
+    source_bytes = 0
+    graph_input_hashes: dict[str, str] = {}
+    graph_input_sizes: dict[str, int] = {}
+    graph_input_fingerprints: dict[str, str] = {}
+    repository_paths = _repository_paths(repository)
+    for relative in repository_paths:
+        files_discovered += 1
+        path = repository / Path(relative)
+        if not (path.is_file() or path.is_symlink()):
+            continue
+        prefix = _graph_input_prefix(path)
+        if relative == ".gitmodules" or is_graph_input(relative, prefix):
+            payload = _graph_input_payload(path)
+            graph_input_hashes[relative] = hashlib.sha256(payload).hexdigest()
+            graph_input_sizes[relative] = len(payload)
+            graph_input_fingerprints[relative] = _graph_input_fingerprint(path)
+            source_bytes += len(payload)
+
+    submodules = ""
+    if (repository / ".gitmodules").is_file():
+        _, submodules = _run_git(repository, "submodule", "status", "--recursive")
     return RepositoryIdentity(
         repository=str(repository),
         commit_sha=commit_sha,
         branch=branch_name,
         working_tree_state=working_tree_state,
-        source_revision=digest.hexdigest(),
+        source_revision=_source_revision(commit_sha, submodules, graph_input_hashes),
         files_discovered=files_discovered,
-        graph_input_files=len(framed),
+        graph_input_files=len(graph_input_hashes),
         source_bytes=source_bytes,
         graph_input_hashes=graph_input_hashes,
+        graph_input_sizes=graph_input_sizes,
+        graph_input_fingerprints=graph_input_fingerprints,
+        git_status_paths=git_status_paths,
+        submodule_state=submodules,
+    )
+
+
+def _inventory_repository_identity(root: Path, stored: GraphReceipt) -> RepositoryIdentity:
+    """Recompute identity from Git state plus a complete graph-input inventory."""
+
+    # Submodule worktrees require recursively hashing their files. Keep this path
+    # conservative until a submodule-aware incremental inventory is implemented.
+    if (root / ".gitmodules").is_file() or stored.submodule_state:
+        return compute_repository_identity(root, canonical_root=True)
+    snapshot = _git_snapshot(root)
+    if snapshot is None:
+        return compute_repository_identity(root, canonical_root=True)
+    hashes: dict[str, str] = {}
+    sizes: dict[str, int] = {}
+    fingerprints: dict[str, str] = {}
+    prior_hashes = stored.graph_input_hashes
+    prior_sizes = stored.graph_input_sizes
+    prior_fingerprints = stored.graph_input_fingerprints
+    forced = set(stored.git_status_paths) | set(snapshot.changed_paths)
+    files_discovered = 0
+    repository_paths = _repository_paths(root)
+    for relative in repository_paths:
+        files_discovered += 1
+        candidate = root / Path(relative)
+        if not (candidate.is_file() or candidate.is_symlink()):
+            continue
+        known_input = relative in prior_hashes
+        if not known_input:
+            prefix = _graph_input_prefix(candidate)
+            if relative != ".gitmodules" and not is_graph_input(relative, prefix):
+                continue
+        fingerprint = _graph_input_fingerprint(candidate)
+        fingerprints[relative] = fingerprint
+        if (
+            known_input
+            and relative not in forced
+            and prior_fingerprints.get(relative) == fingerprint
+            and relative in prior_sizes
+        ):
+            hashes[relative] = prior_hashes[relative]
+            sizes[relative] = prior_sizes[relative]
+            continue
+        payload = _graph_input_payload(candidate)
+        hashes[relative] = hashlib.sha256(payload).hexdigest()
+        sizes[relative] = len(payload)
+    return RepositoryIdentity(
+        repository=str(root),
+        commit_sha=snapshot.commit_sha,
+        branch=snapshot.branch,
+        working_tree_state=snapshot.working_tree_state,
+        source_revision=_source_revision(snapshot.commit_sha, "", hashes),
+        files_discovered=files_discovered,
+        graph_input_files=len(hashes),
+        source_bytes=sum(sizes.values()),
+        graph_input_hashes=hashes,
+        graph_input_sizes=sizes,
+        graph_input_fingerprints=fingerprints,
+        git_status_paths=snapshot.changed_paths,
+        submodule_state="",
     )
 
 
@@ -322,6 +560,7 @@ class RepositoryGraphService:
         )
         self.graph_path = self.state_dir / "graph.db"
         self.receipt_path = self.state_dir / "graph-receipt.json"
+        self._verified_graph_fingerprint: tuple[str, int, int, str] | None = None
 
     @staticmethod
     def file_sha256(path: str | os.PathLike[str]) -> str:
@@ -385,12 +624,19 @@ class RepositoryGraphService:
             degraded_reasons=tuple(dict.fromkeys(reasons)),
             repository_files_discovered=identity.files_discovered,
             graph_input_hashes=identity.graph_input_hashes,
+            graph_input_sizes=identity.graph_input_sizes,
+            graph_input_fingerprints=identity.graph_input_fingerprints,
+            git_status_paths=identity.git_status_paths,
+            submodule_state=identity.submodule_state,
             source_bytes=identity.source_bytes,
         )
 
     def status(self) -> GraphReceipt:
-        current = compute_repository_identity(self.root)
         if not self.receipt_path.is_file():
+            current = compute_repository_identity(
+                self.root,
+                canonical_root=True,
+            )
             state = GraphStatus.FAILED if self.graph_path.exists() else GraphStatus.ABSENT
             reason = "graph_receipt_missing" if self.graph_path.exists() else "graph_not_built"
             return self._empty_receipt(state, current, reason)
@@ -399,7 +645,12 @@ class RepositoryGraphService:
                 json.loads(self.receipt_path.read_text(encoding="utf-8"))
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            current = compute_repository_identity(
+                self.root,
+                canonical_root=True,
+            )
             return self._empty_receipt(GraphStatus.FAILED, current, "graph_receipt_invalid")
+        current = _inventory_repository_identity(self.root, stored)
 
         stale: list[str] = []
         if Path(stored.repository).resolve() != self.root:
@@ -415,6 +666,7 @@ class RepositoryGraphService:
                 stored,
                 branch=current.branch,
                 working_tree_state=current.working_tree_state,
+                git_status_paths=current.git_status_paths,
                 build_status=GraphStatus.STALE,
                 query_ready=False,
                 degraded_reasons=tuple(dict.fromkeys((*stored.degraded_reasons, *stale))),
@@ -430,38 +682,55 @@ class RepositoryGraphService:
                 ),
             )
         try:
-            checksum = self.file_sha256(graph)
+            graph_stat = graph.stat()
+            fingerprint = (
+                str(graph.resolve()),
+                int(graph_stat.st_size),
+                int(graph_stat.st_mtime_ns),
+                stored.graph_checksum_or_identity,
+            )
         except OSError:
-            checksum = ""
-        if checksum != stored.graph_checksum_or_identity:
-            return replace(
-                stored,
-                build_status=GraphStatus.FAILED,
-                query_ready=False,
-                degraded_reasons=tuple(
-                    dict.fromkeys((*stored.degraded_reasons, "graph_checksum_mismatch"))
-                ),
-            )
-        try:
-            connection = sqlite3.connect(f"file:{graph.as_posix()}?mode=ro", uri=True)
+            fingerprint = (str(graph), -1, -1, stored.graph_checksum_or_identity)
+        if fingerprint != self._verified_graph_fingerprint:
             try:
-                quick = str(connection.execute("PRAGMA quick_check").fetchone()[0]).lower()
-                connection.execute("SELECT 1 FROM nodes LIMIT 1").fetchall()
-                connection.execute("SELECT 1 FROM edges LIMIT 1").fetchall()
-            finally:
-                connection.close()
-        except (sqlite3.Error, OSError):
-            quick = "error"
-        if quick != "ok":
-            return replace(
-                stored,
-                build_status=GraphStatus.FAILED,
-                query_ready=False,
-                degraded_reasons=tuple(
-                    dict.fromkeys((*stored.degraded_reasons, "graph_integrity_failed"))
-                ),
-            )
-        return stored
+                checksum = self.file_sha256(graph)
+            except OSError:
+                checksum = ""
+            if checksum != stored.graph_checksum_or_identity:
+                return replace(
+                    stored,
+                    build_status=GraphStatus.FAILED,
+                    query_ready=False,
+                    degraded_reasons=tuple(
+                        dict.fromkeys((*stored.degraded_reasons, "graph_checksum_mismatch"))
+                    ),
+                )
+            try:
+                connection = sqlite3.connect(f"file:{graph.as_posix()}?mode=ro", uri=True)
+                try:
+                    quick = str(connection.execute("PRAGMA quick_check").fetchone()[0]).lower()
+                    connection.execute("SELECT 1 FROM nodes LIMIT 1").fetchall()
+                    connection.execute("SELECT 1 FROM edges LIMIT 1").fetchall()
+                finally:
+                    connection.close()
+            except (sqlite3.Error, OSError):
+                quick = "error"
+            if quick != "ok":
+                return replace(
+                    stored,
+                    build_status=GraphStatus.FAILED,
+                    query_ready=False,
+                    degraded_reasons=tuple(
+                        dict.fromkeys((*stored.degraded_reasons, "graph_integrity_failed"))
+                    ),
+                )
+            self._verified_graph_fingerprint = fingerprint
+        return replace(
+            stored,
+            branch=current.branch,
+            working_tree_state=current.working_tree_state,
+            git_status_paths=current.git_status_paths,
+        )
 
     @staticmethod
     def _graph_stats(graph: Path) -> _GraphBuildStats:
@@ -529,6 +798,7 @@ class RepositoryGraphService:
                 "discovery_skipped_directories",
                 "file_hash_failures",
                 "file_hash_failure_details",
+                "component_failures",
             }
             file_nodes = sum(count for label, count in nodes.items() if label.casefold() == "file")
             return _GraphBuildStats(
@@ -556,6 +826,7 @@ class RepositoryGraphService:
                 ),
                 excluded_directories=records("discovery_skipped_directories"),
                 receipt_complete=required <= metadata.keys(),
+                component_failures=tuple(str(item) for item in json_list("component_failures")),
             )
         finally:
             connection.close()
@@ -616,6 +887,11 @@ class RepositoryGraphService:
         elif receipt_consistency_errors:
             status = GraphStatus.DEGRADED
             reasons.extend(receipt_consistency_errors)
+        elif stats.component_failures:
+            status = GraphStatus.DEGRADED
+            reasons.extend(
+                f"graph_component_failed:{component}" for component in stats.component_failures
+            )
         elif stats.symbols <= 0 or files_indexed <= 0:
             status = GraphStatus.DEGRADED
             reasons.append("suspiciously_empty_graph")
@@ -698,6 +974,11 @@ class RepositoryGraphService:
             failed_paths=failed_paths,
             excluded_directories=stats.excluded_directories,
             graph_input_hashes=after.graph_input_hashes,
+            graph_input_sizes=after.graph_input_sizes,
+            graph_input_fingerprints=after.graph_input_fingerprints,
+            git_status_paths=after.git_status_paths,
+            submodule_state=after.submodule_state,
+            component_failures=stats.component_failures,
             update_mode=update_mode,
             graph_bytes=graph.stat().st_size,
             source_bytes=after.source_bytes,
@@ -749,58 +1030,23 @@ class RepositoryGraphService:
         return self._finalize_graph_receipt(index, before, after, started, update_mode=_update_mode)
 
     def update(self, *, timeout: float = 120.0) -> GraphReceipt:
-        """Incrementally converge a same-commit stale graph or rebuild safely."""
+        """Converge a stale graph without exposing partial relationship updates.
+
+        The vendored file-keyed index path refreshes calls, imports, containment,
+        properties, and incoming edges, but it does not yet rerun every whole-repo
+        relationship pass. Until full-vs-incremental parity is independently proven,
+        the canonical product takes the correct full-rebuild path for every mutation.
+        """
 
         observed = self.status()
         if observed.query_ready:
             return observed
         if observed.build_status is not GraphStatus.STALE:
             return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-        current = compute_repository_identity(self.root)
-        if (
-            observed.commit_sha != current.commit_sha
-            or observed.graph_builder_version != GRAPH_BUILDER_VERSION
-            or not observed.graph_input_hashes
-        ):
-            return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-
-        previous_inputs = observed.graph_input_hashes
-        current_inputs = current.graph_input_hashes
-        changed = sorted(
-            path
-            for path in set(previous_inputs) | set(current_inputs)
-            if previous_inputs.get(path) != current_inputs.get(path)
-        )
-        if not changed:
-            return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-        if any(path == ".gitmodules" or is_graph_metadata(path) for path in changed):
-            return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-
-        deleted = [path for path in changed if path not in current_inputs]
-        added = [path for path in changed if path not in previous_inputs]
-        modified = [path for path in changed if path in current_inputs and path in previous_inputs]
-        # A delete+add pair may be a rename. Full convergence is currently the
-        # only sound way to re-resolve incoming edges across a renamed file.
-        if (deleted and added) or len(changed) > max(50, observed.files_attempted // 10):
-            return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-
-        ordered_paths = tuple((*deleted, *added, *modified))
-        started = self._now()
-        self._write_receipt(
-            self._empty_receipt(GraphStatus.BUILDING, current, "incremental_update_in_progress")
-        )
-        index = refresh_index_files(
-            self.root,
-            observed.persistent_graph_path,
-            ordered_paths,
+        return self.build(
+            force=True,
             timeout=timeout,
-            source_revision=current.source_revision,
-        )
-        after = compute_repository_identity(self.root)
-        if not index.graph_db:
-            return self.build(force=True, timeout=timeout, _update_mode="full_fallback")
-        return self._finalize_graph_receipt(
-            index, current, after, started, update_mode="incremental"
+            _update_mode="full_fallback_unproven_incremental_parity",
         )
 
     def _ready_graph(self) -> tuple[GraphReceipt, Path]:

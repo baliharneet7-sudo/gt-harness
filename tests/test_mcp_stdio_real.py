@@ -89,7 +89,7 @@ async def test_stdio_mcp_builds_updates_and_reuses_the_production_graph(tmp_path
             assert callers["count"] == 0
             updated = _payload(await _call(session, "gt_status", {}))
             assert updated["query_ready"] is True
-            assert updated["update_mode"] == "incremental"
+            assert updated["update_mode"] == "full_fallback_unproven_incremental_parity"
             assert updated["graph_checksum_or_identity"] != first_identity
             updated_started = updated["build_started"]
 

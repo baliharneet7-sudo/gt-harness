@@ -102,6 +102,12 @@ def _receipt(root: Path, graph: Path) -> GraphReceipt:
         graph_checksum_or_identity=RepositoryGraphService.file_sha256(graph),
         query_ready=True,
         degraded_reasons=(),
+        repository_files_discovered=identity.files_discovered,
+        graph_input_hashes=identity.graph_input_hashes,
+        graph_input_sizes=identity.graph_input_sizes,
+        graph_input_fingerprints=identity.graph_input_fingerprints,
+        git_status_paths=identity.git_status_paths,
+        submodule_state=identity.submodule_state,
     )
 
 
@@ -212,6 +218,42 @@ def test_query_refuses_graph_after_worktree_changes(tmp_path: Path) -> None:
         service.query("definition", "answer")
 
 
+def test_status_detects_skip_worktree_source_mutation(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    service = RepositoryGraphService(root, state_dir=state)
+    assert service.status().query_ready
+
+    _git(root, "update-index", "--skip-worktree", "app.py")
+    (root / "app.py").write_text("def answer():\n    return 43\n", encoding="utf-8")
+    assert _git(root, "status", "--porcelain=v1") == ""
+
+    stale = service.status()
+    assert stale.build_status is GraphStatus.STALE
+    assert stale.query_ready is False
+    assert "source_revision_mismatch" in stale.degraded_reasons
+
+
+def test_repository_identity_excludes_gitignored_untracked_files(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    before = compute_repository_identity(root)
+    exclude = root / ".git" / "info" / "exclude"
+    exclude.write_text("ignored.py\n", encoding="utf-8")
+    (root / "ignored.py").write_text("ignored = True\n", encoding="utf-8")
+
+    after = compute_repository_identity(root)
+
+    assert after.source_revision == before.source_revision
+    assert "ignored.py" not in after.graph_input_hashes
+
+
 def test_ready_receipt_cannot_claim_missing_or_changed_database(tmp_path: Path) -> None:
     root = _repo(tmp_path)
     state = tmp_path / "state"
@@ -228,6 +270,46 @@ def test_ready_receipt_cannot_claim_missing_or_changed_database(tmp_path: Path) 
     assert observed.build_status is GraphStatus.FAILED
     assert observed.query_ready is False
     assert "graph_checksum_mismatch" in observed.degraded_reasons
+
+
+def test_query_readiness_keeps_source_checks_but_reuses_unchanged_graph_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gt_engine.repository_graph_service as graph_service
+
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    git_calls: list[tuple[str, ...]] = []
+    checksum_calls = 0
+    original_git = graph_service._run_git
+    original_checksum = RepositoryGraphService.file_sha256
+    service = RepositoryGraphService(root, state_dir=state)
+
+    def observed_git(repository: Path, *args: str) -> tuple[int, str]:
+        git_calls.append(args)
+        return original_git(repository, *args)
+
+    def observed_checksum(path: str | Path) -> str:
+        nonlocal checksum_calls
+        checksum_calls += 1
+        return original_checksum(path)
+
+    monkeypatch.setattr(graph_service, "_run_git", observed_git)
+    monkeypatch.setattr(RepositoryGraphService, "file_sha256", staticmethod(observed_checksum))
+
+    assert service.status().query_ready
+    assert service.status().query_ready
+
+    assert len(git_calls) == 2
+    assert all(call[:4] == ("status", "--porcelain=v2", "--branch", "-z") for call in git_calls)
+    assert checksum_calls == 1
 
 
 def test_receipt_rejects_ready_without_query_readiness(tmp_path: Path) -> None:
@@ -289,3 +371,59 @@ def test_discovery_accounting_mismatch_can_never_report_ready(
     assert receipt.build_status is GraphStatus.DEGRADED
     assert receipt.query_ready is False
     assert "discovery_accounting_mismatch" in receipt.degraded_reasons
+
+
+def test_graph_component_failure_can_never_report_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    monkeypatch.setattr(
+        "gt_engine.repository_graph_service.ensure_index_with_receipt",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            graph_db=str(graph),
+            status=SimpleNamespace(value="available"),
+            error_type=None,
+            error_diagnostic="",
+            elapsed_ms=1.0,
+            schema_valid=True,
+            graph_db_sha256=RepositoryGraphService.file_sha256(graph),
+        ),
+    )
+    monkeypatch.setattr(
+        RepositoryGraphService,
+        "_graph_stats",
+        staticmethod(
+            lambda _graph: _GraphBuildStats(
+                schema="v15.3-discovery-receipt",
+                symbols=10,
+                nodes={"Function": 10},
+                edges={"CALLS": 1},
+                files_attempted=10,
+                files_parsed=10,
+                file_hashes=10,
+                parse_failures=0,
+                file_hash_failures=0,
+                files_discovered=11,
+                skipped_count=1,
+                discovery_method="git_ls_files",
+                skipped_reasons={"unsupported_path": 1},
+                skipped_paths=({"path": "README.txt", "reason": "unsupported_path"},),
+                parse_failure_details=(),
+                file_hash_failure_details=(),
+                excluded_directories=(),
+                receipt_complete=True,
+                component_failures=("import_edges",),
+            )
+        ),
+    )
+
+    receipt = RepositoryGraphService(root, state_dir=state).build(force=True)
+
+    assert receipt.build_status is GraphStatus.DEGRADED
+    assert receipt.query_ready is False
+    assert receipt.component_failures == ("import_edges",)
+    assert "graph_component_failed:import_edges" in receipt.degraded_reasons

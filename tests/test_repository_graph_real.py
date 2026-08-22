@@ -69,7 +69,7 @@ def test_real_index_build_query_stale_and_rebuild(tmp_path: Path) -> None:
     assert service.status().build_status is GraphStatus.STALE
     second = service.build(timeout=180)
     assert second.query_ready, second.as_dict()
-    assert second.update_mode == "incremental"
+    assert second.update_mode == "full_fallback_unproven_incremental_parity"
     assert not service.query("callers", "target")["evidence"]
 
     (root / "feature.py").write_text(
@@ -78,7 +78,7 @@ def test_real_index_build_query_stale_and_rebuild(tmp_path: Path) -> None:
     )
     added = service.build(timeout=180)
     assert added.query_ready, added.as_dict()
-    assert added.update_mode == "incremental"
+    assert added.update_mode == "full_fallback_unproven_incremental_parity"
     assert any(
         row["file_path"] == "feature.py"
         for row in service.query("definition", "feature")["evidence"]
@@ -87,13 +87,13 @@ def test_real_index_build_query_stale_and_rebuild(tmp_path: Path) -> None:
     (root / "feature.py").unlink()
     deleted = service.build(timeout=180)
     assert deleted.query_ready, deleted.as_dict()
-    assert deleted.update_mode == "incremental"
+    assert deleted.update_mode == "full_fallback_unproven_incremental_parity"
     assert not service.query("definition", "feature")["evidence"]
 
     (root / "core.py").rename(root / "engine.py")
     renamed = service.build(timeout=180)
     assert renamed.query_ready, renamed.as_dict()
-    assert renamed.update_mode == "full_fallback"
+    assert renamed.update_mode == "full_fallback_unproven_incremental_parity"
     target_definitions = service.query("definition", "target")["evidence"]
     assert any(row["file_path"] == "engine.py" for row in target_definitions)
     assert not any(row["file_path"] == "core.py" for row in target_definitions)

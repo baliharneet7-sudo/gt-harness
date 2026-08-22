@@ -403,12 +403,14 @@ func main() {
 		}
 	}
 
+	componentFailures := make([]string, 0)
 	// Populate FTS5 virtual table AFTER all nodes are inserted. The localizer
 	// queries nodes_fts for BM25 retrieval — gives GT at least grep-grade recall
 	// with structural ranking on top. Non-fatal: if FTS5 fails (e.g. SQLite
 	// compiled without FTS5), the Python reader falls back to name-match seeding.
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("WARNING: FTS5 population failed: %v", err)
+		componentFailures = append(componentFailures, "nodes_fts")
 	}
 	// B1: build the CONTENT surface (symbol_content_fts) over per-symbol body content
 	// so the localizer's content-BM25 leg can RETRIEVE behavior-described (stratum-B)
@@ -417,9 +419,11 @@ func main() {
 	// content-index failure never blocks the build (the leg degrades to 0).
 	if err := db.EnsureContentFTS(); err != nil {
 		log.Printf("WARNING: content FTS ensure failed: %v", err)
+		componentFailures = append(componentFailures, "content_fts_schema")
 	}
 	if err := db.PopulateContentFTS(*root); err != nil {
 		log.Printf("WARNING: content FTS population failed: %v", err)
+		componentFailures = append(componentFailures, "content_fts_population")
 	}
 	// GT_REQUIRE_FTS5 preflight gate: on a paid benchmark we must NOT silently
 	// degrade to the Python name-match fallback. If FTS5 isn't a real, populated
@@ -654,6 +658,7 @@ func main() {
 	if len(containsPtrs) > 0 {
 		if err := db.BatchInsertEdges(containsPtrs); err != nil {
 			log.Printf("WARNING: containment edges: %v", err)
+			componentFailures = append(componentFailures, "containment_edges")
 		}
 	}
 
@@ -679,6 +684,7 @@ func main() {
 	}
 	if err := db.BatchInsertProperties(propPtrs); err != nil {
 		log.Printf("WARNING: batch insert properties: %v", err)
+		componentFailures = append(componentFailures, "properties")
 	}
 
 	// Convert AssertionRefs to store.Assertion with target resolution
@@ -754,6 +760,7 @@ func main() {
 	}
 	if err := db.BatchInsertAssertions(assertPtrs); err != nil {
 		log.Printf("WARNING: batch insert assertions: %v", err)
+		componentFailures = append(componentFailures, "assertions")
 	}
 
 	propElapsed := time.Since(propStart)
@@ -766,6 +773,7 @@ func main() {
 	apiEdgeCount, apiErr := resolver.ResolveAPIEdges(db, files, *root)
 	if apiErr != nil {
 		log.Printf("WARNING: API edge resolution: %v", apiErr)
+		componentFailures = append(componentFailures, "api_edges")
 	}
 	apiElapsed := time.Since(apiStart)
 	fmt.Fprintf(os.Stderr, "  Resolved %d API edges in %s\n", apiEdgeCount, apiElapsed.Round(time.Millisecond))
@@ -776,6 +784,7 @@ func main() {
 	relCount, relErr := resolver.ResolveRelationships(db, files, *root)
 	if relErr != nil {
 		log.Printf("WARNING: relationship extraction failed: %v", relErr)
+		componentFailures = append(componentFailures, "relationship_edges")
 	}
 	relElapsed := time.Since(relStart)
 	fmt.Fprintf(os.Stderr, "  Extracted %d relationship edges in %s\n", relCount, relElapsed.Round(time.Millisecond))
@@ -801,6 +810,7 @@ func main() {
 		// Non-fatal: a failure here must not abort the index. The agent degrades to
 		// the CALLS/closure graph without the file->module IMPORTS hops.
 		log.Printf("WARNING: IMPORTS edge materialization failed: %v", impErr)
+		componentFailures = append(componentFailures, "import_edges")
 	}
 	// RE_EXPORTS edges from the parser's ReExportRef AST (TS/JS barrels, Python
 	// __init__.py, Rust pub use) — language-agnostic, replaces the JS/TS-only regex
@@ -808,10 +818,12 @@ func main() {
 	reExportCount, reErr := resolver.ResolveReExports(db, allReExports, fileMap, files)
 	if reErr != nil {
 		log.Printf("WARNING: RE_EXPORTS edge materialization failed: %v", reErr)
+		componentFailures = append(componentFailures, "reexport_edges")
 	}
 	promotedCount, promErr := resolver.PromotePropertyEdges(db)
 	if promErr != nil {
 		log.Printf("WARNING: property->edge promotion failed: %v", promErr)
+		componentFailures = append(componentFailures, "promoted_edges")
 	}
 	// Instance-attribute COMPOSES: self.x=Class() / self.x:Class (Python __init__) +
 	// this.x=new Foo() (JS/TS ctor) — the dynamic-language composition idiom invisible to
@@ -819,6 +831,7 @@ func main() {
 	composesInitCount, ciErr := resolver.ResolveComposesFromAssignments(db, allAssignments)
 	if ciErr != nil {
 		log.Printf("WARNING: instance-attribute COMPOSES failed: %v", ciErr)
+		componentFailures = append(componentFailures, "instance_composition_edges")
 	}
 	importElapsed := time.Since(importStart)
 	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS, %d RE_EXPORTS, %d promoted, %d init-COMPOSES in %s\n",
@@ -840,6 +853,7 @@ func main() {
 			// Non-fatal: a closure failure must not abort the index. impact/trace
 			// degrade gracefully to live BFS when the table is empty/absent.
 			log.Printf("WARNING: transitive closure failed: %v", cerr)
+			componentFailures = append(componentFailures, "transitive_closure")
 		} else {
 			closureCount = n
 		}
@@ -943,14 +957,17 @@ func main() {
 	// was stamped at edge construction). Non-fatal — a derived index; the raw metadata stands.
 	if err := db.PopulateEdgeMetadata(); err != nil {
 		log.Printf("WARNING: populate edge_metadata: %v", err)
+		componentFailures = append(componentFailures, "edge_metadata")
 	}
+	sort.Strings(componentFailures)
+	componentFailureJSON, _ := json.Marshal(componentFailures)
+	db.SetMeta("component_failures", string(componentFailureJSON))
 	// B-29: stamp the COMPOSITE post_revision + per-surface sub-revisions and back-fill
 	// property source_revision. Runs LAST, after every fact surface (nodes/edges/properties/
 	// assertions/closure/cochange/content_fts/file_hashes) is populated, so the composite is
-	// over the final graph state. Non-fatal on the full-index path (an expensive rebuild must
-	// not abort over a revision-stamp hiccup; the incremental executor contract is fail-closed).
+	// over the final graph state. A missing revision stamp makes graph identity unverifiable.
 	if _, err := db.StampCompositeRevision(); err != nil {
-		log.Printf("WARNING: stamp composite revision: %v", err)
+		log.Fatalf("stamp composite revision: %v", err)
 	}
 
 	// Post-insert FK validation (non-fatal)

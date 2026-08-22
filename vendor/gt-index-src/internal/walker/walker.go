@@ -120,7 +120,11 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 		}
 		spec, resolutionReason := specs.ResolveSource(path, prefix)
 		if spec == nil {
-			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: "language_unresolved"})
+			reason := "language_unresolved"
+			if resolutionReason == "no_source_identity" {
+				reason = "unsupported_path"
+			}
+			result.Skipped = append(result.Skipped, SkipRecord{Path: relPath, Reason: reason})
 			continue
 		}
 		if isGeneratedFile(path) {

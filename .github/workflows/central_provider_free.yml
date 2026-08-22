@@ -168,6 +168,8 @@ jobs:
             tests/test_repository_graph_service.py \
             tests/test_repository_graph_real.py \
             tests/test_product_treatments.py \
+            tests/test_product_comparison.py \
+            tests/test_product_repository_matrix.py \
             tests/test_mcp_stdio_real.py -q
 
       - name: Structural readiness audit
@@ -207,6 +209,7 @@ jobs:
             gt_engine/benchmark_reports.py \
             gt_engine/mechanical_completeness.py \
             gt_engine/runtime_gate.py \
+            gt_engine/repository_graph_service.py \
             gt_engine/task_semantic_substrate.py \
             gt_engine/convergence_controller.py \
             gt_engine/completion.py \
@@ -236,7 +239,11 @@ jobs:
             scripts/central_regression_preservation_replay.py \
             scripts/verify_tb2_language_contract.py \
             scripts/central_language_depth_audit.py \
+            scripts/product_repository_matrix.py \
             scripts/decision_point_eval.py \
+            gt_harness/cli.py \
+            gt_harness/indexer_setup.py \
+            gt_harness/treatments.py \
             tests/test_gt_central_runtime.py \
             tests/test_gt_central_agent.py \
             tests/test_gt_uplift_policy.py \
@@ -291,7 +298,13 @@ jobs:
             tests/test_render_treatment_agent_args.py \
             tests/test_gt_component_registry.py \
             tests/test_decision_point_eval.py \
-            tests/test_gt_decisive_derivation.py
+            tests/test_gt_decisive_derivation.py \
+            tests/test_repository_graph_service.py \
+            tests/test_repository_graph_real.py \
+            tests/test_product_treatments.py \
+            tests/test_product_comparison.py \
+            tests/test_product_repository_matrix.py \
+            tests/test_mcp_stdio_real.py
 
       - name: Documentation consistency audit
         run: |

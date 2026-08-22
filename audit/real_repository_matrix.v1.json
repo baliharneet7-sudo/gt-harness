@@ -1,0 +1,106 @@
+{
+  "schema": "gt.real_repository_matrix.v1",
+  "frozen_at": "2026-08-22",
+  "repositories": [
+    {
+      "id": "python-small-itsdangerous",
+      "category": "python_small_conventional",
+      "url": "https://github.com/pallets/itsdangerous.git",
+      "commit": "672971d66a2ef9f85151e53283113f33d642dabd",
+      "languages": ["python"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "Signer", "expected_file": "src/itsdangerous/signer.py"}
+      ]
+    },
+    {
+      "id": "python-large-django",
+      "category": "python_large_dynamic_framework",
+      "url": "https://github.com/django/django.git",
+      "commit": "03988c5a5ba248c3b9b11ea96fd4fda5e98849aa",
+      "languages": ["python"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "Model", "expected_file": "django/db/models/base.py"}
+      ]
+    },
+    {
+      "id": "python-reexports-pydantic",
+      "category": "python_heavy_reexports",
+      "url": "https://github.com/pydantic/pydantic.git",
+      "commit": "2151025aa51263f3016502b00010b78e4481eaa1",
+      "languages": ["python", "rust"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "BaseModel", "expected_file": "pydantic/main.py"}
+      ]
+    },
+    {
+      "id": "javascript-express",
+      "category": "javascript_conventional_package",
+      "url": "https://github.com/expressjs/express.git",
+      "commit": "023767fe9872e029271df1418f73401bff20ff40",
+      "languages": ["javascript"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "createApplication", "expected_file": "lib/express.js"}
+      ]
+    },
+    {
+      "id": "typescript-redux",
+      "category": "typescript_barrel_exports",
+      "url": "https://github.com/reduxjs/redux.git",
+      "commit": "71606661ac515bdd64c199a6bb508401c7cf736f",
+      "languages": ["typescript"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "createStore", "expected_file": "src/createStore.ts"}
+      ]
+    },
+    {
+      "id": "typescript-pnpm",
+      "category": "typescript_monorepo",
+      "url": "https://github.com/pnpm/pnpm.git",
+      "commit": "b1f6d3727945848e4baeb49e4e6d59aba4875630",
+      "languages": ["typescript", "javascript"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "main", "expected_file": "pnpm11/pnpm/src/main.ts"}
+      ]
+    },
+    {
+      "id": "go-gorilla-mux",
+      "category": "go_standard_module",
+      "url": "https://github.com/gorilla/mux.git",
+      "commit": "db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265",
+      "languages": ["go"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "NewRouter", "expected_file": "mux.go"}
+      ]
+    },
+    {
+      "id": "go-testify",
+      "category": "go_multi_package_module",
+      "url": "https://github.com/stretchr/testify.git",
+      "commit": "c627960a7323bfc7a58835e9ef5540f306fc7fac",
+      "languages": ["go"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "Equal", "expected_file": "assert/assertions.go"}
+      ]
+    },
+    {
+      "id": "rust-ripgrep",
+      "category": "rust_workspace",
+      "url": "https://github.com/BurntSushi/ripgrep.git",
+      "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "languages": ["rust"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "main", "expected_file": "crates/core/main.rs"}
+      ]
+    },
+    {
+      "id": "java-gson",
+      "category": "java_multi_package_library",
+      "url": "https://github.com/google/gson.git",
+      "commit": "dae37cf0fe12235b76fb09f01118a0a8c8823f42",
+      "languages": ["java"],
+      "smoke_queries": [
+        {"mode": "definition", "symbol": "Gson", "expected_file": "gson/src/main/java/com/google/gson/Gson.java"}
+      ]
+    }
+  ]
+}

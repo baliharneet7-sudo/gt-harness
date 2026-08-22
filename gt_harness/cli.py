@@ -168,6 +168,7 @@ def _graph_receipt_output(
         "graph_checksum_or_identity",
         "query_ready",
         "degraded_reasons",
+        "component_failures",
         "skipped_reasons",
         "update_mode",
         "graph_bytes",
