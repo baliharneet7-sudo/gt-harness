@@ -37,7 +37,13 @@ def test_frozen_real_repository_matrix_covers_required_product_categories() -> N
         assert row["languages"]
         assert row["smoke_queries"]
         for query in row["smoke_queries"]:
-            assert query["mode"] in {"definition", "callers", "imports", "reexports"}
+            assert query["mode"] in {
+                "definition",
+                "callers",
+                "imports",
+                "reexports",
+                "exporters",
+            }
             assert query["symbol"]
             assert query["expected_file"]
 

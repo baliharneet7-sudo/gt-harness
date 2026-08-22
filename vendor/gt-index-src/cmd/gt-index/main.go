@@ -261,6 +261,19 @@ func main() {
 		}
 	}
 	sort.Strings(failDetails)
+	var parserLimitations []string
+	for index, result := range results {
+		if result == nil || index < 0 || index >= len(files) {
+			continue
+		}
+		for _, limitation := range result.Limitations {
+			parserLimitations = append(
+				parserLimitations,
+				fmt.Sprintf("%s: %s", files[index].Path, limitation),
+			)
+		}
+	}
+	sort.Strings(parserLimitations)
 
 	parseElapsed := time.Since(parseStart)
 	parsedOK := len(files) - parseFailures
@@ -781,7 +794,7 @@ func main() {
 	// ── Pass 4c: RELATIONSHIP EDGES — inheritance, interfaces, decorators, composition, re-exports
 	relStart := time.Now()
 	fmt.Fprintf(os.Stderr, "Pass 4c: extracting relationships (inheritance, interfaces, composition, re-exports)...\n")
-	relCount, relErr := resolver.ResolveRelationships(db, files, *root)
+	relCount, relErr := resolver.ResolveRelationships(db, files, *root, allImports, fileMap)
 	if relErr != nil {
 		log.Printf("WARNING: relationship extraction failed: %v", relErr)
 		componentFailures = append(componentFailures, "relationship_edges")
@@ -873,6 +886,8 @@ func main() {
 	db.SetMeta("parse_failures", fmt.Sprintf("%d", parseFailures))
 	parseFailureJSON, _ := json.Marshal(failDetails)
 	db.SetMeta("parse_failure_details", string(parseFailureJSON))
+	parserLimitationJSON, _ := json.Marshal(parserLimitations)
+	db.SetMeta("parser_limitation_details", string(parserLimitationJSON))
 	db.SetMeta("discovery_method", walkResult.DiscoveryMethod)
 	db.SetMeta("discovery_files_seen", fmt.Sprintf("%d", walkResult.FilesDiscovered))
 	db.SetMeta("discovery_skipped_count", fmt.Sprintf("%d", len(walkResult.Skipped)))

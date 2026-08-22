@@ -53,6 +53,7 @@ type ParseResult struct {
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
 	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
+	Limitations []string        // explicit partial-parse/recovery reasons for the build receipt
 	// RustImplIdx records the 1-based Nodes index of every Rust `impl_item` Class
 	// node, captured at parse time from the AST node kind. linkRustImplMethods uses
 	// this to distinguish impl blocks from struct/enum/trait definitions — a
@@ -77,6 +78,7 @@ type ModDecl struct {
 type ReExportRef struct {
 	ExportedName string // the symbol being re-exported (e.g., "Router")
 	SourceModule string // the module it originates from (e.g., "./Router", "crate::routing")
+	SourceSymbol string // original symbol before aliasing; local symbol for CommonJS
 	File         string // the file containing this re-export
 	Line         int
 }
@@ -166,6 +168,9 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 
 	result := &ParseResult{}
 	root := tree.RootNode()
+	if root.HasError() {
+		result.Limitations = append(result.Limitations, "tree_sitter_syntax_error_recovered")
+	}
 
 	// Content-corroborate a NAME-only is_test flag. Test-runner collection semantics = a
 	// filename gate AND a unit gate: a file is a test iff it is named like one AND actually
@@ -186,6 +191,9 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
+	if sf.Language == "typescript" {
+		recoverTypeScriptTypeDefinitions(sf, src, isTest, result)
+	}
 	if sf.Language == "cobol" {
 		extractCOBOLParagraphCalls(root, sf, src, result)
 	}
@@ -209,31 +217,26 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 		linkRustImplMethods(result)
 	}
 
-	// Synthetic file-anchor node for module-linking files that define NO symbols.
+	// Synthetic file-anchor node for every successfully parsed non-comment source.
 	// A barrel/re-export file (e.g. TS `index.ts` containing only `export … from
 	// "./x"`) parses to zero symbol nodes, so file→file relationship edges
 	// (RE_EXPORTS, IMPORTS) have nothing to anchor on the source side and are
-	// silently dropped. Emit one File node so such files can anchor those edges.
-	// Generalized: fires for ANY language whose file has zero symbol nodes but
+	// silently dropped. Emit one File node so every file has a stable module anchor.
+	// Generalized: fires for every supported parser, not one language or repository.
 	// contains a module-linking construct (export/import/from/require/use/mod) —
-	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
-	// so the graph isn't polluted with content-free anchors.
+	// Empty, comment-only, and malformed sources do not gain graph authority.
 	maybeAddFileAnchorNode(root, sf, src, isTest, result)
 
 	return result, nil
 }
 
-// maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
-// symbol nodes yet carries module-linking structure. See ParseFile caller for why.
+// maybeAddFileAnchorNode appends the one explicit file/module anchor.
 func maybeAddFileAnchorNode(root *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult) {
-	if len(result.Nodes) > 0 {
-		return
-	}
 	text := string(src)
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if root == nil || root.HasError() {
+	if root == nil || (root.HasError() && len(result.Nodes) == 0) {
 		return
 	}
 	// A successfully parsed source file containing real syntax remains useful
@@ -270,6 +273,51 @@ func maybeAddFileAnchorNode(root *sitter.Node, sf walker.SourceFile, src []byte,
 		// FTS-seedable test PATH (the walker's file-level isTest already knows the truth).
 		IsTest: isTest,
 	})
+}
+
+func recoverTypeScriptTypeDefinitions(
+	sf walker.SourceFile, src []byte, isTest bool, result *ParseResult,
+) {
+	seen := make(map[string]bool)
+	for _, node := range result.Nodes {
+		seen[node.Name] = true
+	}
+	for index, line := range strings.Split(string(src), "\n") {
+		trimmed := strings.TrimSpace(line)
+		exported := strings.HasPrefix(trimmed, "export ")
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "declare "))
+		label := ""
+		switch {
+		case strings.HasPrefix(trimmed, "interface "):
+			label = "Interface"
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "interface "))
+		case strings.HasPrefix(trimmed, "type "):
+			label = "Type"
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "type "))
+		default:
+			continue
+		}
+		name := trimmed
+		if boundary := strings.IndexAny(name, " <={\t"); boundary >= 0 {
+			name = name[:boundary]
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		result.Nodes = append(result.Nodes, store.Node{
+			Label:         label,
+			Name:          name,
+			QualifiedName: name,
+			FilePath:      sf.Path,
+			StartLine:     index + 1,
+			EndLine:       index + 1,
+			IsExported:    exported,
+			IsTest:        isTest,
+			Language:      sf.Language,
+		})
+	}
 }
 
 func hasModuleLinkSyntax(text string) bool {
@@ -2140,7 +2188,7 @@ func extractCommonJSExports(node *sitter.Node, sf walker.SourceFile, src []byte,
 			// the result's .server(), the symbol "server" IS "Server" defined here.
 			result.ReExports = append(result.ReExports, ReExportRef{
 				ExportedName: exportName,
-				SourceModule: rhsText, // the local symbol name (e.g. "Server")
+				SourceSymbol: rhsText,
 				File:         sf.Path,
 				Line:         int(node.StartPoint().Row) + 1,
 			})
@@ -2369,6 +2417,7 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 						result.ReExports = append(result.ReExports, ReExportRef{
 							ExportedName: exportName,
 							SourceModule: modulePath,
+							SourceSymbol: importedName,
 							File:         file,
 							Line:         line,
 						})
@@ -2677,9 +2726,14 @@ func extractJSTSReExports(node *sitter.Node, file string, src []byte, result *Pa
 						exportedName = spec.Child(0).Content(src)
 					}
 					if exportedName != "" {
+						sourceSymbol := exportedName
+						if nameNode := spec.ChildByFieldName("name"); nameNode != nil {
+							sourceSymbol = nameNode.Content(src)
+						}
 						result.ReExports = append(result.ReExports, ReExportRef{
 							ExportedName: exportedName,
 							SourceModule: sourceModule,
+							SourceSymbol: sourceSymbol,
 							File:         file,
 							Line:         line,
 						})
@@ -2942,6 +2996,7 @@ func walkRustUse(node *sitter.Node, prefix, file string, src []byte, line int, r
 				result.ReExports = append(result.ReExports, ReExportRef{
 					ExportedName: alias,
 					SourceModule: mod,
+					SourceSymbol: lastColonComponent(joinRustPath(prefix, pathText)),
 					File:         file,
 					Line:         line,
 				})
@@ -3084,6 +3139,7 @@ func extractRustImportsFallback(node *sitter.Node, file string, src []byte, line
 			result.ReExports = append(result.ReExports, ReExportRef{
 				ExportedName: exportName,
 				SourceModule: modulePath,
+				SourceSymbol: importedName,
 				File:         file,
 				Line:         line,
 			})

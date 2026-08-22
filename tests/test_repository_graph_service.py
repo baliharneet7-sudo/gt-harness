@@ -64,10 +64,12 @@ def _database(path: Path) -> None:
             INSERT INTO nodes VALUES
               (1,'function','answer','answer','app.py',1,2,'answer()','',1,0,'python',NULL,'repo'),
               (2,'method','helper','Answer.answer','app.py',4,5,'helper()','',0,0,'python',NULL,'repo'),
-              (3,'function','invoke','invoke','app.py',7,8,'invoke()','',0,0,'python',NULL,'repo');
+              (3,'function','invoke','invoke','app.py',7,8,'invoke()','',0,0,'python',NULL,'repo'),
+              (10,'File','app','app.py','app.py',1,8,'','',1,0,'python',NULL,'repo');
             INSERT INTO edges VALUES
               (1,2,1,'CALLS',4,'app.py','name_match',0.2,'','low',2,'name_match','unverified','repo'),
-              (2,3,1,'CALLS',8,'app.py','same_file',1.0,'','high',1,'same_file','verified','repo');
+              (2,3,1,'CALLS',8,'app.py','same_file',1.0,'','high',1,'same_file','verified','repo'),
+              (3,10,1,'RE_EXPORTS',1,'app.py','re_export',1.0,'','high',1,'re_export','verified','repo');
             """
         )
         connection.commit()
@@ -179,6 +181,66 @@ def test_relationship_query_refuses_to_merge_ambiguous_symbols(tmp_path: Path) -
     assert len(ambiguous["ambiguous_candidates"]) == 2
     assert selected["status"] == "READY"
     assert [row["name"] for row in selected["evidence"]] == ["invoke"]
+
+
+def test_reexport_queries_traverse_explicit_file_anchor(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    service = RepositoryGraphService(root, state_dir=state)
+
+    exported = service.query("reexports", "app.py")
+    exporters = service.query("exporters", "answer", file_path="app.py")
+
+    assert [(row["name"], row["file_path"]) for row in exported["evidence"]] == [
+        ("answer", "app.py")
+    ]
+    assert [(row["label"], row["qualified_name"]) for row in exporters["evidence"]] == [
+        ("File", "app.py")
+    ]
+
+
+def test_hierarchy_query_prefers_type_over_same_named_constructor(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    connection = sqlite3.connect(graph)
+    try:
+        connection.executescript(
+            """
+            INSERT INTO nodes VALUES
+              (20,'Class','BillingInstrument','Outer.BillingInstrument','app.py',10,20,'','',0,0,'java',NULL,'repo'),
+              (21,'Method','BillingInstrument','BillingInstrument.BillingInstrument','app.py',12,14,'BillingInstrument()','',0,0,'java',20,'repo'),
+              (22,'Class','CreditCard','Outer.CreditCard','app.py',22,30,'','',0,0,'java',NULL,'repo');
+            INSERT INTO edges VALUES
+              (20,22,20,'EXTENDS',22,'app.py','inheritance',1.0,'','high',1,'inheritance','verified','repo');
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+
+    result = RepositoryGraphService(root, state_dir=state).query(
+        "subclasses", "BillingInstrument", file_path="app.py"
+    )
+
+    assert result["status"] == "READY"
+    assert result["resolved_symbol"]["label"] == "Class"
+    assert [(row["name"], row["relationship"]) for row in result["evidence"]] == [
+        ("CreditCard", "EXTENDS")
+    ]
 
 
 def test_cli_receipt_is_compact_by_default_and_lossless_when_verbose(tmp_path: Path) -> None:
@@ -427,3 +489,60 @@ def test_graph_component_failure_can_never_report_ready(
     assert receipt.query_ready is False
     assert receipt.component_failures == ("import_edges",)
     assert "graph_component_failed:import_edges" in receipt.degraded_reasons
+
+
+def test_parser_recovery_is_declared_and_cannot_report_unqualified_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    monkeypatch.setattr(
+        "gt_engine.repository_graph_service.ensure_index_with_receipt",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            graph_db=str(graph),
+            status=SimpleNamespace(value="available"),
+            error_type=None,
+            error_diagnostic="",
+            elapsed_ms=1.0,
+            schema_valid=True,
+            graph_db_sha256=RepositoryGraphService.file_sha256(graph),
+        ),
+    )
+    limitation = "app.py: tree_sitter_syntax_error_recovered"
+    monkeypatch.setattr(
+        RepositoryGraphService,
+        "_graph_stats",
+        staticmethod(
+            lambda _graph: _GraphBuildStats(
+                schema="v15.3-discovery-receipt",
+                symbols=10,
+                nodes={"Function": 10},
+                edges={"CALLS": 1},
+                files_attempted=10,
+                files_parsed=10,
+                file_hashes=10,
+                parse_failures=0,
+                file_hash_failures=0,
+                files_discovered=10,
+                skipped_count=0,
+                discovery_method="git_ls_files",
+                skipped_reasons={},
+                skipped_paths=(),
+                parse_failure_details=(),
+                file_hash_failure_details=(),
+                excluded_directories=(),
+                receipt_complete=True,
+                parser_limitations=(limitation,),
+            )
+        ),
+    )
+
+    receipt = RepositoryGraphService(root, state_dir=state).build(force=True)
+
+    assert receipt.build_status is GraphStatus.READY_WITH_DECLARED_LIMITATIONS
+    assert receipt.query_ready is True
+    assert receipt.parser_limitations == (limitation,)
+    assert "parser_limitations:1" in receipt.degraded_reasons

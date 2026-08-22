@@ -496,6 +496,7 @@ var _identityWrappers = map[string]bool{
 //   - a CUSTOM generic (`Queue[Task]`, `MyBox<T>`) → the HEAD is the receiver class (`Queue`), never
 //     the type argument;
 //   - a union with ≥2 non-None arms → ambiguous receiver → ABSTAIN.
+//
 // Language-uniform: handles `[...]` (Python), `<...>` (Rust/TS/Java), Go `[]T`/`map[...]`, `*`/`&`,
 // and `|` unions via the two data tables above. Non-receiver callers keep stripTypeWrapper.
 func receiverTypeName(t string) (name string, abstain bool) {
@@ -4025,6 +4026,15 @@ func resolveModulePath(modulePath string, fileMap map[string][]string) []string 
 	// Rust module paths: crate::foo::bar → try foo::bar, then foo/bar
 	// Also handles self:: (current module) and super:: (parent module)
 	if strings.Contains(modulePath, "::") {
+		relativeRustPath := strings.HasPrefix(modulePath, "crate::") ||
+			strings.HasPrefix(modulePath, "self::") ||
+			strings.HasPrefix(modulePath, "super::")
+		// Exact workspace-crate keys were checked above. Suffix-matching an
+		// unresolved absolute crate path can turn std::process into an unrelated
+		// in-repo process.rs, so unresolved external paths must abstain.
+		if !relativeRustPath {
+			return nil
+		}
 		// Strip path-relative prefixes: crate:: is the crate root,
 		// self:: is the current module, super:: is the parent.
 		// Without caller file context we can only strip them and
@@ -4602,6 +4612,9 @@ func ChainReExports(
 // weaker JS/TS-only line-regex). Language-agnostic: the extension/index/mod.rs
 // probing covers TS/JS barrels, Python __init__.py, and Rust pub use alike.
 func resolveReExportTargets(re parser.ReExportRef, fm map[string][]string) []string {
+	if re.SourceModule == "" {
+		return nil
+	}
 	sourceFiles := resolveModulePath(re.SourceModule, fm)
 	if len(sourceFiles) > 0 {
 		if len(sourceFiles) == 1 {
@@ -4679,19 +4692,64 @@ func ResolveReExports(db *store.DB, reExports []parser.ReExportRef, fm map[strin
 	if len(fileNodeMap) == 0 {
 		return 0, nil
 	}
+	type symbolResolution struct {
+		id    int64
+		count int
+	}
+	symbols := make(map[string]map[string]symbolResolution)
+	tx, err := db.BeginTx()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(`SELECT MIN(id), name, file_path, COUNT(*) FROM nodes WHERE label NOT IN ('File','ImplBlock') GROUP BY name, file_path`)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	for rows.Next() {
+		var id int64
+		var name, file string
+		var count int
+		if err := rows.Scan(&id, &name, &file, &count); err != nil || name == "" || file == "" {
+			continue
+		}
+		if symbols[file] == nil {
+			symbols[file] = make(map[string]symbolResolution)
+		}
+		symbols[file][name] = symbolResolution{id: id, count: count}
+	}
+	rows.Close()
+	tx.Rollback()
 	var edges []*store.Edge
 	seen := make(map[edgeKey]bool)
 	for _, re := range reExports {
-		sourceFiles := resolveReExportTargets(re, fm)
-		if len(sourceFiles) == 0 {
-			continue
-		}
 		srcID := fileNodeMap[filepath.ToSlash(re.File)]
 		if srcID == 0 {
 			continue
 		}
+		symbolName := re.SourceSymbol
+		if symbolName == "" {
+			symbolName = re.ExportedName
+		}
+		sourceFiles := resolveReExportTargets(re, fm)
+		if len(sourceFiles) == 0 && re.SourceModule == "" && symbolName != "" && symbolName != "*" {
+			if target := symbols[filepath.ToSlash(re.File)][symbolName]; target.count == 1 {
+				sourceFiles = []string{filepath.ToSlash(re.File)}
+			}
+		}
+		if len(sourceFiles) == 0 {
+			continue
+		}
 		for _, tf := range sourceFiles {
-			tgtID := fileNodeMap[tf]
+			tgtID := int64(0)
+			if symbolName != "" && symbolName != "*" {
+				if target := symbols[tf][symbolName]; target.count == 1 {
+					tgtID = target.id
+				}
+			}
+			if tgtID == 0 {
+				tgtID = fileNodeMap[tf]
+			}
 			if tgtID == 0 || tgtID == srcID {
 				continue // non-invention / no self-edge
 			}

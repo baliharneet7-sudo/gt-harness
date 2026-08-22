@@ -222,8 +222,10 @@ func ResolveImportsTx(tx *sql.Tx, imports []parser.ImportRef, fileMap map[string
 		// First-id-wins file anchor (matches buildFileNodeMap's ORDER BY id LIMIT 1;
 		// allNodes is appended filtered-then-fresh, fresh ids are larger, so an
 		// existing target file keeps its smaller anchor id — deterministic).
-		if cur, ok := fileNodeMap[n.FilePath]; !ok || id < cur {
-			fileNodeMap[n.FilePath] = id
+		if n.Label == "File" {
+			if cur, ok := fileNodeMap[n.FilePath]; !ok || id < cur {
+				fileNodeMap[n.FilePath] = id
+			}
 		}
 		// FILE->SYMBOL: exclude File-label anchors from name targeting.
 		if n.Label != "File" && n.Name != "" {

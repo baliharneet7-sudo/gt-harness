@@ -1,0 +1,95 @@
+{
+  "schema": "gt.graph_truth_facts.v1",
+  "frozen_at": "2026-08-22",
+  "principle": "Expected relationships are derived from repository source with independent language-native or bounded source oracles; GroundTruth is never used as the oracle.",
+  "facts": [
+    {
+      "id": "python-direct-subclasses-baddata",
+      "repository_id": "python-small-itsdangerous",
+      "language": "python",
+      "relationship": "subclasses",
+      "query": {"mode": "subclasses", "symbol": "BadData"},
+      "oracle": {"kind": "python_direct_subclasses", "symbol": "BadData"}
+    },
+    {
+      "id": "python-in-repository-callees-base64-encode",
+      "repository_id": "python-small-itsdangerous",
+      "language": "python",
+      "relationship": "callees",
+      "query": {"mode": "callees", "symbol": "base64_encode", "file": "src/itsdangerous/encoding.py"},
+      "oracle": {"kind": "python_in_repo_callees", "symbol": "base64_encode", "file": "src/itsdangerous/encoding.py"}
+    },
+    {
+      "id": "javascript-relative-requires-express-entry",
+      "repository_id": "javascript-express",
+      "language": "javascript",
+      "relationship": "imports",
+      "query": {"mode": "imports", "symbol": "lib/express.js"},
+      "oracle": {"kind": "javascript_relative_requires", "file": "lib/express.js"}
+    },
+    {
+      "id": "javascript-commonjs-local-reexports",
+      "repository_id": "javascript-express",
+      "language": "javascript",
+      "relationship": "reexports",
+      "query": {"mode": "reexports", "symbol": "test/support/utils.js"},
+      "oracle": {"kind": "javascript_commonjs_local_reexports", "file": "test/support/utils.js"}
+    },
+    {
+      "id": "typescript-redux-type-barrel",
+      "repository_id": "typescript-redux",
+      "language": "typescript",
+      "relationship": "reexports",
+      "query": {"mode": "reexports", "symbol": "src/index.ts"},
+      "oracle": {"kind": "typescript_named_type_reexports", "file": "src/index.ts"}
+    },
+    {
+      "id": "typescript-external-react-component-abstention",
+      "repository_id": "typescript-redux",
+      "language": "javascript",
+      "relationship": "subclasses",
+      "query": {"mode": "subclasses", "symbol": "Component", "file": "test/typescript/injectedDispatch.test-d.ts"},
+      "oracle": {"kind": "external_import_subclass_abstention", "symbol": "Component", "module": "react"}
+    },
+    {
+      "id": "go-clean-import-path-caller",
+      "repository_id": "go-testify",
+      "language": "go",
+      "relationship": "callers",
+      "query": {"mode": "callers", "symbol": "cleanImportPath", "file": "_codegen/internal/imports/imports.go"},
+      "oracle": {"kind": "go_text_callers", "symbol": "cleanImportPath"}
+    },
+    {
+      "id": "rust-cli-crate-reexports",
+      "repository_id": "rust-ripgrep",
+      "language": "rust",
+      "relationship": "reexports",
+      "query": {"mode": "reexports", "symbol": "crates/cli/src/lib.rs"},
+      "oracle": {"kind": "rust_crate_named_reexports", "file": "crates/cli/src/lib.rs"}
+    },
+    {
+      "id": "rust-stdlib-import-abstention",
+      "repository_id": "rust-ripgrep",
+      "language": "rust",
+      "relationship": "imports",
+      "query": {"mode": "imports", "symbol": "build.rs"},
+      "oracle": {"kind": "rust_external_use_abstention", "file": "build.rs", "module": "std::process", "symbol": "Command"}
+    },
+    {
+      "id": "java-direct-subclasses-billing-instrument",
+      "repository_id": "java-gson",
+      "language": "java",
+      "relationship": "subclasses",
+      "query": {"mode": "subclasses", "symbol": "BillingInstrument", "file": "extras/src/test/java/com/google/gson/typeadapters/RuntimeTypeAdapterFactoryTest.java"},
+      "oracle": {"kind": "java_direct_subclasses", "symbol": "BillingInstrument"}
+    },
+    {
+      "id": "java-in-file-callees-utc-format",
+      "repository_id": "java-gson",
+      "language": "java",
+      "relationship": "callees",
+      "query": {"mode": "callees", "symbol": "format", "file": "extras/src/main/java/com/google/gson/typeadapters/UtcDateTypeAdapter.java"},
+      "oracle": {"kind": "java_in_file_callees", "symbol": "format", "file": "extras/src/main/java/com/google/gson/typeadapters/UtcDateTypeAdapter.java"}
+    }
+  ]
+}

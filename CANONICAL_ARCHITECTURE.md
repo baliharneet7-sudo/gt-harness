@@ -24,6 +24,8 @@ repository working tree
   -> content-addressed local Go build (gt_harness.indexer_setup)
   -> Git-authoritative discovery (tracked + non-ignored files)
   -> tree-sitter parse and deterministic relationship resolution
+     (one explicit File anchor per parsed source; import-provenance binding;
+      named re-export targets; explicit parser-recovery limitations)
   -> SQLite candidate graph + metadata/discovery receipt
   -> atomic graph/manifest publication
   -> .groundtruth/graph.db + graph-receipt.json
@@ -53,6 +55,11 @@ query_ready == true
 ```
 
 The explicit non-ready states are `ABSENT`, `BUILDING`, `DEGRADED`, `FAILED`, and `STALE`. A stale or partial graph cannot be queried through the canonical service.
+
+The canonical query modes are `definition`, `search`, `callers`, `callees`,
+`imports`, `importers`, `reexports`, `exporters`, `implementations`, `subclasses`,
+`references`, `impact`, and `tests`. Hierarchy queries resolve only type-like
+anchors, so a same-named constructor cannot make a class query ambiguous.
 
 ## Lifecycle
 

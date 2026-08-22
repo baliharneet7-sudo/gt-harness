@@ -30,7 +30,7 @@ func TestElmValueDeclarationNamesAreBareIdentifiers(t *testing.T) {
 	if result == nil {
 		t.Fatal("elm returned no parse result")
 	}
-	if len(result.Nodes) != 2 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" {
+	if len(result.Nodes) != 3 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" || result.Nodes[2].Label != "File" {
 		t.Fatalf("unexpected elm nodes: %+v", result.Nodes)
 	}
 	for _, n := range result.Nodes {
@@ -72,7 +72,7 @@ func TestOCamlLetBindingNamesAreBareIdentifiers(t *testing.T) {
 	if result == nil {
 		t.Fatal("ocaml returned no parse result")
 	}
-	if len(result.Nodes) != 2 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" {
+	if len(result.Nodes) != 3 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" || result.Nodes[2].Label != "File" {
 		t.Fatalf("unexpected ocaml nodes: %+v", result.Nodes)
 	}
 	var found bool

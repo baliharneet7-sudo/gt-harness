@@ -310,8 +310,8 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 	return len(edges), nil
 }
 
-// buildFileNodeMap queries the DB for the first node in each file to use as an
-// anchor for API edges. Falls back to 0 if no node exists for that file.
+// buildFileNodeMap returns only explicit File nodes. Falling back to the first
+// declaration silently turns module-level relationships into symbol facts.
 func buildFileNodeMap(db *store.DB, files []walker.SourceFile) map[string]int64 {
 	result := make(map[string]int64, len(files))
 	// Use LookupNodeByName won't work here — we need file-level lookup.
@@ -322,7 +322,7 @@ func buildFileNodeMap(db *store.DB, files []walker.SourceFile) map[string]int64 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`SELECT id FROM nodes WHERE file_path = ? ORDER BY id LIMIT 1`)
+	stmt, err := tx.Prepare(`SELECT id FROM nodes WHERE file_path = ? AND label = 'File' ORDER BY id LIMIT 1`)
 	if err != nil {
 		return result
 	}

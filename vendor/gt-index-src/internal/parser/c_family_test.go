@@ -39,8 +39,8 @@ func TestCFamilyFunctionNamesAreBareIdentifiers(t *testing.T) {
 		if result == nil {
 			t.Fatalf("%s returned no parse result", tc.language)
 		}
-		if len(result.Nodes) != 2 {
-			t.Fatalf("%s nodes: want 2 got %d: %+v", tc.language, len(result.Nodes), result.Nodes)
+		if len(result.Nodes) != 3 || result.Nodes[2].Label != "File" {
+			t.Fatalf("%s nodes: want 2 symbols plus file anchor, got %+v", tc.language, result.Nodes)
 		}
 		for i, want := range []string{"target", "caller"} {
 			if got := result.Nodes[i].Name; got != want {
@@ -86,7 +86,7 @@ func TestBashFunctionCallResolution(t *testing.T) {
 	if result == nil {
 		t.Fatal("bash returned no parse result")
 	}
-	if len(result.Nodes) != 2 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" {
+	if len(result.Nodes) != 3 || result.Nodes[0].Name != "target" || result.Nodes[1].Name != "caller" || result.Nodes[2].Label != "File" {
 		t.Fatalf("unexpected bash nodes: %+v", result.Nodes)
 	}
 	var found bool

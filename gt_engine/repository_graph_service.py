@@ -32,6 +32,8 @@ CANONICAL_QUERY_MODES = (
     "callees",
     "imports",
     "importers",
+    "reexports",
+    "exporters",
     "implementations",
     "subclasses",
     "references",
@@ -45,6 +47,8 @@ QUERY_MODE_ALIASES = {
     "callee": "callees",
     "import": "imports",
     "importer": "importers",
+    "reexport": "reexports",
+    "exporter": "exporters",
     "implementation": "implementations",
     "subclass": "subclasses",
     "reference": "references",
@@ -52,6 +56,7 @@ QUERY_MODE_ALIASES = {
     "refs": "references",
 }
 SUPPORTED_QUERY_MODES = tuple((*CANONICAL_QUERY_MODES, *QUERY_MODE_ALIASES))
+_TYPE_ANCHOR_LABELS = ("class", "interface", "trait", "struct", "enum", "type")
 _READY = frozenset({"READY", "READY_WITH_DECLARED_LIMITATIONS"})
 _SKIP_DIRS = frozenset(
     {
@@ -148,6 +153,7 @@ class GraphReceipt:
     git_status_paths: tuple[str, ...] = ()
     submodule_state: str = ""
     component_failures: tuple[str, ...] = ()
+    parser_limitations: tuple[str, ...] = ()
     update_mode: str = ""
     parser_runtime: str = "gt-index/tree-sitter"
     graph_bytes: int = 0
@@ -212,6 +218,9 @@ class GraphReceipt:
         row["component_failures"] = tuple(
             str(component) for component in row.get("component_failures", ())
         )
+        row["parser_limitations"] = tuple(
+            str(limitation) for limitation in row.get("parser_limitations", ())
+        )
         row["nodes_by_type"] = {
             str(key): int(count) for key, count in dict(row.get("nodes_by_type", {})).items()
         }
@@ -242,6 +251,7 @@ class _GraphBuildStats:
     excluded_directories: tuple[dict[str, str], ...]
     receipt_complete: bool
     component_failures: tuple[str, ...] = ()
+    parser_limitations: tuple[str, ...] = ()
 
 
 def _run_git(root: Path, *args: str) -> tuple[int, str]:
@@ -799,6 +809,7 @@ class RepositoryGraphService:
                 "file_hash_failures",
                 "file_hash_failure_details",
                 "component_failures",
+                "parser_limitation_details",
             }
             file_nodes = sum(count for label, count in nodes.items() if label.casefold() == "file")
             return _GraphBuildStats(
@@ -827,6 +838,9 @@ class RepositoryGraphService:
                 excluded_directories=records("discovery_skipped_directories"),
                 receipt_complete=required <= metadata.keys(),
                 component_failures=tuple(str(item) for item in json_list("component_failures")),
+                parser_limitations=tuple(
+                    str(item) for item in json_list("parser_limitation_details")
+                ),
             )
         finally:
             connection.close()
@@ -909,6 +923,7 @@ class RepositoryGraphService:
             reasons.append("suspicious_graph_has_no_edges")
         elif (
             stats.parse_failures
+            or stats.parser_limitations
             or stats.discovery_method != "git_ls_files"
             or any(
                 stats.skipped_reasons.get(reason, 0)
@@ -924,6 +939,8 @@ class RepositoryGraphService:
             status = GraphStatus.READY_WITH_DECLARED_LIMITATIONS
             if stats.parse_failures:
                 reasons.append(f"parser_failures:{stats.parse_failures}")
+            if stats.parser_limitations:
+                reasons.append(f"parser_limitations:{len(stats.parser_limitations)}")
             if stats.discovery_method != "git_ls_files":
                 reasons.append(f"discovery_method:{stats.discovery_method or 'unknown'}")
             for reason in (
@@ -979,6 +996,7 @@ class RepositoryGraphService:
             git_status_paths=after.git_status_paths,
             submodule_state=after.submodule_state,
             component_failures=stats.component_failures,
+            parser_limitations=stats.parser_limitations,
             update_mode=update_mode,
             graph_bytes=graph.stat().st_size,
             source_bytes=after.source_bytes,
@@ -1128,15 +1146,20 @@ class RepositoryGraphService:
                     parameters,
                 ).fetchall()
             else:
-                file_clause = "AND n.file_path=?" if selected_file else ""
-                anchor_parameters: tuple[Any, ...] = (token, token, selected_file)
-                if not selected_file:
-                    anchor_parameters = (token, token)
+                anchor_conditions = ["(n.name=? OR n.qualified_name=?)"]
+                anchor_values: list[Any] = [token, token]
+                if selected_file:
+                    anchor_conditions.append("n.file_path=?")
+                    anchor_values.append(selected_file)
+                if normalized in {"implementations", "subclasses"}:
+                    placeholders = ",".join("?" for _ in _TYPE_ANCHOR_LABELS)
+                    anchor_conditions.append(f"LOWER(n.label) IN ({placeholders})")
+                    anchor_values.extend(_TYPE_ANCHOR_LABELS)
                 anchor_rows = connection.execute(
                     f"SELECT {node_projection} FROM nodes n "
-                    f"WHERE (n.name=? OR n.qualified_name=?) {file_clause} "
+                    f"WHERE {' AND '.join(anchor_conditions)} "
                     "ORDER BY n.file_path,n.start_line",
-                    anchor_parameters,
+                    tuple(anchor_values),
                 ).fetchall()
                 exact_qualified = [row for row in anchor_rows if row["qualified_name"] == token]
                 anchors = exact_qualified if exact_qualified else list(anchor_rows)
@@ -1153,6 +1176,7 @@ class RepositoryGraphService:
                     reverse = normalized in {
                         "callers",
                         "importers",
+                        "exporters",
                         "implementations",
                         "subclasses",
                         "references",
@@ -1164,6 +1188,8 @@ class RepositoryGraphService:
                         "callees": ("CALLS",),
                         "imports": ("IMPORTS", "IMPORTS_FROM"),
                         "importers": ("IMPORTS", "IMPORTS_FROM"),
+                        "reexports": ("RE_EXPORTS",),
+                        "exporters": ("RE_EXPORTS",),
                         "implementations": ("IMPLEMENTS",),
                         "subclasses": ("EXTENDS", "INHERITS"),
                         "references": ("REFERENCES", "CALLS", "IMPORTS", "IMPORTS_FROM"),

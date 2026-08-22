@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
@@ -87,12 +88,21 @@ var (
 // ResolveRelationships runs 5 extraction passes over already-indexed source
 // files and inserts relationship edges (EXTENDS, IMPLEMENTS, HANDLES_ROUTE,
 // COMPOSES, RE_EXPORTS) into graph.db. Returns the number of edges created.
-func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) (int, error) {
+func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string,
+	imports []parser.ImportRef, fileMap map[string][]string) (int, error) {
 	// Pre-build indexes from the DB: name -> []nodeID with label filter.
 	classIndex, interfaceIndex, funcFileIndex, funcRangeIndex := buildRelationshipIndexes(db)
 
 	// File-path -> first node ID (for file-level anchoring of edges)
 	fileNodeMap := buildFileNodeMap(db, files)
+	importIndex := buildImportIndex(imports, fileMap)
+	importDeclarations := make(map[string]map[string]bool)
+	for _, imp := range imports {
+		if importDeclarations[imp.File] == nil {
+			importDeclarations[imp.File] = make(map[string]bool)
+		}
+		importDeclarations[imp.File][imp.ImportedName] = true
+	}
 
 	var edges []*store.Edge
 	seen := make(map[edgeKey]bool)
@@ -195,7 +205,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						// other files) rather than wiring inheritance to an arbitrary global
 						// first-match — a wrong parent contaminates CHA (lookupMethodWithInheritance)
 						// for every method call on the subclass.
-						baseID := resolveClassNodeSameFileOrUnique(base, sf.Path, classIndex)
+						baseID := resolveClassNodeImportAware(base, sf.Path, classIndex, importIndex, importDeclarations)
 						if baseID != 0 && childID != 0 {
 							addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 						}
@@ -243,7 +253,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
 					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNodeImportAware(baseName, sf.Path, classIndex, importIndex, importDeclarations)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -262,7 +272,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						if idx := strings.Index(iface, "<"); idx > 0 {
 							iface = iface[:idx]
 						}
-						ifaceID := resolveInterfaceOrClassNode(iface, sf.Path, interfaceIndex, classIndex)
+						ifaceID := resolveInterfaceOrClassNodeImportAware(iface, sf.Path, interfaceIndex, classIndex, importIndex, importDeclarations)
 						if childID != 0 && ifaceID != 0 {
 							addEdge(childID, ifaceID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -307,7 +317,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
 					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNodeImportAware(baseName, sf.Path, classIndex, importIndex, importDeclarations)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -325,7 +335,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						if idx := strings.Index(iface, "<"); idx > 0 {
 							iface = iface[:idx]
 						}
-						ifaceID := resolveInterfaceOrClassNode(iface, sf.Path, interfaceIndex, classIndex)
+						ifaceID := resolveInterfaceOrClassNodeImportAware(iface, sf.Path, interfaceIndex, classIndex, importIndex, importDeclarations)
 						if childID != 0 && ifaceID != 0 {
 							addEdge(childID, ifaceID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -457,7 +467,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					structName := rustLastSegment(m[2])
 					if traitName != "" && structName != "" {
 						structID := resolveClassNode(structName, sf.Path, classIndex)
-						traitID := resolveInterfaceOrClassNode(traitName, sf.Path, interfaceIndex, classIndex)
+						traitID := resolveInterfaceOrClassNodeImportAware(traitName, sf.Path, interfaceIndex, classIndex, importIndex, importDeclarations)
 						if structID != 0 && traitID != 0 {
 							addEdge(structID, traitID, "IMPLEMENTS", sf.Path, lineNum, "implements", 1.0)
 						}
@@ -974,6 +984,57 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
+// resolveClassNodeImportAware preserves same-file declarations, resolves an
+// explicitly imported base only inside its proven target file set, and abstains
+// when that import is external or unresolved. A globally unique same-named node
+// elsewhere is not evidence that it satisfies an external import.
+func resolveClassNodeImportAware(
+	name, currentFile string,
+	classIndex map[string][]classNodeEntry,
+	importIndex map[string]map[string][]string,
+	declarations map[string]map[string]bool,
+) int64 {
+	entries := classIndex[name]
+	var sameFile []classNodeEntry
+	for _, entry := range entries {
+		if entry.FilePath == currentFile {
+			sameFile = append(sameFile, entry)
+		}
+	}
+	if len(sameFile) == 1 {
+		return sameFile[0].ID
+	}
+	if len(sameFile) > 1 {
+		return 0
+	}
+
+	declared := declarations[currentFile][name] || declarations[currentFile]["*"]
+	if declared {
+		targetFiles := importIndex[currentFile][name]
+		if len(targetFiles) == 0 {
+			targetFiles = importIndex[currentFile]["*"]
+		}
+		allowed := make(map[string]bool, len(targetFiles))
+		for _, target := range targetFiles {
+			allowed[target] = true
+		}
+		var matches []classNodeEntry
+		for _, entry := range entries {
+			if allowed[entry.FilePath] {
+				matches = append(matches, entry)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0].ID
+		}
+		return 0
+	}
+	if len(entries) == 1 {
+		return entries[0].ID
+	}
+	return 0
+}
+
 // resolveInterfaceNode finds an Interface node by name, SAME-FILE-FIRST and abstaining
 // on a cross-file AMBIGUOUS name (RS9: an IMPLEMENTS/impl-trait edge to an arbitrary
 // same-named interface in another file contaminates CHA the same way a wrong base does).
@@ -1001,6 +1062,22 @@ func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, class
 		return id
 	}
 	return resolveClassNodeSameFileOrUnique(name, currentFile, classIndex)
+}
+
+func resolveInterfaceOrClassNodeImportAware(
+	name, currentFile string,
+	interfaceIndex, classIndex map[string][]classNodeEntry,
+	importIndex map[string]map[string][]string,
+	declarations map[string]map[string]bool,
+) int64 {
+	if id := resolveClassNodeImportAware(
+		name, currentFile, interfaceIndex, importIndex, declarations,
+	); id != 0 {
+		return id
+	}
+	return resolveClassNodeImportAware(
+		name, currentFile, classIndex, importIndex, declarations,
+	)
 }
 
 // resolveClassOrFuncNode tries class index first, then function.

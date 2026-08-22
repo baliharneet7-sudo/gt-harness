@@ -129,7 +129,7 @@ func TestRParserEmitsLocalCallReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Nodes) != 2 || result.Nodes[0].Name != "r_target" || result.Nodes[1].Name != "r_caller" || len(result.Calls) != 1 || result.Calls[0].CallerNodeIdx != 1 || result.Calls[0].CalleeName != "r_target" || result.Calls[0].CalleeQualified != "r_target" {
+	if len(result.Nodes) != 3 || result.Nodes[0].Name != "r_target" || result.Nodes[1].Name != "r_caller" || result.Nodes[2].Label != "File" || len(result.Calls) != 1 || result.Calls[0].CallerNodeIdx != 1 || result.Calls[0].CalleeName != "r_target" || result.Calls[0].CalleeQualified != "r_target" {
 		t.Fatalf("R local call missing: nodes=%+v calls=%+v", result.Nodes, result.Calls)
 	}
 }
