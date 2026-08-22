@@ -1678,6 +1678,8 @@ jobs:
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_XSESSION_DIR="/opt/gt_xsession" \
             -e GT_BASELINE=$GT_BASELINE_FLAG \
+            -e GT_STEP_LIMIT="${GT_STEP_LIMIT:-150}" \
+            -e GT_PRO_COST_LIMIT="${GT_PRO_COST_LIMIT:-2.0}" \
             -e MSWEA_COST_TRACKING="ignore_errors" \
             $MODEL_ENV \
             --entrypoint "" \
