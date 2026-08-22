@@ -65,16 +65,7 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 	skipped := 0
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip errors
-		}
-		if len(files) >= maxFiles {
-			if !info.IsDir() && specs.HasCandidatePath(path) {
-				skipped++
-			}
-			if skipped > 1000 {
-				return filepath.SkipAll // stop counting after 1000 to save time
-			}
-			return nil
+			return err
 		}
 
 		// Skip hidden and known directories
@@ -112,7 +103,7 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 			var readErr error
 			prefix, readErr = readPrefix(path, 65536)
 			if readErr != nil {
-				return nil
+				return readErr
 			}
 		}
 		spec, resolutionReason := specs.ResolveSource(path, prefix)
@@ -122,6 +113,10 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 
 		// Skip generated files (check first line for codegen markers)
 		if isGeneratedFile(path) {
+			return nil
+		}
+		if maxFiles > 0 && len(files) >= maxFiles {
+			skipped++
 			return nil
 		}
 

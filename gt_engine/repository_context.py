@@ -328,10 +328,11 @@ def _path(value: str) -> str:
 
 
 def _node(source: bool, link: StructuralLink) -> SymbolRef:
+    line = link.source_start_line if source else link.target_start_line
     return SymbolRef(
         path=_path(link.source_path if source else link.target_path),
         symbol=str(link.source_symbol if source else link.target_symbol or "").strip(),
-        line=max(1, int(link.source_start_line if source else link.target_start_line or 1)),
+        line=max(1, int(line or 1)),
     )
 
 
@@ -473,7 +474,13 @@ class RepositoryContextEngine:
         candidate_limit = self.max_execution_views * 8
         for anchor in anchor_nodes:
             upstream: list[tuple[tuple[DirectedExecutionStep, ...], str, str, bool, bool]] = []
-            queue = deque([(anchor, (), frozenset({anchor}))])
+            queue: deque[
+                tuple[
+                    SymbolRef,
+                    tuple[DirectedExecutionStep, ...],
+                    frozenset[SymbolRef],
+                ]
+            ] = deque([(anchor, (), frozenset({anchor}))])
             while queue and paths_considered < self.max_edge_expansions:
                 current, steps, visited = queue.popleft()
                 rows = bounded_rows(reverse.get(current, ()))
@@ -1324,6 +1331,9 @@ class RepositoryContextEngine:
             if fact.claim_id not in coupled_constituents
             and fact.claim_id not in convention_constituents
         )
+        # Diagnostics/validation remain first.  Certified process orientation
+        # comes before generic symbol facts because it replaces expensive
+        # exploration; semantic snippets remain available when budget permits.
         groups = (
             (
                 "repository_context",
@@ -1331,14 +1341,14 @@ class RepositoryContextEngine:
                 critical_lines,
             ),
             (
-                "repository_semantic",
-                "Current certified repository context:",
-                semantic_lines,
-            ),
-            (
                 "repository_process",
                 "Current certified repository context:",
                 process_lines,
+            ),
+            (
+                "repository_semantic",
+                "Current certified repository context:",
+                semantic_lines,
             ),
         )
         available_groups = tuple(
@@ -1557,7 +1567,16 @@ class RepositoryContextEngine:
                     if claim in execution_claims or claim in impact_claims
                     else "certified_composition"
                     if claim in coupled_claims or claim in convention_claims
-                    else "compiler_semantic"
+                    else {
+                        "COMPILER": "compiler_semantic",
+                        "LSP": "lsp_semantic",
+                        "PARSER_STRUCTURAL": "parser_structural",
+                        "HEURISTIC": "heuristic_semantic",
+                        "TEXTUAL": "textual_candidate",
+                    }.get(
+                        str(semantic_by_id[claim].semantic_authority),
+                        "unknown_semantic",
+                    )
                     if claim in semantic_claims
                     else "declared_validation"
                     if claim in validation_claims
@@ -1595,8 +1614,8 @@ class RepositoryContextEngine:
         contributions: list[GTContribution] = []
         priority_by_surface = {
             "repository_context": 4,
-            "repository_semantic": 6,
-            "repository_process": 18,
+            "repository_process": 6,
+            "repository_semantic": 18,
         }
         for surface, heading, _ in groups:
             rows = selected_by_surface.get(surface, [])

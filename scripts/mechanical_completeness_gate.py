@@ -268,11 +268,19 @@ def audit_configuration(
             {"provider_credentials_declared": False},
         ),
         _check(
-            "live_provider_barrier",
+            "fail_open_solver_dispatch",
             "evaluate_provider_barrier(" in agent_source
-            and 'terminal = "MechanicalCompletenessBlocked"' in agent_source
-            and '"task_execution_certificate"' in agent_source,
-            {"barrier_before_provider_query": True},
+            and "dispatch_assessment = assess_provider_dispatch(provider_barrier)"
+            in agent_source
+            and 'model_call_contexts[-1]["provider_dispatch_assessment"]'
+            in agent_source
+            and 'contribution_receipt["treatment_validity"]' in agent_source
+            and '"solver_continued": bool(' in agent_source
+            and 'terminal = "MechanicalCompletenessBlocked"' not in agent_source,
+            {
+                "optional_substrate_failure_invalidates_treatment": True,
+                "optional_substrate_failure_does_not_block_solver": True,
+            },
         ),
         _check(
             "terminal_task_check_surface",

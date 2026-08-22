@@ -401,7 +401,7 @@ async def test_red_test_probe_runs_within_end_to_end_loop_and_seeds_retrieval(
         document_chars=25,
     )
     monkeypatch.setattr(
-        "eval.gt_central_agent.build_hybrid_repository",
+        "eval.gt_central_agent.build_query_hybrid_repository",
         lambda *args, **kwargs: repository,
     )
     agent._start_repository_session = fake_repository_session

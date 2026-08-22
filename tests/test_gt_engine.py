@@ -51,6 +51,37 @@ except ImportError:
 requires_gt = pytest.mark.skipif(not HAVE_GT, reason="groundtruth not installed")
 
 
+def _write_schema_complete_graph(path: str | os.PathLike[str]) -> None:
+    """Create a minimal graph that satisfies the production schema contract."""
+
+    import sqlite3
+
+    from gt_engine.indexer import (
+        _REQUIRED_GRAPH_FTS_TABLES,
+        _REQUIRED_GRAPH_TABLE_COLUMNS,
+    )
+
+    connection = sqlite3.connect(path)
+    try:
+        for table, columns in _REQUIRED_GRAPH_TABLE_COLUMNS.items():
+            definitions = ",".join(f'"{column}" TEXT' for column in sorted(columns))
+            connection.execute(f'CREATE TABLE "{table}" ({definitions})')
+        for table in _REQUIRED_GRAPH_FTS_TABLES:
+            connection.execute(f'CREATE VIRTUAL TABLE "{table}" USING fts5(content)')
+        connection.executemany(
+            "INSERT INTO project_meta(key,value) VALUES (?,?)",
+            (
+                ("schema_version", "v15.2-trust-tier"),
+                ("file_count", "1"),
+                ("parse_failures", "0"),
+                ("post_revision", "0" * 64),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 # --------------------------------------------------------------------------- #
 # exit-code parsing (decision C: tools.py:172 flattens the code into a string)
 # --------------------------------------------------------------------------- #
@@ -639,17 +670,7 @@ def test_ensure_index_can_keep_graph_state_outside_repository(
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
     def fake_run_index(_root, output, *, timeout=600):
-        import sqlite3
-
-        connection = sqlite3.connect(output)
-        try:
-            connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
-            connection.execute(
-                "CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)"
-            )
-            connection.commit()
-        finally:
-            connection.close()
+        _write_schema_complete_graph(output)
         return True
 
     monkeypatch.setattr(groundtruth._binary, "run_index", fake_run_index)
@@ -689,8 +710,6 @@ def test_failed_index_build_preserves_previous_database(tmp_path, monkeypatch):
 
 @requires_gt
 def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch):
-    import sqlite3
-
     import groundtruth._binary
 
     import gt_engine.indexer as indexer
@@ -708,10 +727,7 @@ def test_manifest_publication_failure_rolls_back_database(tmp_path, monkeypatch)
     monkeypatch.setenv("GT_STATE_DIR", str(state))
 
     def valid_index(_root, output, *, timeout=600):
-        connection = sqlite3.connect(output)
-        connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
-        connection.commit()
-        connection.close()
+        _write_schema_complete_graph(output)
         return True
 
     monkeypatch.setattr(groundtruth._binary, "run_index", valid_index)

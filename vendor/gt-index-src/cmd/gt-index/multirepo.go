@@ -154,10 +154,18 @@ func runMultiRepo(rootList []string, output string, maxFiles, workers int) error
 func indexOneRepo(db *store.DB, root string, repoID int64, maxFiles, workers int) (repoIngest, int, int, error) {
 	ing := repoIngest{repoID: repoID, root: root, coord: resolver.ExtractRepoCoord(repoID, root), anchors: map[string]int64{}}
 
-	files, err := walker.Walk(root, maxFiles)
+	walkResult, err := walker.WalkWithMeta(root, maxFiles)
 	if err != nil {
 		return ing, 0, 0, fmt.Errorf("walk: %w", err)
 	}
+	if walkResult.FilesSkipped > 0 {
+		return ing, 0, 0, fmt.Errorf(
+			"walk: source coverage incomplete: %d eligible files exceeded max-files=%d",
+			walkResult.FilesSkipped,
+			maxFiles,
+		)
+	}
+	files := walkResult.Files
 	filePaths := make([]string, len(files))
 	fileLangs := make([]string, len(files))
 	for i, sf := range files {

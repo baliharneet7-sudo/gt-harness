@@ -696,7 +696,8 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert "select_catalog" in workflow
     assert "ids <= allowed" not in workflow
     assert '"system_prompt_sha256": prompt_identity.get("system_prompt_sha256")' in workflow
-    assert '"effective_actions": metrics.get("effective_task_actions")' in workflow
+    assert '"effective_actions": metrics.get("effective_actions")' in workflow
+    assert '"effective_actions_schema": metrics.get("effective_actions_schema")' in workflow
     assert "Download the single exact bootstrap canary proof" in workflow
     assert "exact provider route gate failed" in workflow
     assert "not proof[\"system_fingerprint\"]" in workflow
@@ -713,7 +714,11 @@ def test_deepswe_final_workflow_is_commit_provider_outcome_and_timeout_exact():
     assert 'default: certified_full' in workflow
     assert "--ak preflight_mode=assistive_safe" not in workflow
     assert workflow.count("--ak preflight_mode=shadow") >= 2
-    assert "timeout --signal=TERM --kill-after=30s 6000s pier run" in workflow
+    assert (
+        'timeout --signal=TERM --kill-after=30s "${AGENT_TIMEOUT_SEC}s" pier run'
+        in workflow
+    )
+    assert '"execution_budget_sec"' in workflow
     assert "provider_query_started.json" in workflow
     assert "central_receipt.json -print -quit" in workflow
     assert "infra-only retry: no GT provider query started" in workflow
@@ -1654,9 +1659,15 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
         source_file_count=1,
         document_chars=25,
     )
+    query_states = []
+
+    def build_query_repository(*args, **kwargs):
+        query_states.append(kwargs["state"])
+        return replace(repository, source_revision=kwargs["state"].source_revision)
+
     monkeypatch.setattr(
-        "eval.gt_central_agent.build_hybrid_repository",
-        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+        "eval.gt_central_agent.build_query_hybrid_repository",
+        build_query_repository,
     )
     agent._start_repository_session = fake_repository_session
     environment = _Environment()
@@ -1700,6 +1711,8 @@ async def test_persistent_state_bootstraps_once_then_runs_at_every_live_boundary
         "structural",
     }
     assert receipt["metrics"]["persistent_state_initial_retrieval_calls"] == 1
+    assert query_states
+    assert query_states[0].task_text.startswith("Fix src/service.py")
     assert persistent["initial_retrieval"]["runtime_cache_seeded"] is True
     task_start_retrieval = receipt["preemptive_retrieval"]["decisions"][0]
     assert task_start_retrieval["opportunity_kind"] == "task_start"
@@ -1825,8 +1838,11 @@ async def test_initial_retrieval_failure_prevents_bootstrap_provider_spend(
         document_chars=25,
     )
     monkeypatch.setattr(
-        "eval.gt_central_agent.build_hybrid_repository",
-        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+        "eval.gt_central_agent.build_query_hybrid_repository",
+        lambda *args, **kwargs: replace(
+            repository,
+            source_revision=kwargs["state"].source_revision,
+        ),
     )
 
     def fail_retrieval(*args, **kwargs):
@@ -2337,8 +2353,11 @@ async def test_supported_source_creation_activates_persistent_state_once(
         document_chars=5,
     )
     monkeypatch.setattr(
-        "eval.gt_central_agent.build_hybrid_repository",
-        lambda *args, **kwargs: replace(repository, source_revision=kwargs["source_revision"]),
+        "eval.gt_central_agent.build_query_hybrid_repository",
+        lambda *args, **kwargs: replace(
+            repository,
+            source_revision=kwargs["state"].source_revision,
+        ),
     )
     model = DynamicBootstrapModel()
     environment = TransferMutationEnvironment(
@@ -2791,7 +2810,7 @@ async def test_relational_v2_delivers_certified_process_after_existing_read_acti
 
 
 @pytest.mark.asyncio
-async def test_final_profile_blocks_provider_before_incomplete_runtime_dispatch(tmp_path):
+async def test_final_profile_invalidates_treatment_but_dispatches_baseline_solver(tmp_path):
     model = _ScriptedModel(["echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"])
     agent = MiniSweCentralAgent(
         logs_dir=tmp_path,
@@ -2805,13 +2824,21 @@ async def test_final_profile_blocks_provider_before_incomplete_runtime_dispatch(
     await agent.run("Create the requested output.", _Environment(), AgentContext())
 
     receipt = json.loads((tmp_path / "central_receipt.json").read_text())
-    assert model.observed_history == []
-    assert receipt["metrics"]["solver_exhausted_reason"] == (
+    assert len(model.observed_history) == 1
+    assert receipt["metrics"]["solver_exhausted_reason"] != (
         "mechanical_completeness_barrier"
     )
     barrier = receipt["mechanical_completeness"]["provider_barriers"][0]
     assert barrier["status"] == "BLOCKED"
     assert "runtime_contract_missing" in barrier["failures"]
+    assert receipt["treatment_validity"]["state"] == "INVALID"
+    assert "runtime_contract_missing" in receipt["treatment_validity"]["reason_codes"]
+    assert receipt["model_call_contexts"][0]["provider_dispatch_assessment"] == {
+        "schema": "gt.provider_dispatch_assessment.v1",
+        "dispatch_allowed": True,
+        "treatment_validity": "INVALID",
+        "reason_codes": barrier["failures"],
+    }
     assert receipt["task_execution_certificate"]["status"] == "BLOCKED"
 
 
@@ -5836,10 +5863,23 @@ You can generate data.comp any way you want, but data.comp must be at most 2500 
     # be classified and mirrored rather than silently omitted from graph
     # substrate discovery.
     assert receipt["metrics"]["actual_environment_execs"] == 10
-    assert receipt["metrics"]["effective_actions"] == 9
+    assert receipt["metrics"]["effective_actions"] == 1
+    assert receipt["metrics"]["legacy_effective_task_environment_execs"] == 9
     assert receipt["metrics"]["sensor_environment_execs"] == 5
     assert receipt["metrics"]["controller_environment_execs"] == 9
-    assert receipt["metrics"]["effective_actions_schema"] == "actual-task-environment-execs-v2"
+    assert receipt["metrics"]["effective_actions_schema"] == "model-selected-tool-actions-v3"
+    assert receipt["actor_action_accounting"]["counts"] == {
+        "MODEL_DECISION": 1,
+        "TOOL_ACTION": 1,
+        "CONTROLLER_ACTION": 3,
+        "SUBSTRATE_PROBE": 5,
+        "HOST_OTHER": 1,
+    }
+    assert receipt["actor_action_accounting"]["conservation_valid"] is True
+    assert receipt["runtime_lifecycle"]["model_agnostic"] is True
+    assert receipt["runtime_lifecycle"]["lifecycle_conservation_valid"] is True
+    assert receipt["runtime_lifecycle"]["action_conservation_valid"] is True
+    assert receipt["runtime_lifecycle"]["complete"] is True
     assert receipt["metrics"]["host_exec_category_counts"]["model_action"] == 1
     assert receipt["metrics"]["host_exec_category_counts"]["completion_probe"] == 2
     assert receipt["metrics"]["host_exec_category_counts"]["auto_submit"] == 1

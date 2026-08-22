@@ -68,7 +68,7 @@ func main() {
 	root := flag.String("root", ".", "Project root directory")
 	roots := flag.String("roots", "", "SM-9a MULTI-REPO: comma-separated ADDITIONAL repository roots to index into ONE graph.db alongside -root (repo_id-partitioned, cross-repo import edges). Empty (default) = single-root behavior, byte-identical to before.")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
-	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
+	maxFiles := flag.Int("max-files", 0, "Maximum files to index (0 = unlimited; a reached limit fails coverage)")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
@@ -174,10 +174,14 @@ func main() {
 
 	// ── Pass 1: STRUCTURE — discover files ──────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 1: discovering files in %s...\n", *root)
-	files, err := walker.Walk(*root, *maxFiles)
+	walkResult, err := walker.WalkWithMeta(*root, *maxFiles)
 	if err != nil {
 		log.Fatalf("walk: %v", err)
 	}
+	if walkResult.FilesSkipped > 0 {
+		log.Fatalf("walk: source coverage incomplete: %d eligible files exceeded -max-files=%d", walkResult.FilesSkipped, *maxFiles)
+	}
+	files := walkResult.Files
 	fmt.Fprintf(os.Stderr, "  Found %d source files\n", len(files))
 
 	langCount := make(map[string]int)

@@ -57,6 +57,15 @@ _PERSISTENT_NONE_FRAME_REASONS = frozenset(
 )
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    """Coerce receipt JSON values without allowing ``None`` to escape."""
+
+    try:
+        return int(default if value is None else value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 @dataclass(frozen=True, slots=True)
 class ReleaseGateCheck:
     name: str
@@ -171,7 +180,11 @@ def _substrate(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
             graph_sha = str(index.get("graph_db_sha256") or "")
             manifest_sha = str(index.get("graph_manifest_sha256") or "")
             binary_sha = str(index.get("binary_sha256") or "")
-            if sha.fullmatch(graph_sha) is None or graph_sha != graph_revision:
+            if (
+                sha.fullmatch(graph_sha) is None
+                or sha.fullmatch(graph_revision) is None
+                or graph_revision != str(evidence.get("graph_revision") or "")
+            ):
                 failures.append(f"{label}:repository_graph_content_identity_invalid")
             if sha.fullmatch(manifest_sha) is None:
                 failures.append(f"{label}:repository_graph_manifest_identity_invalid")
@@ -559,12 +572,12 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
     executor_calls = int(receipt.get("executor_calls") or 0)
     actions = int(receipt.get("actions") or 0)
     action_accounting = receipt.get("action_accounting") or {}
-    processed_actions = int(
+    processed_actions = _as_int(
         action_accounting.get("processed")
         if "processed" in action_accounting
         else actions
     )
-    executed_actions = int(
+    executed_actions = _as_int(
         action_accounting.get("executed")
         if "executed" in action_accounting
         else (receipt.get("host_execution") or {}).get("decision_actions") or 0
@@ -599,12 +612,12 @@ def _persistent_execution_state(receipt: dict[str, Any], label: str) -> ReleaseG
         for row in model_call_contexts
         if int(row.get("call") or 0) >= max(1, activation_call)
     ]
-    processed_before_activation = int(
+    processed_before_activation = _as_int(
         activation.get("processed_actions_before_activation")
         if "processed_actions_before_activation" in activation
         else activation_action
     )
-    executed_at_activation = int(
+    executed_at_activation = _as_int(
         activation.get("executed_actions_at_activation")
         if "executed_actions_at_activation" in activation
         else activation_action
@@ -837,17 +850,17 @@ def _product_mechanism_census(receipt: dict[str, Any], label: str) -> ReleaseGat
     if mechanism_applicable:
         selection_mode = str(mechanism.get("selection_mode") or "generative")
         bootstrap_calls = int(mechanism.get("bootstrap_calls") or 0)
-        selection_events = int(
+        selection_events = _as_int(
             mechanism.get("selection_event_count")
             if mechanism.get("selection_event_count") is not None
             else bootstrap_calls
         )
-        selection_provider_calls = int(
+        selection_provider_calls = _as_int(
             mechanism.get("selection_provider_calls")
             if mechanism.get("selection_provider_calls") is not None
             else bootstrap_calls
         )
-        bootstrap_provider_calls = int(
+        bootstrap_provider_calls = _as_int(
             mechanism.get("bootstrap_provider_calls")
             if mechanism.get("bootstrap_provider_calls") is not None
             else bootstrap_calls
@@ -1163,6 +1176,105 @@ def _action_lifecycle(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
         not failures,
         tuple(failures),
         {"task": label, **values},
+    )
+
+
+def _actor_action_conservation(
+    receipt: dict[str, Any], label: str
+) -> ReleaseGateCheck:
+    accounting = receipt.get("actor_action_accounting") or {}
+    counts = accounting.get("counts") or {}
+    expected_actors = {
+        "MODEL_DECISION",
+        "TOOL_ACTION",
+        "CONTROLLER_ACTION",
+        "SUBSTRATE_PROBE",
+        "HOST_OTHER",
+    }
+    failures: list[str] = []
+    if accounting.get("schema") != "gt.action_accounting.v1":
+        failures.append(f"{label}:actor_action_accounting_missing")
+    if set(counts) != expected_actors:
+        failures.append(f"{label}:actor_action_actor_set_invalid")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in counts.values()
+    ):
+        failures.append(f"{label}:actor_action_count_invalid")
+    host_total = accounting.get("host_execution_total")
+    classified_host = sum(
+        int(counts.get(actor) or 0)
+        for actor in expected_actors - {"MODEL_DECISION"}
+    )
+    if (
+        isinstance(host_total, bool)
+        or not isinstance(host_total, int)
+        or host_total < 0
+        or classified_host != host_total
+    ):
+        failures.append(f"{label}:actor_action_host_conservation_mismatch")
+    if accounting.get("conservation_valid") is not True:
+        failures.append(f"{label}:actor_action_conservation_invalid")
+    receipt_host_total = (receipt.get("host_execution") or {}).get(
+        "actual_environment_execs"
+    )
+    if isinstance(receipt_host_total, int) and receipt_host_total != host_total:
+        failures.append(f"{label}:actor_action_receipt_host_mismatch")
+    metrics = receipt.get("metrics") or {}
+    if metrics.get("effective_actions_schema") != "model-selected-tool-actions-v3":
+        failures.append(f"{label}:effective_actions_schema_invalid")
+    effective_actions = metrics.get("effective_actions")
+    if (
+        isinstance(effective_actions, bool)
+        or not isinstance(effective_actions, int)
+        or effective_actions != int(counts.get("TOOL_ACTION") or 0)
+    ):
+        failures.append(f"{label}:effective_actions_actor_mismatch")
+    return ReleaseGateCheck(
+        "actor_action_conservation",
+        not failures,
+        tuple(failures),
+        {"task": label, "host_execution_total": host_total, "counts": counts},
+    )
+
+
+def _runtime_lifecycle(receipt: dict[str, Any], label: str) -> ReleaseGateCheck:
+    lifecycle = receipt.get("runtime_lifecycle") or {}
+    failures: list[str] = []
+    phases = lifecycle.get("phases") or []
+    observed_phases = [str(row.get("phase") or "") for row in phases]
+    if lifecycle.get("schema") != "gt.runtime_lifecycle.v1":
+        failures.append(f"{label}:runtime_lifecycle_missing")
+    if lifecycle.get("model_agnostic") is not True:
+        failures.append(f"{label}:runtime_lifecycle_model_specific")
+    if observed_phases != ["SNAPSHOT", "SUBSTRATE", "SOLVER", "FINALIZATION"]:
+        failures.append(f"{label}:runtime_lifecycle_phase_order_invalid")
+    prepared = int(lifecycle.get("prepared_calls") or 0)
+    dispatched = int(lifecycle.get("dispatched_calls") or 0)
+    not_sent = int(lifecycle.get("not_sent_calls") or 0)
+    received = int(lifecycle.get("received_responses") or 0)
+    response_errors = int(lifecycle.get("response_errors") or 0)
+    calls = lifecycle.get("calls") or []
+    if prepared != len(calls) or prepared != dispatched + not_sent:
+        failures.append(f"{label}:runtime_lifecycle_call_conservation_mismatch")
+    if received + response_errors > dispatched:
+        failures.append(f"{label}:runtime_lifecycle_response_conservation_mismatch")
+    if lifecycle.get("lifecycle_conservation_valid") is not True:
+        failures.append(f"{label}:runtime_lifecycle_conservation_invalid")
+    if lifecycle.get("action_conservation_valid") is not True:
+        failures.append(f"{label}:runtime_lifecycle_action_conservation_invalid")
+    if lifecycle.get("complete") is not True:
+        failures.append(f"{label}:runtime_lifecycle_incomplete")
+    return ReleaseGateCheck(
+        "runtime_lifecycle",
+        not failures,
+        tuple(failures),
+        {
+            "task": label,
+            "prepared_calls": prepared,
+            "dispatched_calls": dispatched,
+            "not_sent_calls": not_sent,
+        },
     )
 
 
@@ -1627,6 +1739,8 @@ def _audit_treatment_runtime_requirements(
         _contribution_budget(receipt, label),
         _provider_value_contract(receipt, label),
         _action_lifecycle(receipt, label),
+        _actor_action_conservation(receipt, label),
+        _runtime_lifecycle(receipt, label),
         _deterministic_task_controls(receipt, label),
         _preflight(receipt, label),
         _decision_sufficiency(receipt, label),

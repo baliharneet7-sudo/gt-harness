@@ -24,6 +24,7 @@ from gt_engine.central_controls import (
     FeatureEffect,
     consumer_spec_for,
 )
+from gt_engine.graph_inputs import is_graph_input
 from gt_engine.host_execution import HostExecCategory, HostExecutionRecorder
 from gt_engine.language_registry import (
     candidate_capabilities,
@@ -346,22 +347,16 @@ def graph_revision_receipt(
     snapshot: WorkspaceSnapshot,
     task_deliverables: Iterable[str] = (),
 ) -> SourceRevisionReceipt:
-    """Hash only structurally indexable source for repository intelligence."""
+    """Hash structural sources and dependency/build metadata used by the graph."""
 
-    deliverables = set(task_deliverables)
+    del task_deliverables  # compatibility argument; graph identity is path-policy driven
     digest = hashlib.sha256()
     source_paths: list[str] = []
     missing_digest_paths: list[str] = []
     for path, item in sorted(snapshot.entries.items()):
         if item.kind != "f":
             continue
-        classified = classify_change(
-            path,
-            kind=item.kind,
-            task_deliverables=deliverables,
-            content=item.content,
-        )
-        if not classified.graph_indexable:
+        if not is_graph_input(path, item.content):
             continue
         canonical_path = _workspace_relative_path(path)
         source_paths.append(canonical_path)
@@ -425,10 +420,12 @@ def _extensionless_candidate(path: str) -> bool:
     return bool(name and "." not in name and name not in {"", ".", ".."})
 
 
-def _external_manifest_command(paths: Iterable[str]) -> str:
-    quoted = " ".join(shlex.quote(path) for path in paths)
+def _external_manifest_command(path: str) -> str:
+    quoted = shlex.quote(path)
     return (
-        "find "
+        "test ! -e "
+        + quoted
+        + " || find "
         + quoted
         + " -xdev -maxdepth 0 -type f -printf '%y\\t%s\\t%T@\\t%C@\\t%p\\t%l\\n' 2>/dev/null"
     )
@@ -1506,37 +1503,41 @@ class WorkspaceSensor:
             sorted({path for raw_path in external_paths if (path := _safe_external_path(raw_path))})
         )
         if external:
-            try:
-                external_result = (
-                    await recorder.exec(
-                        environment,
-                        _external_manifest_command(external),
-                        category=HostExecCategory.WORKSPACE_MANIFEST,
-                        action_id=action_id,
-                        source_revision=source_revision,
-                        cwd=cwd,
-                        env={},
-                        timeout_sec=max(1, int(self.max_seconds + 0.999)),
+            for external_path in external:
+                try:
+                    command = _external_manifest_command(external_path)
+                    external_result = (
+                        await recorder.exec(
+                            environment,
+                            command,
+                            category=HostExecCategory.WORKSPACE_MANIFEST,
+                            action_id=action_id,
+                            source_revision=source_revision,
+                            cwd=cwd,
+                            env={},
+                            timeout_sec=max(1, int(self.max_seconds + 0.999)),
+                        )
+                        if recorder is not None
+                        else await environment.exec(
+                            command,
+                            cwd=cwd,
+                            env={},
+                            timeout_sec=max(1, int(self.max_seconds + 0.999)),
+                        )
                     )
-                    if recorder is not None
-                    else await environment.exec(
-                        _external_manifest_command(external),
-                        cwd=cwd,
-                        env={},
-                        timeout_sec=max(1, int(self.max_seconds + 0.999)),
+                except Exception as exc:
+                    return self._degraded(
+                        previous,
+                        f"external manifest command error: {type(exc).__name__}",
+                        time.monotonic() - started,
                     )
-                )
-            except Exception as exc:
-                return self._degraded(
-                    previous,
-                    f"external manifest command error: {type(exc).__name__}",
-                    time.monotonic() - started,
-                )
-            if external_result.return_code != 0:
-                return self._degraded(
-                    previous, "external manifest command failed", time.monotonic() - started
-                )
-            raw += external_result.stdout or ""
+                if external_result.return_code != 0:
+                    return self._degraded(
+                        previous,
+                        f"external manifest command failed: {external_path}",
+                        time.monotonic() - started,
+                    )
+                raw += external_result.stdout or ""
         if raw.count("\n") > self.max_entries:
             return self._degraded(previous, "workspace entry limit exceeded", elapsed)
         snapshot = parse_manifest(raw, elapsed_seconds=elapsed)

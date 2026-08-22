@@ -305,6 +305,8 @@ def build_provider_value_certificates(
                     "certified_structural",
                     "certified_composition",
                     "compiler_semantic",
+                    "lsp_semantic",
+                    "parser_structural",
                 }
             ):
                 value_class = ProviderValueClass.ACTION_LOCAL_RELATION

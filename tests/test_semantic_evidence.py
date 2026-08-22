@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from gt_engine.repository_intelligence import RepositoryEvidence
 from gt_engine.semantic_evidence import (
+    SemanticAuthority,
     SemanticEvidenceBridge,
     SemanticEvidenceStatus,
 )
@@ -78,6 +79,10 @@ def test_bridge_composes_definition_signature_caller_and_test_without_extra_quer
     )
 
     assert result.status is SemanticEvidenceStatus.DELIVER
+    authority_by_kind = {item.kind: item.semantic_authority for item in result.items}
+    assert authority_by_kind["definition"] is SemanticAuthority.PARSER_STRUCTURAL
+    assert authority_by_kind["caller"] is SemanticAuthority.LSP
+    assert authority_by_kind["test"] is SemanticAuthority.LSP
     assert "Definition src/service.py:10 save_user" in result.rendered_text
     assert "def save_user(user: User) -> None" in result.rendered_text
     assert "Caller src/api.py:22 handle_request calls save_user" in result.rendered_text
@@ -312,6 +317,39 @@ def test_bridge_rejects_property_without_certified_origin() -> None:
 
     assert result.status is SemanticEvidenceStatus.ABSTAIN
     assert "weak_semantic_property_rejected" in result.reason_codes
+
+
+def test_bridge_rejects_unverified_parser_property_even_when_tier_is_certified() -> None:
+    result = SemanticEvidenceBridge().compose(
+        _healthy(
+            definitions=(),
+            callers=(),
+            references=(),
+            semantic_properties=(
+                {
+                    "path": "src/service.py",
+                    "line": 10,
+                    "symbol": "save_user",
+                    "kind": "param",
+                    "value": "user: MaybeUser",
+                    "confidence": 1.0,
+                    "semantic_certainty": 1.0,
+                    "retrieval_relevance": 1.0,
+                    "trust_tier": "CERTIFIED",
+                    "evidence_method": "tree_sitter_exact",
+                    "verification_status": "unverified",
+                    "property_id": "property-1",
+                    "origin": "program",
+                    "resolution_outcome": "exact",
+                },
+            ),
+        ),
+        source_revision="source-1",
+        graph_revision="graph-1",
+    )
+
+    assert result.status is SemanticEvidenceStatus.ABSTAIN
+    assert "unverified_semantic_property_rejected" in result.reason_codes
 
 
 def test_bridge_rejects_ambiguous_definition_and_reference_origins() -> None:

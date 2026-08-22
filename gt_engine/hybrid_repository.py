@@ -70,6 +70,9 @@ def _merge_graph_projections(
             dict.fromkeys((*legacy.semantic_facts, *augmentation.semantic_facts))
         ),
         revision=augmentation.revision or legacy.revision,
+        query_errors=tuple(
+            dict.fromkeys((*legacy.query_errors, *augmentation.query_errors))
+        ),
     )
 
 
@@ -857,6 +860,8 @@ def build_query_hybrid_repository(
     *,
     candidate_limit: int = 128,
     limits: RepositoryBuildLimits = _DEFAULT_BUILD_LIMITS,
+    model_authored_paths: Iterable[str] = (),
+    task_deliverables: Iterable[str] = (),
 ) -> HybridRepository:
     """Materialize only task-conditioned graph/FTS candidates.
 
@@ -913,6 +918,8 @@ def build_query_hybrid_repository(
         limits=limits,
         include_paths=tuple(sorted(projection.files)),
         include_node_ids=ordered_node_ids,
+        model_authored_paths=model_authored_paths,
+        task_deliverables=task_deliverables,
     )
 
 

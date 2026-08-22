@@ -319,8 +319,10 @@ def verify() -> dict[str, object]:
         if not manifest_path.is_file():
             raise RuntimeError("graph certification manifest missing")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("graph_sha256") != receipt.graph_revision:
-            raise RuntimeError("graph certification revision mismatch")
+        if manifest.get("graph_sha256") != receipt.graph_db_sha256:
+            raise RuntimeError("graph publication hash mismatch")
+        if manifest.get("logical_graph_revision") != receipt.graph_revision:
+            raise RuntimeError("logical graph revision mismatch")
         if manifest.get("source_revision") != source_revision:
             raise RuntimeError("graph/source revision binding missing")
         connection = sqlite3.connect(f"file:{graph.resolve().as_posix()}?mode=ro", uri=True)

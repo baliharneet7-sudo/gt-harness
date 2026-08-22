@@ -23,6 +23,16 @@ class SemanticEvidenceStatus(StrEnum):
     ABSTAIN = "abstain"
 
 
+class SemanticAuthority(StrEnum):
+    """Producer authority for a semantic item, independent of relevance."""
+
+    COMPILER = "COMPILER"
+    LSP = "LSP"
+    PARSER_STRUCTURAL = "PARSER_STRUCTURAL"
+    HEURISTIC = "HEURISTIC"
+    TEXTUAL = "TEXTUAL"
+
+
 _HEALTHY_STATUS = "source_backed"
 _MIN_CERTAINTY = 0.95
 _MIN_RELEVANCE = 0.95
@@ -57,7 +67,7 @@ def _path(value: object) -> str:
 def _line(value: object) -> int:
     """Return a safe positive integer, or zero for malformed input."""
     try:
-        parsed = int(value or 0)
+        parsed = int(str(value or 0))
     except (TypeError, ValueError, OverflowError):
         return 0
     return parsed if parsed > 0 else 0
@@ -87,6 +97,23 @@ def _claim_id(
     return "gt-semantic-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
 
 
+def _semantic_authority(*values: object) -> SemanticAuthority:
+    material = " ".join(
+        str(value or "").lower()
+        for value in values
+        if value is not None
+    )
+    if "scip" in material or "compiler" in material:
+        return SemanticAuthority.COMPILER
+    if "lsp" in material:
+        return SemanticAuthority.LSP
+    if any(token in material for token in ("tree_sitter", "treesitter", "ast", "graph_node")):
+        return SemanticAuthority.PARSER_STRUCTURAL
+    if material.strip():
+        return SemanticAuthority.HEURISTIC
+    return SemanticAuthority.TEXTUAL
+
+
 @dataclass(frozen=True, slots=True)
 class SemanticEvidenceItem:
     kind: str
@@ -105,6 +132,7 @@ class SemanticEvidenceItem:
     semantic_certainty: float
     retrieval_relevance: float
     claim_id: str
+    semantic_authority: SemanticAuthority = SemanticAuthority.PARSER_STRUCTURAL
 
     @property
     def rendered(self) -> str:
@@ -249,6 +277,7 @@ class SemanticEvidenceBridge:
                         value=symbol,
                         signature=signature,
                     ),
+                    semantic_authority=_semantic_authority(*provenance),
                 )
             )
         return items
@@ -314,6 +343,10 @@ class SemanticEvidenceBridge:
                         value=target,
                         signature="",
                     ),
+                    semantic_authority=_semantic_authority(
+                        item.get("resolution_method"),
+                        item.get("evidence_type"),
+                    ),
                 )
             )
         return items
@@ -370,6 +403,7 @@ class SemanticEvidenceBridge:
                         value=str(item.get("target") or symbol),
                         signature="",
                     ),
+                    semantic_authority=_semantic_authority(*provenance),
                 )
             )
         return items
@@ -400,6 +434,7 @@ class SemanticEvidenceBridge:
                 and str(item.get("origin") or "") == "program"
                 and str(item.get("resolution_outcome") or "") == "exact"
                 and bool(str(item.get("evidence_method") or "").strip())
+                and str(item.get("verification_status") or "").lower() == "verified"
             )
             if kind not in allowed_kinds:
                 continue
@@ -407,7 +442,17 @@ class SemanticEvidenceBridge:
                 reasons.append("incomplete_semantic_property_rejected")
                 continue
             if not certified or not self._valid_score(certainty, relevance):
-                reasons.append("weak_semantic_property_rejected")
+                reasons.append(
+                    "unverified_semantic_property_rejected"
+                    if (
+                        str(item.get("trust_tier") or "").upper() == _CERTIFIED_TRUST
+                        and str(item.get("origin") or "") == "program"
+                        and str(item.get("resolution_outcome") or "") == "exact"
+                        and str(item.get("verification_status") or "").lower()
+                        != "verified"
+                    )
+                    else "weak_semantic_property_rejected"
+                )
                 continue
             items.append(
                 SemanticEvidenceItem(
@@ -438,6 +483,10 @@ class SemanticEvidenceBridge:
                         relation=kind,
                         value=value,
                         signature="",
+                    ),
+                    semantic_authority=_semantic_authority(
+                        item.get("evidence_method"),
+                        item.get("extractor"),
                     ),
                 )
             )
@@ -546,6 +595,7 @@ class SemanticEvidenceBridge:
 
 
 __all__ = [
+    "SemanticAuthority",
     "FINAL_SEMANTIC_EVIDENCE_PROFILE",
     "SemanticEvidenceBridge",
     "SemanticEvidenceItem",

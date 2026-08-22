@@ -63,6 +63,33 @@ def test_semantic_source_revision_ignores_filesystem_timestamps():
     assert source_revision_of(left) == source_revision_of(right)
 
 
+def test_graph_revision_includes_dependency_and_build_metadata() -> None:
+    left = _snapshot(
+        "workspace-a",
+        **{
+            "src/app.py": FileState(
+                "f", 12, "1.0", "1.0", "", digest="a" * 64, content="print('x')\n"
+            ),
+            "pyproject.toml": FileState(
+                "f", 20, "1.0", "1.0", "", digest="b" * 64, content="[project]\n"
+            ),
+        },
+    )
+    right = _snapshot(
+        "workspace-b",
+        **{
+            "src/app.py": left.entries["src/app.py"],
+            "pyproject.toml": FileState(
+                "f", 24, "2.0", "2.0", "", digest="c" * 64, content="[project]\nname='x'\n"
+            ),
+        },
+    )
+
+    assert graph_revision_receipt(left).complete is True
+    assert graph_revision_receipt(right).complete is True
+    assert graph_revision_receipt(left).revision != graph_revision_receipt(right).revision
+
+
 def test_semantic_source_revision_receipt_fails_closed_when_source_digest_is_missing():
     snapshot = _snapshot(
         "workspace",
@@ -1310,7 +1337,7 @@ async def test_sensor_captures_allowlisted_external_source_path():
         async def exec(self, command, **kwargs):
             if "find . -xdev" in command:
                 return Result("")
-            if command.startswith("find /etc/nginx/nginx.conf"):
+            if "find /etc/nginx/nginx.conf" in command:
                 return Result("f\t48\t2.0\t2.0\t/etc/nginx/nginx.conf\t\n")
             if command.startswith("sha256sum"):
                 return Result(("c" * 64) + "  /etc/nginx/nginx.conf\n")
@@ -1326,6 +1353,51 @@ async def test_sensor_captures_allowlisted_external_source_path():
 
     assert snapshot.healthy is True
     assert snapshot.entries["/etc/nginx/nginx.conf"].content == source
+
+
+@pytest.mark.asyncio
+async def test_sensor_probes_external_paths_independently_and_accepts_expected_absence():
+    class Result:
+        def __init__(self, stdout="", return_code=0):
+            self.stdout = stdout
+            self.return_code = return_code
+
+    class Environment:
+        def __init__(self):
+            self.external_commands = []
+
+        async def exec(self, command, **kwargs):
+            if "find . -xdev" in command:
+                return Result("")
+            if command.startswith("sha256sum"):
+                return Result(("c" * 64) + "  /etc/nginx/nginx.conf\n")
+            if command.startswith("python3 -c"):
+                return Result("{}\n")
+            if "base64" in command:
+                return Result("")
+            if "/etc/nginx/nginx.conf" in command:
+                self.external_commands.append(command)
+                return Result("f\t48\t2.0\t2.0\t/etc/nginx/nginx.conf\t\n")
+            if "/etc/nginx/conf.d/optional.conf" in command:
+                self.external_commands.append(command)
+                return Result("")
+            raise AssertionError(command)
+
+    environment = Environment()
+    snapshot = await WorkspaceSensor().scan(
+        environment,
+        cwd="/app",
+        external_paths=(
+            "/etc/nginx/nginx.conf",
+            "/etc/nginx/conf.d/optional.conf",
+        ),
+    )
+
+    assert snapshot.healthy is True
+    assert "/etc/nginx/nginx.conf" in snapshot.entries
+    assert "/etc/nginx/conf.d/optional.conf" not in snapshot.entries
+    assert len(environment.external_commands) == 2
+    assert all("test ! -e" in command for command in environment.external_commands)
 
 
 @pytest.mark.asyncio

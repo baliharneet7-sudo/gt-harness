@@ -212,6 +212,14 @@ def test_project_returns_directed_execution_view_and_diff_impact_bundle() -> Non
     metadata = result.contributions[0].claim_metadata
     assert metadata
     assert {row["origin"] for row in metadata} == {"preexisting_repository"}
+    semantic_metadata = [
+        row
+        for contribution in result.contributions
+        if contribution.surface == "repository_semantic"
+        for row in contribution.claim_metadata
+    ]
+    assert semantic_metadata
+    assert {row["authority"] for row in semantic_metadata} == {"parser_structural"}
     assert result.contributions[0].unsafe_provider_origins == ()
 
 
@@ -458,8 +466,8 @@ def test_project_preserves_authority_when_packing_semantic_and_process_surfaces(
         "repository_process",
     }
     assert by_surface["repository_context"].priority == 4
-    assert by_surface["repository_semantic"].priority == 6
-    assert by_surface["repository_process"].priority == 18
+    assert by_surface["repository_process"].priority == 6
+    assert by_surface["repository_semantic"].priority == 18
     assert by_surface["repository_context"].critical
     assert "Observed diagnostic" in by_surface["repository_context"].payload
     assert "declared check" in by_surface["repository_context"].payload

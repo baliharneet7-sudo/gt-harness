@@ -12,6 +12,7 @@ from typing import Any
 
 from gt_engine.central_runtime import is_check_command, is_submit_command, normalize_command
 from gt_engine.delivery_audit import audit_provider_deliveries
+from gt_engine.runtime_safety import measure_rate, measure_ratio
 
 PRIMARY_RESOURCES = (
     "total_tokens",
@@ -717,6 +718,7 @@ def extract_trajectory(
     uncensored_resolved = (
         None if official_solved is None else official_solved and not bool(censored_reason)
     )
+    prompt_cache_hit_measurement = measure_rate(cache_tokens, input_tokens)
     result: dict[str, Any] = {
         "task": task or path.name.removesuffix("_trajectory.json"),
         "reward": reward,
@@ -739,7 +741,8 @@ def extract_trajectory(
         "cache_tokens": cache_tokens,
         "uncached_input_tokens": cache_miss_tokens,
         "total_tokens": total_tokens,
-        "prompt_cache_hit_rate": round(cache_tokens / input_tokens, 6) if input_tokens else 0.0,
+        "prompt_cache_hit_rate": prompt_cache_hit_measurement.value,
+        "prompt_cache_hit_rate_measurement": prompt_cache_hit_measurement.as_dict(),
         "provider_cost_usd": provider_cost,
         "normalized_cost_usd": normalized_cost,
         "normalized_pricing": "deepseek-v4-flash-frozen-2026",
@@ -762,11 +765,9 @@ def extract_trajectory(
         result.get("api_calls", 0),
         int(((payload.get("info") or {}).get("model_stats") or {}).get("api_calls") or 0),
     )
-    result["actions_per_api_call"] = (
-        round(result.get("actions", 0) / result["api_calls"], 6)
-        if result["api_calls"]
-        else 0.0
-    )
+    actions_per_call = measure_ratio(result.get("actions", 0), result["api_calls"])
+    result["actions_per_api_call"] = actions_per_call.value
+    result["actions_per_api_call_measurement"] = actions_per_call.as_dict()
     result["wasted_action_proxy"] = (
         result.get("failed_actions", 0)
         + result.get("repeated_commands", 0)

@@ -32,6 +32,11 @@ on:
         type: string
         default: "600"
 
+permissions:
+  contents: read
+  actions: read
+  packages: read
+
 jobs:
   resolve:
     runs-on: ubuntu-latest
@@ -309,6 +314,16 @@ jobs:
               f.write("\n".join(summary) + "\n")
           print("\n".join(summary))
           EOF
+
+  task_progress:
+    name: Task progress
+    needs: [plan]
+    if: always()
+    uses: ./.github/workflows/task_progress.yml
+    with:
+      expected_tasks_json: ${{ needs.plan.outputs.tasks }}
+      task_job_regex: '^run \(.+\)$'
+    secrets: inherit
 
   run:
     needs: [resolve, plan]

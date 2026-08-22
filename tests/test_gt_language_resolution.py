@@ -9,6 +9,7 @@ from gt_engine.indexer import (
     IndexBuildReceipt,
     IndexBuildStatus,
     _graph_parser_failures,
+    _graph_schema_receipt,
     inspect_source_coverage,
 )
 from gt_engine.language_registry import (
@@ -191,3 +192,36 @@ def test_coverage_reads_content_only_when_language_identity_requires_it(
 
     assert coverage.status is IndexBuildStatus.AVAILABLE
     assert set(observed_reads) == {"proof.v", "runner"}
+
+
+def test_source_coverage_never_calls_a_truncated_scan_complete(tmp_path, monkeypatch) -> None:
+    (tmp_path / "notes.txt").write_text("not source\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
+    monkeypatch.setattr(indexer_module, "_MAX_SCAN_FILES", 1)
+    monkeypatch.setattr(
+        indexer_module.os,
+        "walk",
+        lambda _root: iter([(str(tmp_path), [], ["notes.txt", "main.py"])]),
+    )
+
+    coverage = inspect_source_coverage(tmp_path)
+
+    assert coverage.status is IndexBuildStatus.AVAILABLE
+    assert coverage.source_files == 1
+    assert coverage.indexable_files == 1
+
+
+def test_graph_schema_rejects_nodes_only_database(tmp_path) -> None:
+    graph = tmp_path / "graph.db"
+    connection = sqlite3.connect(graph)
+    connection.execute("CREATE TABLE nodes(id INTEGER PRIMARY KEY)")
+    connection.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name,file_path)")
+    connection.commit()
+    connection.close()
+
+    valid, _nodes, _edges, _fts, detail = _graph_schema_receipt(graph)
+
+    assert valid is False
+    assert "missing_tables:" in detail
+    assert "edges" in detail
+    assert "project_meta" in detail

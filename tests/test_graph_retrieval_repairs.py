@@ -103,6 +103,34 @@ def test_projection_preserves_fts_rank_instead_of_sorting_by_node_id(tmp_path: P
     assert fts_ids[:2] == [99, 1]
 
 
+def test_projection_reports_query_errors_instead_of_returning_healthy_empty(
+    tmp_path: Path,
+) -> None:
+    graph = tmp_path / "graph.db"
+    connection = _base_graph(graph)
+    try:
+        connection.execute("DROP TABLE nodes_fts")
+        connection.execute(
+            "CREATE TABLE nodes_fts(rowid INTEGER PRIMARY KEY,name TEXT,file_path TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO nodes VALUES (1,'function','needle','needle','src/service.py',"
+            "5,9,'def needle()','python',0)"
+        )
+        # This impostor surface is queryable by COUNT(*) but cannot execute
+        # MATCH/BM25. Query health must therefore fail explicitly.
+        connection.execute(
+            "INSERT INTO nodes_fts(rowid,name,file_path) VALUES (1,'needle','src/service.py')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    projection = build_graph_projection(str(graph), _contract(), limit=10)
+
+    assert any(error.startswith("nodes_fts:") for error in projection.query_errors)
+
+
 def test_identity_only_file_node_never_becomes_a_semantic_symbol(tmp_path: Path) -> None:
     graph = tmp_path / "graph.db"
     connection = _base_graph(graph)

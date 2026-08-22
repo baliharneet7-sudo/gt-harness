@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from gt_engine.task_contract import TaskContract, TaskResourceRole, significant_tokens
 
@@ -28,20 +28,37 @@ GRAPH_SURFACES = (
 )
 
 
-def graph_revision(graph_db: str) -> str:
-    """Return a bounded revision token for the on-disk graph snapshot.
+class GraphSurfaceReceipt(TypedDict):
+    available: bool
+    healthy: bool
+    surfaces: dict[str, int]
+    errors: list[str]
 
-    The indexer replaces/updates ``graph.db`` as a unit.  Size plus nanosecond
-    mtime is sufficient to distinguish snapshots inside one task without
-    reading and hashing a potentially large SQLite database.  The path is
-    included so a wake to a different database cannot alias the old revision.
-    """
-    try:
-        stat = os.stat(graph_db)
-    except (OSError, TypeError, ValueError):
+
+def graph_revision(graph_db: str) -> str:
+    """Return the graph's logical, content-derived post revision."""
+
+    if not graph_db or not os.path.isfile(graph_db):
         return ""
-    material = f"{os.path.abspath(graph_db)}\0{stat.st_size}\0{stat.st_mtime_ns}"
-    return hashlib.sha256(material.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+    try:
+        connection = sqlite3.connect(
+            f"file:{Path(graph_db).resolve().as_posix()}?mode=ro", uri=True
+        )
+        try:
+            row = connection.execute(
+                "SELECT value FROM project_meta WHERE key='post_revision'"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return ""
+    revision = str(row[0] if row else "").strip().lower()
+    return (
+        revision
+        if len(revision) == 64
+        and all(character in "0123456789abcdef" for character in revision)
+        else ""
+    )
 
 
 @dataclass(frozen=True)
@@ -67,6 +84,7 @@ class GraphProjection:
     surface_hits: tuple[tuple[str, int], ...]
     semantic_facts: tuple[GraphSemanticFact, ...] = ()
     revision: str = ""
+    query_errors: tuple[str, ...] = ()
 
 
 def _connect(graph_db: str) -> sqlite3.Connection | None:
@@ -95,11 +113,17 @@ def _columns(con: sqlite3.Connection, table: str) -> set[str]:
         return set()
 
 
-def graph_surface_receipt(graph_db: str) -> dict[str, object]:
+def graph_surface_receipt(graph_db: str) -> GraphSurfaceReceipt:
     counts = {name: 0 for name in GRAPH_SURFACES}
     con = _connect(graph_db)
     if con is None:
-        return {"available": False, "surfaces": counts}
+        return {
+            "available": False,
+            "healthy": False,
+            "surfaces": counts,
+            "errors": ["graph_connection_unavailable"],
+        }
+    errors: list[str] = []
     try:
         present = _tables(con)
         for name in GRAPH_SURFACES:
@@ -107,9 +131,15 @@ def graph_surface_receipt(graph_db: str) -> dict[str, object]:
                 continue
             try:
                 counts[name] = int(con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0])
-            except sqlite3.Error:
+            except sqlite3.Error as exc:
                 counts[name] = 0
-        return {"available": True, "surfaces": counts}
+                errors.append(f"{name}:{type(exc).__name__}")
+        return {
+            "available": True,
+            "healthy": not errors,
+            "surfaces": counts,
+            "errors": errors,
+        }
     finally:
         con.close()
 
@@ -209,6 +239,7 @@ def build_graph_projection(
     node_ids: set[int] = set()
     hits = {name: 0 for name in GRAPH_SURFACES}
     semantic_facts: list[GraphSemanticFact] = []
+    query_errors: list[str] = []
     revision = graph_revision(graph_db)
     try:
         tables = _tables(con)
@@ -281,8 +312,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"nodes:{type(exc).__name__}")
         query = _fts_query(contract, query_terms=query_terms)
         if query and "nodes_fts" in tables:
             try:
@@ -320,8 +351,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"nodes_fts:{type(exc).__name__}")
         if query and {"symbol_content_fts", "nodes"} <= tables:
             try:
                 rows = con.execute(
@@ -356,8 +387,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"symbol_content_fts:{type(exc).__name__}")
         if query and {"content_passages_fts", "content_passages", "nodes"} <= tables:
             try:
                 rows = con.execute(
@@ -392,8 +423,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"content_passages_fts:{type(exc).__name__}")
 
         # Preserve the retrieval order that produced the seed.  Sorting node
         # identifiers here silently replaced FTS/BM25 relevance order with an
@@ -467,8 +498,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"edges:{type(exc).__name__}")
         if seed_ids and {"closure", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
@@ -516,8 +547,8 @@ def build_graph_projection(
                             retrieval_relevance=0.0,
                         )
                     )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"closure:{type(exc).__name__}")
         if seed_ids and "properties" in tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
@@ -549,8 +580,8 @@ def build_graph_projection(
                     )
                     for node_id, path, symbol, kind, value, line, confidence in rows
                 )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"properties:{type(exc).__name__}")
         if seed_ids and "assertions" in tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
@@ -590,8 +621,8 @@ def build_graph_projection(
                 )
                 files.update(str(row[1]).replace("\\", "/") for row in rows)
                 node_ids.update(int(row[0]) for row in rows)
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"assertions:{type(exc).__name__}")
         if seed_ids and {"edge_metadata", "edges", "nodes"} <= tables:
             placeholders = ",".join("?" for _ in seed_ids)
             try:
@@ -621,8 +652,8 @@ def build_graph_projection(
                     )
                     for node_id, path, symbol, kind, value, line, confidence in rows
                 )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"edge_metadata:{type(exc).__name__}")
         if files and "file_hashes" in tables:
             base_files = sorted(files)[:limit]
             placeholders = ",".join("?" for _ in base_files)
@@ -645,8 +676,8 @@ def build_graph_projection(
                     )
                     for path, content_hash, language, indexed_at in rows
                 )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"file_hashes:{type(exc).__name__}")
         if "project_meta" in tables:
             try:
                 rows = con.execute(
@@ -666,8 +697,8 @@ def build_graph_projection(
                     )
                     for key, value in rows
                 )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"project_meta:{type(exc).__name__}")
         if files and "cochanges" in tables:
             base_files = sorted(files)[:limit]
             placeholders = ",".join("?" for _ in base_files)
@@ -706,8 +737,8 @@ def build_graph_projection(
                                 retrieval_relevance=0.0,
                             )
                         )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"cochanges:{type(exc).__name__}")
         if files and "cochange_sets" in tables:
             base_files = sorted(files)[:limit]
             placeholders = ",".join("?" for _ in base_files)
@@ -747,8 +778,8 @@ def build_graph_projection(
                                 retrieval_relevance=0.0,
                             )
                         )
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                query_errors.append(f"cochange_sets:{type(exc).__name__}")
         retrieval_surfaces = {
             "nodes": 4,
             "nodes_fts": 3,
@@ -782,6 +813,7 @@ def build_graph_projection(
             surface_hits=tuple(sorted((k, v) for k, v in hits.items() if v)),
             semantic_facts=tuple(retained),
             revision=revision,
+            query_errors=tuple(dict.fromkeys(query_errors)),
         )
     finally:
         con.close()

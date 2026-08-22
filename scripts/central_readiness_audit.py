@@ -429,8 +429,8 @@ def audit() -> dict[str, bool]:
         ),
         "persistent_state_is_graph_first_and_repeated": (
             0
-            <= run_source.find("build_hybrid_repository,")
-            < run_source.find("initial_retrieval_state = RetrievalState(")
+            <= run_source.find("initial_retrieval_state = RetrievalState(")
+            < run_source.find("build_query_hybrid_repository,")
             < run_source.find("preemptive_retriever = HybridRetriever(")
             < run_source.find("preemptive_retriever.retrieve,")
             < run_source.find("build_bootstrap_catalog(")

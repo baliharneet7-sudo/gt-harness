@@ -20,8 +20,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from gt_engine.graph_context import build_graph_projection
+from gt_engine.graph_context import build_graph_projection, graph_surface_receipt
 from gt_engine.graph_evidence import build_evidence_need, rank_graph_evidence
+from gt_engine.graph_identity import stable_symbol_id
+from gt_engine.graph_inputs import is_graph_input, is_graph_metadata
 from gt_engine.indexer import (
     IndexBuildReceipt,
     IndexBuildStatus,
@@ -235,6 +237,18 @@ class RepositorySession:
             return False
         return is_indexable_source(relative_path, prefix)
 
+    def mirrored_path_is_graph_input(self, relative_path: str) -> bool:
+        """Resolve prior graph participation from the exact session mirror."""
+
+        target = self._target(relative_path)
+        if target is None or not target.is_file():
+            return False
+        try:
+            prefix = target.read_bytes()[:65_536]
+        except OSError:
+            return False
+        return is_graph_input(relative_path, prefix)
+
     def invalidate(self, *, source_revision: str, status: str) -> None:
         self.source_revision = source_revision
         self.fresh = False
@@ -288,7 +302,7 @@ class RepositorySession:
                         prior_prefix = target.read_bytes()[:65_536]
                 except OSError:
                     prior_prefix = b""
-                if is_indexable_source(path, prior_prefix) or not os.path.splitext(
+                if is_graph_input(path, prior_prefix) or not os.path.splitext(
                     str(path).replace("\\", "/")
                 )[1]:
                     self._requires_full_rebuild = True
@@ -309,6 +323,11 @@ class RepositorySession:
             is_indexable = is_indexable_source(path, content[:65_536])
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            if is_graph_metadata(path):
+                # Dependency and build metadata can alter package/import
+                # resolution throughout the repository. A single-file parse
+                # cannot prove semantic equivalence, so rebuild the graph.
+                self._requires_full_rebuild = True
             # The indexer also resolves extensionless/content-signature files
             # from bounded content.  The session must use the same evidence
             # when deciding whether to enqueue an incremental refresh.
@@ -787,7 +806,15 @@ def _graph_structural_roles(
                 if str(row[1]).lower() == "file":
                     continue
                 node_id = int(row[0])
+                symbol_id = stable_symbol_id(
+                    language=str(row[7]),
+                    file_path=str(row[4]),
+                    qualified_name=str(row[3] or row[2]),
+                    kind=str(row[1]),
+                    signature=str(row[6]),
+                )
                 definition = {
+                    "symbol_id": symbol_id,
                     "path": str(row[4]),
                     "line": int(row[5]),
                     "symbol": str(row[2]),
@@ -843,6 +870,7 @@ def _graph_structural_roles(
                         ).fetchall()
                         for prop in property_rows:
                             property_row = {
+                                "symbol_id": symbol_id,
                                 "path": str(row[4]),
                                 "symbol": str(row[2]),
                                 "line": int(prop[2] or row[5]),
@@ -1022,6 +1050,30 @@ def inspect_repository(
                 index=index_receipt,
                 substrate_status=RepositorySubstrateStatus.INCOMPLETE.value,
             )
+        surface_receipt = graph_surface_receipt(graph_db)
+        if not bool(surface_receipt.get("healthy")):
+            errors = tuple(str(item) for item in surface_receipt.get("errors") or ())
+            return RepositoryEvidence(
+                graph_revision=index_receipt.graph_revision,
+                project_checks=checks,
+                status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+                index=replace(
+                    index_receipt,
+                    status=IndexBuildStatus.BUILD_FAILED,
+                    graph_db=None,
+                    error_type=(
+                        "graph_query_error:" + ",".join(errors)[:300]
+                        if errors
+                        else "graph_query_unavailable"
+                    ),
+                ),
+                source_revision=source_revision,
+                index_current=False,
+                intelligence_valid=False,
+                substrate_ready=False,
+                substrate_status=RepositorySubstrateStatus.INVALID.value,
+                retrieval_disposition=RetrievalDisposition.NOT_EVALUATED.value,
+            )
         contract = extract_task_contract(instruction)
         if not contract.obligations and instruction.strip():
             # The strict contract extractor intentionally ignores prose that
@@ -1046,6 +1098,45 @@ def inspect_repository(
             limit=max(8, limit * 2),
             active_paths=active_paths,
         )
+        if projection.query_errors:
+            return RepositoryEvidence(
+                graph_revision=index_receipt.graph_revision,
+                project_checks=checks,
+                status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+                index=replace(
+                    index_receipt,
+                    status=IndexBuildStatus.BUILD_FAILED,
+                    graph_db=None,
+                    error_type=(
+                        "graph_projection_error:"
+                        + ",".join(projection.query_errors)[:300]
+                    ),
+                ),
+                source_revision=source_revision,
+                index_current=False,
+                intelligence_valid=False,
+                substrate_ready=False,
+                substrate_status=RepositorySubstrateStatus.INVALID.value,
+                retrieval_disposition=RetrievalDisposition.NOT_EVALUATED.value,
+            )
+        if not projection.revision:
+            return RepositoryEvidence(
+                graph_revision=index_receipt.graph_revision,
+                project_checks=checks,
+                status=RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value,
+                index=replace(
+                    index_receipt,
+                    status=IndexBuildStatus.BUILD_FAILED,
+                    graph_db=None,
+                    error_type="graph_query_unavailable",
+                ),
+                source_revision=source_revision,
+                index_current=False,
+                intelligence_valid=False,
+                substrate_ready=False,
+                substrate_status=RepositorySubstrateStatus.INVALID.value,
+                retrieval_disposition=RetrievalDisposition.NOT_EVALUATED.value,
+            )
         need = build_evidence_need(
             contract,
             projection,

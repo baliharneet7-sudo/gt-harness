@@ -17,9 +17,11 @@ import pytest
 
 import gt_engine.indexer as indexer
 from gt_engine.indexer import (
+    IndexBuildReceipt,
     IndexBuildStatus,
     _certify_published_graph,
     _graph_publication_lock,
+    _graph_schema_receipt,
     ensure_index_with_receipt,
     refresh_index_files,
 )
@@ -201,6 +203,33 @@ def test_published_graph_certification_rejects_hash_matching_invalid_sqlite(tmp_
 
     assert certified is False
     assert error.startswith("graph_schema_invalid:")
+
+
+def test_graph_schema_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "def value():\n    return 1\n", encoding="utf-8"
+    )
+    receipt = ensure_index_with_receipt(
+        tmp_path,
+        state_dir=tmp_path / "state",
+        source_revision="s1",
+    )
+    assert receipt.graph_db
+    connection = sqlite3.connect(receipt.graph_db)
+    try:
+        connection.execute(
+            "UPDATE project_meta SET value='v999-unknown' WHERE key='schema_version'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    valid, _nodes, _edges, _fts, detail = _graph_schema_receipt(
+        Path(receipt.graph_db)
+    )
+
+    assert valid is False
+    assert detail == "unsupported_schema_version:v999-unknown"
 
 
 def test_graph_pair_publication_restores_previous_pair_on_manifest_failure(
@@ -1013,6 +1042,66 @@ def test_repository_session_rejects_unexplained_graph_revision_advance(tmp_path:
     ) is False
     assert session.fresh is False
     assert session.evidence.status == "unexplained_graph_revision"
+
+
+def test_repository_session_rebuilds_resolution_after_metadata_change(
+    tmp_path: Path,
+) -> None:
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    (mirror / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (mirror / "pyproject.toml").write_text("[project]\nname='one'\n", encoding="utf-8")
+    session = RepositorySession(
+        root=mirror,
+        state_dir=tmp_path / "state",
+        instruction="Change x.",
+    )
+    initial = session.refresh(source_revision="s1")
+    assert initial.substrate_ready is True
+    transition = SimpleNamespace(
+        changed_paths=("pyproject.toml",),
+        deleted=(),
+        before_contents={"pyproject.toml": "[project]\nname='one'\n"},
+        after_contents={"pyproject.toml": "[project]\nname='two'\n"},
+        sensor_healthy=True,
+    )
+
+    advanced, refreshed = session.apply_transition_and_refresh(
+        transition,
+        source_revision="s2",
+        changed_paths=("pyproject.toml",),
+    )
+
+    assert advanced is True
+    assert refreshed.substrate_ready is True
+    assert session.refresh_log[-1]["mode"] == "full"
+
+
+def test_repository_query_failure_is_not_reported_as_healthy_empty(tmp_path: Path) -> None:
+    receipt = IndexBuildReceipt(
+        status=IndexBuildStatus.AVAILABLE,
+        graph_db=str(tmp_path / "missing-graph.db"),
+        graph_revision="graph-1",
+        source_revision="source-1",
+        schema_valid=True,
+        node_count=1,
+        source_files=1,
+        indexable_files=1,
+        parser_failures=0,
+    )
+
+    evidence = inspect_repository(
+        tmp_path,
+        "Change app.py.",
+        index_receipt=receipt,
+        source_revision="source-1",
+    )
+
+    assert evidence.status == RepositoryIntelligenceStatus.INDEX_UNAVAILABLE.value
+    assert evidence.substrate_status == RepositorySubstrateStatus.INVALID.value
+    assert evidence.substrate_ready is False
+    assert evidence.index is not None
+    assert str(evidence.index.error_type).startswith("graph_query_")
 
 
 def test_current_graph_with_empty_retrieval_is_healthy_substrate(tmp_path: Path):

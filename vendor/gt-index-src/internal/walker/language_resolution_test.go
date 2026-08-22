@@ -45,3 +45,26 @@ func TestWalkResolvesContentBasenamesAndShebangsWithoutGuessing(t *testing.T) {
 		}
 	}
 }
+
+func TestWalkZeroLimitIsUnlimitedAndPositiveLimitReportsEveryEligibleSkip(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.py", "b.py", "c.py"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("value = 1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unlimited, err := WalkWithMeta(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unlimited.Files) != 3 || unlimited.FilesSkipped != 0 {
+		t.Fatalf("unlimited walk = %d indexed/%d skipped, want 3/0", len(unlimited.Files), unlimited.FilesSkipped)
+	}
+	limited, err := WalkWithMeta(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited.Files) != 1 || limited.FilesSkipped != 2 {
+		t.Fatalf("limited walk = %d indexed/%d skipped, want 1/2", len(limited.Files), limited.FilesSkipped)
+	}
+}

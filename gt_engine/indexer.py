@@ -174,13 +174,11 @@ def inspect_source_coverage(root: str | os.PathLike[str]) -> SourceCoverage:
     ambiguous_paths: set[str] = set()
     languages: dict[str, int] = {}
     resolution_reasons: dict[str, int] = {}
-    seen = 0
     try:
         root_text = os.fspath(root)
         for dirpath, dirnames, filenames in os.walk(root_text):
             dirnames[:] = [name for name in dirnames if name not in _SKIP_DIRS]
             for filename in filenames:
-                seen += 1
                 absolute = os.path.join(dirpath, filename)
                 relative = os.path.relpath(absolute, root_text).replace("\\", "/")
                 resolution, candidates = _resolve_file_language(absolute)
@@ -210,10 +208,6 @@ def inspect_source_coverage(root: str | os.PathLike[str]) -> SourceCoverage:
                     suffix = os.path.splitext(filename)[1].lower()
                     unsupported.add(suffix or "<no-extension>")
                     ambiguous_paths.add(relative)
-                if seen >= _MAX_SCAN_FILES:
-                    break
-            if seen >= _MAX_SCAN_FILES:
-                break
     except OSError:
         return SourceCoverage(IndexBuildStatus.BUILD_FAILED, 0, 0)
     if source_files == 0:
@@ -348,6 +342,87 @@ def _durable_replace(source: Path, destination: Path) -> None:
     _fsync_directory(destination.parent)
 
 
+_REQUIRED_GRAPH_TABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "nodes": frozenset(
+        {
+            "id",
+            "label",
+            "name",
+            "qualified_name",
+            "file_path",
+            "start_line",
+            "end_line",
+            "signature",
+            "return_type",
+            "is_exported",
+            "is_test",
+            "language",
+            "parent_id",
+            "repo_id",
+        }
+    ),
+    "edges": frozenset(
+        {
+            "id",
+            "source_id",
+            "target_id",
+            "type",
+            "source_line",
+            "source_file",
+            "resolution_method",
+            "confidence",
+            "metadata",
+            "trust_tier",
+            "candidate_count",
+            "evidence_type",
+            "verification_status",
+            "repo_id",
+        }
+    ),
+    "properties": frozenset(
+        {
+            "id",
+            "node_id",
+            "kind",
+            "value",
+            "line",
+            "confidence",
+            "property_id",
+            "start_line",
+            "end_line",
+            "extractor",
+            "evidence_method",
+            "trust_tier",
+            "verification_status",
+            "source_revision",
+            "repo_id",
+        }
+    ),
+    "assertions": frozenset(
+        {"id", "test_node_id", "target_node_id", "resolution_score", "kind", "expression"}
+    ),
+    "repos": frozenset({"id", "root", "commit"}),
+    "file_hashes": frozenset({"file_path", "content_hash", "language", "indexed_at"}),
+    "project_meta": frozenset({"key", "value"}),
+    "cochanges": frozenset({"file_a", "file_b", "count"}),
+    "cochange_sets": frozenset({"commit_hash", "file_path"}),
+    "closure": frozenset({"source_id", "target_id", "depth", "min_confidence", "repo_id"}),
+    "edge_metadata": frozenset({"edge_id", "key", "value", "schema_version"}),
+    "content_passages": frozenset(
+        {"passage_id", "node_id", "start_line", "end_line", "content", "content_hash", "repo_id"}
+    ),
+}
+_REQUIRED_GRAPH_FTS_TABLES = frozenset(
+    {"nodes_fts", "symbol_content_fts", "content_passages_fts"}
+)
+_REQUIRED_GRAPH_META_KEYS = frozenset(
+    {"schema_version", "file_count", "parse_failures", "post_revision"}
+)
+_SUPPORTED_GRAPH_SCHEMA_VERSIONS = frozenset(
+    {"v15.2-trust-tier", "v16-multirepo"}
+)
+
+
 def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], str]:
     try:
         connection = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
@@ -359,8 +434,52 @@ def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], 
                     "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
                 )
             }
-            required = {"nodes", "nodes_fts"}
-            schema_valid = quick_check.lower() == "ok" and required <= tables
+            required = set(_REQUIRED_GRAPH_TABLE_COLUMNS) | set(
+                _REQUIRED_GRAPH_FTS_TABLES
+            )
+            missing_tables = required - tables
+            missing_columns: list[str] = []
+            if not missing_tables:
+                for table, expected_columns in _REQUIRED_GRAPH_TABLE_COLUMNS.items():
+                    actual_columns = {
+                        str(row[1])
+                        for row in connection.execute(f'PRAGMA table_info("{table}")')
+                    }
+                    for column in sorted(expected_columns - actual_columns):
+                        missing_columns.append(f"{table}.{column}")
+            metadata_keys = (
+                {
+                    str(row[0])
+                    for row in connection.execute("SELECT key FROM project_meta")
+                }
+                if "project_meta" in tables
+                else set()
+            )
+            missing_meta = _REQUIRED_GRAPH_META_KEYS - metadata_keys
+            schema_version_row = (
+                connection.execute(
+                    "SELECT value FROM project_meta WHERE key='schema_version'"
+                ).fetchone()
+                if "schema_version" in metadata_keys
+                else None
+            )
+            schema_version = str(schema_version_row[0] if schema_version_row else "")
+            unsupported_schema_version = (
+                schema_version not in _SUPPORTED_GRAPH_SCHEMA_VERSIONS
+            )
+            foreign_key_violations = (
+                list(connection.execute("PRAGMA foreign_key_check"))
+                if not missing_tables
+                else []
+            )
+            schema_valid = bool(
+                quick_check.lower() == "ok"
+                and not missing_tables
+                and not missing_columns
+                and not missing_meta
+                and not unsupported_schema_version
+                and not foreign_key_violations
+            )
             node_count = (
                 int(connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
                 if "nodes" in tables
@@ -373,8 +492,16 @@ def _graph_schema_receipt(path: Path) -> tuple[bool, int, int, tuple[str, ...], 
             )
             fts_tables = tuple(sorted(name for name in tables if name.endswith("_fts")))
             detail = quick_check
-            if quick_check.lower() == "ok" and not required <= tables:
-                detail = "missing_tables:" + ",".join(sorted(required - tables))
+            if quick_check.lower() == "ok" and missing_tables:
+                detail = "missing_tables:" + ",".join(sorted(missing_tables))
+            elif quick_check.lower() == "ok" and missing_columns:
+                detail = "missing_columns:" + ",".join(missing_columns)
+            elif quick_check.lower() == "ok" and missing_meta:
+                detail = "missing_metadata:" + ",".join(sorted(missing_meta))
+            elif quick_check.lower() == "ok" and unsupported_schema_version:
+                detail = "unsupported_schema_version:" + schema_version
+            elif quick_check.lower() == "ok" and foreign_key_violations:
+                detail = f"foreign_key_violations:{len(foreign_key_violations)}"
             return schema_valid, node_count, edge_count, fts_tables, detail
         finally:
             connection.close()
@@ -394,6 +521,28 @@ def _graph_parser_failures(path: Path) -> int:
             connection.close()
     except (sqlite3.Error, OSError, TypeError, ValueError):
         return -1
+
+
+def _graph_logical_revision(path: Path) -> str:
+    """Read the canonical content-derived graph revision."""
+
+    try:
+        connection = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                "SELECT value FROM project_meta WHERE key='post_revision'"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return ""
+    revision = str(row[0] if row else "").strip().lower()
+    return (
+        revision
+        if len(revision) == 64
+        and all(character in "0123456789abcdef" for character in revision)
+        else ""
+    )
 
 
 def _graph_publication_journal_path(database: Path) -> Path:
@@ -556,6 +705,11 @@ def _certify_published_graph(
         )
         if not schema_valid:
             return False, "graph_schema_invalid:" + schema_detail[:80]
+        manifest_logical_revision = str(manifest.get("logical_graph_revision") or "")
+        if manifest_logical_revision and manifest_logical_revision != _graph_logical_revision(
+            database
+        ):
+            return False, "logical_graph_revision_mismatch"
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
         return False, "manifest_unreadable"
     return True, ""
@@ -847,6 +1001,7 @@ def ensure_index_with_receipt(
                 coverage=coverage,
             )
         graph_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        logical_graph_revision = _graph_logical_revision(candidate)
         parser_failures = _graph_parser_failures(candidate)
         manifest = {
             "schema": "gt.graph_certification.v1",
@@ -854,6 +1009,7 @@ def ensure_index_with_receipt(
                 os.path.realpath(root_text).encode("utf-8", "surrogatepass")
             ).hexdigest(),
             "graph_sha256": graph_sha256,
+            "logical_graph_revision": logical_graph_revision,
             "graph_bytes": candidate.stat().st_size,
             "sqlite_quick_check": "ok",
             "source_revision": source_revision,
@@ -878,7 +1034,7 @@ def ensure_index_with_receipt(
         return receipt(
             coverage.status,
             graph_db=str(db),
-            graph_revision=graph_sha256,
+            graph_revision=logical_graph_revision,
             graph_db_sha256=graph_sha256,
             graph_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
             binary_sha256=str(manifest["binary_sha256"]),
@@ -1022,14 +1178,13 @@ def refresh_index_files(
                 error_type="certification:" + current_error,
             )
         schema_valid, nodes, edges, fts, check = _graph_schema_receipt(database)
+        graph_db_sha256 = (
+            hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
+        )
         return result(
             coverage.status if schema_valid else IndexBuildStatus.INVALID_DATABASE,
-            graph_revision=(
-                hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
-            ),
-            graph_db_sha256=(
-                hashlib.sha256(database.read_bytes()).hexdigest() if schema_valid else ""
-            ),
+            graph_revision=_graph_logical_revision(database) if schema_valid else "",
+            graph_db_sha256=graph_db_sha256,
             graph_manifest_sha256=(
                 hashlib.sha256(manifest_path.read_bytes()).hexdigest()
                 if schema_valid and manifest_path.is_file()
@@ -1100,13 +1255,15 @@ def refresh_index_files(
                 IndexBuildStatus.INVALID_DATABASE,
                 error_type=f"schema:{check[:80]}",
             )
-        graph_revision = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        graph_db_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        logical_graph_revision = _graph_logical_revision(candidate)
         manifest = {
             "schema": "gt.graph_certification.v1",
             "repository_root_sha256": hashlib.sha256(
                 os.path.realpath(root_path).encode("utf-8", "surrogatepass")
             ).hexdigest(),
-            "graph_sha256": graph_revision,
+            "graph_sha256": graph_db_sha256,
+            "logical_graph_revision": logical_graph_revision,
             "graph_bytes": candidate.stat().st_size,
             "sqlite_quick_check": "ok",
             "source_revision": source_revision,
@@ -1130,8 +1287,8 @@ def refresh_index_files(
         )
         return result(
             coverage.status,
-            graph_revision=graph_revision,
-            graph_db_sha256=graph_revision,
+            graph_revision=logical_graph_revision,
+            graph_db_sha256=graph_db_sha256,
             graph_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
             schema_valid=True,
             node_count=nodes,

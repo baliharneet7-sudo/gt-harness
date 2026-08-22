@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gt_engine.benchmark_parity import audit_runtime_receipt
+from gt_engine.benchmark_population import build_benchmark_population
 from gt_engine.benchmark_reports import build_benchmark_reports
 from gt_engine.central_runtime import CENTRAL_FEATURE_IDS
 from gt_engine.deep_metrics import TrialOutcome, classify_trial_outcome, extract_trajectory
@@ -278,6 +279,11 @@ for task_dir in sorted(Path("tasks").glob("*")):
                 .get("persistent_execution_state") or {}).get("applicable")
             ),
             "actions": metrics.get("actions"),
+            "effective_actions": metrics.get("effective_actions"),
+            "effective_actions_schema": metrics.get("effective_actions_schema"),
+            "legacy_effective_task_environment_execs": metrics.get(
+                "legacy_effective_task_environment_execs"
+            ),
             "effective_task_actions": metrics.get("effective_task_actions"),
             "actual_environment_execs": metrics.get("actual_environment_execs"),
             "controller_environment_execs": metrics.get("controller_environment_execs"),
@@ -468,6 +474,16 @@ artifact_integrity_failures.extend(
 )
 
 classified_trials = [(trial, classify_trial_outcome(trial)) for trial in trials]
+population_receipt = build_benchmark_population(expected, trials)
+task_population = population_receipt.as_dict()
+# This is the sole authoritative missing-task derivation. Artifact discovery
+# may add diagnostics, but it cannot claim an empty missing set when a declared
+# task has no trial record.
+missing = list(task_population["missing_tasks"])
+for task in task_population["duplicate_tasks"]:
+    artifact_integrity_failures.append(f"{task}:duplicate_trial_population")
+for task in task_population["unexpected_tasks"]:
+    artifact_integrity_failures.append(f"{task}:unexpected_trial_population")
 graded = [
     trial
     for trial, outcome in classified_trials
@@ -483,13 +499,13 @@ missing_verifier = [
     if outcome is TrialOutcome.MISSING_VERIFIER
 ]
 outcome_counts = Counter(outcome.value for _, outcome in classified_trials)
-censored_tasks = list(
-    dict.fromkeys(
-        str(t.get("task_name") or t.get("task") or "")
-        for t in censored
-    )
-)
-n_solved = sum(1 for t in graded if solved(t))
+censored_tasks = list(task_population["censored_tasks"])
+errored_tasks = list(task_population["errored_tasks"])
+missing_verifier_tasks = list(task_population["missing_verifier_tasks"])
+graded_tasks = list(task_population["graded_tasks"])
+solved_tasks = list(task_population["solved_tasks"])
+unsolved_graded_tasks = list(task_population["unsolved_graded_tasks"])
+n_solved = len(solved_tasks)
 n_expected = len(expected) if expected else 0
 invalid_intelligence = [
     row["task"]
@@ -636,14 +652,14 @@ if missing:
 out += [
     f"- tasks planned: **{n_expected}**",
     f"- trials returned: **{len(trials)}**",
-    f"- graded (verifier produced rewards): **{len(graded)}**",
-    f"- censored (provider/outer infrastructure): **{len(censored)}**",
-    f"- errored (non-censor exception): **{len(errored)}**",
-    f"- missing verifier result: **{len(missing_verifier)}**",
+    f"- graded (verifier produced rewards): **{len(graded_tasks)}**",
+    f"- censored (provider/outer infrastructure): **{len(censored_tasks)}**",
+    f"- errored (non-censor exception): **{len(errored_tasks)}**",
+    f"- missing verifier result: **{len(missing_verifier_tasks)}**",
 ]
-if graded:
-    out.append(f"- **solved: {n_solved}/{len(graded)} "
-               f"({100 * n_solved / len(graded):.1f}% of graded)**")
+if graded_tasks:
+    out.append(f"- **solved: {n_solved}/{len(graded_tasks)} "
+               f"({100 * n_solved / len(graded_tasks):.1f}% of graded)**")
 if n_expected:
     out.append(f"- **solved of planned: {n_solved}/{n_expected} "
                f"({100 * n_solved / n_expected:.1f}%)**")
@@ -696,7 +712,7 @@ out += [
     "",
     (
         "| task | total tokens | uncached input | calls | model actions | "
-        "effective task execs | controller execs | cached reads | checks | "
+        "model tool actions | controller execs | cached reads | checks | "
         "changes | failed | repeated | guidance delivered/candidates/suppressed | "
         "frontier deliveries/chars | graph nodes/edges | mirror/index ms | "
         "intelligence | censored |"
@@ -707,7 +723,7 @@ for row in sorted(receipt_metrics, key=lambda x: x["task"]):
     out.append(
         f"| {row['task']} | {row['total_tokens'] or '-'} | "
         f"{row['uncached_input_tokens'] or '-'} | {row['api_calls'] or '-'} | "
-        f"{row['actions'] or '-'} | {row['effective_task_actions'] or '-'} | "
+        f"{row['actions'] or '-'} | {row['effective_actions'] or '-'} | "
         f"{row['controller_environment_execs'] or 0} | "
         f"{row['controller_cached_reads'] or 0} | {row['check_actions'] or 0} | "
         f"{row['workspace_change_actions'] or 0} | {row['failed_actions'] or 0} | "
@@ -731,12 +747,18 @@ treatment_runtime_contract = {
 merged_payload = {
     "expected_tasks": n_expected,
     "missing_tasks": missing,
+    "task_population": task_population,
     "n_trials": len(trials),
-    "n_graded": len(graded),
-    "n_errored": len(errored),
-    "n_censored": len(censored),
+    "n_graded": len(graded_tasks),
+    "graded_tasks": graded_tasks,
+    "solved_tasks": solved_tasks,
+    "unsolved_graded_tasks": unsolved_graded_tasks,
+    "n_errored": len(errored_tasks),
+    "errored_tasks": errored_tasks,
+    "n_censored": len(censored_tasks),
     "censored_tasks": censored_tasks,
-    "n_missing_verifier": len(missing_verifier),
+    "n_missing_verifier": len(missing_verifier_tasks),
+    "missing_verifier_tasks": missing_verifier_tasks,
     "central_integrity_audit": central_integrity_report,
     "outcome_counts": dict(sorted(outcome_counts.items())),
     "n_solved": n_solved,
