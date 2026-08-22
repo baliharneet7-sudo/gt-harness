@@ -1859,7 +1859,12 @@ jobs:
               # (in-process delivery), PYTHONUNBUFFERED so the runner breadcrumbs survive a hang/kill.
               GT_RUNNER_RC=0
               if [ "${GT_BASELINE:-0}" = "1" ]; then
-                GT_PRO_MODEL="$INPUT_MODEL" \
+                 # INPUT_MODEL is a host-side workflow variable; it is not
+                 # implicitly present inside the task container.  Splice the
+                 # validated model value into the env assignment at the
+                 # Docker-shell boundary so the GT-off runner receives the
+                 # exact requested model instead of an empty string.
+                 GT_PRO_MODEL="'"$INPUT_MODEL"'" \
                 GT_PRO_ISSUE=/gt_out/issue.txt \
                 GT_PRO_REPO="$GT_ROOT" \
                 GT_PRO_PATCH_OUT=/gt_out/agent_patch.diff \
