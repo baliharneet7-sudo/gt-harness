@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import sys
+import tempfile
+import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gt_engine.repository_graph_service import (
@@ -71,12 +76,19 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run the common coding-agent scaffold.")
     run.add_argument("task")
-    run.add_argument("--model", default="claude-opus-4-8")
+    run.add_argument("--model", required=True, help="Exact model identifier for both arms.")
     run.add_argument("--base-url", default=None)
+    run.add_argument("--temperature", type=float, default=None)
     run.add_argument("--max-iterations", type=int, default=30)
     run.add_argument("--time-budget-seconds", type=float, default=None)
     run.add_argument("--treatment", choices=("bare", "groundtruth"), default="bare")
     run.add_argument("--root", default=".")
+    run.add_argument("--run-id", default=None)
+    run.add_argument(
+        "--output",
+        default=None,
+        help="Run receipt path (default: .groundtruth/runs/<run-id>.json).",
+    )
 
     sub.add_parser("compare", help="Compare completed benchmark treatment receipts.")
     sub.add_parser("certify", help="Evaluate product and benchmark release gates.")
@@ -186,28 +198,133 @@ def _graph(args: argparse.Namespace) -> int:
         return 1
 
 
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+        + b"\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
 def _run_agent(args: argparse.Namespace) -> int:
     from gt_harness.treatments import BareTreatment, GroundTruthTreatment
     from nano.agent import Agent
     from nano.cli import _print_event, build_provider
     from nano.prompts import SYSTEM_PROMPT
 
+    root = Path(args.root).resolve()
+    temperature = getattr(args, "temperature", None)
+    requested_run_id = getattr(args, "run_id", None)
+    output_value = getattr(args, "output", None)
+    generated_run_id = f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:12]}"
+    run_id = str(requested_run_id or generated_run_id)
+    output_path = (
+        Path(output_value).resolve()
+        if output_value
+        else root / ".groundtruth" / "runs" / f"{run_id}.json"
+    )
     treatment = (
-        GroundTruthTreatment(Path(args.root).resolve())
+        GroundTruthTreatment(root)
         if args.treatment == "groundtruth"
         else BareTreatment()
     )
-    provider = build_provider(model=args.model, base_url=args.base_url)
-    agent = Agent(
-        provider=provider,
-        system=SYSTEM_PROMPT,
-        max_iterations=args.max_iterations,
-        on_event=_print_event,
-        treatment=treatment,
-        time_budget_seconds=args.time_budget_seconds,
-    )
+    started = _now()
+    started_clock = time.perf_counter()
+    try:
+        provider = build_provider(
+            model=args.model,
+            base_url=args.base_url,
+            temperature=temperature,
+        )
+        agent = Agent(
+            provider=provider,
+            system=SYSTEM_PROMPT,
+            max_iterations=args.max_iterations,
+            on_event=_print_event,
+            treatment=treatment,
+            time_budget_seconds=args.time_budget_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 - setup failure must still leave a receipt
+        receipt = {
+            "schema": "gt.run_receipt.v1",
+            "run_id": run_id,
+            "status": "ERROR",
+            "error_type": type(exc).__name__,
+            "started": started,
+            "completed": _now(),
+            "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
+            "repository": str(root),
+            "model": args.model,
+            "base_url_configured": bool(args.base_url),
+            "temperature": temperature,
+            "treatment": args.treatment,
+            "resolved": None,
+            "provider_calls": 0,
+        }
+        _write_json_atomic(output_path, receipt)
+        _emit({**receipt, "receipt_path": str(output_path)})
+        return 1
     result = agent.run(args.task)
-    return 0 if result.stop_reason == "end_turn" else 1
+    treatment_receipt = next(
+        (
+            dict(row["receipt"])
+            for row in reversed(result.transcript)
+            if row.get("type") == "treatment_receipt" and isinstance(row.get("receipt"), dict)
+        ),
+        None,
+    )
+    provider_calls = sum(1 for row in result.transcript if row.get("type") == "assistant")
+    receipt = {
+        "schema": "gt.run_receipt.v1",
+        "run_id": run_id,
+        "status": "COMPLETED" if result.stop_reason == "end_turn" else "ERROR",
+        "started": started,
+        "completed": _now(),
+        "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
+        "repository": str(root),
+        "model": args.model,
+        "base_url_configured": bool(args.base_url),
+        "temperature": temperature,
+        "treatment": args.treatment,
+        "resolved": None,
+        "stop_reason": result.stop_reason,
+        "iterations": result.iterations,
+        "provider_calls": provider_calls,
+        "input_tokens": result.total_input_tokens,
+        "output_tokens": result.total_output_tokens,
+        "cached_tokens": result.total_cache_read_tokens,
+        "treatment_receipt": treatment_receipt,
+        "treatment_receipt_present": treatment_receipt is not None,
+        "transcript": result.transcript,
+    }
+    if treatment_receipt is None:
+        receipt["status"] = "ERROR"
+        receipt["error_type"] = "treatment_receipt_missing"
+    _write_json_atomic(output_path, receipt)
+    _emit(
+        {
+            "schema": receipt["schema"],
+            "run_id": run_id,
+            "status": receipt["status"],
+            "stop_reason": result.stop_reason,
+            "provider_calls": provider_calls,
+            "receipt_path": str(output_path),
+            "treatment_receipt_present": treatment_receipt is not None,
+        }
+    )
+    return 0 if result.stop_reason == "end_turn" and treatment_receipt is not None else 1
 
 
 def main(argv: list[str] | None = None) -> int:

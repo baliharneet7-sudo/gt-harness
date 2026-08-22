@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,9 +94,20 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
     class FakeAgent:
         def __init__(self, **kwargs):
             captures.append(kwargs)
+            self.treatment = kwargs["treatment"]
 
         def run(self, _task: str):
-            return SimpleNamespace(stop_reason="end_turn")
+            return SimpleNamespace(
+                stop_reason="end_turn",
+                iterations=1,
+                total_input_tokens=10,
+                total_output_tokens=2,
+                total_cache_read_tokens=0,
+                transcript=[
+                    {"type": "assistant"},
+                    {"type": "treatment_receipt", "receipt": self.treatment.finalize(None)},
+                ],
+            )
 
     monkeypatch.setattr(nano.agent, "Agent", FakeAgent)
     monkeypatch.setattr(nano.cli, "build_provider", lambda **_kwargs: object())
@@ -106,6 +118,9 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
         "max_iterations": 30,
         "time_budget_seconds": 120.0,
         "root": str(tmp_path),
+        "temperature": 0.0,
+        "run_id": None,
+        "output": None,
     }
     assert _run_agent(SimpleNamespace(**common, treatment="bare")) == 0
     assert _run_agent(SimpleNamespace(**common, treatment="groundtruth")) == 0
@@ -115,3 +130,11 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
     assert captures[0]["time_budget_seconds"] == captures[1]["time_budget_seconds"]
     assert isinstance(captures[0]["treatment"], BareTreatment)
     assert isinstance(captures[1]["treatment"], GroundTruthTreatment)
+    run_root = tmp_path / ".groundtruth" / "runs"
+    receipts = [
+        json.loads(path.read_text(encoding="utf-8")) for path in run_root.glob("*.json")
+    ]
+    assert len(receipts) == 2
+    assert {receipt["treatment"] for receipt in receipts} == {"bare", "groundtruth"}
+    assert all(receipt["treatment_receipt_present"] for receipt in receipts)
+    assert all(receipt["resolved"] is None for receipt in receipts)

@@ -40,8 +40,16 @@ class BareTreatment:
             "schema": "gt.treatment_receipt.v1",
             "treatment": self.treatment_id,
             "provider_calls": 0,
+            "treatment_provider_calls": 0,
             "graph_available": False,
+            "graph_status": "NOT_APPLICABLE",
             "delivery_count": 0,
+            "delivery_calls": [],
+            "evidence_items_delivered": 0,
+            "graph_query_count": 0,
+            "action_count": 0,
+            "degraded_reasons": [],
+            "errors": [],
         }
 
 
@@ -57,7 +65,10 @@ class GroundTruthTreatment(BareTreatment):
     delivery_count: int = field(default=0, init=False)
     query_count: int = field(default=0, init=False)
     action_count: int = field(default=0, init=False)
+    evidence_items_delivered: int = field(default=0, init=False)
     last_source_revision: str = field(default="", init=False)
+    delivery_calls: list[int] = field(default_factory=list, init=False)
+    errors: list[str] = field(default_factory=list, init=False)
     receipts: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -88,14 +99,16 @@ class GroundTruthTreatment(BareTreatment):
                     return rows
         return rows
 
-    def _render(self, *, update: bool, budget: int) -> str:
+    def _render(self, *, update: bool, budget: int, delivered_before_call: int) -> str:
         receipt = self.service.status()
         if not receipt.query_ready:
             self.receipts.append(receipt.as_dict())
+            self.errors.append(f"graph_not_ready:{receipt.build_status.value}")
             return ""
         try:
             evidence = self._evidence(limit=12 if not update else 6)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - recorded degradation remains non-blocking
+            self.errors.append(f"query_failed:{type(exc).__name__}")
             evidence = []
         payload = {
             "schema": "gt.agent_context.v1",
@@ -122,15 +135,26 @@ class GroundTruthTreatment(BareTreatment):
             )
         rendered = rendered[:budget]
         self.delivery_count += bool(evidence)
+        if evidence:
+            self.delivery_calls.append(delivered_before_call)
+            self.evidence_items_delivered += len(payload["evidence"])
         self.last_source_revision = receipt.source_revision
         self.receipts.append(receipt.as_dict())
         return rendered if evidence else ""
 
     def prepare(self, task: str) -> str:
         self.task = task
-        receipt = self.service.build()
+        try:
+            receipt = self.service.build()
+        except Exception as exc:  # noqa: BLE001 - treatment cannot terminate the agent
+            self.errors.append(f"graph_build_failed:{type(exc).__name__}")
+            return ""
         self.receipts.append(receipt.as_dict())
-        return self._render(update=False, budget=max(0, self.start_char_budget))
+        return self._render(
+            update=False,
+            budget=max(0, self.start_char_budget),
+            delivered_before_call=1,
+        )
 
     def before_model_call(self, iteration: int) -> str:
         if iteration <= 1:
@@ -138,11 +162,19 @@ class GroundTruthTreatment(BareTreatment):
         observed = self.service.status()
         if observed.build_status is not GraphStatus.STALE:
             return ""
-        rebuilt = self.service.build()
+        try:
+            rebuilt = self.service.build()
+        except Exception as exc:  # noqa: BLE001 - recorded degradation remains non-blocking
+            self.errors.append(f"graph_update_failed:{type(exc).__name__}")
+            return ""
         self.receipts.append(rebuilt.as_dict())
         if not rebuilt.query_ready:
             return ""
-        return self._render(update=True, budget=max(0, self.update_char_budget))
+        return self._render(
+            update=True,
+            budget=max(0, self.update_char_budget),
+            delivered_before_call=iteration,
+        )
 
     def after_action(
         self,
@@ -160,14 +192,22 @@ class GroundTruthTreatment(BareTreatment):
             "schema": "gt.treatment_receipt.v1",
             "treatment": self.treatment_id,
             "provider_calls": 0,
+            "treatment_provider_calls": 0,
             "graph_available": receipt.query_ready,
             "graph_status": receipt.build_status.value,
+            "graph_receipt_schema": receipt.receipt_schema,
+            "graph_receipt_path": str(self.service.receipt_path),
+            "graph_commit_sha": receipt.commit_sha,
+            "graph_builder_version": receipt.graph_builder_version,
             "graph_identity": receipt.graph_checksum_or_identity,
             "source_revision": receipt.source_revision,
             "delivery_count": self.delivery_count,
+            "delivery_calls": list(self.delivery_calls),
+            "evidence_items_delivered": self.evidence_items_delivered,
             "graph_query_count": self.query_count,
             "action_count": self.action_count,
             "degraded_reasons": list(receipt.degraded_reasons),
+            "errors": list(dict.fromkeys(self.errors)),
         }
 
 
