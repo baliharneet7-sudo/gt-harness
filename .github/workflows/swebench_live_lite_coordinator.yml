@@ -125,7 +125,8 @@ jobs:
             echo "- tasks: ${{ steps.matrix.outputs.total_tasks }}"
             echo "- reusable workers: ${{ steps.matrix.outputs.total_batches }}"
             echo "- global task concurrency: 20 (4 workers x 5 task rows)"
-            echo "- task contract: GT_STEP_LIMIT=150, task timeout=150 minutes, one rollout/task"
+            echo "- task contract: GT_STEP_LIMIT=150, evaluator timeout=1800 seconds, one rollout/task"
+            echo "- no additional harness task wall timeout is imposed"
             echo "- timeout rows are retained and classified, never dropped"
           } >> "$GITHUB_STEP_SUMMARY"
 

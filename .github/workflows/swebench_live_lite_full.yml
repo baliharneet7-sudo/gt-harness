@@ -659,7 +659,6 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
-    timeout-minutes: 150
     env:
       # Preserve the dispatch token for audit while exposing only the validated canonical
       # value to the deterministic seam. Both values are cross-checked in sealed artifacts.
@@ -699,9 +698,6 @@ jobs:
       # time, preserving the same global 20-task ceiling.
       max-parallel: ${{ inputs.worker_parallel || 20 }}
     steps:
-      - name: Mark authoritative trial-job start epoch
-        run: echo "GT_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
-
       - name: Checkout GroundTruth
         uses: actions/checkout@v4
         with:
@@ -1404,37 +1400,25 @@ jobs:
           fi
 
           # Keep enough of the runner outside the task cgroup to finish the shell,
-          # seal the terminal receipt, and execute both artifact-upload steps.  The
-          # task is untrusted repository code: its memory and wall clock must never
-          # be allowed to consume the runner that owns its evidence.
-          GT_AGENT_WALL_TIMEOUT_S="${GT_AGENT_WALL_TIMEOUT_S:-5400}"
+          # seal the terminal receipt, and execute both artifact-upload steps. No
+          # second task wall clock is imposed here. The benchmark step budget and
+          # evaluator timeout remain the only task limits.
           GT_RUNNER_HOST_RESERVE_MB="${GT_RUNNER_HOST_RESERVE_MB:-3072}"
           GT_AGENT_SWAP_ALLOWANCE_MB="${GT_AGENT_SWAP_ALLOWANCE_MB:-2048}"
-          GT_AGENT_JOB_TIMEOUT_S=9000
-          GT_AGENT_MIN_UPLOAD_RESERVE_S=1800
           _GT_HOST_MEM_MB=$(awk '/MemTotal:/{print int($2/1024); exit}' /proc/meminfo)
-          _GT_NOW_EPOCH=$(date +%s)
-          if ! [[ "$GT_AGENT_WALL_TIMEOUT_S" =~ ^[0-9]+$ ]] \
-             || ! [[ "$GT_RUNNER_HOST_RESERVE_MB" =~ ^[0-9]+$ ]] \
+          if ! [[ "$GT_RUNNER_HOST_RESERVE_MB" =~ ^[0-9]+$ ]] \
              || ! [[ "$GT_AGENT_SWAP_ALLOWANCE_MB" =~ ^[0-9]+$ ]] \
-             || ! [[ "${GT_JOB_STARTED:-}" =~ ^[0-9]+$ ]] \
              || [ "${_GT_HOST_MEM_MB:-0}" -le "$GT_RUNNER_HOST_RESERVE_MB" ]; then
-            echo "GT_AGENT_RESOURCE_PREFLIGHT_FAIL: invalid wall/memory resource envelope" | tee -a trial_output.log
+            echo "GT_AGENT_RESOURCE_PREFLIGHT_FAIL: invalid memory resource envelope" | tee -a trial_output.log
             exit 1
           fi
-          _GT_JOB_ELAPSED_S=$((_GT_NOW_EPOCH - GT_JOB_STARTED))
-          _GT_LATEST_AGENT_EXIT_S=$((GT_AGENT_JOB_TIMEOUT_S - _GT_JOB_ELAPSED_S - GT_AGENT_MIN_UPLOAD_RESERVE_S))
           GT_AGENT_MEMORY_MB=$((_GT_HOST_MEM_MB - GT_RUNNER_HOST_RESERVE_MB))
           GT_AGENT_MEMORY_SWAP_MB=$((GT_AGENT_MEMORY_MB + GT_AGENT_SWAP_ALLOWANCE_MB))
-          if [ "$GT_AGENT_MEMORY_MB" -lt 4096 ] || [ "$_GT_LATEST_AGENT_EXIT_S" -lt 300 ]; then
-            echo "GT_AGENT_RESOURCE_PREFLIGHT_FAIL: insufficient task memory or upload headroom" | tee -a trial_output.log
+          if [ "$GT_AGENT_MEMORY_MB" -lt 4096 ]; then
+            echo "GT_AGENT_RESOURCE_PREFLIGHT_FAIL: insufficient task memory" | tee -a trial_output.log
             exit 1
           fi
-          GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S="$GT_AGENT_WALL_TIMEOUT_S"
-          if [ "$GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S" -gt "$_GT_LATEST_AGENT_EXIT_S" ]; then
-            GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S="$_GT_LATEST_AGENT_EXIT_S"
-          fi
-          echo "[GT_RESOURCE] task_memory=${GT_AGENT_MEMORY_MB}MB task_memory_swap=${GT_AGENT_MEMORY_SWAP_MB}MB host_reserve=${GT_RUNNER_HOST_RESERVE_MB}MB wall_timeout=${GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S}s upload_reserve=${GT_AGENT_MIN_UPLOAD_RESERVE_S}s" \
+          echo "[GT_RESOURCE] task_memory=${GT_AGENT_MEMORY_MB}MB task_memory_swap=${GT_AGENT_MEMORY_SWAP_MB}MB host_reserve=${GT_RUNNER_HOST_RESERVE_MB}MB task_wall_policy=official_step_and_evaluator_only" \
             | tee -a trial_output.log
 
           # Payload-free progress heartbeat. Counts are observability only: they do
@@ -1680,7 +1664,6 @@ jobs:
           # configs use cost_tracking=ignore_errors; the container receives
           # the same policy so price lookup cannot abort a provider request.
           _GT_AGENT_STARTED_EPOCH=$(date +%s)
-          timeout --signal=TERM --kill-after=30s "${GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S}s" \
           docker run --rm=false \
             --name "gt-pro-$MTASK" \
             --memory="${GT_AGENT_MEMORY_MB}m" \
@@ -1974,9 +1957,6 @@ jobs:
           docker rm -f "gt-pro-$MTASK" >/dev/null 2>&1 || true
           if [ "$GT_AGENT_CONTAINER_OOM" = "1" ]; then
             GT_AGENT_TERMINATION="memory_limit"
-          elif [ "$AGENT_RC" -eq 124 ] \
-            || { [ "$AGENT_RC" -eq 137 ] && [ "$_GT_AGENT_ELAPSED_S" -ge "$GT_AGENT_WALL_TIMEOUT_EFFECTIVE_S" ]; }; then
-            GT_AGENT_TERMINATION="wall_timeout"
           else
             GT_AGENT_TERMINATION="process_exit"
           fi
@@ -2009,9 +1989,7 @@ jobs:
             echo "GT_AGENT_EXIT_WRITE_FAIL: rc=$GT_AGENT_STATUS_RC" | tee -a trial_output.log
           fi
 
-          if [ "$GT_AGENT_TERMINATION" = "wall_timeout" ]; then
-            echo "GT_AGENT_WALL_TIMEOUT: bounded agent wall clock expired; host evidence preserved for upload" | tee -a trial_output.log
-          elif [ "$GT_AGENT_TERMINATION" = "memory_limit" ]; then
+          if [ "$GT_AGENT_TERMINATION" = "memory_limit" ]; then
             echo "GT_AGENT_OOM: Docker state confirmed the agent container hit the memory cap" | tee -a trial_output.log
           elif [ "$AGENT_RC" -ne 0 ]; then
             echo "AGENT_RUN_FAIL: agent exited rc=$AGENT_RC" | tee -a trial_output.log
