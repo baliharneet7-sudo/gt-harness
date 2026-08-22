@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 GT_INDEX_SOURCE_OBJECT = "e8a1b6cf6243ec12715626879884388ddd26845c"
-GT_INDEX_SOURCE_SHA256 = "27714cd0ca8c6add1623665e5250bbfb049ec5bb8863c80860e03e6e9aaa9301"
+GT_INDEX_SOURCE_SHA256 = "af4de1b3c05c545144d6c1a07bef609f483005618484e0206704d999a922d29d"
 GT_INDEX_SOURCE_FILES = 80
 GT_INDEX_BUILD_ID = f"source-{GT_INDEX_SOURCE_SHA256[:16]}"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +71,17 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _canonical_source_payload(path: Path) -> bytes:
+    """Return platform-independent bytes for a checked-in source file.
+
+    Git may materialize text files with CRLF on Windows even though the blob is
+    stored with LF.  The indexer source tree is entirely text, so its release
+    identity must describe repository content rather than checkout policy.
+    """
+
+    return path.read_bytes().replace(b"\r\n", b"\n")
+
+
 def _source_tree_identity() -> tuple[str, int]:
     digest = hashlib.sha256()
     paths = sorted(
@@ -80,7 +91,7 @@ def _source_tree_identity() -> tuple[str, int]:
     )
     for path in paths:
         relative = path.relative_to(REPOSITORY_ROOT).as_posix().encode("utf-8")
-        payload = path.read_bytes()
+        payload = _canonical_source_payload(path)
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
         digest.update(len(payload).to_bytes(8, "big"))
