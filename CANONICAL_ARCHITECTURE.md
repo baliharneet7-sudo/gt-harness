@@ -80,7 +80,8 @@ anchors, so a same-named constructor cannot make a class query ambiguous.
 | `nano/` | PRODUCTION | Common model/provider/tool agent scaffold |
 | `eval/miniswe_agent.py`, `eval/swe_agent.py`, `eval/tb_agent.py` | BENCHMARK | Adapters must invoke `gt-harness run`, not a substitute graph path |
 | `gt_engine/indexer.py:refresh_index_files`, `gt_engine/bridge.py`, central runtime and historical control layers | LEGACY / RESEARCH pending parity audit | File-keyed refresh and older control paths are not the official CLI/MCP lifecycle; do not delete until consumers and unique behavior are classified |
-| historical workflows, `gt_finalstand/`, historical reports | BENCHMARK / LEGACY evidence | Cannot certify the prerelease; cleanup remains gated on classification |
+| historical workflows and `gt_finalstand/` | BENCHMARK / LEGACY evidence | Cannot certify the prerelease; retained where unique capability/evidence remains, but several old workflows are non-runnable and paid execution is unauthorized |
+| generated head-to-head outputs, historical run artifacts, broken `artifact_deepswe` configs | DELETE (completed) | Removed after zero production consumers and missing referenced modules were verified; frozen tag retains recovery history |
 | vendored wheel and prebuilt Linux binary | DELETE (completed) | Removed; frozen tag retains recovery history |
 
 There is one canonical graph database: `.groundtruth/graph.db`. The separate historical `index.db`/SymbolStore and legacy MCP servers are not production-authoritative.

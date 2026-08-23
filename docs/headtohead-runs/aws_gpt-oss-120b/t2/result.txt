@@ -1,1 +1,0 @@
-RESULT aws/gpt-oss-120b t2 PASS agent_exit=0 54s stop: end_turn  iterations=12  in=3235  out=3018  cache_read=0

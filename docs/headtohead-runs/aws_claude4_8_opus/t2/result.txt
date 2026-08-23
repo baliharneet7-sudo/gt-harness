@@ -1,1 +1,0 @@
-RESULT aws/claude4_8_opus t2 PASS agent_exit=1 212s stop: max_iterations  iterations=30  in=4478  out=2656  cache_read=0

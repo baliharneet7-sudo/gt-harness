@@ -48,16 +48,24 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 17. Hierarchy queries treated a Java class and its same-named constructor as ambiguous even when the graph contained the correct inheritance edges. Query anchoring is now relationship-aware and selects type nodes for subclass/implementation traversal.
 18. The Go walker used `os.Stat`, followed source symlinks, and could index an external target while the Python receipt hashed only the link target string. External content could therefore change without changing graph identity. Discovery now uses `os.Lstat`, classifies symlinks and loops as `non_regular_file`, and never gives them graph authority.
 19. CLI and MCP exposed different subsets of graph identity, and startup failures could terminate MCP without an agent-visible repository state. Both surfaces now use one public receipt projection; MCP records startup errors and CLI emits a structured non-queryable failure receipt.
+20. The source provenance digest sorted platform-native `Path` objects. Windows and POSIX path comparison order differs, so identical 82-file checkouts produced different aggregate identities and Linux `doctor` failed. Identity now sorts normalized POSIX relative-path strings, reports observed as well as expected provenance, and is regression-tested across case-sensitive path order and line endings.
+21. The declared development extra omitted `hypothesis`, `zstandard`, and `pytest-timeout`, while the full inherited suite depended on packages already installed on the developer machine. The clean-suite dependencies are now pinned. Tests requiring the separately pinned ARB evaluator or a hosted historical Finalstand artifact are explicitly classified `external_evidence` and cannot masquerade as provider-free product tests.
 
 ## Current real-repository evidence
 
-- The final source identity `d2d352a6d25583537bfb119326924ee6d0e9e97a51a21d1c722a99050b6cad4f` (82 files) produced byte-identical Windows Go builds twice (`ee656e94e703f820c65ae403d91e84ec4ac62964edaac133d119cf4c34761b41`).
+- The portable source identity `e2afb40abc3763c0cc75a03a9a21e12b6c1cf53fb53c0017b31b4fc9f552a83c` (82 files) produced byte-identical Windows Go builds twice (`ee656e94e703f820c65ae403d91e84ec4ac62964edaac133d119cf4c34761b41`) and a successful Linux source build (`f15352d20902eecba9e3c8c403fa3af6acc1d0124ef2120597e2d1c7b3b1ef51`).
 - All ten frozen repository-matrix checkouts rebuilt, reopened, matched their exact commits, and passed their production query smoke checks.
 - The source-derived truth corpus covers Python, JavaScript, TypeScript, Go, Rust, and Java across callers, callees, imports, re-exports, and direct inheritance. Its current bounded result is 62 true positives, 0 false positives, and 0 false negatives. This is strong sampled evidence, not universal accuracy certification.
 - Parser recovery and deliberate repository exclusions are exposed as `READY_WITH_DECLARED_LIMITATIONS`; they are never collapsed into unqualified `READY`.
 - The same cold/warm/add/modify/delete lifecycle passed for all six declared languages, with zero stale sampled edges.
 - A clean stdio MCP client built, queried, updated, restarted, and reused the production graph on a real repository without benchmark machinery.
-- The complete Windows Python suite, vendored Go suite, and canonical prerelease lint scope pass. Five Python tests are explicitly skipped for platform or unavailable optional-model conditions.
+- The complete Windows Python suite, vendored Go suite, and canonical prerelease lint scope pass. The Linux provider-free suite excludes only tests labeled `external_evidence`; these require the separately pinned official ARB evaluator or a hosted historical Finalstand artifact and are not product-certification evidence.
+
+## Gate 11 cleanup disposition
+
+- Deleted 85 tracked generated run files under `docs/headtohead-runs/`, `artifacts/`, and the remaining `artifact_deepswe/` configurations. They had no production consumer; the DeepSWE configs referenced modules that were already absent. The frozen `gt-frozen-3df01d2` tag retains exact recovery history.
+- Retained first-party central-engine, LSP, embedding, delivery, and benchmark code as `RESEARCH` or `BENCHMARK` where unique behavior has not yet been migrated. It is not reachable through the canonical graph authority merely because it remains checked in.
+- Retained manually dispatched historical workflows as `LEGACY/BENCHMARK`. They are not product certification and paid execution remains unauthorized. Workflow consolidation remains a release-maintenance item because several historical workflows depend on removed seams.
 
 ## Remaining blockers
 

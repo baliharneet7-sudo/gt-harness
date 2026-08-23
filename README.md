@@ -58,6 +58,8 @@ gt-harness run "task" --model exact/provider-model --treatment groundtruth
 
 The legacy file-keyed incremental indexer and historical benchmark/control paths remain in the repository for parity analysis, but they are not the canonical graph lifecycle. See `CANONICAL_ARCHITECTURE.md` for the authoritative boundary.
 
+Provider-free product certification runs `pytest -m 'not external_evidence'`. The excluded class is explicit: it requires either the separately pinned official ARB evaluator or a hosted historical Finalstand artifact/API receipt. It is not silently counted as product coverage and runs only in its owning benchmark/evidence workflow.
+
 ## License
 
 MIT.

@@ -13,6 +13,9 @@ results/**/raw/
 
 # local-only artifacts (benchmark runs, editor config, scratch notes)
 results/
+/artifact_deepswe/
+/artifacts/
+/docs/headtohead-runs/
 .vscode/
 nul
 harness.txt

@@ -1,1 +1,0 @@
-RESULT aws/claude4_8_opus t1 PASS agent_exit=0 47s stop: end_turn  iterations=8  in=568  out=539  cache_read=0

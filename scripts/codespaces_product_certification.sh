@@ -91,7 +91,7 @@ cd "$ROOT"
 
 run_step install python -m pip install -e '.[dev,eval,miniswe,gt]'
 run_step doctor gt-harness doctor
-run_step python_tests python -m pytest -q
+run_step python_tests python -m pytest -q -m 'not external_evidence'
 run_step go_tests bash -c 'cd vendor/gt-index-src && go test ./...'
 run_step canonical_lint python -m ruff check \
   gt_engine/repository_graph_service.py \

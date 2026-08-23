@@ -7,11 +7,14 @@ import pytest
 
 from scripts.arb_evaluate import evaluate
 
+requires_external_arb = pytest.mark.external_evidence
+
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
 
+@requires_external_arb
 def test_evaluator_uses_official_file_line_block_metrics_and_extra_metrics(tmp_path: Path) -> None:
     samples = tmp_path / "samples.jsonl"
     predictions = tmp_path / "arb-shard-0.jsonl"
@@ -71,6 +74,7 @@ def test_evaluator_uses_official_file_line_block_metrics_and_extra_metrics(tmp_p
     assert result["repo_macro"]["owner/repo"]["nDCG@20"] == 1.0
 
 
+@requires_external_arb
 def test_no_gold_rows_do_not_reduce_positive_leaderboard_metrics(tmp_path: Path) -> None:
     samples = tmp_path / "samples.jsonl"
     predictions = tmp_path / "arb-shard-0.jsonl"
@@ -130,6 +134,7 @@ def test_no_gold_rows_do_not_reduce_positive_leaderboard_metrics(tmp_path: Path)
     assert result["official_metrics"]["overall"]["Recall@20"] == 1.0
 
 
+@requires_external_arb
 def test_evaluator_reports_top3_latency_and_channel_payload_metrics(tmp_path: Path) -> None:
     samples = tmp_path / "samples.jsonl"
     predictions = tmp_path / "arb-shard-0.jsonl"
@@ -264,6 +269,7 @@ def test_partial_selective_evaluation_receipts_insufficient_fold_balance(tmp_pat
         )
 
 
+@requires_external_arb
 def test_evaluator_rejects_missing_and_extra_prediction_ids(tmp_path: Path) -> None:
     samples = tmp_path / "samples.jsonl"
     predictions = tmp_path / "arb-shard-0.jsonl"
@@ -294,6 +300,7 @@ def test_evaluator_rejects_missing_and_extra_prediction_ids(tmp_path: Path) -> N
         )
 
 
+@requires_external_arb
 def test_evaluator_can_publish_missing_id_progress_without_accepting_extras(tmp_path: Path) -> None:
     samples = tmp_path / "samples.jsonl"
     predictions = tmp_path / "arb-shard-0.jsonl"

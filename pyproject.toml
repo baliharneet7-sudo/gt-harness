@@ -52,6 +52,7 @@ packages = ["nano", "eval", "gt_engine", "gt_harness", "src/groundtruth"]
 testpaths = ["tests"]
 addopts = "-ra -q"
 markers = [
+  "external_evidence: requires a pinned external benchmark package or hosted historical artifact and is excluded from provider-free product certification",
   "gt_all17: deterministic ten-trigger campaign covering all 17 GT identities",
   "real_graph: exercises the source-built Go indexer against a real repository",
 ]

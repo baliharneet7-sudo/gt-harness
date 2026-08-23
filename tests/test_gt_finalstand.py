@@ -11,6 +11,10 @@ import warnings
 import zipfile
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.external_evidence
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
