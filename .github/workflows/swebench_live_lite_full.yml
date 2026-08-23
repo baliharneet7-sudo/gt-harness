@@ -1695,7 +1695,8 @@ jobs:
             -e GT_RUNTIME_LEDGER="/gt_out/gt_runtime_ledger.jsonl" \
             -e GT_HOOK_FIRE_COUNTS="/gt_out/gt_hook_fire_counts.json" \
             -e GT_XSESSION_DIR="/opt/gt_xsession" \
-            -e GT_BASELINE=$GT_BASELINE_FLAG \
+            -e GT_BASELINE="${GT_BASELINE_FLAG:-0}" \
+            -e GT_BASELINE_FLAG="${GT_BASELINE_FLAG:-0}" \
             -e GT_STEP_LIMIT="${GT_STEP_LIMIT:-150}" \
             -e GT_PRO_COST_LIMIT="${GT_PRO_COST_LIMIT:-2.0}" \
             -e MSWEA_COST_TRACKING="ignore_errors" \
@@ -1819,7 +1820,7 @@ jobs:
               # the profile in-container from the STAGED rl_profile module (single source of truth).
               # FAIL-CLOSED: on a partial substrate the preflight emits NO exports and the profile
               # stays off (byte-identical to pre-fix). Skipped in BASELINE (control arm stays pure).
-              if [ "${GT_BASELINE:-0}" != "1" ]; then
+              if [ "${GT_BASELINE:-${GT_BASELINE_FLAG:-0}}" != "1" ]; then
                 # #72: capability RECEIPT — emit the baked-SURFACE facts BEFORE the profile preflight
                 # so the manifest can ADMIT the substrate-property members (GT_CONTENT_LEG/GT_SEM_BODY/
                 # GT_L6_FRESH) instead of failing them all closed (Fix B, rl_profile._MEMBER_CAPABILITY_
@@ -1862,7 +1863,7 @@ jobs:
               # Apply GT patch (monkey-patches LocalEnvironment to append GT evidence).
               # BASELINE (control) arm: GT_BASELINE=1 -> skip entirely so NO <gt-evidence>
               # is ever appended. This is the paired-control difference from the GT arm.
-              if [ "${GT_BASELINE:-0}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
+              if [ "${GT_BASELINE:-${GT_BASELINE_FLAG:-0}}" != "1" ] && [ -f /opt/gt/gt_mini_patch.py ]; then
                 # Belt (defense-in-depth): run under GT_PY (has minisweagent) so _install() patches
                 # real env classes + writes the proof marker EARLY. The load-bearing delivery is the
                 # runner importing gt_mini_patch in-process (gt_headless_runner.py); this separate
@@ -1907,7 +1908,7 @@ jobs:
               # above), PYTHONPATH=/opt/gt so the runner imports both minisweagent AND gt_mini_patch
               # (in-process delivery), PYTHONUNBUFFERED so the runner breadcrumbs survive a hang/kill.
               GT_RUNNER_RC=0
-              if [ "${GT_BASELINE:-0}" = "1" ]; then
+              if [ "${GT_BASELINE:-${GT_BASELINE_FLAG:-0}}" = "1" ]; then
                 # Baseline means the stock Mini-SWE runner: no GT injection,
                 # no GT profile, and no GT-specific artifact contract.
                 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_headless_runner.py 2>&1 || GT_RUNNER_RC=$?
