@@ -17,7 +17,9 @@ jobs:
     timeout-minutes: 90
     env:
       PYTHONUTF8: "1"
-      GT_HARNESS_CACHE_DIR: ${{ runner.temp }}/gt-harness-cache
+      # The `runner` expression context is unavailable while GitHub parses
+      # job-level env. Ubuntu hosted runners guarantee a writable /tmp.
+      GT_HARNESS_CACHE_DIR: /tmp/gt-harness-cache
     steps:
       - uses: actions/checkout@v4
         with:
