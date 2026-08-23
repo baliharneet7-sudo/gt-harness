@@ -6,6 +6,7 @@ import sys
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
 from .agent import Agent
 from .prompts import GT_PROMPT_SUFFIX, SYSTEM_PROMPT
@@ -42,17 +43,19 @@ def _print_event(event: dict) -> None:
     et = event["type"]
     if et == "assistant":
         if event.get("text"):
-            _console.print(Panel(event["text"], title="assistant", border_style="cyan"))
+            _console.print(
+                Panel(Text(str(event["text"])), title="assistant", border_style="cyan")
+            )
         # Log the tool calls themselves, not just their output. Without the
         # inputs a transcript is unreadable: you see what came back but never
         # what the model actually ran.
         for tc in event.get("tool_calls") or []:
             args = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
-            _console.print(Panel(f"{tc.name}({args})", title="tool_call",
+            _console.print(Panel(Text(f"{tc.name}({args})"), title="tool_call",
                                  border_style="yellow"))
     elif et == "tool_result":
         title = "tool_result" + (" (error)" if event.get("is_error") else "")
-        _console.print(Panel(event["output"][:2000], title=title,
+        _console.print(Panel(Text(str(event["output"])[:2000]), title=title,
                              border_style="red" if event.get("is_error") else "green"))
     elif et == "stats":
         _console.print(f"[dim]iter={event['iteration']} "
@@ -118,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                    f"out={result.total_output_tokens}  "
                    f"cache_read={result.total_cache_read_tokens}")
     if result.final_text:
-        _console.print(Panel(result.final_text, title="final", border_style="bold"))
+        _console.print(Panel(Text(result.final_text), title="final", border_style="bold"))
     return 0 if result.stop_reason == "end_turn" else 1
 
 
