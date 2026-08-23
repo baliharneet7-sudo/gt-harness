@@ -54,11 +54,14 @@ gt-harness graph query definition Symbol --root /path/to/repository
 gt-harness mcp --root /path/to/repository
 gt-harness run "task" --model exact/provider-model --treatment bare
 gt-harness run "task" --model exact/provider-model --treatment groundtruth
+gt-harness certify --receipt-dir /path/to/codespaces-campaign --expected-commit "$(git rev-parse HEAD)"
 ```
 
 The legacy file-keyed incremental indexer and historical benchmark/control paths remain in the repository for parity analysis, but they are not the canonical graph lifecycle. See `CANONICAL_ARCHITECTURE.md` for the authoritative boundary.
 
 Provider-free product certification runs `pytest -m 'not external_evidence'`. The excluded class is explicit: it requires either the separately pinned official ARB evaluator or a hosted historical Finalstand artifact/API receipt. It is not silently counted as product coverage and runs only in its owning benchmark/evidence workflow.
+
+The certification command verifies receipts produced by the real clean Linux campaign. It does not create evidence, accept a different checkout SHA, tolerate a dirty checkout, or convert an absent competitive benchmark into a product PASS.
 
 ## License
 

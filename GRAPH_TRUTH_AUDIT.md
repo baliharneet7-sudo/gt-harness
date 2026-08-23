@@ -1,8 +1,8 @@
 # Graph Truth Audit
 
-Observed: `2026-08-23T00:46:15.020491Z`
+Observed: `2026-08-23T01:50:50.645613Z`
 
-Receipt: `D:\gt-product-audit-5296dc3\receipts\graph-truth-d2d352a6.json`
+Receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\graph-truth.json`
 
 Verdict: **PASS**
 

@@ -7,7 +7,7 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 | Component | Exists | Production reachable | Tested | Real-world verified | Canonical | Legacy/dead |
 |---|---:|---:|---:|---:|---:|---:|
 | `gt-harness` CLI | Yes | Yes | Yes | Local invocation | Yes | No |
-| Source indexer provisioning | Yes | Yes | Yes | Reproducible Windows source build; Linux pending rerun | Yes | Opaque wheel/binary removed |
+| Source indexer provisioning | Yes | Yes | Yes | Reproducible Windows build and clean Linux source build | Yes | Opaque wheel/binary removed |
 | Git-authoritative discovery receipt | Yes | Yes | Go + Python regressions | GT-Harness and real Git fixtures | Yes | Replaces incompatible Python count comparison |
 | Tree-sitter graph construction | Yes | Yes | Go suite + Python integration | GT-Harness and real fixtures | Yes | No |
 | Graph receipt/readiness state machine | Yes | Yes | Yes | False-READY reproduction and repair | Yes | No |
@@ -21,9 +21,9 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 | LSP promotion | Yes in imported GT | Not on canonical default path | Historical tests | Not recertified | No | Candidate research capability |
 | Embeddings/ONNX | Yes in imported GT | Not required by canonical structural path | Historical Gate 0 | Clean Linux provisioning pending | No | Optional/research until routed |
 | Benchmark compare command | Yes | Yes | Strict pairing/statistics regressions | Awaiting evaluator-completed live receipts | Yes | No provider calls |
-| Product certify command | Placeholder refusal | Explicitly blocked | Exit behavior only | No | No | Must be implemented after all product evidence gates |
-| Failure-state campaign | Yes | Yes | 15 Windows attacks | Explicit fail/recover behavior; Linux permissions/symlinks pending | Yes | No |
-| Performance instrumentation | Yes | Yes | Ten frozen repositories | Cold/warm/query/CPU/RSS/graph-size receipt | Yes | No |
+| Product certify command | Yes | Yes | Strict positive and adversarial receipt-bundle tests | Exact Linux campaign verification pending the resulting implementation SHA | Yes | Placeholder removed |
+| Failure-state campaign | Yes | Yes | 18 Linux attacks | Explicit fail/recover behavior including permissions and symlink loops | Yes | No |
+| Performance instrumentation | Yes | Yes | Ten frozen repositories | Linux cold/warm/query/CPU/RSS/graph-size receipt | Yes | No |
 | Historical central engine/bridge | Yes | Compatibility paths only | Extensive inherited tests | Historical runs only | No | Classification/removal pending |
 | Historical workflows/reports | Yes | Several still active | Mixed | Cannot certify current product | No | Cleanup pending |
 
@@ -50,6 +50,7 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 19. CLI and MCP exposed different subsets of graph identity, and startup failures could terminate MCP without an agent-visible repository state. Both surfaces now use one public receipt projection; MCP records startup errors and CLI emits a structured non-queryable failure receipt.
 20. The source provenance digest sorted platform-native `Path` objects. Windows and POSIX path comparison order differs, so identical 82-file checkouts produced different aggregate identities and Linux `doctor` failed. Identity now sorts normalized POSIX relative-path strings, reports observed as well as expected provenance, and is regression-tested across case-sensitive path order and line endings.
 21. The declared development extra omitted `hypothesis`, `zstandard`, and `pytest-timeout`, while the full inherited suite depended on packages already installed on the developer machine. The clean-suite dependencies are now pinned. Tests requiring the separately pinned ARB evaluator or a hosted historical Finalstand artifact are explicitly classified `external_evidence` and cannot masquerade as provider-free product tests.
+22. The public `certify` command was a refusal placeholder even after every product gate had executable evidence. It now validates the exact clean Linux subject SHA, campaign steps, provider-free state, receipt schemas, ten-repository graph matrix, bounded truth minimum, lifecycle, six-language matrix, production MCP, and 18-case failure campaign. Any missing or contradictory evidence produces `NOT_CERTIFIED`.
 
 ## Current real-repository evidence
 
@@ -72,8 +73,8 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 - Independent graph precision/recall is currently exact on a bounded 62-edge source-derived sample; broader randomized sampling remains.
 - Languages beyond Python, JavaScript, TypeScript, Go, Rust, and Java are not certified product support.
 - Proven file-keyed incremental parity is absent; correctness currently requires a full rebuild after changes.
-- The Linux-only unreadable-file, permission-denied, and symlink/loop attacks remain unobserved until the Codespaces campaign.
-- Cold construction is slow on the largest repositories (pnpm 469 seconds; Django 215 seconds on Windows), and their persisted graphs are 257.6 MiB and 302.6 MiB.
+- Cold construction is slow on the largest repositories (pnpm 79 seconds; Django 125 seconds on the four-core Linux host), and their persisted graphs are 257.6 MiB and 302.7 MiB.
 - Historical graph/MCP/control implementations, generated run outputs, and workflows still require final consumer classification and cleanup.
-- Competitive implementation research and blind GitNexus comparison are correctly blocked until product Gate 12.
+- The new certification command and documentation require one exact-SHA Linux rerun before Gate 12 can close.
+- Competitive implementation research and blind GitNexus comparison remain blocked until that Gate 12 rerun passes.
 - Paid agent benchmarking is not authorized.

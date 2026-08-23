@@ -1,10 +1,10 @@
 # GroundTruth Graph Lifecycle Audit
 
-Observed: `2026-08-23T00:27:26.246748Z`
+Observed: `2026-08-23T01:50:54.640645Z`
 
 Verdict: **PASS**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\receipts\graph-lifecycle-d2d352a6.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\graph-lifecycle.json`
 
 The campaign used an isolated local clone of the frozen real itsdangerous checkout. All graph operations went through `RepositoryGraphService` or the production CLI.
 

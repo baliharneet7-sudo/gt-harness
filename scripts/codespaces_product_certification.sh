@@ -102,8 +102,10 @@ run_step canonical_lint python -m ruff check \
   scripts/language_lifecycle_matrix.py \
   scripts/mcp_real_repository_campaign.py \
   scripts/failure_campaign.py \
+  gt_harness/product_certification.py \
   tests/test_repository_graph_service.py \
   tests/test_product_repository_matrix.py \
+  tests/test_product_certification.py \
   tests/test_mcp_stdio_real.py
 
 run_step repository_matrix python scripts/product_repository_matrix.py \
@@ -141,3 +143,13 @@ run_step failure_campaign python scripts/failure_campaign.py \
   --large-repository "$WORKSPACE/repositories/python-large-django" \
   --run-dir "$WORKSPACE/failure-run" \
   --output "$RECEIPTS/failure-campaign.json"
+
+# Materialize the complete wrapper, then exercise the public verifier against
+# that exact evidence bundle.  The EXIT trap rewrites the wrapper afterward so
+# the final receipt also records this step.
+finalize 0
+run_step product_certifier gt-harness certify \
+  --receipt-dir "$OUTPUT_ROOT" \
+  --root "$ROOT" \
+  --expected-commit "$(git rev-parse HEAD)" \
+  --output "$RECEIPTS/product-certification.json"

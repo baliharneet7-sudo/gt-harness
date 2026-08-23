@@ -1,10 +1,10 @@
 # GroundTruth Failure Campaign
 
-Observed: `2026-08-23T00:26:56.900533Z`
+Observed: `2026-08-23T01:52:03.862181Z`
 
-Platform campaign: **PASS_WITH_PLATFORM_GAPS**
+Platform campaign: **PASS on Linux Codespaces**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\receipts\failure-campaign-d2d352a6.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\failure-campaign.json`
 
 | Attack | Expected behavior | Observed | Result |
 | --- | --- | --- | --- |
@@ -23,11 +23,12 @@ Machine receipt: `D:\gt-product-audit-5296dc3\receipts\failure-campaign-d2d352a6
 | unsupported-only repository | explicit non-queryable failure/degradation | FAILED | PASS |
 | Git linked worktree / detached HEAD | repository-bound query-ready graph | READY | PASS |
 | Git submodule | query-ready parent with explicit non_regular_file limitation | READY_WITH_DECLARED_LIMITATIONS | PASS |
+| source symlink and symlink loop | declared limitation; never follow external authority | READY_WITH_DECLARED_LIMITATIONS | PASS |
+| unreadable source permission | explicit limitation/degradation with exact path | DEGRADED | PASS |
+| state-directory permission denial | structured non-queryable CLI failure | PermissionError payload | PASS |
 
 ## Explicitly non-applicable dependencies
 
 The canonical structural graph does not invoke a language server, embedding model, ONNX runtime, or provider. Missing/broken LSP and missing/corrupt model cases are therefore `NOT_APPLICABLE` to graph readiness, rather than hidden dependencies.
 
-## Remaining Linux-only attacks
-
-Unreadable-source permissions, state-directory permission denial, and symlink-loop behavior cannot be credibly certified on this Windows checkout. They remain mandatory for the final Codespaces/Linux proof. This report does not convert them into PASS.
+The final campaign ran as the non-root Codespaces user on Linux. It closes the permission and symlink gaps that could not be credibly exercised on Windows.

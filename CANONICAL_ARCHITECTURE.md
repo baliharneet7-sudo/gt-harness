@@ -11,8 +11,9 @@ The sole product executable is `gt-harness` (`gt_harness.cli:main`). Its support
 - `gt-harness mcp`: exposes the canonical graph through stdio, SSE, or streamable HTTP.
 - `gt-harness run --treatment bare|groundtruth`: runs one common model-agnostic coding-agent scaffold. The two arms use the same prompt, tools, limits, provider adapter, and action semantics. The GroundTruth arm may only add bounded deterministic evidence and record observations.
 - `gt-harness compare`: performs a provider-free, strictly paired comparison of completed evaluator receipts and rejects scaffold, repository, or treatment-delivery mismatches.
+- `gt-harness certify`: fail-closed validation of the Linux product campaign, exact implementation SHA, clean checkout, provider-free status, required gate receipts, graph truth, lifecycle, language, MCP, and failure-campaign minima.
 
-`certify` intentionally exits nonzero until its evidence gate exists. It does not fabricate success.
+`certify` never runs a benchmark and never infers success from prose. It returns `NOT_CERTIFIED` for a missing, malformed, stale, wrong-SHA, dirty-tree, provider-using, or incomplete evidence bundle.
 
 ## Repository-to-agent execution path
 

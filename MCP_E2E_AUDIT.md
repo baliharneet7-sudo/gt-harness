@@ -1,10 +1,10 @@
 # GroundTruth MCP End-to-End Audit
 
-Observed: `2026-08-23T00:27:49.970517Z`
+Observed: `2026-08-23T01:51:52.530197Z`
 
 Verdict: **PASS**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\receipts\mcp-e2e-d2d352a6.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\mcp-e2e.json`
 
 A clean MCP client entered an isolated clone of the pinned real itsdangerous repository. The server was the production `gt-harness mcp` stdio boundary; no benchmark adapter or precomputed graph was used.
 
@@ -21,10 +21,10 @@ A clean MCP client entered an isolated clone of the pinned real itsdangerous rep
 ## Agent-visible identity
 
 - Repository commit: `672971d66a2ef9f85151e53283113f33d642dabd`
-- Cold graph: `903d542a26a33d13795c5ef2a0c50b0fc3c431a9fea4d7d4886b9409a7433fa7`
-- Updated graph: `764dbfce9163b9e8f5de545668eb70a676e6a36d33c8e7a668bc4d8dda6688df`
+- Cold graph: `adead2595ae77d32e7a4d1d0b88cda152dafa4d6ddfdd6da200735f1e362ef4d`
+- Updated graph: `d42530d573f7678d5036a50667d921e0105071bf4b49a6d9628ded0527c19171`
 - Updated state: `READY`; query ready `True`
-- MCP initialization latency: `3214.341` ms
-- Warm restart initialization latency: `1376.43` ms
+- MCP initialization latency: `2242.033` ms
+- Warm restart initialization latency: `1940.948` ms
 
 The machine receipt stores the bounded status, definition, context, edit, and restart payloads exactly as delivered to the client.

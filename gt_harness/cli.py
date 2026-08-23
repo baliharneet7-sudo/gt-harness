@@ -100,7 +100,19 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--treatment", required=True)
     compare.add_argument("--output", default=None)
-    sub.add_parser("certify", help="Evaluate product and benchmark release gates.")
+    certify = sub.add_parser("certify", help="Verify a complete product evidence bundle.")
+    certify.add_argument(
+        "--receipt-dir",
+        required=True,
+        help="Directory containing the Codespaces wrapper and required gate receipts.",
+    )
+    certify.add_argument("--root", default=".", help="Exact product checkout being certified.")
+    certify.add_argument(
+        "--expected-commit",
+        default=None,
+        help="Optional full SHA; must equal both the checkout and campaign evidence.",
+    )
+    certify.add_argument("--output", default=None, help="Optional certification receipt path.")
     return parser
 
 
@@ -400,8 +412,19 @@ def main(argv: list[str] | None = None) -> int:
             _write_json_atomic(Path(args.output).resolve(), report)
         _emit(report)
         return 0 if report["status"] == "COMPLETE" else 1
-    print(f"{args.command}: blocked until its evidence gate is complete", file=sys.stderr)
-    return 2
+    if args.command == "certify":
+        from gt_harness.product_certification import certify_receipt_bundle
+
+        report = certify_receipt_bundle(
+            args.receipt_dir,
+            repository=args.root,
+            expected_commit=args.expected_commit,
+        )
+        if args.output:
+            _write_json_atomic(Path(args.output).resolve(), report)
+        _emit(report)
+        return 0 if report["status"] == "CERTIFIED_WITH_DECLARED_LIMITATIONS" else 1
+    raise AssertionError(f"unhandled command: {args.command}")
 
 
 if __name__ == "__main__":

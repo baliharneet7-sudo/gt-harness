@@ -1,10 +1,10 @@
 # GroundTruth Language Support Audit
 
-Observed: `2026-08-23T00:30:03.007632Z`
+Observed: `2026-08-23T01:51:44.744860Z`
 
 Verdict: **PASS for the six declared prerelease languages**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\receipts\language-support-d2d352a6.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\language-lifecycle.json`
 
 | Language | Real repository | Cold/warm | Add | Modify | Delete | Stale edges |
 | --- | --- | --- | --- | --- | --- | ---: |
@@ -18,3 +18,5 @@ Machine receipt: `D:\gt-product-audit-5296dc3\receipts\language-support-d2d352a6
 The same production lifecycle was exercised for Python, JavaScript, TypeScript, Go, Rust, and Java. All edit paths used the correctness-first atomic full rebuild; file-keyed incremental optimization remains non-canonical.
 
 The broader ten-repository construction matrix separately covers large Python, dynamic/re-export-heavy Python, TypeScript barrels and a monorepo, and multi-package Go. Languages outside these six are parser capabilities, not certified product support, until they receive the same real-repository truth and lifecycle audit.
+
+Linux correctly classified repository symlinks as `non_regular_file`. This produces small platform count differences where Windows materializes symlinks as regular files (Pydantic 729 versus 730 attempted files; pnpm 4,246 versus 4,249), but the skipped paths are explicit and neither platform follows external graph authority.
