@@ -76,7 +76,7 @@ jobs:
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       NANO_TEMPERATURE: ${{ inputs.temperature }}
       PYTHONUTF8: "1"
-      GT_INDEX_BINARY_HOST: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+      GT_INDEX_BINARY_HOST: /tmp/gt-index-linux-amd64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,21 +107,21 @@ jobs:
           export CGO_ENABLED=1
           if go build -tags sqlite_fts5 \
                -ldflags '-linkmode external -extldflags "-static"' \
-               -o ../gt-index-linux-amd64 ./cmd/gt-index/; then
+               -o /tmp/gt-index-linux-amd64 ./cmd/gt-index/; then
             echo "static build ok"
           else
             echo "::warning::static link failed; falling back to a dynamically linked gt-index (will not run on musl/alpine task images)"
-            go build -tags sqlite_fts5 -o ../gt-index-linux-amd64 ./cmd/gt-index/
+            go build -tags sqlite_fts5 -o /tmp/gt-index-linux-amd64 ./cmd/gt-index/
           fi
-          file ../gt-index-linux-amd64 || true
-          ldd ../gt-index-linux-amd64 || true
+          file /tmp/gt-index-linux-amd64 || true
+          ldd /tmp/gt-index-linux-amd64 || true
 
       # Prove the binary indexes AND that FTS5 made it in (the failure mode is
       # silent) before spending a single API dollar.
       - name: Smoke gt-index
         run: |
           set -euo pipefail
-          ./vendor/gt-index-linux-amd64 -root nano -output /tmp/gt-smoke.db
+          /tmp/gt-index-linux-amd64 -root nano -output /tmp/gt-smoke.db
           python3 - <<'EOF'
           import sqlite3
           names = {r[0] for r in sqlite3.connect("/tmp/gt-smoke.db")
@@ -173,7 +173,7 @@ jobs:
 
       - name: Prove the provider-free product boundary before provider spend
         env:
-          GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
+          GT_INDEX_BINARY: /tmp/gt-index-linux-amd64
         run: |
           pytest -m 'not external_evidence' -q
           (cd vendor/gt-index-src && go test ./...)
@@ -277,7 +277,7 @@ jobs:
       - name: Preflight GT artifacts
         run: |
           set -euo pipefail
-          test -x vendor/gt-index-linux-amd64
+          test -x /tmp/gt-index-linux-amd64
           python - <<'EOF'
           from eval.tb_agent import GTNanoAgent
           print("binary:", GTNanoAgent._gt_binary_host())

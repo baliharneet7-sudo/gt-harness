@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import gt_engine.miniswe_runtime as rt
 from gt_engine.gt_session import GTMode, GTSession, GTSessionConfig
 from gt_engine.miniswe_controller import Predicate
@@ -7,6 +9,19 @@ from gt_engine.miniswe_evidence import EvidenceResult
 from gt_engine.miniswe_integration import MiniSweAdapter
 from gt_engine.miniswe_runtime import install_runtime_hooks
 from gt_engine.task_contract import extract_task_contract
+
+
+def _initialize_git_repository(repo) -> None:
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "GT Test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "gt-test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
 
 
 class FakeModel:
@@ -276,14 +291,10 @@ def test_submit_magic_string_executes_when_contract_proven(tmp_path):
 
 
 def test_git_based_edit_detection_catches_heredoc_write(tmp_path):
-    import subprocess
-
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "mod.py").write_text("def compute(values):\n    pass\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    _initialize_git_repository(repo)
 
     class WriteEnv:
         def __init__(self):
@@ -385,14 +396,10 @@ def test_result_level_submit_interception_accepts_when_proven(tmp_path):
 
 
 def test_failing_test_attributed_to_edited_surface(monkeypatch, tmp_path):
-    import subprocess
-
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "mod.py").write_text("def compute(values):\n    return 0\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    _initialize_git_repository(repo)
 
     class ScriptedEnv:
         def __init__(self):
@@ -456,14 +463,10 @@ def test_failing_test_attributed_to_edited_surface(monkeypatch, tmp_path):
 
 
 def test_syntax_probe_catches_broken_edit(monkeypatch, tmp_path):
-    import subprocess
-
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "mod.py").write_text("def compute(values):\n    return 0\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    _initialize_git_repository(repo)
 
     class BrokenWriteEnv:
         def execute(self, action):
@@ -523,14 +526,10 @@ def test_evidence_capsule_splices_into_observation(monkeypatch, tmp_path):
 
 
 def test_newfile_precedent_delivered_on_file_create(tmp_path, monkeypatch):
-    import subprocess
-
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "util.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    _initialize_git_repository(repo)
 
     class CreateEnv:
         def execute(self, action):
@@ -602,16 +601,12 @@ def test_byte_identical_rename_is_not_treated_as_new_file(tmp_path):
 def test_advisory_mode_never_runs_hidden_covering_or_syntax_commands(
     monkeypatch, tmp_path
 ):
-    import subprocess
-
     import gt_engine.miniswe_covering as covering
 
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "mod.py").write_text("value = 1\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+    _initialize_git_repository(repo)
 
     class EditEnv(FakeEnv):
         def execute(self, action):

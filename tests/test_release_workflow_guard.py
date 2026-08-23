@@ -141,3 +141,5 @@ def test_canonical_gt_workflow_uses_dedicated_ox_alpha_release_manifest() -> Non
     assert "--manifest eval/release/ox_alpha_smoke20.json" in workflow
     assert "'.[dev,eval,miniswe,gt]'" in workflow
     assert "always() && steps.harbor.outcome != 'skipped'" in workflow
+    assert "GT_INDEX_BINARY_HOST: /tmp/gt-index-linux-amd64" in workflow
+    assert "${{ github.workspace }}/vendor/gt-index-linux-amd64" not in workflow
