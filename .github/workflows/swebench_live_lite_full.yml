@@ -1810,6 +1810,7 @@ jobs:
               # quote construction produced an unterminated shell string in
               # LiteLLM's startup path for OpenRouter model IDs.
               printf "model=\"%s\"\\nDEEPSEEK_API_KEY=%s\\nOPENROUTER_API_KEY=%s\\nOPENAI_API_KEY=%s\\nOPENAI_BASE_URL=%s\\n" "$INPUT_MODEL" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
+              mini-extra config set model "$INPUT_MODEL" 2>/dev/null || true
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
