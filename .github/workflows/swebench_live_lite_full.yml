@@ -1800,7 +1800,7 @@ jobs:
               # Fail before dispatch if the exact LiteLLM/Pydantic combination
               # cannot construct the response model.  A late step-1 provider
               # exception is an infrastructure failure, not an unsolved task.
-              "$GT_PY" -c "import litellm; from litellm.types.utils import ModelResponse; ModelResponse(); print('[GT] litellm response model probe OK')" \
+              "$GT_PY" -c "import litellm; from litellm.types.utils import ModelResponse; ModelResponse(); print(\"[GT] litellm response model probe OK\")" \
                 || { echo "FATAL: incompatible LiteLLM response-model runtime"; exit 1; }
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
