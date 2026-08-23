@@ -541,6 +541,7 @@ func main() {
 	if len(allProps) > 0 {
 		ptIdx := resolver.BuildParamTypeIndex(allProps, nodeDBIDs)
 		resolver.SetParamTypeIndex(ptIdx)
+		resolver.SetParamNameIndex(resolver.BuildParamNameIndex(allProps, nodeDBIDs))
 		fmt.Fprintf(os.Stderr, "  Declared-type receivers: %d callers with typed params\n", len(ptIdx))
 
 		// Strategy 2b: declared-FIELD-type receiver index from the SAME `class_field`
@@ -550,6 +551,7 @@ func main() {
 		// NodeIdx is global (Pass 2) and parallel to nodeDBIDs, same as the param index.
 		ftIdx := resolver.BuildFieldTypeIndex(allProps, nodeDBIDs)
 		resolver.SetFieldTypeIndex(ftIdx)
+		resolver.SetCallableFieldIndex(resolver.BuildCallableFieldIndex(allProps, nodeDBIDs, nodeMeta))
 		fmt.Fprintf(os.Stderr, "  Declared-type fields: %d classes with typed fields\n", len(ftIdx))
 
 		// GAP C: build the constructor-return-shape index for the Strategy 1.96/1.97
@@ -569,6 +571,12 @@ func main() {
 		rsIdx := resolver.BuildReturnShapeIndex(allProps, nodeDBIDs, classNames)
 		resolver.SetReturnShapeIndex(rsIdx)
 		fmt.Fprintf(os.Stderr, "  Return-shape receivers: %d factories with constructor returns\n", len(rsIdx))
+	} else {
+		resolver.SetParamTypeIndex(nil)
+		resolver.SetParamNameIndex(nil)
+		resolver.SetFieldTypeIndex(nil)
+		resolver.SetCallableFieldIndex(nil)
+		resolver.SetReturnShapeIndex(nil)
 	}
 
 	// PyCG Step 1: build assignment index for Strategy 1.96
@@ -1441,10 +1449,12 @@ func runIncremental(root, relpath, dbPath string) error {
 	// so Strategy 1.94a resolves typed-receiver method calls on `gt-index -file` too.
 	if len(pr.Properties) > 0 {
 		resolver.SetParamTypeIndex(resolver.BuildParamTypeIndex(pr.Properties, newDBIDs))
+		resolver.SetParamNameIndex(resolver.BuildParamNameIndex(pr.Properties, newDBIDs))
 		// Strategy 2b on the incremental path: declared-field-type index from the
 		// reparsed file's `class_field` properties so self.<field>.method() resolves
 		// on `gt-index -file` reindex too (parity with the param index above).
 		resolver.SetFieldTypeIndex(resolver.BuildFieldTypeIndex(pr.Properties, newDBIDs))
+		resolver.SetCallableFieldIndex(resolver.BuildCallableFieldIndex(pr.Properties, newDBIDs, nodeMeta))
 		// GAP C on the incremental path: constructor-return-shape index for the
 		// 1.96/1.97 return-type fallback, parity with the full-index path. classNames
 		// is the FULL cross-file class-like name set (nodeMeta spans all files).
@@ -1456,6 +1466,12 @@ func runIncremental(root, relpath, dbPath string) error {
 			}
 		}
 		resolver.SetReturnShapeIndex(resolver.BuildReturnShapeIndex(pr.Properties, newDBIDs, classNames))
+	} else {
+		resolver.SetParamTypeIndex(nil)
+		resolver.SetParamNameIndex(nil)
+		resolver.SetFieldTypeIndex(nil)
+		resolver.SetCallableFieldIndex(nil)
+		resolver.SetReturnShapeIndex(nil)
 	}
 
 	resolved := resolver.Resolve(pr.Calls, nameIndex, fileIndex, callerDBIDs, pr.Imports, fileMap, nodeMeta)

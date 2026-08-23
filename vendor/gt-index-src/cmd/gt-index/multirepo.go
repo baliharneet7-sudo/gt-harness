@@ -320,7 +320,9 @@ func indexOneRepo(db *store.DB, root string, repoID int64, maxFiles, workers int
 	nodeMeta := resolver.BuildNodeMeta(allNodes, nodeDBIDs)
 	if len(allProps) > 0 {
 		resolver.SetParamTypeIndex(resolver.BuildParamTypeIndex(allProps, nodeDBIDs))
+		resolver.SetParamNameIndex(resolver.BuildParamNameIndex(allProps, nodeDBIDs))
 		resolver.SetFieldTypeIndex(resolver.BuildFieldTypeIndex(allProps, nodeDBIDs))
+		resolver.SetCallableFieldIndex(resolver.BuildCallableFieldIndex(allProps, nodeDBIDs, nodeMeta))
 		classNames := make(map[string]bool)
 		for _, m := range nodeMeta {
 			switch m.Label {
@@ -329,6 +331,12 @@ func indexOneRepo(db *store.DB, root string, repoID int64, maxFiles, workers int
 			}
 		}
 		resolver.SetReturnShapeIndex(resolver.BuildReturnShapeIndex(allProps, nodeDBIDs, classNames))
+	} else {
+		resolver.SetParamTypeIndex(nil)
+		resolver.SetParamNameIndex(nil)
+		resolver.SetFieldTypeIndex(nil)
+		resolver.SetCallableFieldIndex(nil)
+		resolver.SetReturnShapeIndex(nil)
 	}
 	if inhMap := buildInheritanceMap(files, root, nameIndex, nodeMeta); len(inhMap) > 0 {
 		resolver.SetInheritanceMap(inhMap)

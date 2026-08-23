@@ -36,6 +36,49 @@ func TestBuildImportIndexResolvesPythonParentRelativeImport(t *testing.T) {
 	}
 }
 
+func TestBuildParamNameIndexIncludesUntypedCallback(t *testing.T) {
+	properties := []parser.PropertyRef{{
+		NodeIdx: 0,
+		Kind:    "param",
+		Value:   "createStore [required]",
+	}}
+
+	got := BuildParamNameIndex(properties, []int64{41})
+	if !got[41]["createStore"] {
+		t.Fatalf("untyped callback parameter missing: %#v", got)
+	}
+}
+
+func TestBuildCallableFieldIndexRequiresTypedBareClassDefault(t *testing.T) {
+	properties := []parser.PropertyRef{
+		{NodeIdx: 0, Kind: "class_field", Value: "signer: type[Signer] = Signer"},
+		{NodeIdx: 0, Kind: "class_field", Value: "other = Signer"},
+		{NodeIdx: 0, Kind: "class_field", Value: "built: type[Signer] = Signer()"},
+	}
+
+	got := BuildCallableFieldIndex(properties, []int64{51}, nil)
+	if got[51]["signer"] != "Signer" {
+		t.Fatalf("callable class field missing: %#v", got)
+	}
+	if len(got[51]) != 1 {
+		t.Fatalf("unsafe callable fields accepted: %#v", got)
+	}
+}
+
+func TestBuildCallableFieldIndexUsesTypedInstanceAssignment(t *testing.T) {
+	properties := []parser.PropertyRef{{
+		NodeIdx: 0,
+		Kind:    "data_flow",
+		Value:   "signer -> signer is None | self.signer: type[Signer] = signer",
+	}}
+	meta := map[int64]NodeMeta{61: {Label: "Method", ParentID: 51, Name: "__init__"}}
+
+	got := BuildCallableFieldIndex(properties, []int64{61}, meta)
+	if got[51]["signer"] != "Signer" {
+		t.Fatalf("typed instance callable field missing: %#v", got)
+	}
+}
+
 func TestImportedExternalBaseDoesNotBindUniqueLocalName(t *testing.T) {
 	classes := map[string][]classNodeEntry{
 		"Component": {{ID: 7, FilePath: "tests/types.ts"}},

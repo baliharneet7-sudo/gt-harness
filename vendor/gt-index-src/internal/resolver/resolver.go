@@ -1090,6 +1090,12 @@ var reExportGraphIncomplete bool
 // Generalized across statically-typed languages (Go/Rust/Java/TS + annotated Python).
 var paramTypeIndex map[int64]map[string]string
 
+// paramNameIndex records every declared parameter, including untyped callback
+// parameters. An unqualified call through such a name is a call to the local
+// value, not to a same-named repository function. The resolver must abstain
+// unless callable-value flow proves a concrete target.
+var paramNameIndex map[int64]map[string]bool
+
 // returnShapeIndex: function node DB ID → the internal class-like type NAME the function
 // constructs and returns, mined from the `return_shape` property ONLY when the body returns
 // a BARE CONSTRUCTOR (`ClassName(...)` for Python/JS/TS, `&Struct{...}` / `Struct{...}` for
@@ -1117,6 +1123,12 @@ var returnShapeIndex map[int64]string
 // statically-typed langs (Go/Rust/TS struct/class fields + annotated Python attrs) —
 // `class_field` is language-uniform (parser.go:3817-3818).
 var fieldTypeIndex map[int64]map[string]string
+
+// callableFieldIndex: CLASS node DB ID -> field name -> default class value for
+// source facts such as Python `signer: type[Signer] = Signer`. This supports a
+// bounded candidate constructor edge for `self.signer(...)` without confusing
+// the field name with an unrelated same-named method.
+var callableFieldIndex map[int64]map[string]string
 
 // builtinMethodNames: methods of language builtin/stdlib types (str/dict/list/set
 // and equivalents). A QUALIFIED call obj.method() that reaches Strategy 2 did NOT
@@ -1273,9 +1285,19 @@ func SetParamTypeIndex(idx map[int64]map[string]string) {
 	paramTypeIndex = idx
 }
 
+// SetParamNameIndex sets the caller->declared-parameter shadow map.
+func SetParamNameIndex(idx map[int64]map[string]bool) {
+	paramNameIndex = idx
+}
+
 // SetFieldTypeIndex sets the class→field→type map for Strategy 2b.
 func SetFieldTypeIndex(idx map[int64]map[string]string) {
 	fieldTypeIndex = idx
+}
+
+// SetCallableFieldIndex sets the class->callable-field->default-class map.
+func SetCallableFieldIndex(idx map[int64]map[string]string) {
+	callableFieldIndex = idx
 }
 
 // SetReturnShapeIndex sets the funcNodeID→constructed-class-name map used as the
@@ -1628,6 +1650,136 @@ func BuildFieldTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int6
 // BuildParamTypeIndex builds caller-node-DB-ID → {paramName → typeName} from the
 // `param` properties (value form "name:type [flags]") the parser extracts. nodeDBIDs
 // is parallel to the global node slice the properties' NodeIdx indexes into.
+// parseTypedCallableAssignment parses a simple typed assignment whose annotation
+// states that the value is a class object, for example
+// `signer: type[Signer] = Signer` or `self.signer: type[Signer] = signer`.
+// It intentionally rejects expressions, constructor calls, and compound targets.
+func parseTypedCallableAssignment(value string) (fieldName, className, assignedName string, ok bool) {
+	value = stripTSFieldModifiers(strings.TrimSpace(value))
+	equals := strings.Index(value, "=")
+	colon := strings.Index(value, ":")
+	if equals <= 0 || colon <= 0 || colon >= equals {
+		return "", "", "", false
+	}
+	fieldName = strings.TrimSpace(value[:colon])
+	fieldName = strings.TrimPrefix(fieldName, "self.")
+	fieldName = strings.TrimPrefix(fieldName, "this.")
+	annotation := strings.TrimSpace(value[colon+1 : equals])
+	assignedName = strings.TrimSpace(value[equals+1:])
+	if !isIdent(fieldName) || !isIdent(assignedName) {
+		return "", "", "", false
+	}
+	open := strings.IndexAny(annotation, "[<")
+	if open <= 0 || !(strings.HasSuffix(annotation, "]") || strings.HasSuffix(annotation, ">")) {
+		return "", "", "", false
+	}
+	head := strings.TrimSpace(annotation[:open])
+	className = strings.TrimSpace(annotation[open+1 : len(annotation)-1])
+	if (head != "type" && head != "Type") || !isIdent(className) {
+		return "", "", "", false
+	}
+	return fieldName, className, assignedName, true
+}
+
+// BuildCallableFieldIndex recognizes two explicit callable-field facts:
+//
+//   - a class field with a matching bare class default, such as
+//     `signer: type[Signer] = Signer`; and
+//   - an instance field assigned from a same-function parameter with a callable
+//     annotation, such as `self.signer: type[Signer] = signer`.
+//
+// The second form is carried by the parser's bounded data-flow property and is
+// anchored to the containing class through node metadata. Resolution later still
+// requires the type to name an import-reachable internal class. The resulting
+// constructor relationship remains a candidate because runtime callers may pass
+// a subclass or replacement implementation.
+func BuildCallableFieldIndex(props []parser.PropertyRef, nodeDBIDs []int64, meta map[int64]NodeMeta) map[int64]map[string]string {
+	idx := make(map[int64]map[string]string)
+	for _, p := range props {
+		if p.NodeIdx < 0 || p.NodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		nodeDBID := nodeDBIDs[p.NodeIdx]
+		if nodeDBID <= 0 {
+			continue
+		}
+
+		switch p.Kind {
+		case "class_field":
+			fieldName, className, defaultClass, ok := parseTypedCallableAssignment(p.Value)
+			if !ok || className != defaultClass {
+				continue
+			}
+			if idx[nodeDBID] == nil {
+				idx[nodeDBID] = make(map[string]string)
+			}
+			idx[nodeDBID][fieldName] = className
+
+		case "data_flow":
+			methodMeta, exists := meta[nodeDBID]
+			if !exists || methodMeta.ParentID <= 0 {
+				continue
+			}
+			arrow := strings.Index(p.Value, " -> ")
+			if arrow <= 0 {
+				continue
+			}
+			paramName := strings.TrimSpace(p.Value[:arrow])
+			if !isIdent(paramName) {
+				continue
+			}
+			for _, use := range strings.Split(p.Value[arrow+4:], " | ") {
+				trimmed := strings.TrimSpace(use)
+				if !strings.HasPrefix(trimmed, "self.") && !strings.HasPrefix(trimmed, "this.") {
+					continue
+				}
+				fieldName, className, assignedName, ok := parseTypedCallableAssignment(trimmed)
+				if !ok || assignedName != paramName {
+					continue
+				}
+				if idx[methodMeta.ParentID] == nil {
+					idx[methodMeta.ParentID] = make(map[string]string)
+				}
+				idx[methodMeta.ParentID][fieldName] = className
+			}
+		}
+	}
+	return idx
+}
+
+// BuildParamNameIndex records both typed and untyped declared parameters. The
+// `param` property is parser-authored source evidence with a stable leading name
+// (`name:type ...` or `name ...`).
+func BuildParamNameIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int64]map[string]bool {
+	idx := make(map[int64]map[string]bool)
+	for _, p := range props {
+		if p.Kind != "param" || p.NodeIdx < 0 || p.NodeIdx >= len(nodeDBIDs) {
+			continue
+		}
+		dbid := nodeDBIDs[p.NodeIdx]
+		if dbid <= 0 {
+			continue
+		}
+		value := strings.TrimSpace(p.Value)
+		end := len(value)
+		if colon := strings.Index(value, ":"); colon >= 0 && colon < end {
+			end = colon
+		}
+		if space := strings.IndexAny(value, " \t"); space >= 0 && space < end {
+			end = space
+		}
+		name := strings.TrimSpace(value[:end])
+		if !isIdent(name) {
+			continue
+		}
+		if idx[dbid] == nil {
+			idx[dbid] = make(map[string]bool)
+		}
+		idx[dbid][name] = true
+	}
+	return idx
+}
+
 func BuildParamTypeIndex(props []parser.PropertyRef, nodeDBIDs []int64) map[int64]map[string]string {
 	idx := make(map[int64]map[string]string)
 	for _, p := range props {
@@ -2042,6 +2194,41 @@ func Resolve(
 		return "", false
 	}
 
+	lookupCallableFieldWithInheritance := func(classID int64, fieldName string) (string, bool) {
+		if callableFieldIndex == nil {
+			return "", false
+		}
+		if fields, ok := callableFieldIndex[classID]; ok {
+			if className, ok := fields[fieldName]; ok {
+				return className, true
+			}
+		}
+		if inheritanceMap == nil {
+			return "", false
+		}
+		visited := map[int64]bool{classID: true}
+		current := classID
+		for depth := 0; depth < 10; depth++ {
+			parents := inheritanceMap[current]
+			if len(parents) == 0 {
+				return "", false
+			}
+			for _, parentID := range parents {
+				if visited[parentID] {
+					continue
+				}
+				visited[parentID] = true
+				if fields, ok := callableFieldIndex[parentID]; ok {
+					if className, ok := fields[fieldName]; ok {
+						return className, true
+					}
+				}
+			}
+			current = parents[0]
+		}
+		return "", false
+	}
+
 	// Build unique-method-class index: method names that belong to exactly one class.
 	// "filter" exists only in QuerySet → self.queryset.filter() resolves to QuerySet.filter.
 	methodClassCount := make(map[string]map[int64]bool)
@@ -2361,6 +2548,15 @@ func Resolve(
 		var ok bool
 		matchMethod := "name_match"
 		evidence := "name_match"
+		unqualifiedCall := call.CalleeQualified == "" || call.CalleeQualified == calleeName
+		// A declared local parameter shadows every same-named repository symbol.
+		// Calling a callback parameter is real, but its concrete target is unknown
+		// until callable-value flow proves it. Abstain instead of binding a global
+		// unique/same-file name (Redux applyMiddleware's createStore callback).
+		if unqualifiedCall && (call.CalleeIsParameter ||
+			(paramNameIndex != nil && paramNameIndex[callerID][calleeName])) {
+			continue
+		}
 
 		// Strategy 1: Same-file exact name match (only when unambiguous AND UNQUALIFIED).
 		// B-2: a QUALIFIED call obj.method() must never bind a bare same-file name at
@@ -3493,6 +3689,36 @@ func Resolve(
 									}
 								}
 							}
+						}
+					}
+				}
+			}
+		}
+
+		// Strategy 1.975: a class-valued field invoked through self/this calls
+		// that field's default class constructor. This is a CANDIDATE rather than
+		// CERTIFIED because subclasses may override the class attribute.
+		if receiver, fieldName, fieldCall := splitReceiverMethod(call.CalleeQualified); fieldCall &&
+			(receiver == "self" || receiver == "this") && metaMap != nil {
+			if callerMeta, ok := metaMap[callerID]; ok && callerMeta.ParentID != 0 {
+				if className, ok := lookupCallableFieldWithInheritance(callerMeta.ParentID, fieldName); ok {
+					if classID, abstain := resolveInternalClassByName(
+						className, call.File, nodeIDs, metaMap, fileNodeIDs, importIndex,
+					); !abstain && classID != 0 {
+						if targetID, found := lookupMethodWithInheritance(classID, "__init__"); found && targetID != callerID {
+							putEdge(ResolvedCall{
+								SourceNodeID:   callerID,
+								TargetNodeID:   targetID,
+								SourceLine:     call.Line,
+								SourceFile:     call.File,
+								Method:         "callable_field_default",
+								Confidence:     0.6,
+								CandidateCount: 1,
+								TrustTier:      tierFor(0.6),
+								EvidenceType:   "class_callable_field_default",
+								ReceiverType:   className,
+							})
+							continue
 						}
 					}
 				}

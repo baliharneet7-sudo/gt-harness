@@ -110,18 +110,32 @@ def test_python_relative_imports_inheritance_and_dynamic_member_abstention(
     _git(root, "config", "user.email", "gt@example.invalid")
     _git(root, "config", "user.name", "GT Test")
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (root / "pkg" / "base.py").write_text("class Base:\n    pass\n", encoding="utf-8")
+    (root / "pkg" / "base.py").write_text(
+        "class Base:\n    def __init__(self):\n        pass\n", encoding="utf-8"
+    )
     (root / "pkg" / "child.py").write_text(
         "from .base import Base\n\nclass Child(Base):\n    pass\n", encoding="utf-8"
     )
     (root / "pkg" / "factory.py").write_text(
         "from .base import Base\n\n"
         "class Factory:\n"
+        "    default_signer: type[Base] = Base\n\n"
+        "    def __init__(self, signer: type[Base] | None = None):\n"
+        "        if signer is None:\n"
+        "            signer = self.default_signer\n"
+        "        self.signer: type[Base] = signer\n\n"
         "    def make(self):\n"
         "        return self.signer()\n\n"
         "class Unrelated:\n"
         "    def signer(self):\n"
         "        return Base()\n",
+        encoding="utf-8",
+    )
+    (root / "callback.ts").write_text(
+        "export function createStore(): number { return 1 }\n"
+        "export function applyMiddleware() {\n"
+        "  return createStore => createStore()\n"
+        "}\n",
         encoding="utf-8",
     )
     _git(root, "add", ".")
@@ -141,3 +155,8 @@ def test_python_relative_imports_inheritance_and_dynamic_member_abstention(
     assert {"pkg/child.py", "pkg/factory.py"} <= importer_files
     callees = service.query("callees", "Factory.make")["evidence"]
     assert not any(row["name"] == "signer" for row in callees)
+    assert any(row["qualified_name"] == "Base.__init__" for row in callees)
+    create_store_callers = service.query(
+        "callers", "createStore", file_path="callback.ts"
+    )["evidence"]
+    assert not create_store_callers

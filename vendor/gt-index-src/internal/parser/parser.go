@@ -108,11 +108,12 @@ type AssertionRef struct {
 
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
-	CallerNodeIdx   int    // index into ParseResult.Nodes
-	CalleeName      string // the function/method name being called (last component)
-	CalleeQualified string // full qualified name if available (e.g. "obj.method")
-	Line            int
-	File            string
+	CallerNodeIdx     int    // index into ParseResult.Nodes
+	CalleeName        string // the function/method name being called (last component)
+	CalleeQualified   string // full qualified name if available (e.g. "obj.method")
+	CalleeIsParameter bool   // lexical parameter shadows a same-named repository symbol
+	Line              int
+	File              string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
@@ -1477,6 +1478,28 @@ func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *P
 	extractCallsWithParent(node, sf, src, result, callerIdx, "")
 }
 
+func calleeIsLexicalParameter(node *sitter.Node, name string, spec *specs.Spec, src []byte) bool {
+	for ancestor := node.Parent(); ancestor != nil; ancestor = ancestor.Parent() {
+		if !spec.IsFunctionNode(ancestor.Type()) {
+			continue
+		}
+		// JS/TS permits an unparenthesized single arrow parameter (`x =>`).
+		// Tree-sitter exposes it as the singular `parameter` field rather than
+		// the spec's normal `parameters` field.
+		if parameter := ancestor.ChildByFieldName("parameter"); parameter != nil {
+			if firstParamIdent(parameter, src) == name {
+				return true
+			}
+		}
+		for _, parameter := range collectParamNames(ancestor, spec, src) {
+			if parameter == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType string) {
 	spec := sf.Spec
 	nodeType := node.Type()
@@ -1550,11 +1573,12 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 			}
 
 			result.Calls = append(result.Calls, CallRef{
-				CallerNodeIdx:   callerIdx,
-				CalleeName:      simple,
-				CalleeQualified: qualified,
-				Line:            int(node.StartPoint().Row) + 1,
-				File:            sf.Path,
+				CallerNodeIdx:     callerIdx,
+				CalleeName:        simple,
+				CalleeQualified:   qualified,
+				CalleeIsParameter: calleeIsLexicalParameter(node, simple, spec, src),
+				Line:              int(node.StartPoint().Row) + 1,
+				File:              sf.Path,
 			})
 
 			// Classify caller usage context from parent node type
