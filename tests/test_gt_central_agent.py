@@ -777,6 +777,7 @@ def test_provider_free_workflow_covers_final_hardening_and_exact_commit():
     assert '["git", "rev-parse", "HEAD"]' in workflow
     assert "ref: ${{ inputs.ref || github.sha }}" in workflow
     assert "workflow_call:" in workflow
+    assert "'.[dev,retrieval]'" in workflow
     assert '"dispatch_sha": "${{ github.sha }}"' in workflow
     assert '"provider_calls": 0' in workflow
 

@@ -136,7 +136,8 @@ def test_compiler_abstains_instead_of_sending_generic_symbols_for_unmatched_anch
     packet = RepositoryContextCompiler().compile(
         repository,
         _request(
-            "Sanitize the git repository by replacing AWS_ACCESS_KEY_ID in history"
+            "Sanitize the git repository by replacing AWS_ACCESS_KEY_ID in history; "
+            "do not delete or modify files that are not contaminated"
         ),
     )
 
