@@ -1301,10 +1301,12 @@ jobs:
           fi
           # Headless agent runner (B5 fix): the non-interactive core of run/mini.py. The bare
           # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
-          # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
+          # headless container (0 steps). This runner is neutral harness plumbing and is required
+          # by both arms; it self-disables GT imports when GT_BASELINE=1. GT-only helpers remain
+          # staged below only for the treatment arm.
+          cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
+          cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
           if [ "$INPUT_BASELINE" != "true" ]; then
-            cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
-            cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
           fi
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true

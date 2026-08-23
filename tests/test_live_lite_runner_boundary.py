@@ -18,6 +18,8 @@ def test_model_and_task_cross_docker_boundary_as_environment() -> None:
     assert 'GT_PRO_MODEL="$GT_INPUT_MODEL"' in text
     assert 'GT_PRO_INSTANCE_ID="$GT_INPUT_TASK"' in text
     assert '"\'"$INPUT_MODEL"\'"' not in text
+    assert 'cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"' in text
+    assert 'cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"' in text
 
 
 def test_task_execution_has_no_nonofficial_wall_cap() -> None:
