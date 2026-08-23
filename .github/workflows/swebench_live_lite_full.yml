@@ -1971,8 +1971,8 @@ jobs:
               # last-resort backup only if the clean git diff produced nothing (no tracked changes):
               [ -s /gt_out/agent_patch.diff ] || cp /tmp/patch.txt /gt_out/agent_patch.diff 2>/dev/null || true
               exit "$GT_RUNNER_RC"
-            GT_CONTAINER_SCRIPT
-            )" 2>&1 | tee -a trial_output.log
+          GT_CONTAINER_SCRIPT
+          )" 2>&1 | tee -a trial_output.log
           AGENT_RC=${PIPESTATUS[0]}
           _GT_AGENT_ELAPSED_S=$(($(date +%s) - _GT_AGENT_STARTED_EPOCH))
           # A timed-out/killed Docker client may leave its named container behind.

@@ -11,7 +11,7 @@ def _workflow() -> str:
 def test_model_and_task_cross_docker_boundary_as_environment() -> None:
     text = _workflow()
     assert 'bash -c "$(cat <<\'GT_CONTAINER_SCRIPT\'' in text
-    assert "GT_CONTAINER_SCRIPT\n            )\" 2>&1 | tee -a trial_output.log" in text
+    assert "GT_CONTAINER_SCRIPT\n          )\" 2>&1 | tee -a trial_output.log" in text
     assert '-e GT_INPUT_MODEL="$INPUT_MODEL"' in text
     assert '-e GT_INPUT_TASK="$MTASK"' in text
     assert 'export GT_RUN_MODEL="$GT_INPUT_MODEL"' in text
