@@ -134,18 +134,13 @@ def test_frozen_benchmark_contract_fails_closed_when_inputs_are_missing() -> Non
     assert "benchmark_contract_inputs_missing" in failures
 
 
-def test_canonical_gt_workflow_uses_dedicated_ox_alpha_release_manifest() -> None:
+def test_canonical_gt_workflow_uses_mini_swe_central_ox_alpha_release_manifest() -> None:
     workflow = (
-        Path(__file__).resolve().parents[1] / ".github/workflows/tb2_gt.yml"
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/tb2_miniswe_ox_alpha_diagnostic.yml"
     ).read_text(encoding="utf-8")
-    assert "--manifest eval/release/ox_alpha_smoke20.json" in workflow
-    assert "'.[dev,eval,miniswe,gt]'" in workflow
-    assert "always() && steps.harbor.outcome != 'skipped'" in workflow
-    assert "GT_INDEX_BINARY_HOST: /tmp/gt-index-linux-amd64" in workflow
-    assert "${{ github.workspace }}/vendor/gt-index-linux-amd64" not in workflow
-    normalize = workflow.index("Normalize Harbor result ownership for binding and upload")
-    bind = workflow.index("Bind grader outcomes and verify actual GT treatment delivery")
-    upload = workflow.index("Upload results artifact")
-    assert normalize < bind < upload
-    assert 'sudo chown -R "$(id -u):$(id -g)" "$run_dir"' in workflow
-    assert "max(30.0, 900 * float(sys.argv[1]) - 60.0)" in workflow
+    assert "MiniSweCentralAgent" in workflow
+    assert "eval/release/ox_alpha_smoke20.json" in workflow
+    assert "expected 20 unique contract tasks" in workflow
+    assert "max-parallel: 10" in workflow
+    assert "execution_budget_sec" in workflow

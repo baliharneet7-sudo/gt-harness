@@ -18,7 +18,7 @@ on:
       provider_secret:
         description: "Repository Actions secret containing the provider key"
         type: string
-        default: "OX_ALPHA_OPENROUTER_KEY"
+        default: "OPENROUTER_NEW"
       temperature:
         description: "Mini-SWE sampling temperature"
         type: string
