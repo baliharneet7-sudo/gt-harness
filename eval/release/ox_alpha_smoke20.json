@@ -1,16 +1,16 @@
 {
   "schema": "gt.release_manifest.v2",
-  "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v7",
-  "runtime_commit": "fea562fe29c0041a75578a73a610b074c61f134d",
+  "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v8",
+  "runtime_commit": "d8286c15783ba090e1594bba69d0645d439a1b5c",
   "benchmark_authorized": true,
-  "authorization_scope": "one GT-only 20-task end-to-end smoke; not broad superiority certification",
+  "authorization_scope": "one replacement GT-only 20-task end-to-end smoke after run 32631659145 completed Harbor but lost post-run receipts to two fixed harness defects; not broad superiority certification",
   "authorization_blockers": [],
   "authorized_workflows": [
     "tb2_gt.yml"
   ],
   "product_certification": {
-    "implementation_commit": "449a761a3fd3bfa7754aad8eba26694061fdfb8a",
-    "github_actions_provider_free_run": "32624390269",
+    "implementation_commit": "d8286c15783ba090e1594bba69d0645d439a1b5c",
+    "github_actions_provider_free_run": "pending exact-subject prerelease matrix",
     "codespaces_status": "CERTIFIED_WITH_DECLARED_LIMITATIONS",
     "provider_calls": 0
   },
