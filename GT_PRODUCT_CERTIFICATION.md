@@ -16,6 +16,8 @@ Campaign wrapper: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\
 
 The public `gt-harness certify` command independently accepted the complete bundle with zero errors. It verified a clean checkout at the exact implementation SHA, all required campaign steps, all required receipt schemas and statuses, the minimum truth/lifecycle/language/MCP/failure evidence, and provider-free execution. Provider calls were zero; provider credentials were not inspected.
 
+The independent hosted repository-matrix workflow was repaired after GitHub rejected its job-level `runner.temp` expression before job creation. Workflow dispatch run `32617666718` then completed `SUCCESS` in 6m51s against exact input subject `3e2185d`, and uploaded a ten-repository `PASS` receipt (SHA-256 `2218b0315abc0930d98ba2006e950cc8a9edbc1f8913e28a043c8ceeef7eb7e3`). The richer product verdict still comes from the full Codespaces bundle above.
+
 ## Certified product facts
 
 | Requirement | Observed evidence | Result |

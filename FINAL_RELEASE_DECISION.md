@@ -12,7 +12,7 @@ Decision date: `2026-08-23`
 
 ## Evidence summary
 
-- Mechanical reproducibility: Codespaces wrapper `PASS` on clean detached Linux exact SHA; install, doctor, full Python/Go tests, canonical lint, all product campaigns, and public certifier passed. Provider calls `0`; credentials not inspected.
+- Mechanical reproducibility: Codespaces wrapper `PASS` on clean detached Linux exact SHA; install, doctor, full Python/Go tests, canonical lint, all product campaigns, and public certifier passed. Hosted GitHub Actions run `32617666718` independently repeated the exact ten-repository matrix and uploaded a `PASS` artifact. Provider calls `0`; credentials not inspected.
 - Product verdict: `CERTIFIED_WITH_DECLARED_LIMITATIONS`.
 - Certified languages: Python, JavaScript, TypeScript, Go, Rust, and Java.
 - Graph construction: ten frozen real repositories, 9,550 attempted/indexed source files, zero file failures, persisted/reopened exact graph identity on every repository.

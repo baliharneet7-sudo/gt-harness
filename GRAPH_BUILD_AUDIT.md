@@ -6,6 +6,8 @@ Gate status: **PASS on Linux Codespaces for the frozen ten-repository matrix**
 
 Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\real-repository-matrix.json`
 
+Hosted reproduction: GitHub Actions run `32617666718` completed `SUCCESS`; its 30-day artifact contains a second ten-repository `PASS` receipt with SHA-256 `2218b0315abc0930d98ba2006e950cc8a9edbc1f8913e28a043c8ceeef7eb7e3`.
+
 This is graph-construction evidence, not universal graph-truth or competitive evidence. Every checkout was clean and pinned by `audit/real_repository_matrix.v1.json`. Each graph was persisted, reopened through a new production service, rebound to the exact repository source revision and graph identity, and queried through the public interface.
 
 ## Builder under test
