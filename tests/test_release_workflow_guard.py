@@ -139,3 +139,5 @@ def test_canonical_gt_workflow_uses_dedicated_ox_alpha_release_manifest() -> Non
         Path(__file__).resolve().parents[1] / ".github/workflows/tb2_gt.yml"
     ).read_text(encoding="utf-8")
     assert "--manifest eval/release/ox_alpha_smoke20.json" in workflow
+    assert "'.[dev,eval,miniswe,gt]'" in workflow
+    assert "always() && steps.harbor.outcome != 'skipped'" in workflow
