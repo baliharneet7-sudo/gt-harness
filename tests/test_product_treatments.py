@@ -17,7 +17,6 @@ from gt_engine.repository_graph_service import GraphStatus
 from gt_harness.treatments import (
     BareTreatment,
     GroundTruthTreatment,
-    TreatmentUnavailableError,
 )
 from nano.agent import Agent
 from nano.providers import StepResult, ToolCall, Usage
@@ -83,7 +82,7 @@ def test_treatment_cannot_rewrite_or_block_agent_tool_action() -> None:
     assert provider.messages[0][0]["content"] == "task\n\nrepository fact"
 
 
-def test_groundtruth_failure_is_explicit_and_stops_before_provider_call(
+def test_groundtruth_not_applicable_is_explicit_and_agent_still_runs(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "not-code"
@@ -91,16 +90,16 @@ def test_groundtruth_failure_is_explicit_and_stops_before_provider_call(
     treatment = GroundTruthTreatment(root)
 
     provider = Provider()
-    with pytest.raises(TreatmentUnavailableError, match="NOT_APPLICABLE"):
-        Agent(
-            provider=provider,
-            system="system",
-            bash=Bash(),
-            treatment=treatment,
-            verify=False,
-        ).run("task")
+    result = Agent(
+        provider=provider,
+        system="system",
+        bash=Bash(),
+        treatment=treatment,
+        verify=False,
+    ).run("task")
 
-    assert provider.calls == 0
+    assert result.stop_reason == "end_turn"
+    assert provider.calls == 2
     receipt = treatment.finalize(None)
     assert receipt["treatment"] == "groundtruth"
     assert receipt["treatment_status"] == "NOT_APPLICABLE"
@@ -109,20 +108,25 @@ def test_groundtruth_failure_is_explicit_and_stops_before_provider_call(
     assert receipt["delivery_count"] == 0
 
 
-def test_run_cli_records_unavailable_treatment_without_calling_provider(
+def test_run_cli_records_not_applicable_treatment_and_runs_provider(
     tmp_path: Path, monkeypatch
 ) -> None:
     import nano.cli
     from gt_harness.cli import _run_agent
 
-    class ForbiddenProvider:
+    class CompletingProvider:
         def step(self, *_args, **_kwargs):
-            raise AssertionError("provider must not run without an active GT graph")
+            return StepResult(
+                text="done",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(input_tokens=1, output_tokens=1),
+            )
 
     monkeypatch.setattr(
         nano.cli,
         "build_provider",
-        lambda **_kwargs: ForbiddenProvider(),
+        lambda **_kwargs: CompletingProvider(),
     )
     root = tmp_path / "not-code-cli"
     root.mkdir()
@@ -143,11 +147,10 @@ def test_run_cli_records_unavailable_treatment_without_calling_provider(
         treatment="groundtruth",
     )
 
-    assert _run_agent(args) == 1
+    assert _run_agent(args) == 0
     receipt = json.loads(output.read_text(encoding="utf-8"))
-    assert receipt["status"] == "ERROR"
-    assert receipt["error_type"] == "TreatmentUnavailableError"
-    assert receipt["provider_calls"] == 0
+    assert receipt["status"] == "COMPLETED"
+    assert receipt["provider_calls"] == 1
     assert receipt["treatment_receipt"]["treatment_status"] == "NOT_APPLICABLE"
 
 
@@ -177,7 +180,7 @@ def test_groundtruth_observes_only_real_repository_paths_and_real_diagnostics(
 
     assert treatment.active_paths == [".github/workflows/check.yml"]
     assert treatment.diagnostics == []
-    assert treatment.context_dirty is True
+    assert treatment.context_dirty is False
 
     treatment.context_dirty = False
     treatment.after_action("bash", {"command": "pwd"}, "ordinary output", False)
@@ -406,3 +409,65 @@ def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(
     assert len({receipt["system_prompt_sha256"] for receipt in receipts}) == 1
     assert len({receipt["tool_policy_sha256"] for receipt in receipts}) == 1
     assert len({receipt["repository_start"]["source_revision"] for receipt in receipts}) == 1
+
+
+def test_run_cli_checkpoints_receipt_before_agent_finishes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import nano.agent
+    import nano.cli
+    from gt_harness.cli import _run_agent
+
+    output = tmp_path / "gt-run.json"
+
+    class CheckpointingAgent:
+        def __init__(self, **kwargs):
+            self.on_event = kwargs["on_event"]
+            self.treatment = kwargs["treatment"]
+
+        def run(self, _task: str):
+            initial = json.loads(output.read_text(encoding="utf-8"))
+            assert initial["status"] == "RUNNING"
+            assert initial["provider_calls"] == 0
+            self.on_event({"type": "assistant", "text": "working", "tool_calls": []})
+            self.on_event(
+                {"type": "stats", "iteration": 1, "input_tokens": 12,
+                 "output_tokens": 3}
+            )
+            checkpoint = json.loads(output.read_text(encoding="utf-8"))
+            assert checkpoint["status"] == "RUNNING"
+            assert checkpoint["provider_calls"] == 1
+            assert checkpoint["input_tokens"] == 12
+            treatment_receipt = self.treatment.finalize(None)
+            return SimpleNamespace(
+                stop_reason="end_turn",
+                iterations=1,
+                total_input_tokens=12,
+                total_output_tokens=3,
+                total_cache_read_tokens=0,
+                transcript=[
+                    {"type": "assistant", "text": "working"},
+                    {"type": "treatment_receipt", "receipt": treatment_receipt},
+                ],
+            )
+
+    monkeypatch.setattr(nano.agent, "Agent", CheckpointingAgent)
+    monkeypatch.setattr(nano.cli, "build_provider", lambda **_kwargs: object())
+    args = SimpleNamespace(
+        task="Do work",
+        model="provider/model",
+        base_url="https://provider.invalid",
+        max_iterations=3,
+        time_budget_seconds=30.0,
+        root=str(tmp_path),
+        temperature=0.0,
+        run_id="checkpoint",
+        task_id="task-checkpoint",
+        trial_id="1",
+        output=str(output),
+        state_dir=None,
+        treatment="bare",
+    )
+
+    assert _run_agent(args) == 0
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "COMPLETED"

@@ -118,8 +118,9 @@ def bind_evaluator_outcome(
     evaluator, evaluator_bytes = _read_object(evaluator_path, label="evaluator receipt")
     if run.get("schema") != "gt.run_receipt.v1":
         raise OutcomeBindingError("unsupported run receipt schema")
-    if run.get("status") != "COMPLETED":
-        raise OutcomeBindingError("run receipt did not complete")
+    run_status = str(run.get("status") or "")
+    if run_status not in {"COMPLETED", "ERROR", "RUNNING"}:
+        raise OutcomeBindingError(f"unsupported run receipt status: {run_status or 'missing'}")
     if isinstance(run.get("resolved"), bool) or run.get("evaluation") is not None:
         raise OutcomeBindingError("run receipt already has an evaluator outcome")
     task_id = str(run.get("task_id") or "").strip()
@@ -135,6 +136,7 @@ def bind_evaluator_outcome(
         "task_id": task_id,
         "trial_id": str(run.get("trial_id") or ""),
         "resolved": resolved,
+        "run_status_at_binding": run_status,
         "evaluator_format": evaluator_format,
         "evaluator_receipt_name": evaluator_path.name,
         "run_receipt_sha256": hashlib.sha256(run_bytes).hexdigest(),
@@ -172,10 +174,14 @@ def bind_harbor_run_directory(
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{task_id}--{trial_id}")
         output_path = destination / f"{safe_name}.json"
         bound.append(bind_evaluator_outcome(run_path, evaluator_path, output_path))
+    incomplete = sum(1 for row in bound if row.get("status") != "COMPLETED")
     return {
         "schema": "gt.evaluated_run_collection.v1",
-        "status": "COMPLETE",
+        "status": (
+            "COMPLETE_WITH_INCOMPLETE_RUNS" if incomplete else "COMPLETE"
+        ),
         "bound_receipts": len(bound),
+        "incomplete_run_receipts": incomplete,
         "pairs": [
             {"task_id": row["task_id"], "trial_id": row["trial_id"]}
             for row in bound

@@ -11,6 +11,10 @@ from pydantic import BaseModel
 _RETRYABLE_STATUS = {429, 500, 502, 503, 529}
 
 
+class EmptyProviderResponseError(RuntimeError):
+    """Provider returned neither user-visible text nor an executable tool call."""
+
+
 def _call_with_retry(fn, attempts: int = 3):
     """Retry transient API failures (rate limits, overload, dropped
     connections) with exponential backoff. Non-transient errors and the
@@ -24,7 +28,8 @@ def _call_with_retry(fn, attempts: int = 3):
             # no "Connection" in their concrete class name - same transient
             # class of failure, same retry.
             name = type(e).__name__
-            transient = (status in _RETRYABLE_STATUS
+            transient = (isinstance(e, EmptyProviderResponseError)
+                         or status in _RETRYABLE_STATUS
                          or "Connection" in name or "Timeout" in name)
             if not transient or attempt == attempts - 1:
                 raise
@@ -255,7 +260,21 @@ class OpenAIProvider:
                 self.request_observer("openai.chat.completions", kwargs)
             except Exception:
                 pass
-        resp = _call_with_retry(lambda: self.client.chat.completions.create(**kwargs))
+        def create_valid_completion():
+            response = self.client.chat.completions.create(**kwargs)
+            choices = tuple(getattr(response, "choices", ()) or ())
+            if not choices:
+                raise EmptyProviderResponseError("provider returned no completion choices")
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None)
+            calls = getattr(message, "tool_calls", None) or ()
+            if not str(content or "").strip() and not calls:
+                raise EmptyProviderResponseError(
+                    "provider returned empty content and no tool calls"
+                )
+            return response
+
+        resp = _call_with_retry(create_valid_completion)
         choice = resp.choices[0]
         msg = choice.message
 

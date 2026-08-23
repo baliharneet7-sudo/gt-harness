@@ -12,13 +12,15 @@ from gt_harness.outcomes import (
 )
 
 
-def _run_receipt(task_id: str = "task-one") -> dict[str, object]:
+def _run_receipt(
+    task_id: str = "task-one", *, status: str = "COMPLETED"
+) -> dict[str, object]:
     return {
         "schema": "gt.run_receipt.v1",
         "run_id": "run-one",
         "task_id": task_id,
         "trial_id": "1",
-        "status": "COMPLETED",
+        "status": status,
         "resolved": None,
         "treatment": "groundtruth",
     }
@@ -97,6 +99,30 @@ def test_outcome_binding_refuses_to_overwrite_an_existing_outcome(tmp_path: Path
         bind_evaluator_outcome(run_path, evaluator_path, output_path)
 
 
+def test_outcome_binding_preserves_incomplete_run_status(tmp_path: Path) -> None:
+    run_path = tmp_path / "run.json"
+    evaluator_path = tmp_path / "result.json"
+    output_path = tmp_path / "evaluated.json"
+    run_path.write_text(
+        json.dumps(_run_receipt(status="RUNNING")), encoding="utf-8"
+    )
+    evaluator_path.write_text(
+        json.dumps(
+            {
+                "task_name": "task-one",
+                "verifier_result": {"rewards": {"tests": 0.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = bind_evaluator_outcome(run_path, evaluator_path, output_path)
+
+    assert result["status"] == "RUNNING"
+    assert result["resolved"] is False
+    assert result["evaluation"]["run_status_at_binding"] == "RUNNING"
+
+
 def test_record_outcome_cli_exercises_the_public_product_boundary(
     tmp_path: Path, capsys
 ) -> None:
@@ -158,3 +184,31 @@ def test_harbor_directory_binding_produces_comparison_ready_receipts(
     receipts = list(output.glob("*.json"))
     assert len(receipts) == 1
     assert json.loads(receipts[0].read_text(encoding="utf-8"))["resolved"] is True
+
+
+def test_harbor_directory_binding_reports_incomplete_runs_without_losing_results(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "harbor" / "task-one__abc1234"
+    agent = trial / "agent"
+    agent.mkdir(parents=True)
+    (agent / "gt-run.json").write_text(
+        json.dumps(_run_receipt(status="RUNNING")), encoding="utf-8"
+    )
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task-one",
+                "verifier_result": {"rewards": {"tests": 0.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = bind_harbor_run_directory(
+        tmp_path / "harbor", tmp_path / "evaluated"
+    )
+
+    assert summary["status"] == "COMPLETE_WITH_INCOMPLETE_RUNS"
+    assert summary["bound_receipts"] == 1
+    assert summary["incomplete_run_receipts"] == 1

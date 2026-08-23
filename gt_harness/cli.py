@@ -243,6 +243,18 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _receipt_event(event: dict[str, object]) -> dict[str, object]:
+    """Convert a live agent event into durable JSON without losing tool calls."""
+
+    def default(value: object) -> object:
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump()
+        return str(value)
+
+    return json.loads(json.dumps(event, ensure_ascii=False, default=default))
+
+
 def _run_repository_identity(root: Path) -> dict[str, object]:
     identity = compute_repository_identity(root)
     return {
@@ -301,6 +313,74 @@ def _run_agent(args: argparse.Namespace) -> int:
     )
     started = _now()
     started_clock = time.perf_counter()
+    checkpoint_events: list[dict[str, object]] = []
+    checkpoint_provider_calls = 0
+    checkpoint_input_tokens = 0
+    checkpoint_output_tokens = 0
+    checkpoint_repository_end = repository_start
+
+    def write_checkpoint() -> None:
+        try:
+            treatment_receipt = treatment.finalize(None)
+        except Exception as exc:  # noqa: BLE001 - retain progress even if telemetry fails
+            treatment_receipt = {
+                "schema": "gt.treatment_receipt.v1",
+                "treatment": args.treatment,
+                "treatment_status": "FAILED",
+                "errors": [f"checkpoint_finalize_failed:{type(exc).__name__}"],
+            }
+        _write_json_atomic(
+            output_path,
+            {
+                "schema": "gt.run_receipt.v1",
+                "run_id": run_id,
+                "task_id": task_id,
+                "task_fingerprint": task_fingerprint,
+                "trial_id": trial_id,
+                "status": "RUNNING",
+                "started": started,
+                "completed": None,
+                "duration_ms": round(
+                    (time.perf_counter() - started_clock) * 1000, 3
+                ),
+                "repository": str(root),
+                **run_configuration,
+                "repository_start": repository_start,
+                "repository_end": checkpoint_repository_end,
+                "treatment": args.treatment,
+                "resolved": None,
+                "stop_reason": None,
+                "provider_calls": checkpoint_provider_calls,
+                "input_tokens": checkpoint_input_tokens,
+                "output_tokens": checkpoint_output_tokens,
+                "cached_tokens": 0,
+                "treatment_receipt": treatment_receipt,
+                "treatment_receipt_present": True,
+                "transcript": list(checkpoint_events),
+            },
+        )
+
+    def handle_event(event: dict[str, object]) -> None:
+        nonlocal checkpoint_provider_calls
+        nonlocal checkpoint_input_tokens
+        nonlocal checkpoint_output_tokens
+        nonlocal checkpoint_repository_end
+        _print_event(event)
+        normalized = _receipt_event(event)
+        checkpoint_events.append(normalized)
+        event_type = str(normalized.get("type") or "")
+        if event_type == "assistant":
+            checkpoint_provider_calls += 1
+        elif event_type == "stats":
+            checkpoint_input_tokens = int(normalized.get("input_tokens") or 0)
+            checkpoint_output_tokens = int(normalized.get("output_tokens") or 0)
+        elif event_type == "tool_result":
+            try:
+                checkpoint_repository_end = _run_repository_identity(root)
+            except Exception:  # noqa: BLE001 - next event/final receipt can recover
+                pass
+        write_checkpoint()
+
     try:
         provider = build_provider(
             model=args.model,
@@ -311,10 +391,13 @@ def _run_agent(args: argparse.Namespace) -> int:
             provider=provider,
             system=SYSTEM_PROMPT,
             max_iterations=args.max_iterations,
-            on_event=_print_event,
+            on_event=handle_event,
             treatment=treatment,
             time_budget_seconds=args.time_budget_seconds,
         )
+        # A Harbor/CI timeout may kill the process before Agent.run returns.
+        # Persist the pair identity and current graph state before any work.
+        write_checkpoint()
     except Exception as exc:  # noqa: BLE001 - setup failure must still leave a receipt
         receipt = {
             "schema": "gt.run_receipt.v1",

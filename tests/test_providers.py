@@ -1,3 +1,5 @@
+import pytest
+
 from nano.providers import StepResult, ToolCall, Usage
 
 
@@ -206,6 +208,55 @@ def test_openai_provider_end_turn():
     assert result.text == "done"
     assert result.tool_calls == []
     assert result.stop_reason == "end_turn"  # normalized from "stop"
+
+
+def test_openai_provider_retries_empty_completion(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda _seconds: None)
+    empty = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content=None, tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=0, completion_tokens=0),
+    )
+    valid = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="done", tool_calls=None),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=3, completion_tokens=1),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [empty, valid]
+
+    result = OpenAIProvider(model="provider/model", client=fake_client).step(
+        messages=[{"role": "user", "content": "work"}], tools=[], system="s"
+    )
+
+    assert result.text == "done"
+    assert fake_client.chat.completions.create.call_count == 2
+
+
+def test_openai_provider_rejects_persistently_empty_completion(monkeypatch):
+    import nano.providers as providers
+    monkeypatch.setattr(providers.time, "sleep", lambda _seconds: None)
+    empty = MagicMock(
+        choices=[MagicMock(
+            message=MagicMock(content="  ", tool_calls=[]),
+            finish_reason="stop",
+        )],
+        usage=MagicMock(prompt_tokens=0, completion_tokens=0),
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = empty
+
+    with pytest.raises(providers.EmptyProviderResponseError):
+        OpenAIProvider(model="provider/model", client=fake_client).step(
+            messages=[{"role": "user", "content": "work"}], tools=[], system="s"
+        )
+
+    assert fake_client.chat.completions.create.call_count == 3
 
 
 def test_openai_provider_translates_tool_schema_to_openai_format():

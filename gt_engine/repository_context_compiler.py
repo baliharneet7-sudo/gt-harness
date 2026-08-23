@@ -235,6 +235,29 @@ def _explicit_identifiers(request: ContextCompileRequest) -> dict[str, int]:
     return identifiers
 
 
+def _concrete_identifiers(request: ContextCompileRequest) -> frozenset[str]:
+    """Return task tokens whose spelling identifies a concrete code artifact.
+
+    Paths, qualified names, snake-case constants, and case-significant names
+    are stronger than ordinary prose. If the repository cannot match one of
+    these anchors, generic lexical similarity is not decision-grade evidence.
+    """
+    concrete: set[str] = set()
+    for value in (request.task, *request.active_symbols):
+        for token in _EXPLICIT_TOKEN.findall(str(value or "")):
+            lowered = token.lower()
+            if lowered in _ISSUE_LANGUAGE_WORDS:
+                continue
+            if (
+                any(separator in token for separator in ("/", "\\", ".", "_", "::"))
+                or any(character.isupper() for character in token[1:])
+                or token.isupper()
+            ):
+                concrete.add(lowered)
+                concrete.add(token.rsplit(".", 1)[-1].lower())
+    return frozenset(item for item in concrete if item)
+
+
 def _exact_candidate(ranked: RankedFile):
     return dict(ranked.channel_candidates).get(RetrievalChannel.EXACT)
 
@@ -400,6 +423,7 @@ class RepositoryContextCompiler:
             character_budget=max(1, int(request.character_budget)),
         )
         identifiers = _explicit_identifiers(request)
+        concrete_identifiers = _concrete_identifiers(request)
         ranked = tuple(sorted(retrieval.ranked_files, key=lambda row: _rank_key(row, identifiers)))
 
         exact_symbol_rows = tuple(
@@ -416,8 +440,25 @@ class RepositoryContextCompiler:
             and "exact_path" in set(candidate.provenance)
         )
         selected_claims = {candidate.claim_hash for candidate in retrieval.selected_context}
+        def matches_concrete_anchor(row: RankedFile) -> bool:
+            candidate = _exact_candidate(row) or row.representative
+            haystack = " ".join(
+                (
+                    str(candidate.path or ""),
+                    str(candidate.symbol or ""),
+                    str(candidate.text or ""),
+                )
+            ).lower()
+            return any(identifier in haystack for identifier in concrete_identifiers)
+
         certified_rows = tuple(
-            row for row in ranked if row.representative.claim_hash in selected_claims
+            row
+            for row in ranked
+            if row.representative.claim_hash in selected_claims
+            and (
+                not concrete_identifiers
+                or matches_concrete_anchor(row)
+            )
         )
         candidates = exact_symbol_rows or exact_path_rows or certified_rows
         primary_rows = tuple(candidates[:3])
@@ -611,6 +652,8 @@ class RepositoryContextCompiler:
             }.values()
         )
         uncertainty_reasons = [*repository.reason_codes]
+        if concrete_identifiers and not primary:
+            uncertainty_reasons.append("concrete_task_anchor_unmatched")
         uncertainty_reasons.extend(
             reason
             for reason in retrieval.reason_codes

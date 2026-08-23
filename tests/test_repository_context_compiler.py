@@ -117,6 +117,34 @@ def test_compiler_does_not_treat_issue_verbs_as_symbol_anchors() -> None:
     assert all(item.symbol != "Change" for item in packet.primary_edit_targets)
 
 
+def test_compiler_abstains_instead_of_sending_generic_symbols_for_unmatched_anchor(
+) -> None:
+    repository = HybridRepository(
+        documents=(
+            _document("modifiers.py", "modify", "def modify(value): return value"),
+            _document("processor.py", "commit", "def commit(repo): return repo"),
+            _document("file_utils.py", "remove", "def remove(path): return path"),
+        ),
+        structural_links=(),
+        source_revision="source-1",
+        complete=True,
+        reason_codes=(),
+        source_file_count=3,
+        document_chars=120,
+    )
+
+    packet = RepositoryContextCompiler().compile(
+        repository,
+        _request(
+            "Sanitize the git repository by replacing AWS_ACCESS_KEY_ID in history"
+        ),
+    )
+
+    assert packet.status is ContextStatus.ABSTAIN
+    assert packet.primary_edit_targets == ()
+    assert "concrete_task_anchor_unmatched" in packet.uncertainties
+
+
 def test_compiler_rejects_unverified_full_confidence_relationship() -> None:
     unsafe = StructuralLink(
         source_path="gt_harness/treatments.py",

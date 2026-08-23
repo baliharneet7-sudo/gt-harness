@@ -154,6 +154,13 @@ class GroundTruthTreatment(BareTreatment):
         self.errors.append(error)
         return TreatmentUnavailableError(error)
 
+    def _abstain(self, reason: str) -> str:
+        """Record an honest no-treatment result without aborting the agent."""
+        self.treatment_status = TreatmentStatus.NOT_APPLICABLE
+        self.errors.append(f"NOT_APPLICABLE:{reason}")
+        self.context_dirty = False
+        return ""
+
     def _context(self, *, update: bool, budget: int) -> GTContextPacket:
         receipt = self.service.status()
         state = ContextCompileRequest(
@@ -202,10 +209,10 @@ class GroundTruthTreatment(BareTreatment):
             reason = ",".join(packet.uncertainties) or "context_compile_failed"
             raise self._unavailable(receipt, reason)
         if packet.status is ContextStatus.ABSTAIN:
-            self.context_dirty = False
             if not update:
                 reason = ",".join(packet.uncertainties) or "no_repository_evidence"
-                raise self._unavailable(receipt, f"context_abstained:{reason}")
+                return self._abstain(f"context_abstained:{reason}")
+            self.context_dirty = False
             return ""
         normalized_packet = packet.as_dict()
 
@@ -327,7 +334,13 @@ class GroundTruthTreatment(BareTreatment):
                 receipt, f"graph_build_failed:{type(exc).__name__}"
             ) from exc
         if not receipt.query_ready:
-            raise self._unavailable(receipt, f"graph_not_ready:{receipt.build_status.value}")
+            if self._not_applicable(receipt):
+                return self._abstain(
+                    f"graph_not_ready:{receipt.build_status.value}"
+                )
+            raise self._unavailable(
+                receipt, f"graph_not_ready:{receipt.build_status.value}"
+            )
         self.treatment_status = TreatmentStatus.ACTIVE
         return self._render(
             update=False,
@@ -337,6 +350,8 @@ class GroundTruthTreatment(BareTreatment):
 
     def before_model_call(self, iteration: int) -> str:
         if iteration <= 1:
+            return ""
+        if self.treatment_status is TreatmentStatus.NOT_APPLICABLE:
             return ""
         observed = self.service.status()
         if observed.build_status is GraphStatus.STALE:
@@ -391,7 +406,6 @@ class GroundTruthTreatment(BareTreatment):
             if not resolved.is_relative_to(repository_root) or not resolved.is_file():
                 continue
             paths.append(normalized)
-        previous_paths = tuple(self.active_paths)
         self.active_paths = list(dict.fromkeys((*self.active_paths, *paths)))[-20:]
         diagnostic_lines = tuple(
             line.strip()[:500]
@@ -413,8 +427,7 @@ class GroundTruthTreatment(BareTreatment):
             self.diagnostics = []
             self.validation_state = "pass"
         if (
-            tuple(self.active_paths) != previous_paths
-            or diagnostic_lines
+            diagnostic_lines
             or diagnostics_cleared
         ):
             self.context_dirty = True

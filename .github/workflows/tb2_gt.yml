@@ -370,26 +370,38 @@ jobs:
           if not receipts:
               raise SystemExit("no evaluated GT run receipts")
           failures = []
+          active = 0
+          not_applicable = 0
           for row in receipts:
               gt = row.get("treatment_receipt") or {}
               key = f"{row.get('task_id')}::{row.get('trial_id')}"
               if row.get("status") != "COMPLETED":
                   failures.append(f"{key}:run_not_completed")
-              if gt.get("treatment_status") != "ACTIVE":
-                  failures.append(f"{key}:treatment_not_active")
-              if gt.get("graph_status") not in {"READY", "READY_WITH_DECLARED_LIMITATIONS"}:
-                  failures.append(f"{key}:graph_not_ready")
-              if int(gt.get("delivery_count") or 0) < 1:
-                  failures.append(f"{key}:context_not_delivered")
-              if int(gt.get("evidence_items_delivered") or 0) < 1:
-                  failures.append(f"{key}:evidence_not_delivered")
-              if gt.get("graph_commit_sha") != (row.get("repository_end") or {}).get("commit_sha"):
-                  failures.append(f"{key}:graph_commit_mismatch")
-              if gt.get("source_revision") != (row.get("repository_end") or {}).get("source_revision"):
-                  failures.append(f"{key}:graph_source_revision_mismatch")
+              status = gt.get("treatment_status")
+              if status == "ACTIVE":
+                  active += 1
+                  if gt.get("graph_status") not in {"READY", "READY_WITH_DECLARED_LIMITATIONS"}:
+                      failures.append(f"{key}:graph_not_ready")
+                  if int(gt.get("delivery_count") or 0) < 1:
+                      failures.append(f"{key}:context_not_delivered")
+                  if int(gt.get("evidence_items_delivered") or 0) < 1:
+                      failures.append(f"{key}:evidence_not_delivered")
+                  if gt.get("graph_commit_sha") != (row.get("repository_end") or {}).get("commit_sha"):
+                      failures.append(f"{key}:graph_commit_mismatch")
+                  if gt.get("source_revision") != (row.get("repository_end") or {}).get("source_revision"):
+                      failures.append(f"{key}:graph_source_revision_mismatch")
+              elif status == "NOT_APPLICABLE":
+                  not_applicable += 1
+                  if int(gt.get("delivery_count") or 0) != 0:
+                      failures.append(f"{key}:not_applicable_but_context_delivered")
+              else:
+                  failures.append(f"{key}:treatment_failed:{status}")
           if failures:
               raise SystemExit("invalid GT treatment:\n" + "\n".join(failures))
-          print(f"verified {len(receipts)} evaluated GT treatment receipt(s)")
+          print(
+              f"verified {len(receipts)} evaluated receipt(s): "
+              f"ACTIVE={active}, NOT_APPLICABLE={not_applicable}"
+          )
           PY
 
       # Upload grader results, raw run receipts, hash-bound evaluated receipts,
