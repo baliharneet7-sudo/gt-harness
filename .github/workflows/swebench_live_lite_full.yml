@@ -2994,6 +2994,7 @@ jobs:
       expected_total: ${{ needs.prepare.outputs.total }}
       task_job_regex: '^.+ \(.+\)$'
       monitor_timeout_minutes: "150"
+      checkpoint_every: "20"
     secrets: inherit
 
   # Independent publication of task outcomes.  This is not a second evaluator:
