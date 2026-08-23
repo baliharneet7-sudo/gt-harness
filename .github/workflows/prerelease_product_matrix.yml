@@ -45,10 +45,11 @@ jobs:
         run: gt-harness doctor
 
       - name: Run complete provider-free Python and Go regression
-        env:
-          GT_INDEX_BINARY: /tmp/gt-harness-cache/bin/gt-index
         run: |
           set -euo pipefail
+          (cd vendor/gt-index-src && \
+            go build -tags sqlite_fts5 -o "$RUNNER_TEMP/gt-index" ./cmd/gt-index/)
+          export GT_INDEX_BINARY="$RUNNER_TEMP/gt-index"
           pytest -m 'not external_evidence' -q
           (cd vendor/gt-index-src && go test ./...)
 
