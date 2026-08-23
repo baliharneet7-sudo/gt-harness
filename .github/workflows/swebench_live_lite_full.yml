@@ -2996,6 +2996,37 @@ jobs:
       monitor_timeout_minutes: "150"
     secrets: inherit
 
+  # Independent publication of task outcomes.  This is not a second evaluator:
+  # it only counts explicit reward.txt artifacts already emitted by trial jobs.
+  # It therefore remains useful when the large diagnostic summarize job or its
+  # merge gate fails, and it never changes the benchmark denominator.
+  partial_results:
+    name: Publish partial task results
+    needs: [prepare, trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.gt_sha }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: ll-full-*
+          path: tasks
+          merge-multiple: false
+      - name: Aggregate explicit rewards
+        env:
+          ARTIFACT_ROOT: tasks
+          OUTPUT: live_lite_partial_summary.json
+        run: python3 scripts/ci/aggregate_live_lite_partial.py | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload merge-independent partial summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ll-full-${{ github.run_id }}-PARTIAL
+          path: live_lite_partial_summary.json
+          if-no-files-found: error
+
   summarize:
     needs: [prepare, trial]
     if: always()
