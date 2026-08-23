@@ -12,9 +12,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-import groundtruth._binary as binary
 import pytest
 
+import groundtruth._binary as binary
 import gt_engine.indexer as indexer
 from gt_engine.indexer import (
     IndexBuildReceipt,
