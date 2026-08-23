@@ -6,10 +6,19 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_frozen_outcome_prediction import (
+    _sha256,
     _validate_post_runtime_paths,
     _validate_release_freeze_paths,
     verify_release_manifest,
 )
+
+
+def test_release_artifact_hash_is_independent_of_git_line_endings(tmp_path: Path) -> None:
+    lf = tmp_path / "lf.json"
+    crlf = tmp_path / "crlf.json"
+    lf.write_bytes(b'{\n  "status": "frozen"\n}\n')
+    crlf.write_bytes(b'{\r\n  "status": "frozen"\r\n}\r\n')
+    assert _sha256(lf) == _sha256(crlf)
 
 
 def test_operator_entry_point_loads_from_repository_root() -> None:

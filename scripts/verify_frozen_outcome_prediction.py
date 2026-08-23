@@ -32,7 +32,10 @@ def _canonical(value: Any) -> bytes:
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # Release inputs are JSON/text. Git may materialize them as CRLF on
+    # Windows, while hosted Linux runners materialize LF. Keep one content
+    # identity across supported checkout platforms, matching release_manifest.
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def _task_set_sha256(tasks: list[str]) -> str:
