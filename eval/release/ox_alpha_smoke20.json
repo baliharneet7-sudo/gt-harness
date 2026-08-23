@@ -1,7 +1,7 @@
 {
   "schema": "gt.release_manifest.v2",
-  "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v5",
-  "runtime_commit": "7d3a60b67603d4342d8eb803b1da794f69009201",
+  "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v6",
+  "runtime_commit": "711ab5b765ab5a9ed5f9d10354b6d0090b126591",
   "benchmark_authorized": true,
   "authorization_scope": "one GT-only 20-task end-to-end smoke; not broad superiority certification",
   "authorization_blockers": [],
