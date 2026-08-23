@@ -52,14 +52,17 @@ def test_gt_index_source_provenance_is_content_addressed() -> None:
     assert provenance["upstream_source_commit"] == ("61cfdbce2c42751c11028e46e863b3231f0bb70e")
 
     digest = hashlib.sha256()
-    source_paths = [
-        path
-        for path in sorted((ROOT / "vendor" / "gt-index-src").rglob("*"))
-        if path.is_file() and path.name not in {"gt-index", "gt-index.exe"}
-    ]
+    source_paths = sorted(
+        (
+            (path.relative_to(ROOT).as_posix(), path)
+            for path in (ROOT / "vendor" / "gt-index-src").rglob("*")
+            if path.is_file() and path.name not in {"gt-index", "gt-index.exe"}
+        ),
+        key=lambda row: row[0],
+    )
     assert len(source_paths) == provenance["source_files"]
-    for path in source_paths:
-        relative = path.relative_to(ROOT).as_posix().encode("utf-8")
+    for relative_text, path in source_paths:
+        relative = relative_text.encode("utf-8")
         payload = _canonical_source_payload(path)
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
@@ -94,6 +97,37 @@ def test_indexer_source_identity_is_stable_across_git_line_endings(
     module_file.write_bytes(module_file.read_bytes().replace(b"\n", b"\r\n"))
 
     assert indexer_setup._source_tree_identity() == lf_identity
+
+
+def test_indexer_source_identity_sorts_by_portable_relative_path(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from gt_harness import indexer_setup
+
+    source = tmp_path / "vendor" / "gt-index-src"
+    source.mkdir(parents=True)
+    for relative in ("z.go", "A.go", "nested/B.go", "nested/a.go"):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"// {relative}\n", encoding="utf-8")
+    monkeypatch.setattr(indexer_setup, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(indexer_setup, "INDEXER_SOURCE", source)
+
+    digest = hashlib.sha256()
+    expected = sorted(
+        path.relative_to(tmp_path).as_posix()
+        for path in source.rglob("*")
+        if path.is_file()
+    )
+    for relative_text in expected:
+        relative = relative_text.encode("utf-8")
+        payload = indexer_setup._canonical_source_payload(tmp_path / relative_text)
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+
+    assert indexer_setup._source_tree_identity() == (digest.hexdigest(), len(expected))
 
 
 def test_repository_pins_source_line_endings_for_reproducible_builds() -> None:

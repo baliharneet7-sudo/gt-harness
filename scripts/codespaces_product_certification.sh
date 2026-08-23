@@ -89,7 +89,7 @@ trap 'trap_status=$?; finalize "$trap_status"; exit "$trap_status"' EXIT
 
 cd "$ROOT"
 
-run_step install python -m pip install -e '.[dev]'
+run_step install python -m pip install -e '.[dev,eval,miniswe,gt]'
 run_step doctor gt-harness doctor
 run_step python_tests python -m pytest -q
 run_step go_tests bash -c 'cd vendor/gt-index-src && go test ./...'

@@ -1,6 +1,6 @@
 source_repository = "https://github.com/harneet2512/groundtruth"
 upstream_source_commit = "61cfdbce2c42751c11028e46e863b3231f0bb70e"
 upstream_tree_git_object = "e8a1b6cf6243ec12715626879884388ddd26845c"
-source_tree_sha256 = "d2d352a6d25583537bfb119326924ee6d0e9e97a51a21d1c722a99050b6cad4f"
+source_tree_sha256 = "e2afb40abc3763c0cc75a03a9a21e12b6c1cf53fb53c0017b31b4fc9f552a83c"
 source_files = 82
 overlay = "GT-Harness v0.9 discovery accounting, fail-closed component and parser-limitation receipts, explicit file nodes, import-provenance relationship resolution, symbol-aware re-exports, TypeScript declaration recovery, external Rust import abstention, non-following symlink discovery, cross-platform source identity, extensionless non-source classification, and removal of an unreferenced duplicate internal/types package."

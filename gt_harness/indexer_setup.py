@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 GT_INDEX_SOURCE_OBJECT = "e8a1b6cf6243ec12715626879884388ddd26845c"
-GT_INDEX_SOURCE_SHA256 = "d2d352a6d25583537bfb119326924ee6d0e9e97a51a21d1c722a99050b6cad4f"
+GT_INDEX_SOURCE_SHA256 = "e2afb40abc3763c0cc75a03a9a21e12b6c1cf53fb53c0017b31b4fc9f552a83c"
 GT_INDEX_SOURCE_FILES = 82
 GT_INDEX_BUILD_ID = f"source-{GT_INDEX_SOURCE_SHA256[:16]}"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,8 @@ class IndexerSetupReceipt:
     build_duration_ms: float
     cached: bool
     diagnostic: str = ""
+    observed_source_tree_sha256: str = ""
+    observed_source_files: int = 0
 
     def as_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -85,12 +87,18 @@ def _canonical_source_payload(path: Path) -> bytes:
 def _source_tree_identity() -> tuple[str, int]:
     digest = hashlib.sha256()
     paths = sorted(
-        path
-        for path in INDEXER_SOURCE.rglob("*")
-        if path.is_file() and path.name not in {"gt-index", "gt-index.exe"}
+        (
+            (
+                path.relative_to(REPOSITORY_ROOT).as_posix(),
+                path,
+            )
+            for path in INDEXER_SOURCE.rglob("*")
+            if path.is_file() and path.name not in {"gt-index", "gt-index.exe"}
+        ),
+        key=lambda row: row[0],
     )
-    for path in paths:
-        relative = path.relative_to(REPOSITORY_ROOT).as_posix().encode("utf-8")
+    for relative_text, path in paths:
+        relative = relative_text.encode("utf-8")
         payload = _canonical_source_payload(path)
         digest.update(len(relative).to_bytes(8, "big"))
         digest.update(relative)
@@ -141,6 +149,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
             0.0,
             False,
             "vendored_indexer_source_identity_mismatch",
+            observed_source_tree_sha256=source_digest,
+            observed_source_files=source_files,
         )
     if go is None:
         return IndexerSetupReceipt(
@@ -154,6 +164,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
             0.0,
             False,
             "go_not_found",
+            observed_source_tree_sha256=source_digest,
+            observed_source_files=source_files,
         )
 
     version_result = subprocess.run(
@@ -184,6 +196,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
                     digest,
                     round((time.perf_counter() - started) * 1000.0, 3),
                     True,
+                    observed_source_tree_sha256=source_digest,
+                    observed_source_files=source_files,
                 )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
@@ -232,6 +246,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
             round((time.perf_counter() - started) * 1000.0, 3),
             False,
             type(exc).__name__,
+            observed_source_tree_sha256=source_digest,
+            observed_source_files=source_files,
         )
     if result.returncode != 0 or not candidate.is_file():
         candidate.unlink(missing_ok=True)
@@ -247,6 +263,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
             round((time.perf_counter() - started) * 1000.0, 3),
             False,
             diagnostic or f"go_build_exit_{result.returncode}",
+            observed_source_tree_sha256=source_digest,
+            observed_source_files=source_files,
         )
 
     if os.name != "nt":
@@ -263,6 +281,8 @@ def ensure_source_indexer(*, force: bool = False, timeout: float = 900.0) -> Ind
         digest,
         round((time.perf_counter() - started) * 1000.0, 3),
         False,
+        observed_source_tree_sha256=source_digest,
+        observed_source_files=source_files,
     )
     temporary_receipt = receipt_path.with_suffix(".tmp")
     temporary_receipt.write_text(
