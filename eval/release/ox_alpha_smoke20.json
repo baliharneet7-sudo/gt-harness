@@ -10,7 +10,7 @@
   ],
   "product_certification": {
     "implementation_commit": "d8286c15783ba090e1594bba69d0645d439a1b5c",
-    "github_actions_provider_free_run": "pending exact-subject prerelease matrix",
+    "github_actions_provider_free_run": "32634873373",
     "codespaces_status": "CERTIFIED_WITH_DECLARED_LIMITATIONS",
     "provider_calls": 0
   },
