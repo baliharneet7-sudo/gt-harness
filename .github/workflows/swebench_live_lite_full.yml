@@ -1697,6 +1697,8 @@ jobs:
             -e GT_XSESSION_DIR="/opt/gt_xsession" \
             -e GT_BASELINE="${GT_BASELINE_FLAG:-0}" \
             -e GT_BASELINE_FLAG="${GT_BASELINE_FLAG:-0}" \
+            -e GT_INPUT_MODEL="$INPUT_MODEL" \
+            -e GT_INPUT_TASK="$MTASK" \
             -e GT_STEP_LIMIT="${GT_STEP_LIMIT:-150}" \
             -e GT_PRO_COST_LIMIT="${GT_PRO_COST_LIMIT:-2.0}" \
             -e MSWEA_COST_TRACKING="ignore_errors" \
@@ -1809,8 +1811,8 @@ jobs:
               # Write a shell-safe dotenv/config value.  The previous nested
               # quote construction produced an unterminated shell string in
               # LiteLLM's startup path for OpenRouter model IDs.
-              printf "model=\"%s\"\\nDEEPSEEK_API_KEY=%s\\nOPENROUTER_API_KEY=%s\\nOPENAI_API_KEY=%s\\nOPENAI_BASE_URL=%s\\n" "$INPUT_MODEL" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
-              mini-extra config set model "$INPUT_MODEL" 2>/dev/null || true
+              printf "model=\"%s\"\\nDEEPSEEK_API_KEY=%s\\nOPENROUTER_API_KEY=%s\\nOPENAI_API_KEY=%s\\nOPENAI_BASE_URL=%s\\n" "$GT_INPUT_MODEL" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
+              mini-extra config set model "$GT_INPUT_MODEL" 2>/dev/null || true
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
@@ -1898,7 +1900,7 @@ jobs:
               # Env contract (no apostrophe-prone inline args in this single-quoted docker block); task is
               # -z guarded /gt_out -> /tmp -> literal since the host issue file can be exist-but-empty.
               export MSWEA_CONFIGURED=true
-              export GT_RUN_MODEL="'"$INPUT_MODEL"'"
+              export GT_RUN_MODEL="$GT_INPUT_MODEL"
               export GT_RUN_CONFIG=/opt/gt/agent_config.yaml
               export GT_RUN_OUTPUT=/gt_out/mini-swe-agent.trajectory.json
               GT_TASK_TEXT="$(cat /gt_out/issue.txt 2>/dev/null)"
@@ -1918,12 +1920,12 @@ jobs:
                 # implicitly present inside the task container.  Splice the
                 # validated model value into the env assignment at the
                 # Docker-shell boundary for the GT runner.
-                 GT_PRO_MODEL="'"$INPUT_MODEL"'" \
+                 GT_PRO_MODEL="$GT_INPUT_MODEL" \
                 GT_PRO_ISSUE=/gt_out/issue.txt \
                 GT_PRO_REPO="$GT_ROOT" \
                 GT_PRO_PATCH_OUT=/gt_out/agent_patch.diff \
                 GT_PRO_TRAJ_DIR=/gt_out \
-                GT_PRO_INSTANCE_ID="$MTASK" \
+                GT_PRO_INSTANCE_ID="$GT_INPUT_TASK" \
                 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/gt "$GT_PY" /opt/gt/gt_pro_runner.py 2>&1 || GT_RUNNER_RC=$?
                 # gt_pro_runner writes the task-scoped native trajectory as
                 # task.traj.json; older adapters used <instance>.traj.json.
@@ -1943,7 +1945,7 @@ jobs:
               if [ "${GT_RUNNER_RC:-0}" -ne 0 ]; then
                 # Keep this command safe inside the outer single-quoted
                 # docker bash payload: no single-quoted Python literals.
-                RUNNER_RC="$GT_RUNNER_RC" RUNNER_TASK="$MTASK" python3 -c "import json,os; print(json.dumps(dict(schema=\"gt.runner_failure.v1\",instance_id=os.environ[\"RUNNER_TASK\"],exit_code=int(os.environ[\"RUNNER_RC\"]),classification=\"agent_or_model_failure\",artifact_complete=True)))" > /gt_out/runner_failure.json
+                RUNNER_RC="$GT_RUNNER_RC" RUNNER_TASK="$GT_INPUT_TASK" python3 -c "import json,os; print(json.dumps(dict(schema=\"gt.runner_failure.v1\",instance_id=os.environ[\"RUNNER_TASK\"],exit_code=int(os.environ[\"RUNNER_RC\"]),classification=\"agent_or_model_failure\",artifact_complete=True)))" > /gt_out/runner_failure.json
               fi
 
               # CRITICAL: capture the patch to the bind-mount BEFORE the container exits.
