@@ -36,8 +36,22 @@ def _read_object(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
 
 
 def _task_name(row: dict[str, Any]) -> str:
-    value = str(row.get("task_id") or row.get("task_name") or row.get("trial_name") or "")
-    if "__" in value and not row.get("task_id") and not row.get("task_name"):
+    # Harbor 0.20 uses ``task_id`` for a provenance object
+    # (git_url/git_commit_id/path).  Stringifying that object used to shadow
+    # the actual scalar task_name and made every production result unbindable.
+    value: object = row.get("task_name")
+    if not isinstance(value, str) or not value.strip():
+        task_id = row.get("task_id")
+        if isinstance(task_id, str):
+            value = task_id
+        elif isinstance(task_id, dict):
+            value = task_id.get("path") or task_id.get("name") or ""
+        else:
+            value = ""
+    if not isinstance(value, str) or not value.strip():
+        value = row.get("trial_name") or ""
+    value = str(value)
+    if "__" in value and not row.get("task_name"):
         value = value.split("__", 1)[0]
     return value.rstrip("/").rsplit("/", 1)[-1]
 

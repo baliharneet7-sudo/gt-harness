@@ -230,6 +230,11 @@ def _write_json_atomic(path: Path, value: object) -> None:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
+        # Harbor mounts /logs back to the host.  Its task process can run as
+        # container root, so NamedTemporaryFile's 0600 mode otherwise leaves
+        # the GitHub runner unable to bind or upload the final/checkpointed
+        # receipt.  The receipt deliberately contains no provider credential.
+        os.chmod(temporary, 0o644)
     os.replace(temporary, path)
 
 

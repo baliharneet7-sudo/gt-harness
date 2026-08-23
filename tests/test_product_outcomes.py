@@ -186,6 +186,39 @@ def test_harbor_directory_binding_produces_comparison_ready_receipts(
     assert json.loads(receipts[0].read_text(encoding="utf-8"))["resolved"] is True
 
 
+def test_harbor_directory_binding_accepts_harbor_020_structured_task_id(
+    tmp_path: Path,
+) -> None:
+    """Harbor 0.20 emits task_id as provenance, not a scalar task name."""
+
+    trial = tmp_path / "harbor" / "task-one__abc1234"
+    agent = trial / "agent"
+    agent.mkdir(parents=True)
+    (agent / "gt-run.json").write_text(json.dumps(_run_receipt()), encoding="utf-8")
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "task-one",
+                "trial_name": "task-one__abc1234",
+                "task_id": {
+                    "git_url": "https://example.invalid/tasks.git",
+                    "git_commit_id": "a" * 40,
+                    "path": "task-one",
+                },
+                "verifier_result": {"rewards": {"reward": 1.0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = bind_harbor_run_directory(
+        tmp_path / "harbor", tmp_path / "evaluated"
+    )
+
+    assert summary["status"] == "COMPLETE"
+    assert summary["bound_receipts"] == 1
+
+
 def test_harbor_directory_binding_reports_incomplete_runs_without_losing_results(
     tmp_path: Path,
 ) -> None:

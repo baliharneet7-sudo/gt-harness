@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -477,3 +479,5 @@ def test_run_cli_checkpoints_receipt_before_agent_finishes(
 
     assert _run_agent(args) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["status"] == "COMPLETED"
+    if os.name != "nt":
+        assert output.stat().st_mode & stat.S_IROTH

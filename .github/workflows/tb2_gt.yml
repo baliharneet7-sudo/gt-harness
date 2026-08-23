@@ -344,6 +344,21 @@ jobs:
 
           harbor "${args[@]}"
 
+      - name: Normalize Harbor result ownership for binding and upload
+        if: ${{ always() && steps.harbor.outcome != 'skipped' }}
+        env:
+          JOB_NAME: ${{ steps.harbor.outputs.job_name }}
+        run: |
+          set -euo pipefail
+          run_dir="results/terminal-bench/${JOB_NAME}"
+          case "$run_dir" in
+            results/terminal-bench/*) ;;
+            *) echo "unsafe Harbor result path: $run_dir" >&2; exit 1 ;;
+          esac
+          test -d "$run_dir"
+          sudo chown -R "$(id -u):$(id -g)" "$run_dir"
+          chmod -R u+rwX,go+rX "$run_dir"
+
       - name: Disk after run
         if: always()
         run: df -h /
