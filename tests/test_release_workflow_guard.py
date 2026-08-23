@@ -148,3 +148,4 @@ def test_canonical_gt_workflow_uses_dedicated_ox_alpha_release_manifest() -> Non
     upload = workflow.index("Upload results artifact")
     assert normalize < bind < upload
     assert 'sudo chown -R "$(id -u):$(id -g)" "$run_dir"' in workflow
+    assert "max(30.0, 900 * float(sys.argv[1]) - 60.0)" in workflow

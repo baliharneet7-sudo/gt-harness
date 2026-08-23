@@ -7,6 +7,7 @@ calls.  This keeps model, prompt, tool policy, and step budget arm-neutral.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -128,6 +129,10 @@ class GroundTruthTreatment(BareTreatment):
     diagnostics: list[str] = field(default_factory=list, init=False, repr=False)
     validation_state: str = field(default="unknown", init=False, repr=False)
     context_dirty: bool = field(default=False, init=False, repr=False)
+    initial_context: str = field(default="", init=False, repr=False)
+    _prepared_task: str | None = field(default=None, init=False, repr=False)
+    _prepared_context: str = field(default="", init=False, repr=False)
+    _prepare_complete: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.state_dir is None:
@@ -330,10 +335,18 @@ class GroundTruthTreatment(BareTreatment):
         self.evidence_items_delivered += len(delivered)
         self.context_dirty = False
         self.treatment_status = TreatmentStatus.ACTIVE
+        if not update:
+            self.initial_context = rendered
         return rendered
 
     def prepare(self, task: str) -> str:
+        # The CLI preflights this once before its first durable checkpoint.
+        # Agent.run calls prepare again, so cache the exact packet and avoid a
+        # second build/delivery or a changed first prompt.
+        if self._prepare_complete and self._prepared_task == task:
+            return self._prepared_context
         self.task = task
+        self._prepared_task = task
         try:
             receipt = self.service.build()
         except Exception as exc:  # noqa: BLE001 - treatment must fail closed
@@ -343,18 +356,22 @@ class GroundTruthTreatment(BareTreatment):
             ) from exc
         if not receipt.query_ready:
             if self._not_applicable(receipt):
-                return self._abstain(
+                self._prepared_context = self._abstain(
                     f"graph_not_ready:{receipt.build_status.value}"
                 )
+                self._prepare_complete = True
+                return self._prepared_context
             raise self._unavailable(
                 receipt, f"graph_not_ready:{receipt.build_status.value}"
             )
         self.treatment_status = TreatmentStatus.ACTIVE
-        return self._render(
+        self._prepared_context = self._render(
             update=False,
             budget=max(0, self.start_char_budget),
             delivered_before_call=1,
         )
+        self._prepare_complete = True
+        return self._prepared_context
 
     def before_model_call(self, iteration: int) -> str:
         if iteration <= 1:
@@ -466,6 +483,12 @@ class GroundTruthTreatment(BareTreatment):
             "degraded_reasons": list(receipt.degraded_reasons),
             "errors": list(dict.fromkeys(self.errors)),
             "delivered_claim_ids": sorted(self.delivered_claim_ids),
+            "initial_context": self.initial_context,
+            "initial_context_sha256": (
+                hashlib.sha256(self.initial_context.encode("utf-8")).hexdigest()
+                if self.initial_context
+                else None
+            ),
         }
 
 

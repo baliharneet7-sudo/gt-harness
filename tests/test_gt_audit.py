@@ -99,6 +99,34 @@ def test_crashed_run_is_red():
     assert not a.unparsed_structures
 
 
+def test_cli_run_receipts_are_reconciled_instead_of_reported_unparsed(tmp_path):
+    receipt = {
+        "schema": "gt.run_receipt.v1",
+        "status": "COMPLETED",
+        "stop_reason": "end_turn",
+        "iterations": 2,
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cached_tokens": 3,
+        "initial_context": "<groundtruth-repository-context>facts</groundtruth-repository-context>",
+        "initial_context_sha256": "a" * 64,
+        "transcript": [],
+    }
+    task = make_task_dir(
+        tmp_path,
+        "receipt__trial",
+        "receipt",
+        "\n".join([stop_line(iters=2, in_t=11, out_t=7, cache=3), json.dumps(receipt, indent=2)]),
+        reward=1.0,
+    )
+    audit = gt_audit.audit_task(task)
+    assert audit.run_receipt_present is True
+    assert audit.run_receipt_status == "COMPLETED"
+    assert audit.initial_context_present is True
+    assert audit.initial_context_sha256 == "a" * 64
+    assert audit.unparsed_lines == 0
+
+
 def test_audit_counts_task_agent_harness_path_attempts(tmp_path):
     task = make_task_dir(
         tmp_path,

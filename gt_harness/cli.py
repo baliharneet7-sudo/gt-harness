@@ -323,6 +323,7 @@ def _run_agent(args: argparse.Namespace) -> int:
     checkpoint_input_tokens = 0
     checkpoint_output_tokens = 0
     checkpoint_repository_end = repository_start
+    initial_context = ""
 
     def write_checkpoint() -> None:
         try:
@@ -341,6 +342,7 @@ def _run_agent(args: argparse.Namespace) -> int:
                 "run_id": run_id,
                 "task_id": task_id,
                 "task_fingerprint": task_fingerprint,
+                "task": args.task,
                 "trial_id": trial_id,
                 "status": "RUNNING",
                 "started": started,
@@ -350,6 +352,12 @@ def _run_agent(args: argparse.Namespace) -> int:
                 ),
                 "repository": str(root),
                 **run_configuration,
+                "initial_context": initial_context,
+                "initial_context_sha256": (
+                    hashlib.sha256(initial_context.encode("utf-8")).hexdigest()
+                    if initial_context
+                    else None
+                ),
                 "repository_start": repository_start,
                 "repository_end": checkpoint_repository_end,
                 "treatment": args.treatment,
@@ -400,6 +408,11 @@ def _run_agent(args: argparse.Namespace) -> int:
             treatment=treatment,
             time_budget_seconds=args.time_budget_seconds,
         )
+        # Build and freeze the initial GT packet before the first checkpoint.
+        # Agent.run invokes prepare again, but GroundTruthTreatment caches the
+        # exact packet, so this remains one production delivery.
+        if args.treatment == "groundtruth":
+            initial_context = treatment.prepare(args.task)
         # A Harbor/CI timeout may kill the process before Agent.run returns.
         # Persist the pair identity and current graph state before any work.
         write_checkpoint()
@@ -410,6 +423,7 @@ def _run_agent(args: argparse.Namespace) -> int:
             "task_id": task_id,
             "task_fingerprint": task_fingerprint,
             "trial_id": trial_id,
+            "task": args.task,
             "status": "ERROR",
             "error_type": type(exc).__name__,
             "started": started,
@@ -417,6 +431,12 @@ def _run_agent(args: argparse.Namespace) -> int:
             "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
             "repository": str(root),
             **run_configuration,
+            "initial_context": initial_context,
+            "initial_context_sha256": (
+                hashlib.sha256(initial_context.encode("utf-8")).hexdigest()
+                if initial_context
+                else None
+            ),
             "repository_start": repository_start,
             "repository_end": _run_repository_identity(root),
             "treatment": args.treatment,
@@ -447,6 +467,7 @@ def _run_agent(args: argparse.Namespace) -> int:
             "task_id": task_id,
             "task_fingerprint": task_fingerprint,
             "trial_id": trial_id,
+            "task": args.task,
             "status": "ERROR",
             "error_type": type(exc).__name__,
             "error": str(exc),
@@ -455,6 +476,12 @@ def _run_agent(args: argparse.Namespace) -> int:
             "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
             "repository": str(root),
             **run_configuration,
+            "initial_context": initial_context,
+            "initial_context_sha256": (
+                hashlib.sha256(initial_context.encode("utf-8")).hexdigest()
+                if initial_context
+                else None
+            ),
             "repository_start": repository_start,
             "repository_end": _run_repository_identity(root),
             "treatment": args.treatment,
@@ -498,12 +525,19 @@ def _run_agent(args: argparse.Namespace) -> int:
         "task_id": task_id,
         "task_fingerprint": task_fingerprint,
         "trial_id": trial_id,
+        "task": args.task,
         "status": "COMPLETED" if result.stop_reason == "end_turn" else "ERROR",
         "started": started,
         "completed": _now(),
         "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
         "repository": str(root),
         **run_configuration,
+        "initial_context": initial_context,
+        "initial_context_sha256": (
+            hashlib.sha256(initial_context.encode("utf-8")).hexdigest()
+            if initial_context
+            else None
+        ),
         "repository_start": repository_start,
         "repository_end": _run_repository_identity(root),
         "treatment": args.treatment,

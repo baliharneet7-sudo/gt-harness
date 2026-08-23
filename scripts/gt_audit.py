@@ -162,14 +162,47 @@ class Transcript:
     stats: list[dict] = field(default_factory=list)
     setup_error: str | None = None
     gt_l1_lines: int = 0  # host-side [GT L1] telemetry lines (outside panels)
+    run_receipts: list[dict] = field(default_factory=list)
     unparsed: list[tuple[int, str]] = field(default_factory=list)  # (lineno, line)
     unparsed_structures: list[str] = field(default_factory=list)
+
+
+def _extract_run_receipts(text: str) -> tuple[str, list[dict]]:
+    """Remove CLI-emitted JSON receipts from the panel transcript.
+
+    ``gt-harness run`` emits a short JSON summary and then the full durable
+    ``gt.run_receipt.v1`` object. They are outside Rich panels, so the old
+    line parser reported every JSON line as unexplained output. Parse only
+    objects with the receipt schema and leave all other raw output visible.
+    """
+    lines = text.splitlines()
+    cleaned = list(lines)
+    receipts: list[dict] = []
+    ignored: set[int] = set()
+    decoder = json.JSONDecoder()
+    for start, line in enumerate(lines):
+        if start in ignored or line.strip() != "{":
+            continue
+        segment = "\n".join(lines[start:])
+        try:
+            value, end = decoder.raw_decode(segment)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict) or value.get("schema") != "gt.run_receipt.v1":
+            continue
+        consumed = segment[:end].count("\n") + 1
+        receipts.append(value)
+        for index in range(start, min(len(lines), start + consumed)):
+            ignored.add(index)
+            cleaned[index] = ""
+    return "\n".join(cleaned), receipts
 
 
 def parse_transcript(text: str) -> Transcript:
     """Tolerant parser: every non-blank line is either consumed by a known
     structure or recorded as UNPARSED - never silently skipped."""
-    t = Transcript()
+    text, t_receipts = _extract_run_receipts(_ANSI_RE.sub("", text))
+    t = Transcript(run_receipts=t_receipts)
     cur: Panel | None = None
     for i, raw in enumerate(_ANSI_RE.sub("", text).splitlines(), start=1):
         line = raw.rstrip("\r")
@@ -670,6 +703,11 @@ class TaskAudit:
     cache_read: int | None = None
     agent_error: str | None = None
     exception_info: str | None = None
+    run_receipt_present: bool = False
+    run_receipt_status: str = ""
+    run_receipt_stop_reason: str = ""
+    initial_context_present: bool = False
+    initial_context_sha256: str = ""
     reward: float | None = None
     # gt activity (gt_deliveries = ledger truth when a ledger exists,
     # else the heuristic transcript-block count)
@@ -870,6 +908,35 @@ def audit_task(task_dir: Path) -> TaskAudit:
         return a
     text = nano_txt.read_text(encoding="utf-8", errors="replace")
     t = parse_transcript(text)
+    # Prefer the last/full durable receipt when the CLI emitted both its
+    # short summary and the complete object. It is the authoritative status
+    # for externally truncated Harbor transcripts.
+    run_receipt = next(
+        (
+            item
+            for item in reversed(t.run_receipts)
+            if "transcript" in item or "treatment_receipt" in item
+        ),
+        t.run_receipts[-1] if t.run_receipts else None,
+    )
+    if run_receipt:
+        a.run_receipt_present = True
+        a.run_receipt_status = str(run_receipt.get("status") or "")
+        a.run_receipt_stop_reason = str(run_receipt.get("stop_reason") or "")
+        initial_context = str(run_receipt.get("initial_context") or "")
+        a.initial_context_present = bool(initial_context)
+        a.initial_context_sha256 = str(
+            run_receipt.get("initial_context_sha256") or ""
+        )
+        if not t.stop and run_receipt.get("stop_reason"):
+            a.stop_reason = str(run_receipt.get("stop_reason"))
+            a.iterations = int(run_receipt.get("iterations") or 0) or None
+            a.in_tokens = int(run_receipt.get("input_tokens") or 0)
+            a.out_tokens = int(run_receipt.get("output_tokens") or 0)
+            a.cache_read = int(run_receipt.get("cached_tokens") or 0)
+            a.notes.append(
+                "stop/tokens recovered from durable gt.run_receipt.v1"
+            )
     forbidden = [
         " ".join(panel.text.split())[:240]
         for panel in t.panels
@@ -891,7 +958,10 @@ def audit_task(task_dir: Path) -> TaskAudit:
         a.iterations = last["iteration"]
         a.in_tokens = last["in_tokens"]
         a.out_tokens = last["out_tokens"]
-        a.notes.append("no 'stop:' line - run killed externally; totals from last stats line")
+        if not a.run_receipt_stop_reason:
+            a.notes.append(
+                "no 'stop:' line - run killed externally; totals from last stats line"
+            )
     for p in t.panels:
         if p.title == "final" and "agent error:" in p.text:
             a.agent_error = " ".join(p.text.split())[:300]
@@ -1522,6 +1592,10 @@ def audit_task(task_dir: Path) -> TaskAudit:
             f", {a.in_tokens or 0}+{a.out_tokens or 0} tokens: {a.agent_error}")
     if a.exception_info:
         a.verdict_reasons.append(f"harness exception_info present: {a.exception_info}")
+    if a.run_receipt_status in {"ERROR", "RUNNING"}:
+        a.verdict_reasons.append(
+            f"durable gt.run_receipt status is {a.run_receipt_status}"
+        )
     if a.leak_tag_count:
         a.verdict_reasons.append(
             f"LEAK: <gt-*> tag visible in observations x{a.leak_tag_count}")
@@ -1551,7 +1625,8 @@ def audit_task(task_dir: Path) -> TaskAudit:
             f"{r.len_shipped_chars}c): {r.status_reason}")
     if (a.agent_error or a.exception_info or a.leak_tag_count
             or a.stop_reason == "error" or unreconciled
-            or a.attribution_issues or attribution_red):
+            or a.attribution_issues or attribution_red
+            or a.run_receipt_status in {"ERROR", "RUNNING"}):
         a.verdict = "RED"
         return a
 
@@ -1566,7 +1641,7 @@ def audit_task(task_dir: Path) -> TaskAudit:
             f"UNPARSED content: {a.unparsed_lines} line(s), "
             f"{len(a.unparsed_structures)} structure issue(s) - parser does not "
             "recognize this shape; verdict cannot be trusted GREEN")
-    if t.stop is None:
+    if t.stop is None and not a.run_receipt_stop_reason:
         a.verdict_reasons.append("no trailing 'stop:' line (transcript incomplete)")
     if a.verdict_reasons:
         a.verdict = "YELLOW"

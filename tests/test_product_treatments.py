@@ -327,6 +327,11 @@ def test_groundtruth_treatment_rebuilds_and_delivers_updated_real_graph(
 
     treatment = GroundTruthTreatment(root, state_dir=tmp_path / "state")
     initial = treatment.prepare("Change answer without breaking invoke")
+    compile_count = treatment.context_compile_count
+    delivery_count = treatment.delivery_count
+    assert treatment.prepare("Change answer without breaking invoke") == initial
+    assert treatment.context_compile_count == compile_count
+    assert treatment.delivery_count == delivery_count
     initial_payload = json.loads(initial.splitlines()[1])
     initial_revision = initial_payload["source_revision"]
     assert initial_payload["context_packet"]["primary_edit_targets"][0]["symbol"] == "answer"
@@ -353,6 +358,8 @@ def test_groundtruth_treatment_rebuilds_and_delivers_updated_real_graph(
     assert receipt["treatment_status"] == "ACTIVE"
     assert receipt["delivery_count"] == 2
     assert receipt["source_revision"] == updated_payload["source_revision"]
+    assert receipt["initial_context"] == initial
+    assert receipt["initial_context_sha256"]
 
 
 def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(

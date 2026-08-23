@@ -315,11 +315,13 @@ jobs:
           JOB_NAME="${JOB_NAME_INPUT:-tb2-gt-${GITHUB_RUN_ID}}"
           echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
-          # Pairing law: the GT arm must run the SAME timeout budget as the
-          # baseline arm it is compared against (the frozen full-89 baseline
-          # used harbor's default 1.0; the early 5-task smokes used 2.0).
+          # Pairing law: Harbor keeps the SAME outer timeout budget as the
+          # baseline arm. GT gets a 60-second internal grace window so its
+          # durable receipt can finalize before Harbor kills the container.
+          # Terminal-Bench's task default is 900 seconds at multiplier 1.0;
+          # this changes no baseline/GT wall-clock allowance.
           export GT_AGENT_TIMEOUT_SECONDS="$(
-            python -c 'import sys; print(1800 * float(sys.argv[1]))' \
+            python -c 'import sys; print(max(30.0, 900 * float(sys.argv[1]) - 60.0))' \
               "${TIMEOUT_MULT:-1.0}"
           )"
           args=( run
