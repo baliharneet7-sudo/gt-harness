@@ -1,9 +1,9 @@
-name: TB2 Mini-SWE Ox Alpha diagnostic (89 tasks, 20 parallel)
+name: TB2 Mini-SWE Ox Alpha smoke20 (20 tasks, 10 parallel)
 
-# Diagnostic only. The canonical DeepSeek release is not modified or
-# promoted by this workflow. Harbor runs MiniSweCentralAgent; each task gets
-# its own GitHub runner, with a 20-job concurrency cap. This makes every task
-# independently visible and prevents Docker images from exhausting one disk.
+# This is the canonical prerelease Ox Alpha smoke. Harbor runs the production
+# MiniSweCentralAgent; each task gets its own GitHub runner. The task set is
+# loaded from the hash-bound ox_alpha_smoke20 release contract, so a dispatch
+# cannot accidentally become the 89-task dataset or use a different order.
 on:
   workflow_dispatch:
     inputs:
@@ -26,11 +26,11 @@ on:
       code_ref:
         description: "Exact branch or commit containing the Mini-SWE GT code"
         type: string
-        default: "ox-alpha-tb2-diagnostic"
+        default: ""
       job_name:
         description: "Optional Harbor job-name prefix"
         type: string
-        default: "tb2-miniswe-ox-alpha-89"
+        default: "tb2-miniswe-ox-alpha-smoke20"
 
 env:
   PYTHONUTF8: "1"
@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.code_ref }}
+          ref: ${{ inputs.code_ref || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
@@ -110,7 +110,7 @@ jobs:
           }, sort_keys=True))
           PY
 
-      - name: Enumerate exactly 89 Terminal-Bench 2.0 tasks
+      - name: Resolve exact release-bound 20-task contract
         id: plan
         run: |
           set -euo pipefail
@@ -121,12 +121,22 @@ jobs:
           import os
           from pathlib import Path
 
+          contract = json.loads(Path("eval/release/ox_alpha_smoke20.json").read_text())
+          benchmark = contract["benchmark_contract"]
+          if benchmark["workflow"] != "tb2_miniswe_ox_alpha_diagnostic.yml":
+              raise SystemExit("release contract is not bound to this Mini-SWE workflow")
+          if benchmark["agent"] != "eval.gt_central_agent:MiniSweCentralAgent":
+              raise SystemExit("release contract is not bound to MiniSweCentralAgent")
+          tasks = list(benchmark["task_ids"])
+          if len(tasks) != 20 or len(set(tasks)) != 20:
+              raise SystemExit(f"expected 20 unique contract tasks, found {len(tasks)}")
           root = Path("tb2-cardinality/terminal-bench")
-          tasks = sorted(path.name for path in root.iterdir() if path.is_dir())
-          if len(tasks) != 89:
-              raise SystemExit(f"expected exactly 89 tasks, found {len(tasks)}")
+          available = {path.name for path in root.iterdir() if path.is_dir()}
+          missing = sorted(set(tasks) - available)
+          if missing:
+              raise SystemExit(f"contract tasks absent from dataset: {missing}")
           # One matrix row per task gives task-level status and artifacts while
-          # max-parallel below retains the requested 20-way cap.
+          # max-parallel below retains a bounded 10-way cap.
           matrix_rows = [{"ordinal": i, "task": task} for i, task in enumerate(tasks)]
           task_hash = hashlib.sha256(
               json.dumps(tasks, separators=(",", ":")).encode()
@@ -157,7 +167,7 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 600
@@ -218,6 +228,18 @@ jobs:
         run: |
           set -euo pipefail
           TREATMENT_CONTRACT="$RUNNER_TEMP/gt-treatment-runtime.json"
+          harbor dataset download terminal-bench@2.0 -o tb2-budget --export
+          EXECUTION_BUDGET=$(python - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.resolve_harbor_budget import resolve_budget
+          task = os.environ["TASK"]
+          receipt = resolve_budget(Path("tb2-budget/terminal-bench") / task / "task.toml", multiplier=1.0)
+          # Keep Harbor's outer budget unchanged while reserving teardown time
+          # for the durable GT receipt and final artifact flush.
+          print(max(30.0, float(receipt["execution_budget_sec"]) - 60.0))
+          PY
+          )
           python -m scripts.render_treatment_agent_args \
             --release-manifest eval/release/active_release.json \
             --source-sha "$(git rev-parse HEAD)" \
@@ -229,6 +251,7 @@ jobs:
           )
           FEATURE_ARGS+=(
             --ak temperature="$TEMPERATURE"
+            --ak execution_budget_sec="$EXECUTION_BUDGET"
             --ak preemptive_retrieval_model_dir="$GT_DENSE_MODEL_DIR"
             --ak enable_replay_capture=true
             --ak treatment_runtime_contract_path="$TREATMENT_CONTRACT"
@@ -260,6 +283,8 @@ jobs:
     if: always()
     needs: [plan, task]
     runs-on: ubuntu-latest
+    env:
+      EXPECTED_TASK_COUNT: ${{ needs.plan.outputs.task_count }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -272,6 +297,7 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           rows = []
@@ -291,7 +317,7 @@ jobs:
               return value
           reward_values = [reward(row) for row in rows]
           summary = {
-              "expected_tasks": 89,
+              "expected_tasks": int(os.environ.get("EXPECTED_TASK_COUNT", "20")),
               "observed_trial_results": len(rows),
               "rewards": sum(value is not None for value in reward_values),
               "errors": sum(1 for row in rows if row.get("exception_info")),
@@ -299,9 +325,9 @@ jobs:
               "reward_values": sorted(set(repr(value) for value in reward_values)),
               "task_names": sorted(str(row.get("task_name") or "") for row in rows),
           }
-          if summary["observed_trial_results"] != 89 or len(set(summary["task_names"])) != 89:
+          if summary["observed_trial_results"] != summary["expected_tasks"] or len(set(summary["task_names"])) != summary["expected_tasks"]:
               raise SystemExit(
-                  f"expected 89 unique trial result rows, found "
+                  f"expected {summary['expected_tasks']} unique trial result rows, found "
                   f"{summary['observed_trial_results']} rows/{len(set(summary['task_names']))} tasks"
               )
           Path("tb2-ox-alpha-summary.json").write_text(json.dumps(summary, indent=2) + "\n")

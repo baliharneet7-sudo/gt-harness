@@ -3,10 +3,10 @@
   "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v9",
   "runtime_commit": "a3f1c62f20548d60631509d46bb3fae7382026b4",
   "benchmark_authorized": true,
-  "authorization_scope": "one replacement GT-only 20-task end-to-end smoke after run 32635379908 exposed timeout finalization, initial-packet durability, and Rich rendering defects; not broad superiority certification",
+  "authorization_scope": "one replacement GT-only 20-task end-to-end smoke using the production Mini-SWE central agent after the Nano run exposed timeout finalization, initial-packet durability, and Rich rendering defects; not broad superiority certification",
   "authorization_blockers": [],
   "authorized_workflows": [
-    "tb2_gt.yml"
+    "tb2_miniswe_ox_alpha_diagnostic.yml"
   ],
   "product_certification": {
     "implementation_commit": "a3f1c62f20548d60631509d46bb3fae7382026b4",
@@ -18,9 +18,9 @@
     "schema": "gt.tb2.ox_alpha.smoke20.v1",
     "path": "config/tb2_ox_alpha_smoke20.json",
     "sha256": "e2f5ee6c45bdcbc61019f9f5ec36a463d0ae84ef11229e2cc6fd0a8bfe62eb98",
-    "workflow": "tb2_gt.yml",
+    "workflow": "tb2_miniswe_ox_alpha_diagnostic.yml",
     "dataset": "terminal-bench@2.0",
-    "agent": "eval.tb_agent:GTNanoAgent",
+    "agent": "eval.gt_central_agent:MiniSweCentralAgent",
     "model": "stealth/ox-alpha",
     "base_url": "https://openrouter.ai/api/v1",
     "provider_secret": "OPENROUTER_NEW",
@@ -55,7 +55,7 @@
     "Harbor result.json and per-trial grader receipts",
     "gt-run.json raw run receipts",
     "treatment and graph receipts",
-    "complete nano.txt trajectories",
+    "complete Mini-SWE trajectory.json and transcript artifacts",
     "patches and verifier outputs",
     "hash-bound evaluated receipts"
   ],
