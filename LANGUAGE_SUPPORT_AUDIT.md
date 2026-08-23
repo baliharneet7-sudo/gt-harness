@@ -1,10 +1,10 @@
 # GroundTruth Language Support Audit
 
-Observed: `2026-08-23T01:51:44.744860Z`
+Observed: `2026-08-23T03:58:23.398687Z`
 
 Verdict: **PASS for the six declared prerelease languages**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\language-lifecycle.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\language-lifecycle.json`
 
 | Language | Real repository | Cold/warm | Add | Modify | Delete | Stale edges |
 | --- | --- | --- | --- | --- | --- | ---: |

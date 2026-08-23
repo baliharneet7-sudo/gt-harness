@@ -1,10 +1,10 @@
 # GroundTruth Graph Lifecycle Audit
 
-Observed: `2026-08-23T01:50:54.640645Z`
+Observed: `2026-08-23T03:57:34.347957Z`
 
 Verdict: **PASS**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\graph-lifecycle.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\graph-lifecycle.json`
 
 The campaign used an isolated local clone of the frozen real itsdangerous checkout. All graph operations went through `RepositoryGraphService` or the production CLI.
 
@@ -23,8 +23,8 @@ The campaign used an isolated local clone of the frozen real itsdangerous checko
 ## Key observations
 
 - Cold/warm graph identity stable: `True`.
-- Commit A: `5bfa74671dd3de11dc73d002cf0978cc76b5a30c`.
-- Commit B: `c6293b147ba486e4a5f3740f74dee81372dde6bd`.
+- Commit A: `918629af49515abc65777843c009d1fd3e53876b`.
+- Commit B: `a22b792760b44065af6a274e04dcfb2229e14d6b`.
 - Add, modify, rename, and delete each produced an explicit STALE state before an atomic full rebuild and exact post-update query result.
 - A process killed after the BUILDING receipt left no queryable partial graph; a fresh production build recovered the state.
 - Concurrent read/update unexpected errors: `0`.

@@ -1,14 +1,14 @@
 # GroundTruth Canonical Architecture
 
-Status: prerelease implementation under audit. This document describes reachable code; it is not a certification.
+Status: canonical prerelease architecture for implementation `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380`. Product certification is recorded separately.
 
 ## Product boundary
 
-The sole product executable is `gt-harness` (`gt_harness.cli:main`). Its supported production surfaces are:
+GroundTruth is a model-agnostic **benchmarking product**. The sole product executable is `gt-harness` (`gt_harness.cli:main`), and its primary product path is `gt-harness run`: the common coding-agent scaffold plus an auditable bare or GroundTruth treatment. Its supported production surfaces are:
 
 - `gt-harness doctor`: verifies Python, Git, Go, and the content-addressed source build of `gt-index`.
 - `gt-harness graph build|status|query`: operates the canonical repository graph.
-- `gt-harness mcp`: exposes the canonical graph through stdio, SSE, or streamable HTTP.
+- `gt-harness mcp`: optional interoperability adapter exposing the same canonical graph through stdio, SSE, or streamable HTTP. MCP is not the product identity and is not a benchmark substitute.
 - `gt-harness run --treatment bare|groundtruth`: runs one common model-agnostic coding-agent scaffold. The two arms use the same prompt, tools, limits, provider adapter, and action semantics. The GroundTruth arm may only add bounded deterministic evidence and record observations.
 - `gt-harness compare`: performs a provider-free, strictly paired comparison of completed evaluator receipts and rejects scaffold, repository, or treatment-delivery mismatches.
 - `gt-harness certify`: fail-closed validation of the Linux product campaign, exact implementation SHA, clean checkout, provider-free status, required gate receipts, graph truth, lifecycle, language, MCP, and failure-campaign minima.
@@ -32,7 +32,9 @@ repository working tree
   -> .groundtruth/graph.db + graph-receipt.json
   -> RepositoryGraphService readiness and identity validation
   -> bounded graph queries
-  -> MCP tools or GroundTruthTreatment context
+  -> deterministic ContextComposer evidence bundle
+  -> GroundTruthTreatment in gt-harness run
+     (or direct CLI query / optional MCP adapter)
   -> unchanged common coding-agent action loop
 ```
 
@@ -74,7 +76,7 @@ anchors, so a same-named constructor cannot make a class query ambiguous.
 
 | Area | Classification | Disposition |
 |---|---|---|
-| `gt_harness/` | PRODUCTION | Canonical CLI, MCP, treatment, and source provisioning |
+| `gt_harness/` | PRODUCTION | Canonical benchmarking CLI, treatment, comparison/certification, optional MCP adapter, and source provisioning |
 | `gt_engine/repository_graph_service.py` | PRODUCTION | Sole graph readiness/lifecycle/query boundary |
 | `vendor/gt-index-src/` | PRODUCTION | Source-built graph writer; upstream provenance plus audited overlay |
 | `src/groundtruth/` | PRODUCTION SUPPORT / MIGRATION SOURCE | First-party GT capabilities retained; only code reached from the canonical service is production until migration finishes |

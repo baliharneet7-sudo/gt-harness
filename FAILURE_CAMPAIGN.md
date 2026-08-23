@@ -1,10 +1,10 @@
 # GroundTruth Failure Campaign
 
-Observed: `2026-08-23T01:52:03.862181Z`
+Observed: `2026-08-23T03:58:41.613818Z`
 
 Platform campaign: **PASS on Linux Codespaces**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\failure-campaign.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\failure-campaign.json`
 
 | Attack | Expected behavior | Observed | Result |
 | --- | --- | --- | --- |

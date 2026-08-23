@@ -1,12 +1,12 @@
-# GroundTruth MCP End-to-End Audit
+# GroundTruth Optional MCP Adapter End-to-End Audit
 
-Observed: `2026-08-23T01:51:52.530197Z`
+Observed: `2026-08-23T03:58:30.646257Z`
 
 Verdict: **PASS**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\mcp-e2e.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\mcp-e2e.json`
 
-A clean MCP client entered an isolated clone of the pinned real itsdangerous repository. The server was the production `gt-harness mcp` stdio boundary; no benchmark adapter or precomputed graph was used.
+A clean MCP client entered an isolated clone of the pinned real itsdangerous repository. The server was the `gt-harness mcp` stdio adapter over the canonical graph; no benchmark adapter or precomputed graph was used. This certifies the optional adapter because the prerelease exposes it. The product itself is GT Harness and its canonical benchmark path is `gt-harness run` plus treatment/result receipts.
 
 | Check | Result |
 | --- | --- |
@@ -21,10 +21,10 @@ A clean MCP client entered an isolated clone of the pinned real itsdangerous rep
 ## Agent-visible identity
 
 - Repository commit: `672971d66a2ef9f85151e53283113f33d642dabd`
-- Cold graph: `adead2595ae77d32e7a4d1d0b88cda152dafa4d6ddfdd6da200735f1e362ef4d`
-- Updated graph: `d42530d573f7678d5036a50667d921e0105071bf4b49a6d9628ded0527c19171`
+- Cold graph: `935407135fe66687fdd80cb7537a429ea20098eb130353cbb6c36197d768119a`
+- Updated graph: `a4f8eaff60acf3ded92fb61f3e40ba5e10d2f31d98651dbef0ce3ac0a8bda969`
 - Updated state: `READY`; query ready `True`
-- MCP initialization latency: `2242.033` ms
-- Warm restart initialization latency: `1940.948` ms
+- MCP initialization latency: `2132.233` ms
+- Warm restart initialization latency: `1834.430` ms
 
 The machine receipt stores the bounded status, definition, context, edit, and restart payloads exactly as delivered to the client.

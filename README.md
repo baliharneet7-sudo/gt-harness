@@ -2,6 +2,8 @@
 
 GT-Harness is a model-agnostic benchmarking product for measuring whether deterministic GroundTruth repository intelligence helps coding agents. The prerelease product owns graph construction, readiness, delivery, run receipts, and paired comparison; it does not depend on a particular model or provider.
 
+Current prerelease implementation `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380` is `CERTIFIED_WITH_DECLARED_LIMITATIONS` on clean Linux. Certified graph-language scope is Python, JavaScript, TypeScript, Go, Rust, and Java. General competitive release remains `HOLD`; no paid solve-rate benchmark is authorized.
+
 ## What is currently being built?
 
 The current system combines:
@@ -51,11 +53,12 @@ pip install -e .
 gt-harness doctor
 gt-harness graph build --root /path/to/repository
 gt-harness graph query definition Symbol --root /path/to/repository
-gt-harness mcp --root /path/to/repository
 gt-harness run "task" --model exact/provider-model --treatment bare
 gt-harness run "task" --model exact/provider-model --treatment groundtruth
 gt-harness certify --receipt-dir /path/to/codespaces-campaign --expected-commit "$(git rev-parse HEAD)"
 ```
+
+`gt-harness mcp --root /path/to/repository` is an optional interoperability adapter over the same graph. It is tested, but MCP is not the product identity and is not a replacement for the `gt-harness run` benchmark path.
 
 The legacy file-keyed incremental indexer and historical benchmark/control paths remain in the repository for parity analysis, but they are not the canonical graph lifecycle. See `CANONICAL_ARCHITECTURE.md` for the authoritative boundary.
 

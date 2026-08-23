@@ -1,8 +1,8 @@
 # Graph Truth Audit
 
-Observed: `2026-08-23T01:50:50.645613Z`
+Observed: `2026-08-23T03:57:30.423756Z`
 
-Receipt: `D:\gt-product-audit-5296dc3\codespaces-5bfb153\graph-truth.json`
+Receipt: `D:\gt-product-audit-5296dc3\codespaces-3e2185d\receipts-only\graph-truth.json`
 
 Verdict: **PASS**
 
@@ -28,21 +28,21 @@ Expected facts were derived from frozen repository source by the independent ora
 
 | Fact | Language | Relationship | Result | TP | FP | FN | Latency ms |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| python-direct-subclasses-baddata | python | subclasses | PASS | 2 | 0 | 0 | 228.738 |
-| python-in-repository-callees-base64-encode | python | callees | PASS | 1 | 0 | 0 | 222.701 |
-| javascript-relative-requires-express-entry | javascript | imports | PASS | 3 | 0 | 0 | 289.621 |
-| javascript-commonjs-local-reexports | javascript | reexports | PASS | 5 | 0 | 0 | 261.779 |
-| typescript-redux-type-barrel | typescript | reexports | PASS | 22 | 0 | 0 | 267.762 |
-| typescript-external-react-component-abstention | javascript | subclasses | PASS | 0 | 0 | 0 | 265.717 |
-| go-clean-import-path-caller | go | callers | PASS | 1 | 0 | 0 | 294.17 |
-| rust-cli-crate-reexports | rust | reexports | PASS | 25 | 0 | 0 | 317.57 |
-| rust-stdlib-import-abstention | rust | imports | PASS | 0 | 0 | 0 | 252.831 |
-| java-direct-subclasses-billing-instrument | java | subclasses | PASS | 2 | 0 | 0 | 302.248 |
-| java-in-file-callees-utc-format | java | callees | PASS | 1 | 0 | 0 | 245.89 |
+| python-direct-subclasses-baddata | python | subclasses | PASS | 2 | 0 | 0 | 5.719 |
+| python-in-repository-callees-base64-encode | python | callees | PASS | 1 | 0 | 0 | 5.632 |
+| javascript-relative-requires-express-entry | javascript | imports | PASS | 3 | 0 | 0 | 7.737 |
+| javascript-commonjs-local-reexports | javascript | reexports | PASS | 5 | 0 | 0 | 7.921 |
+| typescript-redux-type-barrel | typescript | reexports | PASS | 22 | 0 | 0 | 9.975 |
+| typescript-external-react-component-abstention | javascript | subclasses | PASS | 0 | 0 | 0 | 9.491 |
+| go-clean-import-path-caller | go | callers | PASS | 1 | 0 | 0 | 6.728 |
+| rust-cli-crate-reexports | rust | reexports | PASS | 25 | 0 | 0 | 8.213 |
+| rust-stdlib-import-abstention | rust | imports | PASS | 0 | 0 | 0 | 7.920 |
+| java-direct-subclasses-billing-instrument | java | subclasses | PASS | 2 | 0 | 0 | 9.806 |
+| java-in-file-callees-utc-format | java | callees | PASS | 1 | 0 | 0 | 9.650 |
 
 ## Scope
 
-This is a bounded, reproducible real-repository sample, not a claim of universal graph accuracy. Stale-edge behavior is intentionally deferred to the separate lifecycle campaign.
+This is a bounded, reproducible real-repository sample, not a claim of universal graph accuracy. A separate adversarial competitor question set found additional caller-resolution errors that this 11-fact corpus did not exercise; those defects were repaired before this final receipt. The competitive set is reported separately and is not folded into the 62/62 claim. Stale-edge behavior is deferred to the lifecycle campaign.
 
 Reproduce (PowerShell):
 
