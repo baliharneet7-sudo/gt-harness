@@ -150,10 +150,25 @@ jobs:
           pip install -e '.[dev,eval]' "harbor==0.20.0"
 
       - name: Fail closed unless this exact product release authorizes paid execution
+        env:
+          MODEL: ${{ inputs.model }}
+          BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
+          PROVIDER_SECRET: ${{ inputs.provider_secret }}
+          TASK_IDS: ${{ inputs.task_ids }}
+          TEMPERATURE: ${{ inputs.temperature }}
+          TIMEOUT_MULT: ${{ inputs.timeout_multiplier }}
+          CONCURRENCY: ${{ inputs.concurrency }}
         run: |
           python -m scripts.release_workflow_guard \
             --workflow tb2_gt.yml \
-            --runtime-sha "$(git rev-parse HEAD)"
+            --runtime-sha "$(git rev-parse HEAD)" \
+            --model "$MODEL" \
+            --base-url "$BASE_URL" \
+            --provider-secret "$PROVIDER_SECRET" \
+            --task-ids "$TASK_IDS" \
+            --temperature "$TEMPERATURE" \
+            --timeout-multiplier "$TIMEOUT_MULT" \
+            --concurrency "$CONCURRENCY"
 
       - name: Prove the provider-free product boundary before provider spend
         env:
