@@ -1,0 +1,65 @@
+{
+  "schema": "gt.release_manifest.v2",
+  "release_id": "gt-prerelease-ox-alpha-smoke20-2026-08-23-v1",
+  "runtime_commit": "1f5675c609555be406e526b9744402d743c91ee4",
+  "benchmark_authorized": true,
+  "authorization_scope": "one GT-only 20-task end-to-end smoke; not broad superiority certification",
+  "authorization_blockers": [],
+  "authorized_workflows": [
+    "tb2_gt.yml"
+  ],
+  "product_certification": {
+    "implementation_commit": "449a761a3fd3bfa7754aad8eba26694061fdfb8a",
+    "github_actions_provider_free_run": "32624390269",
+    "codespaces_status": "CERTIFIED_WITH_DECLARED_LIMITATIONS",
+    "provider_calls": 0
+  },
+  "benchmark_contract": {
+    "schema": "gt.tb2.ox_alpha.smoke20.v1",
+    "path": "config/tb2_ox_alpha_smoke20.json",
+    "sha256": "e2f5ee6c45bdcbc61019f9f5ec36a463d0ae84ef11229e2cc6fd0a8bfe62eb98",
+    "workflow": "tb2_gt.yml",
+    "dataset": "terminal-bench@2.0",
+    "agent": "eval.tb_agent:GTNanoAgent",
+    "model": "stealth/ox-alpha",
+    "base_url": "https://openrouter.ai/api/v1",
+    "provider_secret": "OPENROUTER_NEW",
+    "temperature": "1",
+    "timeout_multiplier": "1.0",
+    "concurrency": "10",
+    "n_attempts": 1,
+    "task_ids": [
+      "extract-elf",
+      "mcmc-sampling-stan",
+      "prove-plus-comm",
+      "qemu-alpine-ssh",
+      "regex-chess",
+      "sanitize-git-repo",
+      "torch-tensor-parallelism",
+      "video-processing",
+      "winning-avg-corewars",
+      "write-compressor",
+      "headless-terminal",
+      "portfolio-optimization",
+      "schemelike-metacircular-eval",
+      "cobol-modernization",
+      "llm-inference-batching-scheduler",
+      "fix-code-vulnerability",
+      "feal-linear-cryptanalysis",
+      "count-dataset-tokens",
+      "largest-eigenval",
+      "torch-pipeline-parallelism"
+    ]
+  },
+  "required_artifacts": [
+    "Harbor result.json and per-trial grader receipts",
+    "gt-run.json raw run receipts",
+    "treatment and graph receipts",
+    "complete nano.txt trajectories",
+    "patches and verifier outputs",
+    "hash-bound evaluated receipts"
+  ],
+  "allowed_post_runtime_paths": [
+    "eval/release/ox_alpha_smoke20.json"
+  ]
+}
