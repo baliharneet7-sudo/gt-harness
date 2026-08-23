@@ -21,7 +21,22 @@ def main() -> int:
             error = None if reward is not None else "invalid_reward"
         except (OSError, ValueError) as exc:
             reward, error = None, f"unreadable_reward:{type(exc).__name__}"
-        rows.append({"task": task, "reward": reward, "error": error})
+        metrics = next(iter(task_dir.rglob("gt_deep_metrics_*.json")), None)
+        document = {}
+        if metrics:
+            try: document = json.loads(metrics.read_text(encoding="utf-8"))
+            except (OSError, ValueError): document = {}
+        agent = document.get("agent") if isinstance(document.get("agent"), dict) else {}
+        efficiency = document.get("efficiency") if isinstance(document.get("efficiency"), dict) else {}
+        rows.append({"task": task, "reward": reward, "error": error,
+                     "resolved": document.get("resolved"),
+                     "agent_steps": agent.get("action_count"),
+                     "llm_calls": efficiency.get("llm_calls"),
+                     "input_tokens": efficiency.get("llm_tokens_in"),
+                     "output_tokens": efficiency.get("llm_tokens_out"),
+                     "cached_tokens": efficiency.get("llm_tokens_cached"),
+                     "total_tokens": efficiency.get("llm_tokens_total"),
+                     "cost_usd": efficiency.get("llm_cost_usd")})
     graded = [r for r in rows if r["reward"] is not None]
     solved = [r for r in graded if r["reward"] == 1.0]
     payload = {
@@ -30,6 +45,9 @@ def main() -> int:
         "returned": len(rows), "graded": len(graded),
         "ungraded": len(rows) - len(graded), "solved": len(solved),
         "unsolved": len(graded) - len(solved),
+        "metrics": {k: sum((r.get(k) or 0) for r in rows)
+                    for k in ("agent_steps", "llm_calls", "input_tokens", "output_tokens", "cached_tokens", "total_tokens")},
+        "cost_usd_observed": any(r.get("cost_usd") is not None for r in rows),
         "rows": sorted(rows, key=lambda r: r["task"]),
     }
     output = Path(os.environ.get("OUTPUT", "live_lite_partial_summary.json"))
