@@ -1294,9 +1294,7 @@ jobs:
           HOST_GT_INJECT=/tmp/gt_inject/opt/gt
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
-          if [ "$INPUT_BASELINE" = "true" ]; then
-            cp artifact_deepswe/gt_pro_runner.py "${HOST_GT_INJECT}/"
-          else
+          if [ "$INPUT_BASELINE" != "true" ]; then
             cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
           fi
           # Headless agent runner (B5 fix): the non-interactive core of run/mini.py. The bare
@@ -1307,33 +1305,33 @@ jobs:
           cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
           cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
           if [ "$INPUT_BASELINE" != "true" ]; then
-          fi
-          cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
-          cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
-          cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
-          cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
-          for pkg in runtime delivery pretask; do
-            if [ -d "src/groundtruth/${pkg}" ]; then
-              mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
+            cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
+            cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
+            cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
+            cp artifact_deepswe/phase_policy.py   "${HOST_GT_INJECT}/" 2>/dev/null || true
+            for pkg in runtime delivery pretask; do
+              if [ -d "src/groundtruth/${pkg}" ]; then
+                mkdir -p "${HOST_GT_INJECT}/groundtruth/${pkg}"
               # #46 fix (2026-07-11): STRUCTURE-PRESERVING copy. The old `cp .../${pkg}/*.py`
               # glob was NON-recursive, so runtime/adapters/miniswe.py (the ONE Gateway delivery
               # adapter) was never staged; in-container `import groundtruth.runtime.adapters.miniswe`
               # failed -> _gt_gateway_deliver hit `except: return` -> the whole Gateway/Super-Mode
               # stack went DARK regardless of the flags. cp -r stages the subpackage tree.
-              cp -r "src/groundtruth/${pkg}/." "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
-            fi
-          done
+                cp -r "src/groundtruth/${pkg}/." "${HOST_GT_INJECT}/groundtruth/${pkg}/" 2>/dev/null || true
+              fi
+            done
           # #46 fix: trajectory/ (HypothesisLedger classifier dep) is a SIBLING of runtime, not
           # under it, so the pkg loop never reached it -> GT_HYPOTHESIS died on import in-container.
-          if [ -d "src/groundtruth/trajectory" ]; then
-            mkdir -p "${HOST_GT_INJECT}/groundtruth/trajectory"
-            cp -r "src/groundtruth/trajectory/." "${HOST_GT_INJECT}/groundtruth/trajectory/" 2>/dev/null || true
-          fi
+            if [ -d "src/groundtruth/trajectory" ]; then
+              mkdir -p "${HOST_GT_INJECT}/groundtruth/trajectory"
+              cp -r "src/groundtruth/trajectory/." "${HOST_GT_INJECT}/groundtruth/trajectory/" 2>/dev/null || true
+            fi
           # drop copied bytecode caches, then guarantee every staged dir is an importable package
-          find "${HOST_GT_INJECT}/groundtruth" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-          touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
-          find "${HOST_GT_INJECT}/groundtruth" -type d -exec touch {}/__init__.py \; 2>/dev/null || true
-          echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+            find "${HOST_GT_INJECT}/groundtruth" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+            touch "${HOST_GT_INJECT}/groundtruth/__init__.py"
+            find "${HOST_GT_INJECT}/groundtruth" -type d -exec touch {}/__init__.py \; 2>/dev/null || true
+            echo "GT inject staged: $(find "${HOST_GT_INJECT}" -name '*.py' | wc -l) Python files"
+          fi
 
           # L6-FRESH (#48): stage the gt-index binary into HOST_GT_INJECT so the in-container
           # post-edit reindex (gt_mini_patch._invalidate_on_edit, reads GT_INDEX_BIN) has a
