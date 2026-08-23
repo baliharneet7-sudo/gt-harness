@@ -298,6 +298,12 @@ def test_groundtruth_delivers_valid_composed_relationship_context(
         item["verification_status"] == "verified"
         for item in packet["evidence_items"]
     )
+    treatment.max_delivery_count = 1
+    treatment.context_dirty = True
+    assert treatment._render(update=True, budget=4_000, delivered_before_call=2) == ""
+    assert treatment.delivery_count == 1
+    assert treatment.context_compile_count == 1
+    assert "context_delivery_limit_reached" in treatment.errors
 
 
 @pytest.mark.real_graph

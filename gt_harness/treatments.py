@@ -90,6 +90,7 @@ class BareTreatment:
             "graph_status": "NOT_APPLICABLE",
             "delivery_count": 0,
             "delivery_calls": [],
+            "delivery_char_count": 0,
             "evidence_items_delivered": 0,
             "context_compile_count": 0,
             "retrieval_channel_count": 0,
@@ -105,6 +106,7 @@ class GroundTruthTreatment(BareTreatment):
     state_dir: str | Path | None = None
     start_char_budget: int = 6_000
     update_char_budget: int = 4_000
+    max_delivery_count: int = 4
     treatment_id: str = field(default="groundtruth", init=False)
     service: RepositoryGraphService = field(init=False, repr=False)
     compiler: RepositoryContextCompiler = field(init=False, repr=False)
@@ -117,6 +119,7 @@ class GroundTruthTreatment(BareTreatment):
     retrieval_channel_count: int = field(default=0, init=False)
     action_count: int = field(default=0, init=False)
     evidence_items_delivered: int = field(default=0, init=False)
+    delivery_char_count: int = field(default=0, init=False)
     delivery_calls: list[int] = field(default_factory=list, init=False)
     errors: list[str] = field(default_factory=list, init=False)
     delivered_claim_ids: set[str] = field(default_factory=set, init=False, repr=False)
@@ -194,6 +197,10 @@ class GroundTruthTreatment(BareTreatment):
         return packet
 
     def _render(self, *, update: bool, budget: int, delivered_before_call: int) -> str:
+        if update and self.delivery_count >= max(1, self.max_delivery_count):
+            self.errors.append("context_delivery_limit_reached")
+            self.context_dirty = False
+            return ""
         receipt = self.service.status()
         if not receipt.query_ready:
             raise self._unavailable(receipt, f"graph_not_ready:{receipt.build_status.value}")
@@ -319,6 +326,7 @@ class GroundTruthTreatment(BareTreatment):
         self.delivered_claim_ids.update(delivered)
         self.delivery_count += 1
         self.delivery_calls.append(delivered_before_call)
+        self.delivery_char_count += len(rendered)
         self.evidence_items_delivered += len(delivered)
         self.context_dirty = False
         self.treatment_status = TreatmentStatus.ACTIVE
@@ -450,6 +458,7 @@ class GroundTruthTreatment(BareTreatment):
             "source_revision": receipt.source_revision,
             "delivery_count": self.delivery_count,
             "delivery_calls": list(self.delivery_calls),
+            "delivery_char_count": self.delivery_char_count,
             "evidence_items_delivered": self.evidence_items_delivered,
             "context_compile_count": self.context_compile_count,
             "retrieval_channel_count": self.retrieval_channel_count,
