@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gt_engine.repository_graph_service import GraphStatus, RepositoryGraphService
+from gt_harness.indexer_setup import ensure_source_indexer
 
 
 def _git(root: Path, *args: str) -> None:
@@ -97,3 +98,46 @@ def test_real_index_build_query_stale_and_rebuild(tmp_path: Path) -> None:
     target_definitions = service.query("definition", "target")["evidence"]
     assert any(row["file_path"] == "engine.py" for row in target_definitions)
     assert not any(row["file_path"] == "core.py" for row in target_definitions)
+
+
+@pytest.mark.real_graph
+def test_python_relative_imports_inheritance_and_dynamic_member_abstention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repository"
+    (root / "pkg").mkdir(parents=True)
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "gt@example.invalid")
+    _git(root, "config", "user.name", "GT Test")
+    (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "pkg" / "base.py").write_text("class Base:\n    pass\n", encoding="utf-8")
+    (root / "pkg" / "child.py").write_text(
+        "from .base import Base\n\nclass Child(Base):\n    pass\n", encoding="utf-8"
+    )
+    (root / "pkg" / "factory.py").write_text(
+        "from .base import Base\n\n"
+        "class Factory:\n"
+        "    def make(self):\n"
+        "        return self.signer()\n\n"
+        "class Unrelated:\n"
+        "    def signer(self):\n"
+        "        return Base()\n",
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "fixture")
+
+    setup = ensure_source_indexer(force=True)
+    assert setup.status == "READY", setup.as_dict()
+    monkeypatch.setenv("GT_INDEX_BINARY", setup.binary_path)
+    service = RepositoryGraphService(root)
+    receipt = service.build(force=True, timeout=180)
+    assert receipt.query_ready, receipt.as_dict()
+
+    subclasses = service.query("subclasses", "Base")["evidence"]
+    assert any(row["name"] == "Child" for row in subclasses)
+    importers = service.query("importers", "Base")["evidence"]
+    importer_files = {row["file_path"] for row in importers}
+    assert {"pkg/child.py", "pkg/factory.py"} <= importer_files
+    callees = service.query("callees", "Factory.make")["evidence"]
+    assert not any(row["name"] == "signer" for row in callees)

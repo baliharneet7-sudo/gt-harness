@@ -1822,6 +1822,11 @@ func splitReceiverMethod(q string) (recv, method string, ok bool) {
 	return recv, method, true
 }
 
+func isSelfMemberCall(q string) bool {
+	receiver, _, ok := splitReceiverMethod(q)
+	return ok && (receiver == "self" || receiver == "this" || receiver == "super")
+}
+
 // fieldImportReachable reports whether targetFile is IMPORT-reachable from callerFile:
 // same file, a direct import (via the import index, which ChainReExports has already
 // folded barrel re-exports into), or a whole-module/star import reaching the target's
@@ -3508,7 +3513,12 @@ func Resolve(
 		// fact set that excludes unique_method). CERTIFIED/type-derived tiers stay
 		// reserved for the rungs that PROVE the receiver (1.75 self, 1.93/1.94a
 		// import/declared-type, 1.95/1.96 type_flow, 1.97 return_type).
-		if !builtinQualified && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
+		// A self/this/super member that survived every receiver-typing strategy
+		// above is unresolved. Global method-name uniqueness cannot prove that a
+		// dynamic instance attribute points at an unrelated class method (for
+		// example Python `self.signer()` versus `TestSigner.signer`). Abstain
+		// instead of manufacturing a confident false edge.
+		if !builtinQualified && !isSelfMemberCall(call.CalleeQualified) && call.CalleeQualified != "" && call.CalleeQualified != calleeName {
 			if classID, ok := uniqueMethodClass[calleeName]; ok {
 				if methods, ok := methodsByClass[classID]; ok {
 					if targetID, ok := methods[calleeName]; ok && targetID != callerID {
@@ -3540,6 +3550,9 @@ func Resolve(
 		//     never launders as a confident fact while the agent still gets the hint.
 		//     [beancount-931 os.walk -> account.walk]
 		if qualifiedUnresolved {
+			if isSelfMemberCall(call.CalleeQualified) {
+				continue
+			}
 			if builtinQualified {
 				continue
 			}
@@ -3918,9 +3931,22 @@ func buildImportIndex(imports []parser.ImportRef, fileMap map[string][]string) m
 			index[imp.File] = fileEntry
 		}
 
-		// JS/TS relative imports: resolve ./foo or ../bar relative to caller dir
+		// Relative imports must be normalized before resolveModulePath. Python
+		// represents these as `.sibling` / `..parent` while JS/TS uses
+		// `./sibling` / `../parent`. Treating `.sibling` as a dotted absolute
+		// module loses the caller package and silently drops IMPORTS/EXTENDS.
 		effectivePath := imp.ModulePath
-		if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
+		if strings.HasPrefix(effectivePath, ".") &&
+			!strings.HasPrefix(effectivePath, "./") &&
+			!strings.HasPrefix(effectivePath, "../") {
+			leadingDots := len(effectivePath) - len(strings.TrimLeft(effectivePath, "."))
+			callerDir := filepath.ToSlash(filepath.Dir(imp.File))
+			for level := 1; level < leadingDots; level++ {
+				callerDir = filepath.ToSlash(filepath.Dir(callerDir))
+			}
+			modulePath := strings.ReplaceAll(strings.TrimLeft(effectivePath, "."), ".", "/")
+			effectivePath = filepath.ToSlash(filepath.Clean(filepath.Join(callerDir, modulePath)))
+		} else if strings.HasPrefix(effectivePath, "./") || strings.HasPrefix(effectivePath, "../") {
 			callerDir := filepath.ToSlash(filepath.Dir(imp.File))
 			effectivePath = filepath.ToSlash(filepath.Join(callerDir, effectivePath))
 			effectivePath = filepath.ToSlash(filepath.Clean(effectivePath))

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from gt_engine.repository_graph_service import GraphStatus
 from gt_harness.treatments import BareTreatment, GroundTruthTreatment
 from nano.agent import Agent
 from nano.providers import StepResult, ToolCall, Usage
@@ -89,6 +90,66 @@ def test_groundtruth_honors_private_state_directory(tmp_path: Path, monkeypatch)
     treatment = GroundTruthTreatment(tmp_path / "repository")
 
     assert treatment.service.state_dir == state.resolve()
+
+
+def test_groundtruth_delivers_valid_composed_relationship_context(tmp_path: Path) -> None:
+    class FakeReceipt:
+        query_ready = True
+        build_status = GraphStatus.READY
+        repository = str(tmp_path)
+        commit_sha = "a" * 40
+        source_revision = "b" * 64
+        graph_checksum_or_identity = "c" * 64
+        degraded_reasons = ()
+
+        def as_dict(self):
+            return {"build_status": self.build_status.value, "query_ready": True}
+
+    class FakeService:
+        def status(self):
+            return FakeReceipt()
+
+        def query(self, mode, symbol, **_kwargs):
+            if mode == "search" and symbol == "answer":
+                return {
+                    "evidence": [
+                        {
+                            "id": 1,
+                            "label": "Function",
+                            "name": "answer",
+                            "qualified_name": "answer",
+                            "file_path": "app.py",
+                            "start_line": 1,
+                        }
+                    ]
+                }
+            if mode == "callers":
+                return {
+                    "evidence": [
+                        {
+                            "id": 2,
+                            "label": "Function",
+                            "name": "invoke",
+                            "qualified_name": "invoke",
+                            "file_path": "caller.py",
+                            "start_line": 3,
+                            "relationship": "CALLS",
+                        }
+                    ]
+                }
+            return {"evidence": []}
+
+    treatment = GroundTruthTreatment(tmp_path)
+    treatment.service = FakeService()
+    treatment.task = "Change answer without breaking callers"
+
+    rendered = treatment._render(update=False, budget=4_000, delivered_before_call=1)
+
+    assert len(rendered) <= 4_000
+    assert rendered.endswith("\n</groundtruth-repository-context>")
+    payload = json.loads(rendered.splitlines()[1])
+    assert payload["schema"] == "gt.agent_context.v2"
+    assert any(row["query_mode"] == "callers" for row in payload["evidence"])
 
 
 def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(

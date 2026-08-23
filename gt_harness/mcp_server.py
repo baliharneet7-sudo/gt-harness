@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from gt_engine.context_composer import compose_repository_context
 from gt_engine.repository_graph_service import (
     GraphStatus,
     RepositoryGraphService,
@@ -73,30 +73,24 @@ class RepositoryMCP:
             }
 
     def context(self, task: str, limit: int = 12) -> dict[str, Any]:
-        tokens = tuple(
-            dict.fromkeys(
-                token
-                for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", task or "")
-                if token.lower() not in {"the", "and", "for", "from", "with", "this", "that"}
-            )
-        )[:12]
-        rows: list[dict[str, Any]] = []
-        identities: set[tuple[object, ...]] = set()
-        bound = max(1, min(limit, 50))
-        for token in tokens:
-            result = self.query("search", token, limit=max(2, bound))
-            for row in result.get("evidence", ()):
-                identity = (row.get("file_path"), row.get("start_line"), row.get("qualified_name"))
-                if identity not in identities:
-                    identities.add(identity)
-                    rows.append(row)
-                if len(rows) >= bound:
-                    break
-            if len(rows) >= bound:
-                break
+        try:
+            self._refresh_if_stale()
+            composition = compose_repository_context(self.service, task, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - readiness failure stays observable
+            composition = {
+                "task_tokens": [],
+                "anchor_count": 0,
+                "query_count": 0,
+                "evidence": [],
+                "count": 0,
+                "truncated": False,
+                "query_errors": [f"context:{type(exc).__name__}:{exc}"],
+                "min_confidence": 0.5,
+            }
+        composition_schema = composition.pop("schema", "gt.graph_context_composition.v1")
         receipt = self.service.status()
         return {
-            "schema": "gt.graph_context.v1",
+            "schema": "gt.graph_context.v2",
             "task": task,
             "repository": receipt.repository,
             "commit_sha": receipt.commit_sha,
@@ -105,8 +99,8 @@ class RepositoryMCP:
             "graph_builder_version": receipt.graph_builder_version,
             "build_status": receipt.build_status.value,
             "query_ready": receipt.query_ready,
-            "evidence": rows,
-            "count": len(rows),
+            **composition,
+            "composition_schema": composition_schema,
             "degraded_reasons": list(receipt.degraded_reasons),
         }
 

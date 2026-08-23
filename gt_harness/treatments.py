@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from gt_engine.context_composer import compose_repository_context
 from gt_engine.repository_graph_service import GraphStatus, RepositoryGraphService
 
 
@@ -79,30 +79,12 @@ class GroundTruthTreatment(BareTreatment):
                 self.state_dir = override
         self.service = RepositoryGraphService(self.root, state_dir=self.state_dir)
 
-    @staticmethod
-    def _tokens(task: str) -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                token
-                for token in re.findall(r"[A-Za-z_][A-Za-z0-9_:.]{2,}", task or "")
-                if token.lower() not in {"the", "and", "for", "from", "with", "this", "that"}
-            )
-        )[:16]
-
-    def _evidence(self, *, limit: int) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        identities: set[tuple[object, ...]] = set()
-        for token in self._tokens(self.task):
-            result = self.service.query("search", token, limit=max(2, limit))
-            self.query_count += 1
-            for row in result["evidence"]:
-                identity = (row.get("file_path"), row.get("start_line"), row.get("qualified_name"))
-                if identity not in identities:
-                    identities.add(identity)
-                    rows.append(row)
-                if len(rows) >= limit:
-                    return rows
-        return rows
+    def _context(self, *, limit: int) -> dict[str, Any]:
+        composition = compose_repository_context(self.service, self.task, limit=limit)
+        self.query_count += int(composition["query_count"])
+        for error in composition["query_errors"]:
+            self.errors.append(f"context_query_failed:{error}")
+        return composition
 
     def _render(self, *, update: bool, budget: int, delivered_before_call: int) -> str:
         receipt = self.service.status()
@@ -111,12 +93,21 @@ class GroundTruthTreatment(BareTreatment):
             self.errors.append(f"graph_not_ready:{receipt.build_status.value}")
             return ""
         try:
-            evidence = self._evidence(limit=12 if not update else 6)
+            composition = self._context(limit=12 if not update else 6)
+            evidence = list(composition["evidence"])
         except Exception as exc:  # noqa: BLE001 - recorded degradation remains non-blocking
             self.errors.append(f"query_failed:{type(exc).__name__}")
+            composition = {
+                "schema": "gt.graph_context_composition.v1",
+                "task_tokens": [],
+                "anchor_count": 0,
+                "query_count": 0,
+                "truncated": False,
+                "query_errors": [type(exc).__name__],
+            }
             evidence = []
         payload = {
-            "schema": "gt.agent_context.v1",
+            "schema": "gt.agent_context.v2",
             "kind": "repository_update" if update else "repository_start",
             "repository": receipt.repository,
             "commit_sha": receipt.commit_sha,
@@ -124,28 +115,36 @@ class GroundTruthTreatment(BareTreatment):
             "graph_identity": receipt.graph_checksum_or_identity,
             "graph_status": receipt.build_status.value,
             "limitations": list(receipt.degraded_reasons),
+            "composition_schema": composition["schema"],
+            "task_tokens": composition["task_tokens"],
+            "anchor_count": composition["anchor_count"],
+            "graph_query_count": composition["query_count"],
+            "truncated": composition["truncated"],
             "evidence": evidence,
         }
-        rendered = (
-            "<groundtruth-repository-context>\n"
-            + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            + "\n</groundtruth-repository-context>"
-        )
-        if len(rendered) > budget:
-            payload["evidence"] = evidence[: max(1, len(evidence) // 2)]
-            rendered = (
+        def encode() -> str:
+            return (
                 "<groundtruth-repository-context>\n"
                 + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 + "\n</groundtruth-repository-context>"
             )
-        rendered = rendered[:budget]
+
+        rendered = encode()
+        while payload["evidence"] and len(rendered) > budget:
+            payload["evidence"].pop()
+            payload["truncated"] = True
+            rendered = encode()
+        if len(rendered) > budget or not payload["evidence"]:
+            if evidence and len(rendered) > budget:
+                self.errors.append("context_budget_too_small")
+            return ""
         self.delivery_count += bool(evidence)
-        if evidence:
+        if payload["evidence"]:
             self.delivery_calls.append(delivered_before_call)
             self.evidence_items_delivered += len(payload["evidence"])
         self.last_source_revision = receipt.source_revision
         self.receipts.append(receipt.as_dict())
-        return rendered if evidence else ""
+        return rendered
 
     def prepare(self, task: str) -> str:
         self.task = task

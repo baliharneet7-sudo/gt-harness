@@ -1,6 +1,40 @@
 package resolver
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/harneet2512/groundtruth/gt-index/internal/parser"
+)
+
+func TestBuildImportIndexResolvesPythonSiblingRelativeImport(t *testing.T) {
+	imports := []parser.ImportRef{{
+		File:         "src/pkg/child.py",
+		ModulePath:   ".base",
+		ImportedName: "Base",
+	}}
+	fileMap := map[string][]string{"src/pkg/base": {"src/pkg/base.py"}}
+
+	got := buildImportIndex(imports, fileMap)
+	targets := got["src/pkg/child.py"]["Base"]
+	if len(targets) != 1 || targets[0] != "src/pkg/base.py" {
+		t.Fatalf("sibling relative import targets = %#v, want src/pkg/base.py", targets)
+	}
+}
+
+func TestBuildImportIndexResolvesPythonParentRelativeImport(t *testing.T) {
+	imports := []parser.ImportRef{{
+		File:         "src/pkg/nested/child.py",
+		ModulePath:   "..base",
+		ImportedName: "Base",
+	}}
+	fileMap := map[string][]string{"src/pkg/base": {"src/pkg/base.py"}}
+
+	got := buildImportIndex(imports, fileMap)
+	targets := got["src/pkg/nested/child.py"]["Base"]
+	if len(targets) != 1 || targets[0] != "src/pkg/base.py" {
+		t.Fatalf("parent relative import targets = %#v, want src/pkg/base.py", targets)
+	}
+}
 
 func TestImportedExternalBaseDoesNotBindUniqueLocalName(t *testing.T) {
 	classes := map[string][]classNodeEntry{

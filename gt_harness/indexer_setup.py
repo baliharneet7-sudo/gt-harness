@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 GT_INDEX_SOURCE_OBJECT = "e8a1b6cf6243ec12715626879884388ddd26845c"
-GT_INDEX_SOURCE_SHA256 = "e2afb40abc3763c0cc75a03a9a21e12b6c1cf53fb53c0017b31b4fc9f552a83c"
+GT_INDEX_SOURCE_SHA256 = "05d16b69f690ab529410031817c3f0bb87f80b76c97c5688e85eeaaf88c54a83"
 GT_INDEX_SOURCE_FILES = 82
 GT_INDEX_BUILD_ID = f"source-{GT_INDEX_SOURCE_SHA256[:16]}"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
