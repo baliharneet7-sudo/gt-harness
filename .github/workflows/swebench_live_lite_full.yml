@@ -1805,9 +1805,10 @@ jobs:
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
-              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\nOPENAI_BASE_URL=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
-              # Also use mini-extra to set model non-interactively
-              mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
+              # Write a shell-safe dotenv/config value.  The previous nested
+              # quote construction produced an unterminated shell string in
+              # LiteLLM's startup path for OpenRouter model IDs.
+              printf 'model="%s"\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_KEY=%s\nOPENAI_BASE_URL=%s\n' "$INPUT_MODEL" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" "${OPENAI_API_KEY:-}" "${OPENAI_BASE_URL:-}" > /root/.config/mini-swe-agent/.env
               mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
