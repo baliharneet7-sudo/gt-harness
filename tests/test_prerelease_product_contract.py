@@ -134,3 +134,15 @@ def test_repository_pins_source_line_endings_for_reproducible_builds() -> None:
     attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     for pattern in ("*.go text eol=lf", "*.c text eol=lf", "*.h text eol=lf"):
         assert pattern in attributes
+
+
+def test_prerelease_matrix_runs_full_provider_free_regression() -> None:
+    workflow = (ROOT / ".github/workflows/prerelease_product_matrix.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "pytest -m 'not external_evidence' -q" in workflow
+    assert "(cd vendor/gt-index-src && go test ./...)" in workflow
+    assert workflow.index("Run complete provider-free Python and Go regression") < (
+        workflow.index("Run frozen real-repository matrix")
+    )
