@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from gt_engine.hybrid_repository import HybridRepository
+from gt_engine.hybrid_retrieval import (
+    EvidenceOrigin,
+    RepositoryDocument,
+    StructuralLink,
+)
 from gt_engine.repository_graph_service import GraphStatus
-from gt_harness.treatments import BareTreatment, GroundTruthTreatment
+from gt_harness.treatments import (
+    BareTreatment,
+    GroundTruthTreatment,
+    TreatmentUnavailableError,
+)
 from nano.agent import Agent
 from nano.providers import StepResult, ToolCall, Usage
 
@@ -70,17 +83,72 @@ def test_treatment_cannot_rewrite_or_block_agent_tool_action() -> None:
     assert provider.messages[0][0]["content"] == "task\n\nrepository fact"
 
 
-def test_groundtruth_failure_is_explicit_and_nonblocking(tmp_path: Path) -> None:
+def test_groundtruth_failure_is_explicit_and_stops_before_provider_call(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "not-code"
     root.mkdir()
     treatment = GroundTruthTreatment(root)
 
-    assert treatment.prepare("task") == ""
+    provider = Provider()
+    with pytest.raises(TreatmentUnavailableError, match="NOT_APPLICABLE"):
+        Agent(
+            provider=provider,
+            system="system",
+            bash=Bash(),
+            treatment=treatment,
+            verify=False,
+        ).run("task")
+
+    assert provider.calls == 0
     receipt = treatment.finalize(None)
     assert receipt["treatment"] == "groundtruth"
+    assert receipt["treatment_status"] == "NOT_APPLICABLE"
     assert receipt["provider_calls"] == 0
     assert receipt["graph_available"] is False
     assert receipt["delivery_count"] == 0
+
+
+def test_run_cli_records_unavailable_treatment_without_calling_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import nano.cli
+    from gt_harness.cli import _run_agent
+
+    class ForbiddenProvider:
+        def step(self, *_args, **_kwargs):
+            raise AssertionError("provider must not run without an active GT graph")
+
+    monkeypatch.setattr(
+        nano.cli,
+        "build_provider",
+        lambda **_kwargs: ForbiddenProvider(),
+    )
+    root = tmp_path / "not-code-cli"
+    root.mkdir()
+    output = tmp_path / "run-receipt.json"
+    args = SimpleNamespace(
+        task="Fix the parser",
+        model="provider/model",
+        base_url="https://provider.invalid",
+        max_iterations=3,
+        time_budget_seconds=30.0,
+        root=str(root),
+        temperature=0.0,
+        run_id="not-applicable",
+        task_id="task-not-applicable",
+        trial_id="1",
+        output=str(output),
+        state_dir=None,
+        treatment="groundtruth",
+    )
+
+    assert _run_agent(args) == 1
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["status"] == "ERROR"
+    assert receipt["error_type"] == "TreatmentUnavailableError"
+    assert receipt["provider_calls"] == 0
+    assert receipt["treatment_receipt"]["treatment_status"] == "NOT_APPLICABLE"
 
 
 def test_groundtruth_honors_private_state_directory(tmp_path: Path, monkeypatch) -> None:
@@ -92,7 +160,53 @@ def test_groundtruth_honors_private_state_directory(tmp_path: Path, monkeypatch)
     assert treatment.service.state_dir == state.resolve()
 
 
-def test_groundtruth_delivers_valid_composed_relationship_context(tmp_path: Path) -> None:
+def test_groundtruth_observes_only_real_repository_paths_and_real_diagnostics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / ".github" / "workflows" / "check.yml"
+    source.parent.mkdir(parents=True)
+    source.write_text("name: check\n", encoding="utf-8")
+    treatment = GroundTruthTreatment(tmp_path)
+
+    treatment.after_action(
+        "bash",
+        {"command": "rg error ."},
+        ".github/workflows/check.yml:1:name: error-report\n../secret.py:1:error",
+        False,
+    )
+
+    assert treatment.active_paths == [".github/workflows/check.yml"]
+    assert treatment.diagnostics == []
+    assert treatment.context_dirty is True
+
+    treatment.context_dirty = False
+    treatment.after_action("bash", {"command": "pwd"}, "ordinary output", False)
+    assert treatment.context_dirty is False
+
+    treatment.after_action(
+        "bash",
+        {"command": "pytest"},
+        "FAILED tests/test_parser.py::test_parse - ValueError: broken",
+        True,
+    )
+    assert treatment.diagnostics
+    assert treatment.context_dirty is True
+
+    treatment.context_dirty = False
+    treatment.after_action(
+        "bash",
+        {"command": "python -m pytest tests/test_parser.py -q"},
+        "3 passed in 0.12s",
+        False,
+    )
+    assert treatment.diagnostics == []
+    assert treatment.validation_state == "pass"
+    assert treatment.context_dirty is True
+
+
+def test_groundtruth_delivers_valid_composed_relationship_context(
+    tmp_path: Path, monkeypatch
+) -> None:
     class FakeReceipt:
         query_ready = True
         build_status = GraphStatus.READY
@@ -101,43 +215,67 @@ def test_groundtruth_delivers_valid_composed_relationship_context(tmp_path: Path
         source_revision = "b" * 64
         graph_checksum_or_identity = "c" * 64
         degraded_reasons = ()
+        files_attempted = 2
 
         def as_dict(self):
             return {"build_status": self.build_status.value, "query_ready": True}
 
     class FakeService:
+        root = tmp_path
+        graph_path = tmp_path / "graph.sqlite3"
+
         def status(self):
             return FakeReceipt()
 
-        def query(self, mode, symbol, **_kwargs):
-            if mode == "search" and symbol == "answer":
-                return {
-                    "evidence": [
-                        {
-                            "id": 1,
-                            "label": "Function",
-                            "name": "answer",
-                            "qualified_name": "answer",
-                            "file_path": "app.py",
-                            "start_line": 1,
-                        }
-                    ]
-                }
-            if mode == "callers":
-                return {
-                    "evidence": [
-                        {
-                            "id": 2,
-                            "label": "Function",
-                            "name": "invoke",
-                            "qualified_name": "invoke",
-                            "file_path": "caller.py",
-                            "start_line": 3,
-                            "relationship": "CALLS",
-                        }
-                    ]
-                }
-            return {"evidence": []}
+    def document(path: str, symbol: str, text: str) -> RepositoryDocument:
+        return RepositoryDocument(
+            path=path,
+            symbol=symbol,
+            text=text,
+            start_line=1,
+            end_line=1,
+            provenance=("graph_node",),
+            origin=EvidenceOrigin.PREEXISTING_REPOSITORY,
+            origin_revision="b" * 64,
+        )
+
+    repository = HybridRepository(
+        documents=(
+            document("app.py", "answer", "def answer(): return 42"),
+            document("caller.py", "invoke", "def invoke(): return answer()"),
+        ),
+        structural_links=(
+            StructuralLink(
+                source_path="caller.py",
+                target_path="app.py",
+                relation="CALLS",
+                confidence=1.0,
+                certified=True,
+                verification_status="verified",
+                source_symbol="invoke",
+                target_symbol="answer",
+                source_start_line=1,
+                target_start_line=1,
+                source_content_sha256="d" * 64,
+                target_content_sha256="e" * 64,
+                source_evidence_origin="preexisting_repository",
+                target_evidence_origin="preexisting_repository",
+                origin="program",
+                resolution_outcome="exact",
+                resolution_method="exact_symbol",
+                candidate_count=1,
+            ),
+        ),
+        source_revision="b" * 64,
+        complete=True,
+        reason_codes=(),
+        source_file_count=2,
+        document_chars=64,
+    )
+    monkeypatch.setattr(
+        "gt_harness.treatments.build_query_hybrid_repository",
+        lambda *_args, **_kwargs: repository,
+    )
 
     treatment = GroundTruthTreatment(tmp_path)
     treatment.service = FakeService()
@@ -148,8 +286,62 @@ def test_groundtruth_delivers_valid_composed_relationship_context(tmp_path: Path
     assert len(rendered) <= 4_000
     assert rendered.endswith("\n</groundtruth-repository-context>")
     payload = json.loads(rendered.splitlines()[1])
-    assert payload["schema"] == "gt.agent_context.v2"
-    assert any(row["query_mode"] == "callers" for row in payload["evidence"])
+    assert payload["schema"] == "gt.agent_context.v3"
+    packet = payload["context_packet"]
+    assert packet["status"] == "READY"
+    assert packet["primary_edit_targets"][0]["path"] == "app.py"
+    assert packet["execution_paths"]
+    assert all(
+        item["verification_status"] == "verified"
+        for item in packet["evidence_items"]
+    )
+
+
+@pytest.mark.real_graph
+def test_groundtruth_treatment_rebuilds_and_delivers_updated_real_graph(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Fixture"], cwd=root, check=True)
+    (root / "app.py").write_text("def answer():\n    return 41\n", encoding="utf-8")
+    (root / "caller.py").write_text(
+        "from app import answer\n\ndef invoke():\n    return answer()\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+
+    treatment = GroundTruthTreatment(root, state_dir=tmp_path / "state")
+    initial = treatment.prepare("Change answer without breaking invoke")
+    initial_payload = json.loads(initial.splitlines()[1])
+    initial_revision = initial_payload["source_revision"]
+    assert initial_payload["context_packet"]["primary_edit_targets"][0]["symbol"] == "answer"
+
+    (root / "app.py").write_text(
+        "def answer(value: int = 1):\n    return 41 + value\n",
+        encoding="utf-8",
+    )
+    treatment.after_action(
+        "edit_file",
+        {"path": "app.py"},
+        "updated app.py",
+        False,
+    )
+    updated = treatment.before_model_call(2)
+    assert updated, json.dumps(treatment.finalize(None), sort_keys=True)
+    assert len(updated) <= treatment.update_char_budget
+    updated_payload = json.loads(updated.splitlines()[1])
+
+    assert updated_payload["kind"] == "repository_update"
+    assert updated_payload["source_revision"] != initial_revision
+    assert updated_payload["context_packet"]["status"] == "READY"
+    receipt = treatment.finalize(None)
+    assert receipt["treatment_status"] == "ACTIVE"
+    assert receipt["delivery_count"] == 2
+    assert receipt["source_revision"] == updated_payload["source_revision"]
 
 
 def test_official_bare_and_groundtruth_arms_use_the_identical_agent_prompt(

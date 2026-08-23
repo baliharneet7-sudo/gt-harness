@@ -90,7 +90,7 @@ class Agent:
     on_event: Callable[[dict[str, Any]], None] | None = None
     bash: BashTool | None = None
     gt_root: str | None = None  # codebase root for GroundTruth; None = GT off
-    treatment: Any | None = None  # official non-blocking benchmark treatment
+    treatment: Any | None = None  # official fail-closed benchmark treatment
     time_budget_seconds: float | None = None
     finalization_reserve_seconds: float = 180.0
     clock: Callable[[], float] = field(
@@ -144,10 +144,7 @@ class Agent:
         )
         task_content = task
         if self.treatment is not None:
-            try:
-                treatment_context = self.treatment.prepare(task)
-            except Exception:  # noqa: BLE001 - treatment failure degrades to bare
-                treatment_context = ""
+            treatment_context = self.treatment.prepare(task)
             if treatment_context:
                 task_content = task + "\n\n" + treatment_context
         if self._gt is not None:
@@ -192,10 +189,7 @@ class Agent:
 
             self._sync_gt_budget()
             if self.treatment is not None:
-                try:
-                    treatment_context = self.treatment.before_model_call(iteration)
-                except Exception:  # noqa: BLE001 - treatment failure is non-blocking
-                    treatment_context = ""
+                treatment_context = self.treatment.before_model_call(iteration)
                 if treatment_context:
                     messages.append({"role": "user", "content": treatment_context})
                     transcript.append({

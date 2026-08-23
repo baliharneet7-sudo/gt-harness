@@ -100,6 +100,19 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--baseline", required=True)
     compare.add_argument("--treatment", required=True)
     compare.add_argument("--output", default=None)
+    outcome = sub.add_parser(
+        "record-outcome",
+        help="Hash-bind an independently graded evaluator result to one run receipt.",
+    )
+    outcome.add_argument("--run-receipt", required=True)
+    outcome.add_argument("--evaluator-receipt", required=True)
+    outcome.add_argument("--output", required=True)
+    outcomes = sub.add_parser(
+        "record-harbor-outcomes",
+        help="Bind all graded Harbor trials to their GT run receipts.",
+    )
+    outcomes.add_argument("--harbor-run-dir", required=True)
+    outcomes.add_argument("--output-dir", required=True)
     certify = sub.add_parser("certify", help="Verify a complete product evidence bundle.")
     certify.add_argument(
         "--receipt-dir",
@@ -325,7 +338,63 @@ def _run_agent(args: argparse.Namespace) -> int:
         _write_json_atomic(output_path, receipt)
         _emit({**receipt, "receipt_path": str(output_path)})
         return 1
-    result = agent.run(args.task)
+    try:
+        result = agent.run(args.task)
+    except Exception as exc:  # noqa: BLE001 - pre-provider failure needs a receipt
+        try:
+            treatment_receipt = treatment.finalize(None)
+        except Exception as receipt_exc:  # noqa: BLE001 - preserve the primary error
+            treatment_receipt = {
+                "schema": "gt.treatment_receipt.v1",
+                "treatment": args.treatment,
+                "treatment_status": "FAILED",
+                "errors": [
+                    f"{type(exc).__name__}:{exc}",
+                    f"finalize_failed:{type(receipt_exc).__name__}",
+                ],
+            }
+        receipt = {
+            "schema": "gt.run_receipt.v1",
+            "run_id": run_id,
+            "task_id": task_id,
+            "task_fingerprint": task_fingerprint,
+            "trial_id": trial_id,
+            "status": "ERROR",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "started": started,
+            "completed": _now(),
+            "duration_ms": round((time.perf_counter() - started_clock) * 1000, 3),
+            "repository": str(root),
+            **run_configuration,
+            "repository_start": repository_start,
+            "repository_end": _run_repository_identity(root),
+            "treatment": args.treatment,
+            "resolved": None,
+            "provider_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "treatment_receipt": treatment_receipt,
+            "treatment_receipt_present": True,
+            "transcript": [
+                {"type": "error", "message": f"{type(exc).__name__}: {exc}"},
+                {"type": "treatment_receipt", "receipt": treatment_receipt},
+            ],
+        }
+        _write_json_atomic(output_path, receipt)
+        _emit(
+            {
+                "schema": receipt["schema"],
+                "run_id": run_id,
+                "status": receipt["status"],
+                "error_type": receipt["error_type"],
+                "provider_calls": 0,
+                "receipt_path": str(output_path),
+                "treatment_receipt_present": True,
+            }
+        )
+        return 1
     treatment_receipt = next(
         (
             dict(row["receipt"])
@@ -398,6 +467,54 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
         )
+    if args.command == "record-outcome":
+        from gt_harness.outcomes import OutcomeBindingError, bind_evaluator_outcome
+
+        try:
+            receipt = bind_evaluator_outcome(
+                args.run_receipt,
+                args.evaluator_receipt,
+                args.output,
+            )
+        except OutcomeBindingError as exc:
+            _emit(
+                {
+                    "schema": "gt.evaluation_binding_error.v1",
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
+            return 1
+        _emit(
+            {
+                "schema": "gt.evaluation_binding.v1",
+                "status": "BOUND",
+                "task_id": receipt["task_id"],
+                "trial_id": receipt["trial_id"],
+                "resolved": receipt["resolved"],
+                "output": str(Path(args.output).resolve()),
+            }
+        )
+        return 0
+    if args.command == "record-harbor-outcomes":
+        from gt_harness.outcomes import OutcomeBindingError, bind_harbor_run_directory
+
+        try:
+            summary = bind_harbor_run_directory(
+                args.harbor_run_dir,
+                args.output_dir,
+            )
+        except OutcomeBindingError as exc:
+            _emit(
+                {
+                    "schema": "gt.evaluated_run_collection.v1",
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            )
+            return 1
+        _emit(summary)
+        return 0
     if args.command == "run":
         return _run_agent(args)
     if args.command == "compare":

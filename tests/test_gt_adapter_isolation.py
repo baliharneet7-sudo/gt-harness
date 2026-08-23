@@ -19,7 +19,7 @@ def test_gt_staged_source_cleanup_is_exact_and_guarded():
 
 def test_gt_run_uses_external_private_state_directory(monkeypatch, tmp_path):
     class _Environment:
-        pass
+        environment_name = "fixture-task"
 
     captured = {}
 
@@ -39,3 +39,14 @@ def test_gt_run_uses_external_private_state_directory(monkeypatch, tmp_path):
     assert captured["env"]["GT_STATE_DIR"] == "/tmp/.nano-gt-state"
     assert '--treatment groundtruth --root "$PWD"' in captured["command"]
     assert "--output /logs/agent/gt-run.json" in captured["command"]
+    assert "--task-id fixture-task" in captured["command"]
+    assert "--trial-id 1" in captured["command"]
+
+
+def test_gateway_base_url_reaches_the_official_cli(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example.invalid/v1")
+    agent = GTNanoAgent(logs_dir=tmp_path)
+
+    command = agent._run_command("task", "provider/model")
+
+    assert '--base-url "$OPENAI_BASE_URL"' in command

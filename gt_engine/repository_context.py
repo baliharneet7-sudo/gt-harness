@@ -273,6 +273,7 @@ class RepositoryContextProjection:
 
 _ELIGIBLE_KINDS = frozenset(
     {
+        "task_start",
         "post_read_search",
         "post_mutation",
         "post_diagnostic",

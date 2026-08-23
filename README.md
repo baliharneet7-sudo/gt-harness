@@ -2,7 +2,7 @@
 
 GT-Harness is a model-agnostic benchmarking product for measuring whether deterministic GroundTruth repository intelligence helps coding agents. The prerelease product owns graph construction, readiness, delivery, run receipts, and paired comparison; it does not depend on a particular model or provider.
 
-Current prerelease implementation `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380` is `CERTIFIED_WITH_DECLARED_LIMITATIONS` on clean Linux. Certified graph-language scope is Python, JavaScript, TypeScript, Go, Rust, and Java. General competitive release remains `HOLD`; no paid solve-rate benchmark is authorized.
+The last clean-Linux certified implementation is `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380`, with verdict `CERTIFIED_WITH_DECLARED_LIMITATIONS`. The current prerelease branch adds the canonical decision-context compiler and must receive a new exact-SHA Codespaces certification before any paid run is authorized. Certified graph-language scope remains Python, JavaScript, TypeScript, Go, Rust, and Java. General competitive release remains `HOLD`.
 
 ## What is currently being built?
 
@@ -10,17 +10,19 @@ The current system combines:
 
 - deterministic repository graph construction;
 - exact symbol search and source-evidenced structural graph queries;
-- bounded evidence delivery at the provider boundary;
+- hybrid exact/BM25/lexical/structural retrieval with deterministic reciprocal-rank fusion;
+- bounded decision packets containing edit targets, certified process paths, change surface, affected tests, validation facts, uncertainty, and revision-bound evidence;
 - preflight and postflight command classification;
 - exact source-revision tracking and fail-closed full graph convergence after edits;
 - replayable receipts containing request hashes, evidence, timing, and token accounting.
 
 The goal is not to force a model's answer. The goal is to give the model less context, but better-grounded context, at the moment it can use it.
 
-The prerelease-certified graph path does not require an LSP, embedding model,
-ONNX runtime, or provider credential. Historical hybrid-retrieval and embedding
-components remain research/migration inputs until they are routed through and
-recertified at the canonical product boundary.
+The graph and treatment path does not require an LSP, embedding model, ONNX
+runtime, or provider credential. Dense retrieval code remains an optional
+research/benchmark fallback outside the canonical treatment until separately
+recertified. The canonical treatment uses the deterministic hybrid repository
+and does not expose an uncertified graph relationship as a fact.
 
 ## Historical results (not product certification)
 
@@ -55,8 +57,16 @@ gt-harness graph build --root /path/to/repository
 gt-harness graph query definition Symbol --root /path/to/repository
 gt-harness run "task" --model exact/provider-model --treatment bare
 gt-harness run "task" --model exact/provider-model --treatment groundtruth
+gt-harness record-harbor-outcomes --harbor-run-dir /path/to/job --output-dir /path/to/evaluated
+gt-harness compare --baseline /path/to/bare/evaluated --treatment /path/to/gt/evaluated
 gt-harness certify --receipt-dir /path/to/codespaces-campaign --expected-commit "$(git rev-parse HEAD)"
 ```
+
+The GT arm fails before the first provider call when its exact-revision graph
+or initial evidence packet is unavailable. A nominal GT task with zero
+delivered evidence cannot enter a paired comparison. Evaluator outcomes are
+derived from graded Harbor receipts and hash-bound to the run receipt; they are
+not typed in by an operator.
 
 `gt-harness mcp --root /path/to/repository` is an optional interoperability adapter over the same graph. It is tested, but MCP is not the product identity and is not a replacement for the `gt-harness run` benchmark path.
 

@@ -1,6 +1,6 @@
 # GroundTruth Canonical Architecture
 
-Status: canonical prerelease architecture for implementation `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380`. Product certification is recorded separately.
+Status: canonical prerelease architecture. The last certified implementation is `3e2185d3f4ba0a228c740ab2a6d23a287cfc5380`; post-certification context-compiler changes require a new exact-SHA certification receipt.
 
 ## Product boundary
 
@@ -10,6 +10,7 @@ GroundTruth is a model-agnostic **benchmarking product**. The sole product execu
 - `gt-harness graph build|status|query`: operates the canonical repository graph.
 - `gt-harness mcp`: optional interoperability adapter exposing the same canonical graph through stdio, SSE, or streamable HTTP. MCP is not the product identity and is not a benchmark substitute.
 - `gt-harness run --treatment bare|groundtruth`: runs one common model-agnostic coding-agent scaffold. The two arms use the same prompt, tools, limits, provider adapter, and action semantics. The GroundTruth arm may only add bounded deterministic evidence and record observations.
+- `gt-harness record-outcome|record-harbor-outcomes`: derives outcomes from independently graded evaluator receipts and content-binds them to run receipts.
 - `gt-harness compare`: performs a provider-free, strictly paired comparison of completed evaluator receipts and rejects scaffold, repository, or treatment-delivery mismatches.
 - `gt-harness certify`: fail-closed validation of the Linux product campaign, exact implementation SHA, clean checkout, provider-free status, required gate receipts, graph truth, lifecycle, language, MCP, and failure-campaign minima.
 
@@ -31,14 +32,33 @@ repository working tree
   -> atomic graph/manifest publication
   -> .groundtruth/graph.db + graph-receipt.json
   -> RepositoryGraphService readiness and identity validation
-  -> bounded graph queries
-  -> deterministic ContextComposer evidence bundle
+  -> bounded HybridRepository projection from exact checkout bytes
+  -> HybridRetriever
+     (exact identity + BM25 + lexical + certified structural,
+      deterministic reciprocal-rank fusion and budgeted selection)
+  -> RepositoryContextCompiler
+     (production-path ranking, exact symbol anchors, certified direct relationships,
+      process/change/test/validation projection, uncertainty and evidence ledger)
+  -> compact gt.agent_context.v3 provider packet
   -> GroundTruthTreatment in gt-harness run
      (or direct CLI query / optional MCP adapter)
   -> unchanged common coding-agent action loop
 ```
 
 No provider credential or provider call is required to build, validate, update, persist, or query the graph.
+
+Before the first provider request, the GroundTruth treatment must have a
+query-ready exact-revision graph and at least one revision-bound evidence
+claim. Missing graph, compiler failure, initial abstention, or an impossible
+context budget produces `NOT_APPLICABLE` or `FAILED` and a zero-provider-call
+run receipt. It never silently becomes the bare arm.
+
+After tool actions, only real repository paths and recognizable diagnostics
+dirty the context state. A dirty checkout makes the graph `STALE`; the next
+provider boundary rebuilds atomically and recompiles against the new source
+revision. Ordinary output containing words such as `error` does not trigger a
+diagnostic frame, and unrelated relationships from an anchored file are not
+admitted unless their exact endpoint symbol is anchored.
 
 ## Readiness invariant
 
@@ -81,10 +101,12 @@ anchors, so a same-named constructor cannot make a class query ambiguous.
 | `vendor/gt-index-src/` | PRODUCTION | Source-built graph writer; upstream provenance plus audited overlay |
 | `src/groundtruth/` | PRODUCTION SUPPORT / MIGRATION SOURCE | First-party GT capabilities retained; only code reached from the canonical service is production until migration finishes |
 | `nano/` | PRODUCTION | Common model/provider/tool agent scaffold |
-| `eval/miniswe_agent.py`, `eval/swe_agent.py`, `eval/tb_agent.py` | BENCHMARK | Adapters must invoke `gt-harness run`, not a substitute graph path |
+| `eval/tb_agent.py` | BENCHMARK | Official Harbor Bare/GT adapter; passes dataset task identity and invokes `gt-harness run` |
+| `eval/miniswe_agent.py`, historical central agents | LEGACY BENCHMARK | Retained for old-result reconstruction; not the canonical prerelease treatment |
 | `gt_engine/indexer.py:refresh_index_files`, `gt_engine/bridge.py`, central runtime and historical control layers | LEGACY / RESEARCH pending parity audit | File-keyed refresh and older control paths are not the official CLI/MCP lifecycle; do not delete until consumers and unique behavior are classified |
-| historical workflows and `gt_finalstand/` | BENCHMARK / LEGACY evidence | Cannot certify the prerelease; retained where unique capability/evidence remains, but several old workflows are non-runnable and paid execution is unauthorized |
+| `.github/workflows/tb2_gt.yml` | BENCHMARK CANDIDATE | Official GT-Harness/Harbor path; fail-closed authorization, source install, exact treatment receipts, and hash-bound grader outcomes |
+| historical central workflows and `gt_finalstand/` | LEGACY evidence | Cannot certify the prerelease and are not authorized paid treatment paths |
 | generated head-to-head outputs, historical run artifacts, broken `artifact_deepswe` configs | DELETE (completed) | Removed after zero production consumers and missing referenced modules were verified; frozen tag retains recovery history |
 | vendored wheel and prebuilt Linux binary | DELETE (completed) | Removed; frozen tag retains recovery history |
 
-There is one canonical graph database: `.groundtruth/graph.db`. The separate historical `index.db`/SymbolStore and legacy MCP servers are not production-authoritative.
+There is one canonical graph database: `.groundtruth/graph.db`. The separate historical `index.db`/SymbolStore, central runner, and legacy MCP servers are not production-authoritative. `gt_engine.context_composer` remains only for the optional compatibility adapter; it is not the `gt-harness run` treatment compiler.

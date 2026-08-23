@@ -31,6 +31,7 @@ def _receipt(
         treatment_receipt = {
             "schema": "gt.treatment_receipt.v1",
             "treatment": "groundtruth",
+            "treatment_status": "ACTIVE",
             "provider_calls": 0,
             "graph_available": True,
             "graph_status": "READY",
@@ -43,6 +44,7 @@ def _receipt(
         treatment_receipt = {
             "schema": "gt.treatment_receipt.v1",
             "treatment": "bare",
+            "treatment_status": "NOT_APPLICABLE",
             "provider_calls": 0,
             "graph_available": False,
             "graph_status": "NOT_APPLICABLE",
@@ -57,6 +59,15 @@ def _receipt(
         "trial_id": trial,
         "status": "COMPLETED",
         "resolved": resolved,
+        "evaluation": {
+            "schema": "gt.evaluation_binding.v1",
+            "task_id": task,
+            "trial_id": trial,
+            "resolved": resolved,
+            "run_receipt_sha256": "a" * 64,
+            "evaluator_receipt_sha256": "b" * 64,
+            "evaluator_row_sha256": "c" * 64,
+        },
         "treatment": treatment,
         "model": "provider/model-version",
         "base_url_configured": True,
@@ -127,6 +138,11 @@ def test_comparison_rejects_unmatched_or_unevaluated_runs() -> None:
     with pytest.raises(ComparisonError, match="no boolean evaluator outcome"):
         compare_receipts([row], [_receipt("groundtruth", task="one", resolved=True)])
 
+    row = _receipt("bare", task="one", resolved=True)
+    row["evaluation"] = None
+    with pytest.raises(ComparisonError, match="no bound evaluator evidence"):
+        compare_receipts([row], [_receipt("groundtruth", task="one", resolved=True)])
+
 
 def test_comparison_invalidates_different_scaffolds_or_repository_revisions() -> None:
     bare = _receipt("bare", task="one", resolved=True)
@@ -148,6 +164,7 @@ def test_comparison_invalidates_different_scaffolds_or_repository_revisions() ->
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
+        ("treatment_status", "FAILED", "treatment_not_active"),
         ("graph_available", False, "graph_unavailable"),
         ("source_revision", "stale", "graph_source_revision_mismatch"),
         ("delivery_count", 0, "evidence_not_delivered"),

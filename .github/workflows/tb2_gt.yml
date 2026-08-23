@@ -1,14 +1,9 @@
 # Terminal-Bench 2.0 GT ARM: nano-harness + GroundTruth via Harbor.
 #
-# Mirrors tb2_baseline.yml (same inputs, score summary, artifacts) with three
-# GT-specific deltas:
-#   1. agent import path eval.tb_agent:GTNanoAgent (uploads gt_engine/, the
-#      vendored groundtruth wheel, and a Linux gt-index binary into every task
-#      container; runs nano with --gt-root "$PWD").
-#   2. a gt_profile input exported as GT_RL_PROFILE (default "2", the GT
-#      production law; the agent forwards every host GT_* var in-container).
-#   3. a build step that compiles gt-index for linux-amd64 from the vendored
-#      Go source (vendor/gt-index-src) with CGO + `-tags sqlite_fts5`.
+# The only treatment path is eval.tb_agent:GTNanoAgent -> `gt-harness run
+# --treatment groundtruth`. It uploads first-party source plus a source-built
+# Linux indexer. No wheel, legacy central runner, MCP substitute, or feature
+# census is allowed to stand in for the actual treatment receipt.
 #
 # Why build here instead of downloading: the public groundtruth repo has NO
 # binary release assets (tag v1.1.0, which _binary.py's auto-downloader
@@ -17,9 +12,9 @@
 # exact tree the local runtime was developed against; the public repo's
 # gt-index has drifted) is the only deterministic option.
 #
-# The artifact includes a sealed delivery ledger, verbatim delivery blocks,
-# hash-chained attribution events, provider-final request receipts, and the
-# live acceptance report. Transcript markers are corroboration, not proof.
+# The artifact includes raw run receipts, graph/treatment receipts, grader
+# results, and hash-bound evaluated receipts. Transcript text is never used as
+# proof that GT was available or delivered.
 name: TB2 GT arm (nano + GroundTruth)
 
 on:
@@ -29,6 +24,10 @@ on:
         description: "Provider-native model id; the DeepSeek gateway requires bare deepseek-v4-flash"
         type: string
         default: "deepseek-v4-flash"
+      ref:
+        description: "Exact authorized GT commit; blank freezes the dispatch commit"
+        type: string
+        default: ""
       base_url:
         description: "OpenAI-compatible gateway URL; when set, exported as OPENAI_BASE_URL (overrides the repo secret)"
         type: string
@@ -61,26 +60,6 @@ on:
         description: "harbor --agent-timeout-multiplier. MUST match the baseline arm being paired against (frozen full-89 baseline = 1.0; early smokes = 2.0)"
         type: string
         default: "1.0"
-      gt_profile:
-        description: "GT_RL_PROFILE for the agent (GT capability profile; '2' = production law)"
-        type: string
-        default: "2"
-      min_witnessed:
-        description: "Minimum live-witnessed identities (delivery or deterministic capability receipt)"
-        type: string
-        default: "7"
-      min_exercised:
-        description: "Minimum identities with a specific live evaluation or terminal outcome"
-        type: string
-        default: "12"
-      min_action_consistent:
-        description: "Minimum distinct identities whose immediate next action matches the GT delivery"
-        type: string
-        default: "5"
-      expected_tasks:
-        description: "Exact task count required by the live attribution gate"
-        type: string
-        default: "5"
 
 jobs:
   gt:
@@ -95,19 +74,15 @@ jobs:
       OPENAI_API_KEY: ${{ secrets[inputs.provider_secret] }}
       # Input beats secret; empty means "no gateway" (direct provider APIs).
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
-      # GTNanoAgent resolves GT_RL_PROFILE as kwarg > host env > default "2"
-      # and forwards every GT_* host var into the task container.
-      GT_RL_PROFILE: ${{ inputs.gt_profile }}
-      # Harness-local SDLC gate: after a source edit, the penultimate submit
-      # checkpoint requires a passing behavioral test/self-check. It spends
-      # one existing advisory bounce and then fails open, so it cannot deadlock
-      # completion. Kept outside Groundtruth's canonical Profile-2 inventory.
-      GT_SDLC_VERIFY: "1"
       NANO_TEMPERATURE: ${{ inputs.temperature }}
       PYTHONUTF8: "1"
+      GT_INDEX_BINARY_HOST: ${{ github.workspace }}/vendor/gt-index-linux-amd64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -172,14 +147,20 @@ jobs:
       - name: Install nano-harness + harbor
         run: |
           python -m pip install --upgrade pip
-          pip install -e . "harbor==0.20.0" "mini-swe-agent==2.2.8" \
-            "pytest==9.1.1" "pytest-asyncio==1.4.0" "hypothesis" "zstandard" \
-            vendor/groundtruth_mcp-*.whl "numpy==2.5.1"
+          pip install -e '.[dev,eval]' "harbor==0.20.0"
 
-      - name: Audit all 17 deterministic trigger paths
+      - name: Fail closed unless this exact product release authorizes paid execution
+        run: |
+          python -m scripts.release_workflow_guard \
+            --workflow tb2_gt.yml \
+            --runtime-sha "$(git rev-parse HEAD)"
+
+      - name: Prove the provider-free product boundary before provider spend
         env:
           GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
-        run: python -m pytest -m gt_all17 -q
+        run: |
+          pytest -m 'not external_evidence' -q
+          (cd vendor/gt-index-src && go test ./...)
 
       # Substrate-era assumption, corrected: credentials used to be baked ONCE
       # into the substrate image; now every dispatch re-imports them from
@@ -248,7 +229,7 @@ jobs:
               try:
                   provider = build_provider(
                       model=model,
-                      base_url=None,
+                      base_url=base or None,
                       temperature=float(os.environ["NANO_TEMPERATURE"]),
                   )
                   r = provider.step(
@@ -275,16 +256,14 @@ jobs:
                 f"text={(r.text or '')[:80]!r} tool_calls={len(r.tool_calls)}")
           EOF
 
-      # GTNanoAgent fail-fasts in install() when the wheel or binary is
-      # missing; surface the same check here, before harbor spends anything.
+      # GTNanoAgent fail-fasts when the source-built binary is missing; surface
+      # the same check here before Harbor spends anything.
       - name: Preflight GT artifacts
         run: |
           set -euo pipefail
-          ls vendor/groundtruth_mcp-*.whl
           test -x vendor/gt-index-linux-amd64
           python - <<'EOF'
           from eval.tb_agent import GTNanoAgent
-          print("wheel:", GTNanoAgent._gt_wheel())
           print("binary:", GTNanoAgent._gt_binary_host())
           EOF
 
@@ -353,69 +332,52 @@ jobs:
         if: always()
         run: df -h /
 
-      - name: Audit provider-bound GT attribution
+      - name: Bind grader outcomes and verify actual GT treatment delivery
         if: always()
         env:
           JOB_NAME: ${{ steps.harbor.outputs.job_name }}
-          MIN_WITNESSED: ${{ inputs.min_witnessed }}
-          MIN_EXERCISED: ${{ inputs.min_exercised }}
-          MIN_ACTION_CONSISTENT: ${{ inputs.min_action_consistent }}
-          EXPECTED_TASKS: ${{ inputs.expected_tasks }}
-          EXPECTED_TEMPERATURE: ${{ inputs.temperature }}
-          EXPECTED_MODEL: ${{ inputs.model }}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           run_dir="results/terminal-bench/${JOB_NAME}"
-          audit_json="${run_dir}/gt-audit.json"
-          gate_json="${run_dir}/gt-live-gate.json"
-          replay_json="${run_dir}/gt-iteration-replay.json"
-          audit_rc=0
-          gate_rc=0
-          replay_rc=0
-          python scripts/gt_replay.py "$run_dir" --json "$replay_json" \
-            || replay_rc=$?
-          python scripts/gt_audit.py "$run_dir" --json "$audit_json" \
-            || audit_rc=$?
-          if [ -f "$audit_json" ]; then
-            python scripts/gt_live_gate.py "$audit_json" \
-              --run-dir "$run_dir" \
-              --min-witnessed "$MIN_WITNESSED" \
-              --min-exercised "$MIN_EXERCISED" \
-              --min-action-consistent "$MIN_ACTION_CONSISTENT" \
-              --expected-tasks "$EXPECTED_TASKS" \
-              --expected-model "$EXPECTED_MODEL" \
-              --expected-temperature "$EXPECTED_TEMPERATURE" \
-              --require-complete-census \
-              --require-complete-profile \
-              --require-task-contract \
-              --require-graph-surface-receipt \
-              --require-verification-plan-on-graph-edit \
-              --require-improvement-receipts \
-              --require-step0-localization \
-              --require-behavior-flags "GT_CS_EDIT_TRIGGER,GT_SS_EDIT_PREVENTIVE,GT_INFRA_NOISE_GUARD,GT_HYP_CONTRA_GUARD,GT_RECOVERY_ESCALATE,GT_OBLIG_STEER_GUARD,GT_ROLE_DRIVEN_COALITION" \
-              --require-lifecycle "task_start,research,pre_edit,post_edit,test,verify,submit" \
-              --json "$gate_json" || gate_rc=$?
-          else
-            echo "::error::GT audit did not produce $audit_json"
-            gate_rc=1
-          fi
-          if [ -f "$gate_json" ]; then
-            {
-              echo "## GT live attribution gate"
-              echo
-              echo '```json'
-              cat "$gate_json"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ "$audit_rc" -ne 0 ] || [ "$gate_rc" -ne 0 ] \
-              || [ "$replay_rc" -ne 0 ]; then
-            exit 1
-          fi
+          gt-harness record-harbor-outcomes \
+            --harbor-run-dir "$run_dir" \
+            --output-dir "$run_dir/evaluated-receipts" \
+            | tee "$run_dir/evaluated-receipts-summary.json"
+          python - "$run_dir/evaluated-receipts" <<'PY'
+          import json, sys
+          from pathlib import Path
 
-      # Everything harbor and the attribution gate wrote: benchmark result,
-      # transcript, sealed ledger, exact delivery blocks, hash-chained
-      # provider receipts, model patch, verifier output, and live gate report.
+          receipts = [
+              json.loads(path.read_text(encoding="utf-8"))
+              for path in sorted(Path(sys.argv[1]).glob("*.json"))
+          ]
+          if not receipts:
+              raise SystemExit("no evaluated GT run receipts")
+          failures = []
+          for row in receipts:
+              gt = row.get("treatment_receipt") or {}
+              key = f"{row.get('task_id')}::{row.get('trial_id')}"
+              if row.get("status") != "COMPLETED":
+                  failures.append(f"{key}:run_not_completed")
+              if gt.get("treatment_status") != "ACTIVE":
+                  failures.append(f"{key}:treatment_not_active")
+              if gt.get("graph_status") not in {"READY", "READY_WITH_DECLARED_LIMITATIONS"}:
+                  failures.append(f"{key}:graph_not_ready")
+              if int(gt.get("delivery_count") or 0) < 1:
+                  failures.append(f"{key}:context_not_delivered")
+              if int(gt.get("evidence_items_delivered") or 0) < 1:
+                  failures.append(f"{key}:evidence_not_delivered")
+              if gt.get("graph_commit_sha") != (row.get("repository_end") or {}).get("commit_sha"):
+                  failures.append(f"{key}:graph_commit_mismatch")
+              if gt.get("source_revision") != (row.get("repository_end") or {}).get("source_revision"):
+                  failures.append(f"{key}:graph_source_revision_mismatch")
+          if failures:
+              raise SystemExit("invalid GT treatment:\n" + "\n".join(failures))
+          print(f"verified {len(receipts)} evaluated GT treatment receipt(s)")
+          PY
+
+      # Upload grader results, raw run receipts, hash-bound evaluated receipts,
+      # transcripts, patches, and exact treatment/graph receipts.
       - name: Upload results artifact
         if: always()
         uses: actions/upload-artifact@v4

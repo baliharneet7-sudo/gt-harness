@@ -126,7 +126,15 @@ class NanoAgent(BaseInstalledAgent):
         env.update(UTF8_ENV)
         return model, env
 
-    def _run_command(self, instruction: str, model: str, extra_args: str = "") -> str:
+    def _run_command(
+        self,
+        instruction: str,
+        model: str,
+        extra_args: str = "",
+        *,
+        task_id: str = "",
+        trial_id: str = "1",
+    ) -> str:
         # `|| true`: a partial run (max_iterations) may still pass the tests —
         # never let the agent's exit code abort the trial before grading.
         # extra_args, when non-empty, must end with a space.
@@ -134,10 +142,21 @@ class NanoAgent(BaseInstalledAgent):
         temperature_arg = (
             f"--temperature {shlex.quote(temperature)} " if temperature else ""
         )
+        base_url_arg = (
+            '--base-url "$OPENAI_BASE_URL" '
+            if (os.environ.get("OPENAI_BASE_URL") or "").strip()
+            else ""
+        )
+        identity_args = (
+            f"--task-id {shlex.quote(task_id)} --trial-id {shlex.quote(trial_id)} "
+            if task_id
+            else ""
+        )
         return (
             f'"$HOME/.local/bin/gt-harness" run {shlex.quote(instruction)} '
             f"--model {shlex.quote(model)} --max-iterations 100 "
-            f"--output /logs/agent/gt-run.json {temperature_arg}{extra_args}"
+            f"--output /logs/agent/gt-run.json "
+            f"{identity_args}{base_url_arg}{temperature_arg}{extra_args}"
             "</dev/null 2>&1 | tee /logs/agent/nano.txt || true"
         )
 
@@ -147,7 +166,14 @@ class NanoAgent(BaseInstalledAgent):
     ) -> None:
         model, env = self._model_and_env()
         await self.exec_as_agent(
-            environment, self._run_command(instruction, model), env=env
+            environment,
+            self._run_command(
+                instruction,
+                model,
+                task_id=str(environment.environment_name),
+                trial_id=str(os.environ.get("GT_TRIAL_ID") or "1"),
+            ),
+            env=env,
         )
 
 
@@ -291,5 +317,7 @@ class GTNanoAgent(NanoAgent):
                 f"--time-budget-seconds "
                 f"{shlex.quote(os.environ.get('GT_AGENT_TIMEOUT_SECONDS', '1800'))} "
             ),
+            task_id=str(environment.environment_name),
+            trial_id=str(os.environ.get("GT_TRIAL_ID") or "1"),
         )
         await self.exec_as_agent(environment, command, env=env)

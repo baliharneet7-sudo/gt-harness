@@ -65,6 +65,25 @@ def _indexed(rows: list[dict[str, Any]], expected_treatment: str) -> dict[str, d
             raise ComparisonError(f"run {_pair_key(row)} did not complete successfully")
         if not isinstance(row.get("resolved"), bool):
             raise ComparisonError(f"run {_pair_key(row)} has no boolean evaluator outcome")
+        evaluation = row.get("evaluation")
+        if not isinstance(evaluation, dict) or evaluation.get("schema") != (
+            "gt.evaluation_binding.v1"
+        ):
+            raise ComparisonError(f"run {_pair_key(row)} has no bound evaluator evidence")
+        if (
+            evaluation.get("resolved") is not row.get("resolved")
+            or evaluation.get("task_id") != row.get("task_id")
+            or str(evaluation.get("trial_id") or "") != str(row.get("trial_id") or "")
+        ):
+            raise ComparisonError(f"run {_pair_key(row)} evaluator binding mismatch")
+        for field in (
+            "run_receipt_sha256",
+            "evaluator_receipt_sha256",
+            "evaluator_row_sha256",
+        ):
+            value = str(evaluation.get(field) or "")
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ComparisonError(f"run {_pair_key(row)} evaluator hash invalid")
         key = _pair_key(row)
         if key in result:
             raise ComparisonError(f"duplicate paired run: {key}")
@@ -153,6 +172,8 @@ def compare_receipts(
             delivery_failures.append(f"{key}:treatment_receipt_schema")
         elif gt.get("treatment") != "groundtruth":
             delivery_failures.append(f"{key}:treatment_receipt_identity")
+        elif gt.get("treatment_status") != "ACTIVE":
+            delivery_failures.append(f"{key}:treatment_not_active")
         elif not gt.get("graph_available"):
             delivery_failures.append(f"{key}:graph_unavailable")
         elif gt.get("graph_status") not in {"READY", "READY_WITH_DECLARED_LIMITATIONS"}:
