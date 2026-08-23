@@ -160,6 +160,7 @@ jobs:
           CONCURRENCY: ${{ inputs.concurrency }}
         run: |
           python -m scripts.release_workflow_guard \
+            --manifest eval/release/ox_alpha_smoke20.json \
             --workflow tb2_gt.yml \
             --runtime-sha "$(git rev-parse HEAD)" \
             --model "$MODEL" \

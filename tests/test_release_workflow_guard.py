@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from scripts.release_workflow_guard import audit_release_workflow
 
 
@@ -130,3 +132,10 @@ def test_frozen_benchmark_contract_fails_closed_when_inputs_are_missing() -> Non
         runtime_sha="a" * 40,
     )
     assert "benchmark_contract_inputs_missing" in failures
+
+
+def test_canonical_gt_workflow_uses_dedicated_ox_alpha_release_manifest() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/tb2_gt.yml"
+    ).read_text(encoding="utf-8")
+    assert "--manifest eval/release/ox_alpha_smoke20.json" in workflow
