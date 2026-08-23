@@ -7,13 +7,18 @@ GT-Harness is a model-agnostic benchmarking product for measuring whether determ
 The current system combines:
 
 - deterministic repository graph construction;
-- hybrid retrieval across exact paths, lexical search, BM25, local embeddings, and certified graph structure;
+- exact symbol search and source-evidenced structural graph queries;
 - bounded evidence delivery at the provider boundary;
 - preflight and postflight command classification;
 - exact source-revision tracking and fail-closed full graph convergence after edits;
 - replayable receipts containing request hashes, evidence, timing, and token accounting.
 
 The goal is not to force a model's answer. The goal is to give the model less context, but better-grounded context, at the moment it can use it.
+
+The prerelease-certified graph path does not require an LSP, embedding model,
+ONNX runtime, or provider credential. Historical hybrid-retrieval and embedding
+components remain research/migration inputs until they are routed through and
+recertified at the canonical product boundary.
 
 ## Historical results (not product certification)
 

@@ -1,10 +1,10 @@
 # GroundTruth Graph Lifecycle Audit
 
-Observed: `2026-08-22T23:53:47.957793Z`
+Observed: `2026-08-23T00:27:26.246748Z`
 
 Verdict: **PASS**
 
-Machine receipt: `D:\gt-product-audit-5296dc3\receipts\graph-lifecycle-2b1b648e.json`
+Machine receipt: `D:\gt-product-audit-5296dc3\receipts\graph-lifecycle-d2d352a6.json`
 
 The campaign used an isolated local clone of the frozen real itsdangerous checkout. All graph operations went through `RepositoryGraphService` or the production CLI.
 
@@ -23,10 +23,10 @@ The campaign used an isolated local clone of the frozen real itsdangerous checko
 ## Key observations
 
 - Cold/warm graph identity stable: `True`.
-- Commit A: `40984b415daf18fb6db055f743a29cedc8b6a387`.
-- Commit B: `1fe39f2fd6f5b6da539b103dc2ee751a71f2c351`.
+- Commit A: `5bfa74671dd3de11dc73d002cf0978cc76b5a30c`.
+- Commit B: `c6293b147ba486e4a5f3740f74dee81372dde6bd`.
 - Add, modify, rename, and delete each produced an explicit STALE state before an atomic full rebuild and exact post-update query result.
 - A process killed after the BUILDING receipt left no queryable partial graph; a fresh production build recovered the state.
 - Concurrent read/update unexpected errors: `0`.
 
-This campaign proves the canonical correctness-first full-rebuild lifecycle on one real Python repository. It does not claim file-keyed incremental parity or certify the same lifecycle for every language yet.
+This campaign proves the detailed crash/concurrency lifecycle on one real Python repository. `LANGUAGE_SUPPORT_AUDIT.md` separately applies the same cold/warm/add/modify/delete and stale-edge checks to all six declared languages. Neither campaign claims file-keyed incremental parity; correctness currently uses atomic full rebuilds after edits.

@@ -89,7 +89,10 @@ func WalkWithMeta(root string, maxFiles int) (WalkResult, error) {
 	}
 	for _, relPath := range relPaths {
 		path := filepath.Join(root, filepath.FromSlash(relPath))
-		info, statErr := os.Stat(path)
+		// Never follow repository symlinks. The repository receipt identifies a
+		// symlink by its link target, while following it here would index mutable
+		// content outside that identity and could silently stale the graph.
+		info, statErr := os.Lstat(path)
 		if statErr != nil {
 			reason := "metadata_access_failed"
 			if os.IsNotExist(statErr) {

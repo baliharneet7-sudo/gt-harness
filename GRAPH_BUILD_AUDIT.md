@@ -1,17 +1,17 @@
 # GroundTruth Graph Build Audit
 
-Observed: 2026-08-22. Gate status: **PASS for the frozen ten-repository Windows matrix; Linux clean-environment rerun remains a release prerequisite.**
+Observed: 2026-08-23. Gate status: **PASS for the frozen ten-repository Windows matrix; Linux clean-environment rerun remains a release prerequisite.**
 
-This is graph-construction evidence, not graph-truth or product certification. The machine-readable receipt is `D:\gt-product-audit-5296dc3\receipts\matrix-2b1b648e.json`.
+This is graph-construction evidence, not graph-truth or product certification. The machine-readable receipt is `D:\gt-product-audit-5296dc3\receipts\matrix-d2d352a6-v4-perf.json`.
 
 ## Builder under test
 
 - Frozen starting point: `3df01d2507c1f2fa8907eb2f33342368723a58d5`
 - Repair branch: `prerelease/gt-harness-v0.9`
-- Source-tree identity: `2b1b648e418a450ef7a738dde2d44ffcb0238d59e3ca8f530a7dd465649ab6bb` (82 files)
-- Graph builder: `gt-index-source-2b1b648e418a450e-repository-identity-v3`
+- Source-tree identity: `d2d352a6d25583537bfb119326924ee6d0e9e97a51a21d1c722a99050b6cad4f` (82 files)
+- Graph builder: `gt-index-source-d2d352a6d2558353-repository-identity-v4`
 - Graph schema: `v15.3-discovery-receipt`
-- Windows binary SHA-256: `6425af23ba4df377abd479b5d14c598fd2ce66d1e2c7b8768f6f4891fea8b750`
+- Windows binary SHA-256: `ee656e94e703f820c65ae403d91e84ec4ac62964edaac133d119cf4c34761b41`
 - Reproducibility: two forced source builds produced the same binary SHA-256.
 - Provider calls: 0
 - Provider credentials required or inspected: false
@@ -58,15 +58,19 @@ These limitations require targeted language-truth review. They are not silently 
 - The exact commit, complete graph-input source revision, schema, builder identity, SQLite integrity, persisted graph digest, and `query_ready` state were checked again on warm reopen.
 - A graph with any component failure is `DEGRADED` and non-queryable. A graph with declared parser recovery remains queryable only as `READY_WITH_DECLARED_LIMITATIONS`.
 
-## Performance observations (not a performance PASS)
+## Performance observations
 
-The largest cold builds were Django (171,939 ms indexer time; 249,959 ms wall time) and pnpm (113,864 ms indexer; 149,561 ms wall). Warm status checks were 4,512 ms and 3,529 ms respectively. These are correctness-preserving measurements and remain inputs to Gate 10; they are too slow to call the performance gate complete.
+The largest cold builds were Django (199,847 ms indexer; 214,768 ms wall) and pnpm (309,086 ms indexer; 469,325 ms wall). Peak process-tree RSS was 408.9 MiB and 403.7 MiB. Their persisted graphs were 302.6 MiB and 257.6 MiB.
+
+The v4 repository-identity implementation retains exact source-revision and database-checksum checks while reusing stored fingerprints for clean Git paths. Same-process warm readiness p50 was 208 ms for Django and 594 ms for pnpm, versus 4,512 ms and 3,529 ms in the prior v3 single-check measurement. A new process still verifies the complete persisted graph checksum; observed first-process checks were 1,698 ms and 3,770 ms. Full measurements and caveats are in `PERFORMANCE_AUDIT.md`.
 
 ## Reproduction
 
 ```powershell
 python scripts/product_repository_matrix.py `
   --workspace D:\gt-product-audit-5296dc3 `
-  --output D:\gt-product-audit-5296dc3\receipts\matrix-2b1b648e.json `
-  --timeout 1200
+  --output D:\gt-product-audit-5296dc3\receipts\matrix-d2d352a6-v4-perf.json `
+  --timeout 1200 `
+  --query-repetitions 10 `
+  --warm-repetitions 10
 ```

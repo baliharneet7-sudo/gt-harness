@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.16.0"]
+dev = ["psutil==7.2.2", "pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.16.0"]
 eval = ["harbor==0.20.0", "swebench==4.1.0"]
 # Workflows pin the exact treatment version.  The host-owned central runtime is
 # compatible with both the frozen 2.2.8 comparator and the current 2.3 series.

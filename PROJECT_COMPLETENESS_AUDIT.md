@@ -1,20 +1,20 @@
 # GroundTruth Project Completeness Audit
 
-Audit subject: frozen baseline `3df01d2507c1f2fa8907eb2f33342368723a58d5`, with demonstrated defects repaired on `prerelease/gt-harness-v0.9`. Current verdict: **IN PROGRESS — NOT CERTIFIED**.
+Audit subject: frozen baseline `3df01d2507c1f2fa8907eb2f33342368723a58d5`, with demonstrated defects repaired on `prerelease/gt-harness-v0.9`. Current verdict: **IN PROGRESS - NOT CERTIFIED**.
 
-Passing the inherited test suite is Gate 0 evidence only. The table below records production reachability and external evidence available as of 2026-08-22.
+Passing the inherited test suite is Gate 0 evidence only. The table below records production reachability and external evidence available as of 2026-08-23.
 
 | Component | Exists | Production reachable | Tested | Real-world verified | Canonical | Legacy/dead |
 |---|---:|---:|---:|---:|---:|---:|
 | `gt-harness` CLI | Yes | Yes | Yes | Local invocation | Yes | No |
-| Source indexer provisioning | Yes | Yes | Yes | Windows Go 1.23.4 build; Linux pending rerun | Yes | Opaque wheel/binary removed |
+| Source indexer provisioning | Yes | Yes | Yes | Reproducible Windows source build; Linux pending rerun | Yes | Opaque wheel/binary removed |
 | Git-authoritative discovery receipt | Yes | Yes | Go + Python regressions | GT-Harness and real Git fixtures | Yes | Replaces incompatible Python count comparison |
 | Tree-sitter graph construction | Yes | Yes | Go suite + Python integration | GT-Harness and real fixtures | Yes | No |
 | Graph receipt/readiness state machine | Yes | Yes | Yes | False-READY reproduction and repair | Yes | No |
 | SQLite persistence/atomic publication | Yes | Yes | Existing and new tests | Warm restart fixture | Yes | No |
-| Edit/add/delete/rename convergence | Yes | Yes | Real graph and MCP lifecycle tests | Safe full-rebuild publication | Yes | File-keyed optimization blocked pending relationship parity |
-| Query service | Yes | Yes | Yes | 62/62 independently derived sampled relationships across six languages | Yes | Broader truth/lifecycle matrix remains |
-| Production MCP | Yes | Yes | Actual stdio client E2E | Build/query/edit/update/restart/reuse | Yes | Older GT MCP servers non-canonical |
+| Edit/add/delete/rename convergence | Yes | Yes | Real graph, six-language, and MCP lifecycle tests | Safe full-rebuild publication; zero stale sampled edges | Yes | File-keyed optimization blocked pending relationship parity |
+| Query service | Yes | Yes | Yes | 62/62 independently derived sampled relationships across six languages | Yes | Broader randomized truth remains |
+| Production MCP | Yes | Yes | Actual stdio client E2E | Build/query/edit/update/restart/reuse with public graph receipt | Yes | Older GT MCP servers non-canonical |
 | GroundTruth benchmark treatment | Yes | Yes | Parity and immutability tests | Full task benchmarks not yet authorized | Yes | Legacy `gt_root` bridge non-canonical |
 | Bare treatment | Yes | Yes | Strict no-op test | Harness invocation | Yes | No |
 | Provider/model adapters | Yes | Yes | Existing adapter tests | Controlled multi-model trial pending | Yes | No model-specific GT logic permitted |
@@ -22,6 +22,8 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 | Embeddings/ONNX | Yes in imported GT | Not required by canonical structural path | Historical Gate 0 | Clean Linux provisioning pending | No | Optional/research until routed |
 | Benchmark compare command | Yes | Yes | Strict pairing/statistics regressions | Awaiting evaluator-completed live receipts | Yes | No provider calls |
 | Product certify command | Placeholder refusal | Explicitly blocked | Exit behavior only | No | No | Must be implemented after all product evidence gates |
+| Failure-state campaign | Yes | Yes | 15 Windows attacks | Explicit fail/recover behavior; Linux permissions/symlinks pending | Yes | No |
+| Performance instrumentation | Yes | Yes | Ten frozen repositories | Cold/warm/query/CPU/RSS/graph-size receipt | Yes | No |
 | Historical central engine/bridge | Yes | Compatibility paths only | Extensive inherited tests | Historical runs only | No | Classification/removal pending |
 | Historical workflows/reports | Yes | Several still active | Mixed | Cannot certify current product | No | Cleanup pending |
 
@@ -36,7 +38,7 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 7. Deleted files were skipped by the historical incremental refresh, leaving stale nodes and edges. Although its deletion mechanics were repaired, the same file-keyed path still does not rerun every whole-repository relationship pass. The canonical product now fails over to an atomic full rebuild for every edit until incremental parity is proven.
 8. Git and indexer subprocesses inherited MCP stdin, hanging repository-backed MCP calls on Windows. Production subprocess stdin is now `DEVNULL`; an actual stdio MCP lifecycle test reproduces and prevents regression.
 9. Bare and GT benchmark arms used different system prompts. The prompt is now identical; treatment evidence is the only intended difference.
-10. Every query rescanned the entire repository and rehashed/rechecked the graph. On the pinned Django checkout this produced an 8.3-second definition query. Receipt v4 scans the exact tracked plus non-ignored input inventory, reuses hashes only for unchanged filesystem fingerprints, and uses a per-process graph seal. The earlier v3 optimization reduced the same Django query to about 0.4 seconds; v4 large-repository latency remains to be remeasured before the performance gate can pass.
+10. Every query rescanned the entire repository and rehashed/rechecked the graph. On the pinned Django checkout this produced an 8.3-second definition query. Receipt v4 uses Git as the authoritative changed-path source, rehashes current/previous dirty paths and special-index paths, and reuses stored hashes only for unchanged normal paths. It retains full-scan fallback and the persisted-graph checksum. Final Django steady readiness p50 is 208 ms and query p95 is 246 ms; pnpm is 594 ms and 835 ms.
 11. Extensionless non-source files such as `LICENSE` were mislabeled as unresolved languages. They remain fully accounted for but are now correctly classified as `unsupported_path`.
 12. Nonfatal graph component failures were only written to stderr. The Go graph now persists `component_failures`, and any such failure makes the canonical graph `DEGRADED` and non-queryable.
 13. Files containing declarations lacked stable file/module nodes. Import and re-export edges were therefore attached to whichever declaration happened to be first, producing false relationships such as Express's `Router` export pointing to an unrelated test function. Every parsed source now has one explicit File anchor, and file relationships can no longer fall back to arbitrary declarations.
@@ -44,21 +46,26 @@ Passing the inherited test suite is Gate 0 evidence only. The table below record
 15. JavaScript/TypeScript inheritance ignored import provenance, so React's external `Component` was connected to an unrelated local declaration. Type relationships now resolve through proven import targets and abstain on external bindings.
 16. TypeScript parser recovery silently omitted declarations after a syntax-error region while reporting successful parsing. Parser recovery is now a first-class receipt limitation, and bounded declaration recovery restored all 22 independently enumerated Redux type re-exports without claiming unqualified `READY`.
 17. Hierarchy queries treated a Java class and its same-named constructor as ambiguous even when the graph contained the correct inheritance edges. Query anchoring is now relationship-aware and selects type nodes for subclass/implementation traversal.
+18. The Go walker used `os.Stat`, followed source symlinks, and could index an external target while the Python receipt hashed only the link target string. External content could therefore change without changing graph identity. Discovery now uses `os.Lstat`, classifies symlinks and loops as `non_regular_file`, and never gives them graph authority.
+19. CLI and MCP exposed different subsets of graph identity, and startup failures could terminate MCP without an agent-visible repository state. Both surfaces now use one public receipt projection; MCP records startup errors and CLI emits a structured non-queryable failure receipt.
 
 ## Current real-repository evidence
 
-- The final source identity `2b1b648e418a450ef7a738dde2d44ffcb0238d59e3ca8f530a7dd465649ab6bb` (82 files) produced byte-identical Windows Go builds twice.
+- The final source identity `d2d352a6d25583537bfb119326924ee6d0e9e97a51a21d1c722a99050b6cad4f` (82 files) produced byte-identical Windows Go builds twice (`ee656e94e703f820c65ae403d91e84ec4ac62964edaac133d119cf4c34761b41`).
 - All ten frozen repository-matrix checkouts rebuilt, reopened, matched their exact commits, and passed their production query smoke checks.
 - The source-derived truth corpus covers Python, JavaScript, TypeScript, Go, Rust, and Java across callers, callees, imports, re-exports, and direct inheritance. Its current bounded result is 62 true positives, 0 false positives, and 0 false negatives. This is strong sampled evidence, not universal accuracy certification.
 - Parser recovery and deliberate repository exclusions are exposed as `READY_WITH_DECLARED_LIMITATIONS`; they are never collapsed into unqualified `READY`.
+- The same cold/warm/add/modify/delete lifecycle passed for all six declared languages, with zero stale sampled edges.
+- A clean stdio MCP client built, queried, updated, restarted, and reused the production graph on a real repository without benchmark machinery.
+- The complete Windows Python suite, vendored Go suite, and canonical prerelease lint scope pass. Five Python tests are explicitly skipped for platform or unavailable optional-model conditions.
 
 ## Remaining blockers
 
-- Independent graph precision/recall is currently exact on a bounded 62-edge source-derived sample; broader randomized sampling and lifecycle stale-edge measurement remain.
-- Language claims beyond the exercised real-repository matrix are not certified, and matrix inclusion alone does not yet certify each language lifecycle.
+- Independent graph precision/recall is currently exact on a bounded 62-edge source-derived sample; broader randomized sampling remains.
+- Languages beyond Python, JavaScript, TypeScript, Go, Rust, and Java are not certified product support.
 - Proven file-keyed incremental parity is absent; correctness currently requires a full rebuild after changes.
-- Crash/concurrency/failure campaigns are incomplete.
-- Graph size on GT-Harness exceeded the prerelease target and needs attribution/optimization without losing facts.
-- Historical graph/MCP/control implementations and workflows still require consumer classification before deletion.
+- The Linux-only unreadable-file, permission-denied, and symlink/loop attacks remain unobserved until the Codespaces campaign.
+- Cold construction is slow on the largest repositories (pnpm 469 seconds; Django 215 seconds on Windows), and their persisted graphs are 257.6 MiB and 302.6 MiB.
+- Historical graph/MCP/control implementations, generated run outputs, and workflows still require final consumer classification and cleanup.
 - Competitive implementation research and blind GitNexus comparison are correctly blocked until product Gate 12.
 - Paid agent benchmarking is not authorized.

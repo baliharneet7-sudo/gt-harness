@@ -18,7 +18,8 @@ from gt_engine.repository_graph_service import (
     _GraphBuildStats,
     compute_repository_identity,
 )
-from gt_harness.cli import _graph_receipt_output
+from gt_harness.cli import _graph, _graph_receipt_output
+from gt_harness.mcp_server import RepositoryMCP
 
 
 def _git(root: Path, *args: str) -> str:
@@ -369,9 +370,55 @@ def test_query_readiness_keeps_source_checks_but_reuses_unchanged_graph_seal(
     assert service.status().query_ready
     assert service.status().query_ready
 
-    assert len(git_calls) == 2
-    assert all(call[:4] == ("status", "--porcelain=v2", "--branch", "-z") for call in git_calls)
+    assert [call[0] for call in git_calls].count("status") == 2
+    assert [call[:3] for call in git_calls].count(("ls-files", "-v", "-z")) == 2
     assert checksum_calls == 1
+
+
+def test_clean_readiness_uses_git_delta_without_full_inventory_rescan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gt_engine.repository_graph_service as graph_service
+
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        graph_service,
+        "_repository_paths",
+        lambda _root: pytest.fail("clean readiness performed a full inventory rescan"),
+    )
+
+    assert RepositoryGraphService(root, state_dir=state).status().query_ready
+
+
+def test_status_detects_assume_unchanged_source_mutation(tmp_path: Path) -> None:
+    root = _repo(tmp_path)
+    state = tmp_path / "state"
+    state.mkdir()
+    graph = state / "graph.db"
+    _database(graph)
+    receipt = _receipt(root, graph)
+    (state / "graph-receipt.json").write_text(
+        json.dumps(receipt.as_dict(), sort_keys=True), encoding="utf-8"
+    )
+    service = RepositoryGraphService(root, state_dir=state)
+    assert service.status().query_ready
+
+    _git(root, "update-index", "--assume-unchanged", "app.py")
+    (root / "app.py").write_text("def answer():\n    return 44\n", encoding="utf-8")
+    assert _git(root, "status", "--porcelain=v1") == ""
+
+    stale = service.status()
+    assert stale.build_status is GraphStatus.STALE
+    assert stale.query_ready is False
+    assert "source_revision_mismatch" in stale.degraded_reasons
 
 
 def test_receipt_rejects_ready_without_query_readiness(tmp_path: Path) -> None:
@@ -546,3 +593,52 @@ def test_parser_recovery_is_declared_and_cannot_report_unqualified_ready(
     assert receipt.query_ready is True
     assert receipt.parser_limitations == (limitation,)
     assert "parser_limitations:1" in receipt.degraded_reasons
+
+
+def test_cli_graph_build_converts_state_write_failure_to_structured_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path)
+
+    class FailingService:
+        def __init__(self, service_root: str | Path, *, state_dir: str | Path | None) -> None:
+            self.root = Path(service_root).resolve()
+            self.receipt_path = Path(state_dir or self.root) / "graph-receipt.json"
+
+        def build(self, *, force: bool, timeout: float) -> GraphReceipt:
+            raise PermissionError("state directory is read-only")
+
+    monkeypatch.setattr("gt_harness.cli.RepositoryGraphService", FailingService)
+    args = SimpleNamespace(
+        root=str(root),
+        state_dir=str(tmp_path / "state"),
+        graph_command="build",
+        force=True,
+        timeout=1.0,
+        verbose=False,
+    )
+
+    assert _graph(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "FAILED"
+    assert payload["query_ready"] is False
+    assert payload["error_type"] == "PermissionError"
+
+
+def test_mcp_query_converts_build_failure_to_non_queryable_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path)
+    service = RepositoryGraphService(root, state_dir=tmp_path / "state")
+    controller = RepositoryMCP(service)
+
+    def fail_build(*_args: object, **_kwargs: object) -> GraphReceipt:
+        raise PermissionError("state directory is read-only")
+
+    monkeypatch.setattr(service, "build", fail_build)
+    result = controller.query("definition", "answer")
+
+    assert result["status"] == "ABSENT"
+    assert result["query_ready"] is False
+    assert result["error_type"] == "PermissionError"
+    assert result["commit_sha"]

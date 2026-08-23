@@ -148,3 +148,31 @@ func TestWalkReceiptAccountsForEveryDiscoveredFile(t *testing.T) {
 		t.Fatalf("unexpected skip reasons: %v", reasons)
 	}
 }
+
+func TestWalkDoesNotFollowSourceSymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.py")
+	link := filepath.Join(root, "linked.py")
+	if err := os.WriteFile(target, []byte("def target():\n    return 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	result, err := WalkWithMeta(root, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range result.Files {
+		if file.Path == "linked.py" {
+			t.Fatalf("source symlink gained graph authority: %+v", file)
+		}
+	}
+	for _, skipped := range result.Skipped {
+		if skipped.Path == "linked.py" && skipped.Reason == "non_regular_file" {
+			return
+		}
+	}
+	t.Fatalf("source symlink was not explicitly skipped: %+v", result.Skipped)
+}

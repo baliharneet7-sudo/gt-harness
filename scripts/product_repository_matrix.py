@@ -8,11 +8,14 @@ import json
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
 from typing import Any
+
+import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -117,8 +120,64 @@ def _percentile(values: list[float], fraction: float) -> float | None:
     return round(ordered[index], 3)
 
 
+class _ResourceMonitor:
+    """Sample aggregate RSS and CPU for this audit process and active children."""
+
+    def __init__(self) -> None:
+        self.process = psutil.Process()
+        self.stop_event = threading.Event()
+        self.peak_rss_bytes = 0
+        self.peak_cpu_seconds = 0.0
+        initial = self.process.cpu_times()
+        self.cpu_baseline_seconds = float(initial.user + initial.system)
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _sample(self) -> None:
+        rss = 0
+        cpu = 0.0
+        processes = [self.process]
+        try:
+            processes.extend(self.process.children(recursive=True))
+        except (psutil.Error, OSError):
+            pass
+        for process in processes:
+            try:
+                rss += int(process.memory_info().rss)
+                times = process.cpu_times()
+                cpu += float(times.user + times.system)
+            except (psutil.Error, OSError):
+                continue
+        self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+        self.peak_cpu_seconds = max(self.peak_cpu_seconds, cpu)
+
+    def _run(self) -> None:
+        while not self.stop_event.wait(0.01):
+            self._sample()
+        self._sample()
+
+    def start(self) -> None:
+        self._sample()
+        self.thread.start()
+
+    def stop(self) -> dict[str, Any]:
+        self.stop_event.set()
+        self.thread.join(timeout=5)
+        return {
+            "method": "psutil_process_tree_sampling_10ms",
+            "peak_rss_bytes": self.peak_rss_bytes,
+            "cpu_seconds": round(
+                max(0.0, self.peak_cpu_seconds - self.cpu_baseline_seconds), 3
+            ),
+        }
+
+
 def _audit_repository(
-    entry: dict[str, Any], repositories: Path, states: Path, timeout: float
+    entry: dict[str, Any],
+    repositories: Path,
+    states: Path,
+    timeout: float,
+    query_repetitions: int,
+    warm_repetitions: int,
 ) -> dict[str, Any]:
     started = _now()
     wall = time.perf_counter()
@@ -127,23 +186,35 @@ def _audit_repository(
     _checkout(entry, repository)
     clone_completed = time.perf_counter()
     service = RepositoryGraphService(repository, state_dir=state)
+    monitor = _ResourceMonitor()
+    monitor.start()
     receipt = service.build(force=True, timeout=timeout)
+    resources = monitor.stop()
     build_completed = time.perf_counter()
     reopened = RepositoryGraphService(repository, state_dir=state)
-    warm_started = time.perf_counter()
+    warm_start = time.perf_counter()
     warm = reopened.status()
-    warm_ms = (time.perf_counter() - warm_started) * 1000.0
+    warm_start_ms = (time.perf_counter() - warm_start) * 1000.0
+    warm_latencies: list[float] = []
+    for _iteration in range(max(1, warm_repetitions)):
+        warm_started = time.perf_counter()
+        warm = reopened.status()
+        warm_latencies.append((time.perf_counter() - warm_started) * 1000.0)
     query_receipts: list[dict[str, Any]] = []
     query_latencies: list[float] = []
     for query in entry.get("smoke_queries", []):
-        query_started = time.perf_counter()
-        result = reopened.query(
-            str(query["mode"]),
-            str(query["symbol"]),
-            file_path=query.get("file"),
-        )
-        latency = (time.perf_counter() - query_started) * 1000.0
-        query_latencies.append(latency)
+        samples: list[float] = []
+        result: dict[str, Any] = {}
+        for _iteration in range(max(1, query_repetitions)):
+            query_started = time.perf_counter()
+            result = reopened.query(
+                str(query["mode"]),
+                str(query["symbol"]),
+                file_path=query.get("file"),
+            )
+            latency = (time.perf_counter() - query_started) * 1000.0
+            samples.append(latency)
+            query_latencies.append(latency)
         expected_file = str(query.get("expected_file") or "")
         matched = any(
             str(row.get("file_path") or "") == expected_file for row in result["evidence"]
@@ -156,7 +227,11 @@ def _audit_repository(
                 "status": result["status"],
                 "count": result["count"],
                 "expected_file_found": matched,
-                "latency_ms": round(latency, 3),
+                "latency_ms": {
+                    "count": len(samples),
+                    "p50": round(median(samples), 3),
+                    "p95": _percentile(samples, 0.95),
+                },
                 "evidence_files": sorted(
                     {str(row.get("file_path") or "") for row in result["evidence"]}
                 )[:20],
@@ -182,7 +257,14 @@ def _audit_repository(
         "completed": _now(),
         "checkout_duration_ms": round((clone_completed - wall) * 1000.0, 3),
         "build_wall_duration_ms": round((build_completed - clone_completed) * 1000.0, 3),
-        "warm_status_duration_ms": round(warm_ms, 3),
+        "warm_status_duration_ms": round(warm_start_ms, 3),
+        "warm_status_latency_ms": {
+            "first_process_check": round(warm_start_ms, 3),
+            "count": len(warm_latencies),
+            "p50": round(median(warm_latencies), 3),
+            "p95": _percentile(warm_latencies, 0.95),
+        },
+        "build_resources": resources,
         "total_duration_ms": round((time.perf_counter() - wall) * 1000.0, 3),
         "identity_match": identity_match,
         "warm_graph_match": graph_match,
@@ -207,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--query-repetitions", type=int, default=5)
+    parser.add_argument("--warm-repetitions", type=int, default=5)
     args = parser.parse_args(argv)
 
     manifest_path = Path(args.manifest).resolve()
@@ -222,7 +306,14 @@ def main(argv: list[str] | None = None) -> int:
         if selected and entry["id"] not in selected:
             continue
         try:
-            row = _audit_repository(entry, repositories, states, args.timeout)
+            row = _audit_repository(
+                entry,
+                repositories,
+                states,
+                args.timeout,
+                args.query_repetitions,
+                args.warm_repetitions,
+            )
         except Exception as exc:  # noqa: BLE001 - audit failures must be receipted
             row = {
                 "id": entry["id"],

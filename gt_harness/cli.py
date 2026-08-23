@@ -21,6 +21,7 @@ from gt_engine.repository_graph_service import (
     GraphReceipt,
     RepositoryGraphService,
     compute_repository_identity,
+    public_graph_receipt,
 )
 from gt_harness.indexer_setup import ensure_source_indexer, find_go
 
@@ -143,47 +144,27 @@ def _graph_receipt_output(
     value = receipt.as_dict()
     if verbose:
         return value
-    keys = (
-        "receipt_schema",
-        "repository",
-        "commit_sha",
-        "working_tree_state",
-        "source_revision",
-        "graph_schema_version",
-        "graph_builder_version",
-        "build_started",
-        "build_completed",
-        "build_status",
-        "files_discovered",
-        "files_attempted",
-        "files_indexed",
-        "files_skipped",
-        "files_failed",
-        "symbols",
-        "nodes_by_type",
-        "edges_by_type",
-        "coverage",
-        "build_duration_ms",
-        "persistent_graph_path",
-        "graph_checksum_or_identity",
-        "query_ready",
-        "degraded_reasons",
-        "component_failures",
-        "parser_limitations",
-        "skipped_reasons",
-        "update_mode",
-        "graph_bytes",
-        "source_bytes",
-    )
-    output = {key: value[key] for key in keys}
-    output["receipt_path"] = str(service.receipt_path)
-    return output
+    return public_graph_receipt(receipt, receipt_path=service.receipt_path)
 
 
 def _graph(args: argparse.Namespace) -> int:
     service = RepositoryGraphService(args.root, state_dir=args.state_dir)
     if args.graph_command == "build":
-        receipt = service.build(force=args.force, timeout=args.timeout)
+        try:
+            receipt = service.build(force=args.force, timeout=args.timeout)
+        except Exception as exc:  # noqa: BLE001 - product boundary must fail explicitly
+            _emit(
+                {
+                    "schema": "gt.graph_receipt_error.v1",
+                    "status": "FAILED",
+                    "query_ready": False,
+                    "error_type": type(exc).__name__,
+                    "error": " ".join(str(exc).split())[:2000],
+                    "repository": str(service.root),
+                    "receipt_path": str(service.receipt_path),
+                }
+            )
+            return 1
         _emit(_graph_receipt_output(service, receipt, verbose=args.verbose))
         return 0 if receipt.query_ready else 1
     if args.graph_command == "status":

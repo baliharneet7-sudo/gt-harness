@@ -53,3 +53,22 @@ def test_matrix_percentiles_are_deterministic_and_bounded() -> None:
     assert _percentile([30.0, 10.0, 20.0], 0.0) == 10.0
     assert _percentile([30.0, 10.0, 20.0], 0.5) == 20.0
     assert _percentile([30.0, 10.0, 20.0], 0.95) == 30.0
+
+
+def test_language_lifecycle_scope_is_explicit_and_pinned() -> None:
+    manifest = json.loads(
+        (ROOT / "audit" / "language_lifecycle_matrix.v1.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["schema"] == "gt.language_lifecycle_matrix.v1"
+    rows = manifest["repositories"]
+    assert {row["id"] for row in rows} == {
+        "python",
+        "javascript",
+        "typescript",
+        "go",
+        "rust",
+        "java",
+    }
+    assert len({row["repository_id"] for row in rows}) == len(rows)
+    assert all(re.fullmatch(r"[0-9a-f]{40}", row["commit"]) for row in rows)

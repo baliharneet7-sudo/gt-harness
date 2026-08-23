@@ -1,0 +1,12 @@
+{
+  "schema": "gt.language_lifecycle_matrix.v1",
+  "frozen_at": "2026-08-22",
+  "repositories": [
+    {"id": "python", "repository_id": "python-small-itsdangerous", "commit": "672971d66a2ef9f85151e53283113f33d642dabd"},
+    {"id": "javascript", "repository_id": "javascript-express", "commit": "023767fe9872e029271df1418f73401bff20ff40"},
+    {"id": "typescript", "repository_id": "typescript-redux", "commit": "71606661ac515bdd64c199a6bb508401c7cf736f"},
+    {"id": "go", "repository_id": "go-gorilla-mux", "commit": "db9d1d0073d27a0a2d9a8c1bc52aa0af4374d265"},
+    {"id": "rust", "repository_id": "rust-ripgrep", "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7"},
+    {"id": "java", "repository_id": "java-gson", "commit": "dae37cf0fe12235b76fb09f01118a0a8c8823f42"}
+  ]
+}

@@ -24,7 +24,7 @@ from gt_engine.graph_inputs import is_graph_input
 from gt_engine.indexer import ensure_index_with_receipt
 from gt_harness.indexer_setup import GT_INDEX_BUILD_ID
 
-GRAPH_BUILDER_VERSION = f"gt-index-{GT_INDEX_BUILD_ID}-repository-identity-v3"
+GRAPH_BUILDER_VERSION = f"gt-index-{GT_INDEX_BUILD_ID}-repository-identity-v4"
 GRAPH_RECEIPT_SCHEMA = "gt.graph_receipt.v4"
 CANONICAL_QUERY_MODES = (
     "definition",
@@ -57,6 +57,38 @@ QUERY_MODE_ALIASES = {
 }
 SUPPORTED_QUERY_MODES = tuple((*CANONICAL_QUERY_MODES, *QUERY_MODE_ALIASES))
 _TYPE_ANCHOR_LABELS = ("class", "interface", "trait", "struct", "enum", "type")
+PUBLIC_GRAPH_RECEIPT_FIELDS = (
+    "receipt_schema",
+    "repository",
+    "commit_sha",
+    "working_tree_state",
+    "source_revision",
+    "graph_schema_version",
+    "graph_builder_version",
+    "build_started",
+    "build_completed",
+    "build_status",
+    "files_discovered",
+    "files_attempted",
+    "files_indexed",
+    "files_skipped",
+    "files_failed",
+    "symbols",
+    "nodes_by_type",
+    "edges_by_type",
+    "coverage",
+    "build_duration_ms",
+    "persistent_graph_path",
+    "graph_checksum_or_identity",
+    "query_ready",
+    "degraded_reasons",
+    "component_failures",
+    "parser_limitations",
+    "skipped_reasons",
+    "update_mode",
+    "graph_bytes",
+    "source_bytes",
+)
 _READY = frozenset({"READY", "READY_WITH_DECLARED_LIMITATIONS"})
 _SKIP_DIRS = frozenset(
     {
@@ -230,6 +262,18 @@ class GraphReceipt:
         return cls(**row)
 
 
+def public_graph_receipt(
+    receipt: GraphReceipt, *, receipt_path: str | Path | None = None
+) -> dict[str, Any]:
+    """Return the bounded receipt shared by CLI, MCP, and agent delivery."""
+
+    value = receipt.as_dict()
+    output = {key: value[key] for key in PUBLIC_GRAPH_RECEIPT_FIELDS}
+    if receipt_path is not None:
+        output["receipt_path"] = str(receipt_path)
+    return output
+
+
 @dataclass(frozen=True, slots=True)
 class _GraphBuildStats:
     schema: str
@@ -388,6 +432,27 @@ def _git_snapshot(repository: Path) -> _GitSnapshot | None:
     )
 
 
+def _special_index_paths(repository: Path) -> tuple[str, ...] | None:
+    """Return tracked paths Git is allowed to omit from ordinary status output.
+
+    Lowercase ``git ls-files -v`` tags denote assume-unchanged entries and ``S``
+    denotes skip-worktree. Their content is hashed on every readiness check so
+    these performance hints cannot conceal a repository mutation from GT.
+    """
+
+    code, output = _run_git(repository, "ls-files", "-v", "-z")
+    if code != 0:
+        return None
+    paths: list[str] = []
+    for record in output.split("\0") if output else ():
+        if len(record) < 3 or record[1] != " ":
+            continue
+        marker = record[0]
+        if marker == "S" or marker.islower():
+            paths.append(record[2:].replace("\\", "/"))
+    return tuple(dict.fromkeys(paths))
+
+
 def _graph_input_payload(path: Path) -> bytes:
     try:
         if path.is_symlink():
@@ -496,7 +561,7 @@ def compute_repository_identity(
 
 
 def _inventory_repository_identity(root: Path, stored: GraphReceipt) -> RepositoryIdentity:
-    """Recompute identity from Git state plus a complete graph-input inventory."""
+    """Recompute identity from Git deltas while preserving hidden-path safety."""
 
     # Submodule worktrees require recursively hashing their files. Keep this path
     # conservative until a submodule-aware incremental inventory is implemented.
@@ -505,36 +570,27 @@ def _inventory_repository_identity(root: Path, stored: GraphReceipt) -> Reposito
     snapshot = _git_snapshot(root)
     if snapshot is None:
         return compute_repository_identity(root, canonical_root=True)
-    hashes: dict[str, str] = {}
-    sizes: dict[str, int] = {}
-    fingerprints: dict[str, str] = {}
-    prior_hashes = stored.graph_input_hashes
-    prior_sizes = stored.graph_input_sizes
-    prior_fingerprints = stored.graph_input_fingerprints
-    forced = set(stored.git_status_paths) | set(snapshot.changed_paths)
-    files_discovered = 0
-    repository_paths = _repository_paths(root)
-    for relative in repository_paths:
-        files_discovered += 1
+    special_paths = _special_index_paths(root)
+    if special_paths is None or not stored.graph_input_hashes:
+        return compute_repository_identity(root, canonical_root=True)
+    hashes = dict(stored.graph_input_hashes)
+    sizes = dict(stored.graph_input_sizes)
+    fingerprints = dict(stored.graph_input_fingerprints)
+    forced = set(stored.git_status_paths) | set(snapshot.changed_paths) | set(special_paths)
+    for relative in sorted(forced):
         candidate = root / Path(relative)
         if not (candidate.is_file() or candidate.is_symlink()):
+            hashes.pop(relative, None)
+            sizes.pop(relative, None)
+            fingerprints.pop(relative, None)
             continue
-        known_input = relative in prior_hashes
+        known_input = relative in hashes
         if not known_input:
             prefix = _graph_input_prefix(candidate)
             if relative != ".gitmodules" and not is_graph_input(relative, prefix):
                 continue
         fingerprint = _graph_input_fingerprint(candidate)
         fingerprints[relative] = fingerprint
-        if (
-            known_input
-            and relative not in forced
-            and prior_fingerprints.get(relative) == fingerprint
-            and relative in prior_sizes
-        ):
-            hashes[relative] = prior_hashes[relative]
-            sizes[relative] = prior_sizes[relative]
-            continue
         payload = _graph_input_payload(candidate)
         hashes[relative] = hashlib.sha256(payload).hexdigest()
         sizes[relative] = len(payload)
@@ -544,7 +600,7 @@ def _inventory_repository_identity(root: Path, stored: GraphReceipt) -> Reposito
         branch=snapshot.branch,
         working_tree_state=snapshot.working_tree_state,
         source_revision=_source_revision(snapshot.commit_sha, "", hashes),
-        files_discovered=files_discovered,
+        files_discovered=stored.repository_files_discovered or stored.files_discovered,
         graph_input_files=len(hashes),
         source_bytes=sum(sizes.values()),
         graph_input_hashes=hashes,
@@ -1247,8 +1303,10 @@ __all__ = [
     "GraphNotReadyError",
     "GraphReceipt",
     "GraphStatus",
+    "PUBLIC_GRAPH_RECEIPT_FIELDS",
     "RepositoryGraphService",
     "RepositoryIdentity",
     "SUPPORTED_QUERY_MODES",
     "compute_repository_identity",
+    "public_graph_receipt",
 ]

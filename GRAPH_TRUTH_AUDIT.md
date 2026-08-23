@@ -1,8 +1,8 @@
 # Graph Truth Audit
 
-Observed: `2026-08-22T23:46:40.441848Z`
+Observed: `2026-08-23T00:46:15.020491Z`
 
-Receipt: `D:\gt-product-audit-5296dc3\receipts\graph-truth-2b1b648e.json`
+Receipt: `D:\gt-product-audit-5296dc3\receipts\graph-truth-d2d352a6.json`
 
 Verdict: **PASS**
 
@@ -28,17 +28,17 @@ Expected facts were derived from frozen repository source by the independent ora
 
 | Fact | Language | Relationship | Result | TP | FP | FN | Latency ms |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| python-direct-subclasses-baddata | python | subclasses | PASS | 2 | 0 | 0 | 106.798 |
-| python-in-repository-callees-base64-encode | python | callees | PASS | 1 | 0 | 0 | 109.639 |
-| javascript-relative-requires-express-entry | javascript | imports | PASS | 3 | 0 | 0 | 166.907 |
-| javascript-commonjs-local-reexports | javascript | reexports | PASS | 5 | 0 | 0 | 165.337 |
-| typescript-redux-type-barrel | typescript | reexports | PASS | 22 | 0 | 0 | 326.14 |
-| typescript-external-react-component-abstention | javascript | subclasses | PASS | 0 | 0 | 0 | 379.005 |
-| go-clean-import-path-caller | go | callers | PASS | 1 | 0 | 0 | 159.012 |
-| rust-cli-crate-reexports | rust | reexports | PASS | 25 | 0 | 0 | 200.16 |
-| rust-stdlib-import-abstention | rust | imports | PASS | 0 | 0 | 0 | 176.683 |
-| java-direct-subclasses-billing-instrument | java | subclasses | PASS | 2 | 0 | 0 | 206.344 |
-| java-in-file-callees-utc-format | java | callees | PASS | 1 | 0 | 0 | 207.867 |
+| python-direct-subclasses-baddata | python | subclasses | PASS | 2 | 0 | 0 | 228.738 |
+| python-in-repository-callees-base64-encode | python | callees | PASS | 1 | 0 | 0 | 222.701 |
+| javascript-relative-requires-express-entry | javascript | imports | PASS | 3 | 0 | 0 | 289.621 |
+| javascript-commonjs-local-reexports | javascript | reexports | PASS | 5 | 0 | 0 | 261.779 |
+| typescript-redux-type-barrel | typescript | reexports | PASS | 22 | 0 | 0 | 267.762 |
+| typescript-external-react-component-abstention | javascript | subclasses | PASS | 0 | 0 | 0 | 265.717 |
+| go-clean-import-path-caller | go | callers | PASS | 1 | 0 | 0 | 294.17 |
+| rust-cli-crate-reexports | rust | reexports | PASS | 25 | 0 | 0 | 317.57 |
+| rust-stdlib-import-abstention | rust | imports | PASS | 0 | 0 | 0 | 252.831 |
+| java-direct-subclasses-billing-instrument | java | subclasses | PASS | 2 | 0 | 0 | 302.248 |
+| java-in-file-callees-utc-format | java | callees | PASS | 1 | 0 | 0 | 245.89 |
 
 ## Scope
 

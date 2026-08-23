@@ -9,9 +9,9 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from gt_engine.repository_graph_service import (
-    GraphNotReadyError,
     GraphStatus,
     RepositoryGraphService,
+    public_graph_receipt,
 )
 
 
@@ -20,40 +20,20 @@ class RepositoryMCP:
 
     def __init__(self, service: RepositoryGraphService) -> None:
         self.service = service
+        self.startup_errors: list[str] = []
 
     def prepare(self) -> dict[str, Any]:
         return self.service.build().as_dict()
 
     def status(self, *, verbose: bool = False) -> dict[str, Any]:
-        value = self.service.status().as_dict()
+        receipt = self.service.status()
+        value = receipt.as_dict()
         if verbose:
+            value["startup_errors"] = list(self.startup_errors)
             return value
-        keys = (
-            "receipt_schema",
-            "repository",
-            "commit_sha",
-            "working_tree_state",
-            "source_revision",
-            "graph_schema_version",
-            "graph_builder_version",
-            "build_started",
-            "build_completed",
-            "build_status",
-            "files_discovered",
-            "files_attempted",
-            "files_indexed",
-            "files_skipped",
-            "files_failed",
-            "symbols",
-            "coverage",
-            "build_duration_ms",
-            "graph_checksum_or_identity",
-            "query_ready",
-            "degraded_reasons",
-            "skipped_reasons",
-            "update_mode",
-        )
-        return {key: value[key] for key in keys}
+        output = public_graph_receipt(receipt, receipt_path=self.service.receipt_path)
+        output["startup_errors"] = list(self.startup_errors)
+        return output
 
     def _refresh_if_stale(self) -> None:
         receipt = self.service.status()
@@ -68,8 +48,8 @@ class RepositoryMCP:
         file_path: str = "",
         min_confidence: float = 0.5,
     ) -> dict[str, Any]:
-        self._refresh_if_stale()
         try:
+            self._refresh_if_stale()
             return self.service.query(
                 mode,
                 symbol,
@@ -77,13 +57,18 @@ class RepositoryMCP:
                 file_path=file_path or None,
                 min_confidence=min_confidence,
             )
-        except (GraphNotReadyError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - MCP must return explicit failure, not exit
             receipt = self.service.status()
             return {
                 "schema": "gt.graph_query.v1",
                 "status": receipt.build_status.value,
                 "query_ready": False,
                 "error": str(exc),
+                "error_type": type(exc).__name__,
+                "repository": receipt.repository,
+                "commit_sha": receipt.commit_sha,
+                "source_revision": receipt.source_revision,
+                "graph_identity": receipt.graph_checksum_or_identity,
                 "degraded_reasons": list(receipt.degraded_reasons),
             }
 
@@ -116,6 +101,8 @@ class RepositoryMCP:
             "repository": receipt.repository,
             "commit_sha": receipt.commit_sha,
             "source_revision": receipt.source_revision,
+            "graph_identity": receipt.graph_checksum_or_identity,
+            "graph_builder_version": receipt.graph_builder_version,
             "build_status": receipt.build_status.value,
             "query_ready": receipt.query_ready,
             "evidence": rows,
@@ -126,7 +113,12 @@ class RepositoryMCP:
 
 def create_server(root: str | Path, *, state_dir: str | Path | None = None) -> FastMCP:
     controller = RepositoryMCP(RepositoryGraphService(root, state_dir=state_dir))
-    controller.prepare()
+    try:
+        controller.prepare()
+    except Exception as exc:  # noqa: BLE001 - initialization remains observable via MCP
+        controller.startup_errors.append(
+            f"{type(exc).__name__}: {' '.join(str(exc).split())[:1000]}"
+        )
     app = FastMCP(name="gt-harness")
 
     @app.tool(structured_output=False)

@@ -75,6 +75,12 @@ async def test_stdio_mcp_builds_updates_and_reuses_the_production_graph(tmp_path
             first = _payload(await _call(session, "gt_status", {}))
             assert first["query_ready"] is True
             assert "graph_input_hashes" not in first
+            assert first["nodes_by_type"]
+            assert first["edges_by_type"]
+            assert first["persistent_graph_path"]
+            assert "parser_limitations" in first
+            assert first["receipt_path"]
+            assert first["startup_errors"] == []
             definition = _payload(
                 await _call(session, "gt_query", {"mode": "definition", "symbol": "target"})
             )
