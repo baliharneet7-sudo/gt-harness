@@ -1265,7 +1265,9 @@ jobs:
           # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
           # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
           cp artifact_deepswe/gt_headless_runner.py "${HOST_GT_INJECT}/"
-          cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
+          if [ "$INPUT_BASELINE" != "true" ]; then
+            cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
+          fi
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1331,8 +1333,13 @@ jobs:
           echo "CONTAINER mount: ${HOST_ARTIFACTS} -> ${GT_C_ARTIFACTS} (ro); ${HOST_GT_OUT} -> /gt_out (rw); /tmp/gt_inject/opt/gt -> /opt/gt (ro)"
 
           export GT_C_OUT=/gt_out
-          source artifact_deepswe/gt_integration/gt_ae_block.sh
-          echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+          if [ "$INPUT_BASELINE" != "true" ]; then
+            source artifact_deepswe/gt_integration/gt_ae_block.sh
+            echo "GT_AE_ARGS (block): ${GT_AE_ARGS[*]}"
+          else
+            GT_AE_ARGS=()
+            echo "GT_AE_ARGS (block): baseline arm; GT substrate injection disabled"
+          fi
 
           # Bounded swap: only create a small swap file when disk can afford it.
           if ! swapon --show 2>/dev/null | grep -q /gt_swap; then
