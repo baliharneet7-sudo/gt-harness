@@ -39,10 +39,14 @@ import sys
 import time
 from collections.abc import Mapping
 
-try:
-    from artifact_deepswe import ledger_attestation
-except ImportError:  # injected runner + sibling module inside /opt/gt
-    import ledger_attestation  # type: ignore[no-redef]
+# The GT-off control arm deliberately has no attestation module.  Keep this
+# optional: the ledger is only touched by the GT-on terminal-proof path.
+ledger_attestation = None
+if os.environ.get("GT_BASELINE") != "1":
+    try:
+        from artifact_deepswe import ledger_attestation
+    except ImportError:  # injected runner + sibling module inside /opt/gt
+        import ledger_attestation  # type: ignore[no-redef]
 
 
 def _bc(msg: str) -> None:
@@ -310,4 +314,3 @@ def run(env: dict | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(run())
-
