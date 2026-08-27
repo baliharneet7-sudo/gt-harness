@@ -1084,7 +1084,7 @@ jobs:
               'max_parallel_requested': doc.get('max_parallel_requested') == '20',
               'max_parallel_effective': doc.get('max_parallel_effective') == 20,
           }
-          if os.environ.get('INPUT_BASELINE') != 'true':
+          if os.environ.get('GT_ID_BASELINE') != '1':
               required.update({
                   'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
                   'seam_matches_checkout': doc.get('seam_sha256') == os.environ.get('GT_ID_SEAM'),
