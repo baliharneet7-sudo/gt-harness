@@ -1607,7 +1607,7 @@ jobs:
           # Model-specific env vars for inside the container
           MODEL_ENV=""
           if echo "$INPUT_MODEL" | grep -qiE "^openai/minimax/|^openrouter/|minimax"; then
-            MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
+            MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENAI_BASE_URL=https://openrouter.ai/api/v1 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
           fi
