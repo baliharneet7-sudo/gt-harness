@@ -1179,10 +1179,6 @@ jobs:
               'gt_ref_resolved_source': doc.get('gt_ref_resolved_source') == 'git_rev_parse_head',
               'workflow_dispatch_sha': bool(canonical.fullmatch(str(doc.get('workflow_dispatch_sha') or ''))),
               'workflow_dispatch_matches_prepared': doc.get('workflow_dispatch_sha') == doc.get('gt_ref_prepared_sha'),
-              'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
-              'seam_matches_checkout': doc.get('seam_sha256') == file_sha('artifact_deepswe/gt_mini_patch.py'),
-              'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
-              'runner_matches_checkout': doc.get('runner_sha256') == file_sha('artifact_deepswe/gt_headless_runner.py'),
               'workflow_run_id': bool(re.fullmatch(r'[0-9]+', str(doc.get('workflow_run_id') or ''))),
               'workflow_run_matches': str(doc.get('workflow_run_id') or '') == os.environ.get('GITHUB_RUN_ID'),
               'shadow_rate_requested': doc.get('shadow_rate_requested') == os.environ.get('GT_SS_SHADOW_RATE_REQUESTED'),
@@ -1191,6 +1187,13 @@ jobs:
               'max_parallel_requested': doc.get('max_parallel_requested') == '20',
               'max_parallel_effective': doc.get('max_parallel_effective') == 20,
           }
+          if os.environ.get('INPUT_BASELINE') != 'true':
+              required.update({
+                  'seam_sha256': bool(digest.fullmatch(str(doc.get('seam_sha256') or ''))),
+                  'seam_matches_checkout': doc.get('seam_sha256') == file_sha('artifact_deepswe/gt_mini_patch.py'),
+                  'runner_sha256': bool(digest.fullmatch(str(doc.get('runner_sha256') or ''))),
+                  'runner_matches_checkout': doc.get('runner_sha256') == file_sha('artifact_deepswe/gt_headless_runner.py'),
+              })
           expected = os.environ.get('GT_SUBSTRATE_DIGEST') or ''
           if os.environ.get('INPUT_BASELINE') != 'true' and expected:
               parity = doc.get('commit_parity_recorded')
