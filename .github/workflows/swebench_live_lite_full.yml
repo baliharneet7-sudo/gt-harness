@@ -1268,6 +1268,8 @@ jobs:
           if [ "$INPUT_BASELINE" != "true" ]; then
             cp artifact_deepswe/ledger_attestation.py "${HOST_GT_INJECT}/"
           fi
+          # Python 3.10 task images need the typing backport before LiteLLM is imported.
+          cp artifact_deepswe/sitecustomize.py "${HOST_GT_INJECT}/"
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
