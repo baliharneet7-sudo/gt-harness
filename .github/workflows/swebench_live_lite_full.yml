@@ -1440,7 +1440,7 @@ jobs:
           set +e
           set -o pipefail
           INPUT_MODEL="$INPUT_MODEL"
-          if echo "$INPUT_MODEL" | grep -qiE "minimax|tokenrouter"; then
+          if echo "$INPUT_MODEL" | grep -qiE "tokenrouter"; then
             export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
             export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
             if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
@@ -1448,6 +1448,11 @@ jobs:
             fi
             echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
           elif echo "$INPUT_MODEL" | grep -qiE "^openrouter/|minimax"; then
+            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+            export OPENAI_API_BASE="https://openrouter.ai/api/v1"
+            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
+              INPUT_MODEL="openai/${INPUT_MODEL#openrouter/}"
+            fi
             export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
             GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
             echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
@@ -1601,8 +1606,8 @@ jobs:
 
           # Model-specific env vars for inside the container
           MODEL_ENV=""
-          if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
-            MODEL_ENV="-e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
+          if echo "$INPUT_MODEL" | grep -qiE "^openai/minimax/|^openrouter/|minimax"; then
+            MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
           elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
             MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
           fi
