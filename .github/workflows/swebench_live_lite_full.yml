@@ -1254,7 +1254,13 @@ jobs:
           HOST_GT_INJECT=/tmp/gt_inject/opt/gt
           mkdir -p "${HOST_GT_INJECT}"
           mkdir -p "${HOST_GT_INJECT}/groundtruth"
-          cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          # The GT-off control arm must not require the GT seam.  In particular,
+          # artifact_deepswe/gt_mini_patch.py is intentionally absent from some
+          # baseline revisions; staging it unconditionally turns a control task
+          # into an infrastructure failure before the model starts.
+          if [ "$INPUT_BASELINE" != "true" ]; then
+            cp artifact_deepswe/gt_mini_patch.py "${HOST_GT_INJECT}/"
+          fi
           # Headless agent runner (B5 fix): the non-interactive core of run/mini.py. The bare
           # `mini-swe-agent` CLI is the INTERACTIVE mini app and never reaches agent.run() in a
           # headless container (0 steps). This runner builds model+local-env+DefaultAgent and runs.
