@@ -1926,6 +1926,36 @@ jobs:
           set -e
           # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
+      - name: Classify task execution (live diagnostic)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, re
+          from pathlib import Path
+          exit_path = Path('/tmp/gt_out/gt_agent_exit.json')
+          traj_path = Path('/tmp/gt_out/mini-swe-agent.trajectory.json')
+          log = Path('trial_output.log').read_text(encoding='utf-8', errors='replace') if Path('trial_output.log').exists() else ''
+          exit_doc = json.loads(exit_path.read_text(encoding='utf-8')) if exit_path.exists() else {}
+          trajectory = json.loads(traj_path.read_text(encoding='utf-8')) if traj_path.exists() else {}
+          steps = int(((trajectory.get('info') or {}).get('model_stats') or {}).get('api_calls') or 0)
+          rc = int(exit_doc.get('return_code', 1)) if exit_doc else 1
+          if steps > 0:
+              classification = 'TASK_EXECUTION'
+              reason = 'agent produced a trajectory; final reward determines task success'
+          elif re.search(r'Unknown provider|API key|401|402|403|429|rate.?limit|OPENAI_API|OPENROUTER', log, re.I):
+              classification = 'MODEL_FAILURE'
+              reason = 'agent did not produce a trajectory and logs contain provider/API evidence'
+          elif re.search(r'Docker|image not found|No such file|cannot stat|runner|out of memory|timeout', log, re.I) or rc != 0:
+              classification = 'INFRA_FAILURE'
+              reason = 'agent did not produce a trajectory and execution/runner evidence is present'
+          else:
+              classification = 'UNKNOWN_FAILURE'
+              reason = 'agent did not produce a trajectory; no specific marker was found'
+          doc = {'schema': 'gt.task_execution_classification.v1', 'task': '${{ matrix.task }}', 'classification': classification, 'reason': reason, 'agent_steps': steps, 'agent_return_code': rc}
+          Path('task_execution_classification.json').write_text(json.dumps(doc, indent=2), encoding='utf-8')
+          print(f'TASK_EXECUTION_CLASSIFICATION task={doc["task"]} classification={classification} steps={steps} rc={rc} reason={reason}')
+          PY
+
       - name: Upload post-agent diagnostic snapshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -1944,6 +1974,7 @@ jobs:
             /tmp/gt_out/gt_profile_receipt.json
             /tmp/gt_out/gt_batch_activation.json
             /tmp/gt_out/agent_patch.diff
+            task_execution_classification.json
           retention-days: 30
           if-no-files-found: error
 
