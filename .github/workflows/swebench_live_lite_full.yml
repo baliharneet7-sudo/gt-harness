@@ -2933,9 +2933,6 @@ jobs:
     name: Task progress
     needs: [prepare]
     if: always()
-    # Progress visibility is non-blocking; monitor timeout must not invalidate
-    # task results that continue running or have already completed.
-    continue-on-error: true
     uses: ./.github/workflows/task_progress.yml
     with:
       expected_total: ${{ needs.prepare.outputs.total }}
