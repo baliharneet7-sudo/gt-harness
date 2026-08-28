@@ -2953,6 +2953,63 @@ jobs:
           path: /tmp/all
           pattern: ll-full-*
 
+      # Benchmark score is authoritative from each task's verifier reward,
+      # independent of GT-only diagnosis and metric artifacts.  Keep this
+      # report even when the diagnosis publisher is uncitable or the workflow
+      # summary job hits a non-score bookkeeping failure.
+      - name: Publish validator score independently
+        if: always()
+        env:
+          GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
+          GT_RUN_ID: ${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          matrix = json.loads(os.environ["GT_EXPECTED_MATRIX"])
+          expected = [row["task"] for row in matrix["include"]]
+          rows = []
+          for task in expected:
+              root = Path("/tmp/all") / f"ll-full-{task}"
+              reward_paths = [root / "reward.txt", root / "trial_results" / "reward.txt"]
+              reward_path = next((p for p in reward_paths if p.is_file()), None)
+              if reward_path is None:
+                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": None, "reason": "missing_validator_reward"})
+                  continue
+              try:
+                  reward = int(reward_path.read_text(encoding="utf-8").strip())
+              except (OSError, ValueError):
+                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": None, "reason": "invalid_validator_reward"})
+                  continue
+              if reward not in (0, 1):
+                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": reward, "reason": "non_binary_validator_reward"})
+              else:
+                  rows.append({"task": task, "outcome": "PASS" if reward == 1 else "FAIL", "reward": reward})
+          counts = {key: sum(row["outcome"] == key for row in rows) for key in ("PASS", "FAIL", "INFRA_FAILURE")}
+          report = {
+              "schema": "swebench_live_lite.validator_score.v1",
+              "run_id": os.environ["GT_RUN_ID"],
+              "planned": len(expected),
+              "graded": counts["PASS"] + counts["FAIL"],
+              "passed": counts["PASS"],
+              "failed_tasks": counts["FAIL"],
+              "infrastructure_failures": counts["INFRA_FAILURE"],
+              "score": counts["PASS"] / len(expected) if expected else None,
+              "score_denominator": "planned_tasks",
+              "rows": rows,
+          }
+          out = Path("/tmp/gt-diagnosis")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / f"validator_score_{os.environ['GT_RUN_ID']}.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          summary = Path(os.environ.get("GITHUB_STEP_SUMMARY", "/tmp/validator_score.md"))
+          with summary.open("a", encoding="utf-8") as handle:
+              handle.write("### SWE-bench Live Lite validator score\n\n")
+              handle.write(f"- **Passed:** {counts['PASS']}/{len(expected)} ({report['score']:.2%})\n")
+              handle.write(f"- **Task failures:** {counts['FAIL']}\n- **Infrastructure failures:** {counts['INFRA_FAILURE']}\n")
+          print(json.dumps({k: report[k] for k in ("planned", "graded", "passed", "failed_tasks", "infrastructure_failures", "score")}, sort_keys=True))
+
       - name: Build canonical PERF and exact-128 diagnosis
         env:
           GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
