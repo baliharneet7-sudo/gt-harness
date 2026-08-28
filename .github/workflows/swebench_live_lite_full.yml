@@ -24,6 +24,7 @@ name: "SWE-bench Live Lite: Full 300-task (mini-swe-agent, GT substrate)"
 # container); no task IDs or gold labels in product logic; benchmark is
 # validation only.
 
+# Manual dispatch is the canonical entry point for full Live Lite shards.
 on:
   workflow_dispatch:
     inputs:
