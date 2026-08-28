@@ -81,6 +81,22 @@ on:
         description: "Git ref (branch/tag/SHA) to CHECK OUT for the GT code seam. The SYNCED seam — gt_mini_patch.py + src/groundtruth/{runtime,delivery,pretask} + gt_ae_block.sh — is staged from THIS ref at runtime (SPEED-OPT E), so pointing it at an RL-adherence commit evaluates that code WITHOUT a substrate rebake. NOTE: the step-0 brief is BAKED into the substrate (brief.txt), so brief-CONTENT changes still need a rebake; only the seam follows this ref. Default gt-trial (prior behaviour)."
         required: false
         default: "gt-trial"
+  workflow_call:
+    inputs:
+      model: {type: string, required: true}
+      mode: {type: string, required: true}
+      instance_ids: {type: string, required: false, default: ""}
+      max_parallel: {type: string, required: true}
+      shadow_rate: {type: string, required: true}
+      live_cohort_mde: {type: string, required: false, default: ""}
+      assets_repo: {type: string, required: true}
+      gt_substrate_digest: {type: string, required: false, default: ""}
+      require_pinned_substrate: {type: string, required: true}
+      language: {type: string, required: false, default: "all"}
+      shard: {type: string, required: false, default: ""}
+      baseline: {type: boolean, required: false, default: false}
+      gt_ref: {type: string, required: false, default: "gt-trial"}
+    secrets: {}
 
 permissions:
   contents: read

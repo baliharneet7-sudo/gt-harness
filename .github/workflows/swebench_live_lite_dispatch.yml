@@ -1,0 +1,33 @@
+name: "SWE-bench Live Lite: Dispatch full run"
+
+on:
+  workflow_dispatch:
+    inputs:
+      model: {description: "LLM model", required: true, default: "minimax/minimax-m3:free"}
+      shard: {description: "Full-run shard, for example 1/2", required: true}
+      baseline: {description: "Run GT-off baseline", required: true, type: boolean, default: true}
+
+permissions:
+  contents: read
+  packages: read
+  checks: write
+  actions: read
+
+jobs:
+  dispatch:
+    uses: ./.github/workflows/swebench_live_lite_full.yml
+    with:
+      model: ${{ inputs.model }}
+      mode: full
+      instance_ids: ""
+      max_parallel: "20"
+      shadow_rate: "0"
+      live_cohort_mde: ""
+      assets_repo: harneet2512/groundtruth
+      gt_substrate_digest: ""
+      require_pinned_substrate: "1"
+      language: all
+      shard: ${{ inputs.shard }}
+      baseline: ${{ inputs.baseline }}
+      gt_ref: baseline-swe-live-lite-v4flash0731
+    secrets: inherit
