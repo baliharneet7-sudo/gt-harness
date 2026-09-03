@@ -24,14 +24,16 @@ name: "SWE-bench Live Lite: Full 300-task (mini-swe-agent, GT substrate)"
 # container); no task IDs or gold labels in product logic; benchmark is
 # validation only.
 
-# Manual dispatch is the canonical entry point for full Live Lite shards.
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: "LLM model (litellm-compatible)"
+        description: "OpenRouter model id (litellm-compatible, e.g. deepseek/deepseek-v4-flash). No default - must be set explicitly per run."
         required: true
-        default: "deepseek/deepseek-v4-flash"
+      image_owner:
+        description: "GHCR owner to pull task images from. Images are public, so any account can pull the complete cache."
+        required: true
+        default: "harneet2512"
       mode:
         description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (300)"
         required: true
@@ -81,22 +83,6 @@ on:
         description: "Git ref (branch/tag/SHA) to CHECK OUT for the GT code seam. The SYNCED seam — gt_mini_patch.py + src/groundtruth/{runtime,delivery,pretask} + gt_ae_block.sh — is staged from THIS ref at runtime (SPEED-OPT E), so pointing it at an RL-adherence commit evaluates that code WITHOUT a substrate rebake. NOTE: the step-0 brief is BAKED into the substrate (brief.txt), so brief-CONTENT changes still need a rebake; only the seam follows this ref. Default gt-trial (prior behaviour)."
         required: false
         default: "gt-trial"
-  workflow_call:
-    inputs:
-      model: {type: string, required: true}
-      mode: {type: string, required: true}
-      instance_ids: {type: string, required: false, default: ""}
-      max_parallel: {type: string, required: true}
-      shadow_rate: {type: string, required: true}
-      live_cohort_mde: {type: string, required: false, default: ""}
-      assets_repo: {type: string, required: true}
-      gt_substrate_digest: {type: string, required: false, default: ""}
-      require_pinned_substrate: {type: string, required: true}
-      language: {type: string, required: false, default: "all"}
-      shard: {type: string, required: false, default: ""}
-      baseline: {type: boolean, required: false, default: false}
-      gt_ref: {type: string, required: false, default: "gt-trial"}
-    secrets: {}
 
 permissions:
   contents: read
@@ -709,8 +695,7 @@ jobs:
 
       - name: Preflight checks (fail-fast on infra, warn on quality)
         env:
-          TOKENROUTER_API_KEY: ${{ secrets.TOKENROUTER_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
         shell: bash
         run: |
@@ -907,7 +892,7 @@ jobs:
           REST=$(echo "$TASK" | sed "s/^${REPO}__//")
           BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
           # Try GHCR first, fallback to dockerhub
-          GHCR_IMG="ghcr.io/${{ github.repository_owner }}/${BASENAME}:latest"
+          GHCR_IMG="ghcr.io/${{ inputs.image_owner }}/${BASENAME}:latest"
           DH_IMG="docker.io/starryzhang/${BASENAME}:latest"
           if docker manifest inspect "$GHCR_IMG" >/dev/null 2>&1; then
             echo "LL_TASK_IMAGE=$GHCR_IMG" >> "$GITHUB_ENV"
@@ -1166,9 +1151,9 @@ jobs:
           INPUT_BASELINE: ${{ inputs.baseline }}
           GT_ID_BASELINE: ${{ inputs.baseline == true && '1' || '0' }}
           GT_BASELINE_FLAG: ${{ inputs.baseline == true && '1' || '0' }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY }}
-          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_OWNER: ${{ inputs.image_owner }}
           GH_TOKEN_SECRET: ${{ secrets.GITHUB_TOKEN }}
           GT_LIVE_CHECK_TOKEN: ${{ github.token }}
         run: |
@@ -2929,6 +2914,20 @@ jobs:
           rm -f /tmp/gt-substrate.tar.gz /tmp/docker.tgz /tmp/swebench-pro-os.tar.gz 2>/dev/null || true
 
   # ── Summarize ────────────────────────────────────────────────────────────────
+      - name: Record task outcome for run visibility
+        if: always()
+        run: |
+          python scripts/gt_task_visibility.py emit             --workflow "SWE-bench Live Lite full"             --task "${{ matrix.task }}"             --job-status "${{ job.status }}"             --results-dir results             --log ""             --output "task-visibility/${{ matrix.task }}.json"
+
+      - name: Upload task outcome record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-${{ matrix.task }}
+          path: task-visibility/
+          if-no-files-found: warn
+          retention-days: 7
+
   task_progress:
     name: Task progress
     needs: [prepare]
@@ -2937,7 +2936,9 @@ jobs:
     with:
       expected_total: ${{ needs.prepare.outputs.total }}
       task_job_regex: '^.+ \(.+\)$'
-      monitor_timeout_minutes: "150"
+      # Exit before the GitHub hard timeout; observability must not cancel the
+      # benchmark workflow while task jobs remain queued.
+      monitor_timeout_minutes: "330"
     secrets: inherit
 
   summarize:
@@ -2952,63 +2953,6 @@ jobs:
         with:
           path: /tmp/all
           pattern: ll-full-*
-
-      # Benchmark score is authoritative from each task's verifier reward,
-      # independent of GT-only diagnosis and metric artifacts.  Keep this
-      # report even when the diagnosis publisher is uncitable or the workflow
-      # summary job hits a non-score bookkeeping failure.
-      - name: Publish validator score independently
-        if: always()
-        env:
-          GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
-          GT_RUN_ID: ${{ github.run_id }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          matrix = json.loads(os.environ["GT_EXPECTED_MATRIX"])
-          expected = [row["task"] for row in matrix["include"]]
-          rows = []
-          for task in expected:
-              root = Path("/tmp/all") / f"ll-full-{task}"
-              reward_paths = [root / "reward.txt", root / "trial_results" / "reward.txt"]
-              reward_path = next((p for p in reward_paths if p.is_file()), None)
-              if reward_path is None:
-                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": None, "reason": "missing_validator_reward"})
-                  continue
-              try:
-                  reward = int(reward_path.read_text(encoding="utf-8").strip())
-              except (OSError, ValueError):
-                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": None, "reason": "invalid_validator_reward"})
-                  continue
-              if reward not in (0, 1):
-                  rows.append({"task": task, "outcome": "INFRA_FAILURE", "reward": reward, "reason": "non_binary_validator_reward"})
-              else:
-                  rows.append({"task": task, "outcome": "PASS" if reward == 1 else "FAIL", "reward": reward})
-          counts = {key: sum(row["outcome"] == key for row in rows) for key in ("PASS", "FAIL", "INFRA_FAILURE")}
-          report = {
-              "schema": "swebench_live_lite.validator_score.v1",
-              "run_id": os.environ["GT_RUN_ID"],
-              "planned": len(expected),
-              "graded": counts["PASS"] + counts["FAIL"],
-              "passed": counts["PASS"],
-              "failed_tasks": counts["FAIL"],
-              "infrastructure_failures": counts["INFRA_FAILURE"],
-              "score": counts["PASS"] / len(expected) if expected else None,
-              "score_denominator": "planned_tasks",
-              "rows": rows,
-          }
-          out = Path("/tmp/gt-diagnosis")
-          out.mkdir(parents=True, exist_ok=True)
-          (out / f"validator_score_{os.environ['GT_RUN_ID']}.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-          summary = Path(os.environ.get("GITHUB_STEP_SUMMARY", "/tmp/validator_score.md"))
-          with summary.open("a", encoding="utf-8") as handle:
-              handle.write("### SWE-bench Live Lite validator score\n\n")
-              handle.write(f"- **Passed:** {counts['PASS']}/{len(expected)} ({report['score']:.2%})\n")
-              handle.write(f"- **Task failures:** {counts['FAIL']}\n- **Infrastructure failures:** {counts['INFRA_FAILURE']}\n")
-          print(json.dumps({k: report[k] for k in ("planned", "graded", "passed", "failed_tasks", "infrastructure_failures", "score")}, sort_keys=True))
 
       - name: Build canonical PERF and exact-128 diagnosis
         env:
@@ -3591,3 +3535,32 @@ jobs:
           path: /tmp/predictions/predictions.jsonl
           retention-days: 90
           if-no-files-found: error
+
+  visibility:
+    # Always runs, even when every task job failed -- an all-infra run must
+    # still report why, instead of vanishing into a red X.
+    name: "Run visibility"
+    needs: [trial]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: task-visibility-*
+          path: task-visibility
+          merge-multiple: true
+      - name: Aggregate per-task outcomes into the run summary
+        run: |
+          python scripts/gt_task_visibility.py aggregate             --workflow "SWE-bench Live Lite full"             --input-dir task-visibility             --json-output task-visibility-summary.json
+      - name: Upload the visibility summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-visibility-summary
+          path: task-visibility-summary.json
+          if-no-files-found: warn
