@@ -748,7 +748,8 @@ def test_graph_full_rebuild_fallback_restores_freshness(monkeypatch, tmp_path):
     rebuilt.write_bytes(b"new")
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None: IndexBuildReceipt(
+        lambda root, state_dir=None, source_revision="", layout=None,
+            embedding_budget_seconds=None: IndexBuildReceipt(
             IndexBuildStatus.BUILT,
             graph_db=str(rebuilt),
             graph_revision="b" * 64,
@@ -823,7 +824,8 @@ def test_enrichment_is_offered_on_a_rebuilt_current_graph(monkeypatch, tmp_path)
     rebuilt.write_bytes(b"new")
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None: IndexBuildReceipt(
+        lambda root, state_dir=None, source_revision="", layout=None,
+            embedding_budget_seconds=None: IndexBuildReceipt(
             IndexBuildStatus.BUILT,
             graph_db=str(rebuilt),
             graph_revision="b" * 64,
@@ -873,7 +875,8 @@ def test_a_repeated_boundary_does_not_re_offer_the_same_graph(monkeypatch, tmp_p
     rebuilt.write_bytes(b"new")
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None: IndexBuildReceipt(
+        lambda root, state_dir=None, source_revision="", layout=None,
+            embedding_budget_seconds=None: IndexBuildReceipt(
             IndexBuildStatus.BUILT, graph_db=str(rebuilt),
             graph_revision="b" * 64, analysis_state="complete",
         ),
