@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
+import subprocess
+from pathlib import Path, PurePosixPath
 
 from scripts.validate_product_workflow import validate_workflow
 
@@ -31,11 +32,21 @@ def test_product_workflow_rejects_bypassing_manifest_pin_resolution(
 
 
 def test_only_closed_supported_workflow_set_is_active() -> None:
-    active = sorted(
-        path.name
-        for pattern in ("*.yml", "*.yaml")
-        for path in (ROOT / ".github" / "workflows").glob(pattern)
-    )
+    # git ls-files, not glob. GitHub runs workflows from the COMMITTED ref, so
+    # the working tree is a proxy for the property and not the property: an
+    # untracked .yml never reaches Actions, and globbing calls it a
+    # supply-chain event anyway. That false red is not the safe direction - it
+    # is the condition that trains a hurried operator to wave the gate through,
+    # and this is the gate that must not be waved through. The staging area is
+    # included on purpose: something staged is one command from being the ref.
+    listed = subprocess.run(
+        ["git", "ls-files", "--", ".github/workflows/*.yml", ".github/workflows/*.yaml"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    ).stdout
+    active = sorted(PurePosixPath(line).name for line in listed.splitlines() if line.strip())
     # The set stays closed on purpose: an unreviewed workflow appearing here
     # is a supply-chain event, not a detail. The two image mirrors are
     # workflow_dispatch-only, touch no paid path, and exist to cut task-image
