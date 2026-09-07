@@ -636,6 +636,20 @@ def build_agent(
     # assertion orphaned by a dedent, except here the whole block was dead from
     # the first line. Set the one flag directly; there is no function to call.
     os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
+    # Same shape, second flag, found the same way. GT_VERIFY_EXECUTE gates every
+    # capability that EXECUTES something to establish a fact rather than reading
+    # one: the post-edit obligation re-verification, verify_live_submit's D3-F
+    # re-check, and the covering-RED wire (miniswe_covering.py:119). It is
+    # applied by apply_profile_env, which is called from exactly one place -
+    # create_bridge in gt_engine/__init__.py - and create_bridge has ZERO
+    # callers, because GTBridge is not the live path. So on a dispatch the flag
+    # is simply unset and that whole family is dark.
+    #
+    # gt_session.py:557 already records "trusted_verifier declared but
+    # GT_VERIFY_EXECUTE!=1" as an assurance gap, so its absence is a known
+    # deficiency rather than a deliberate off-switch. setdefault keeps an
+    # explicit "0" from the operator winning, exactly as above.
+    os.environ.setdefault("GT_VERIFY_EXECUTE", "1")
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
     predicates = tuple(
