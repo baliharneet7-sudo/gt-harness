@@ -1254,18 +1254,51 @@ class GTSession:
                 int(receipt.get(key) or 0) for key in ("verified", "corrected")
             )
             # selection_complete says whether the ambiguous-edge SELECTION saw
-            # the whole tier. The producer records it and, until now, nothing
-            # read it: both callers of _get_ambiguous_edges leave `limit` at its
-            # default 500 against 6,621 ambiguous callsites on the gate task, so
-            # a positive promoted count can describe a 92.5%-unattempted tier.
-            # None means the receipt predates the field, which is unknown, not
-            # complete.
-            complete = receipt.get("selection_complete")
+            # the whole tier. Both callers of _get_ambiguous_edges leave `limit`
+            # at its default 500 against 6,621 ambiguous callsites on the gate
+            # task, so a positive promoted count can describe a 92.5%-
+            # unattempted tier.
+            #
+            # It is PER LANGUAGE, not top level: background_promotion.py writes
+            # it into the per-language receipt and stores that under
+            # terminal["language_receipts"][language] (:379-384), while verified,
+            # corrected and deleted are summed onto the terminal itself (:385).
+            # Reading it at the top level returns None on EVERY receipt, which
+            # would have reported selection_unknown on every run forever - a
+            # universally firing signal, which is worse than the silence it
+            # replaced. The whole tier is covered only if every attempted
+            # language covered its own; one language that failed or was
+            # cancelled writes {status, error_type} with no selection fields,
+            # and that is genuinely unknown rather than complete.
+            languages = receipt.get("language_receipts")
+            if not isinstance(languages, dict) or not languages:
+                # No language was attempted, so nothing was left unselected.
+                # Zero yield is already DEGRADED on the count; do not also call
+                # a certain no-op unknown.
+                complete: bool | None = True
+            else:
+                flags = [
+                    row.get("selection_complete") if isinstance(row, dict) else None
+                    for row in languages.values()
+                ]
+                if any(flag is None for flag in flags):
+                    complete = None
+                else:
+                    complete = all(bool(flag) for flag in flags)
             return (
                 promoted,
                 int(receipt.get("deleted") or 0),
-                None if complete is None else bool(complete),
-                str(receipt.get("selection_limitation") or ""),
+                complete,
+                next(
+                    (
+                        str(row.get("selection_limitation"))
+                        for row in (languages or {}).values()
+                        if isinstance(row, dict) and row.get("selection_limitation")
+                    ),
+                    "",
+                )
+                if isinstance(languages, dict)
+                else "",
             )
 
         dense_state = CapabilityState.FAILED
