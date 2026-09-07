@@ -56,6 +56,19 @@ BOUNDARY_EVIDENCE = {
     "edit_result": ("edit_transaction",),
 }
 
+# The submit boundary is decided by a POSITIVE DECLARATION, not by an absence.
+# session_closed fires once on every path and carries how the run ended, so
+# reading its terminal says "this run ended by exhausting its budget" rather
+# than "the conditional branch that logs a submit was not taken". The obvious
+# candidate, submit_decision, sits inside `if not self.can_enforce:` - deriving
+# never-happened from an unlogged conditional is the absent-means-negative shape
+# this file exists to avoid, and it would have been wrong for an enforcing run.
+#
+# A run killed before close writes no session_closed at all. That is genuinely
+# unknown and must not read as NOT_REACHED, which is the distinction that makes
+# this derivation safe where the other was not.
+SUBMIT_TERMINALS = frozenset({"submitted", "submitted_verified", "submitted_unverified"})
+
 SCHEMA = "gt.feature_accounting.v1"
 
 
@@ -79,6 +92,7 @@ def account(events: list[dict]) -> dict:
     identity_refused: dict[str, bool] = {}
     identity_kinds: dict[str, str] = {}
     reached: collections.Counter[str] = collections.Counter()
+    terminal: str | None = None
 
     for event in events:
         name = str(event.get("event") or "")
@@ -86,6 +100,8 @@ def account(events: list[dict]) -> dict:
             if name in markers:
                 reached[boundary] += 1
 
+        if name == "session_closed":
+            terminal = str(event.get("terminal") or "")
         supersession = str(event.get("supersession_key") or "")
         evidence_type = str(event.get("evidence_type") or "")
         if not supersession and not evidence_type:
@@ -133,6 +149,10 @@ def account(events: list[dict]) -> dict:
         boundaries = tuple(DIRECT_FEATURES[feature].get("boundaries", ()))
         derivable = [b for b in boundaries if b in BOUNDARY_EVIDENCE]
         hits = {b: reached[b] for b in derivable if reached[b]}
+        if "submit" in boundaries and terminal is not None:
+            derivable.append("submit")
+            if terminal in SUBMIT_TERMINALS:
+                hits["submit"] = 1
         if count:
             state, evidence = "DELIVERED", f"{count} deliveries the model saw"
         elif declined:
@@ -148,6 +168,8 @@ def account(events: list[dict]) -> dict:
         elif derivable:
             state = "NOT_REACHED"
             evidence = "its boundary never occurred: " + ", ".join(sorted(derivable))
+            if "submit" in derivable and terminal:
+                evidence += f" (run ended {terminal})"
         else:
             state = "BOUNDARY_UNKNOWN"
             evidence = "no journal evidence defines " + ", ".join(sorted(boundaries))
@@ -172,6 +194,7 @@ def account(events: list[dict]) -> dict:
         "not_reached": sum(1 for row in rows if row["state"] == "NOT_REACHED"),
         "boundary_unknown": sum(1 for row in rows if row["state"] == "BOUNDARY_UNKNOWN"),
         "boundaries_reached": dict(sorted(reached.items())),
+        "terminal": terminal,
         "capability_aliases": dict(sorted(CAPABILITY_OWNERS.items())),
         "unattributed_evidence": dict(unattributed.most_common()),
         "unattributed_total": sum(unattributed.values()),
