@@ -896,29 +896,37 @@ class MiniSweAdapter(GroundtruthController):
 
         files: list[tuple[str, bytes]] = []
         missing: list[str] = []
-        captured_paths = {
-            str(item.path) for item in snapshot.files
+        captured_bytes = {
+            str(item.path): bytes(item.captured) for item in snapshot.files
             if item.kind == "file" and item.captured is not None
         }
         for item in snapshot.files:
             if not is_producer_input(item.path):
                 continue
             if item.kind == "symlink":
-                # A symlink is a path alias, not absent source, and treating it
-                # as either extreme is wrong. Its captured bytes are the link
-                # TARGET STRING, so feeding it to the producer would index the
-                # alias's name as the file's content; calling it incomplete
-                # aborts every rebuild for the life of the run. On arktype two
-                # producer-input symlinks (README.md, ark/README.md) did exactly
-                # that in run 34064560259: 600 graph_refresh_failed, zero
-                # refreshes, the graph frozen at task start across 105 edits.
-                # If the target is inside the snapshot its bytes are already
-                # present under the real path, so the alias carries no source
-                # the producer lacks. If it is not, the content genuinely is
-                # unknown here and the rebuild must still refuse.
+                # A symlink is a path alias, not absent source, and the old
+                # `kind != "file"` test called it missing -- true on step one and
+                # step three hundred. On arktype two producer-input symlinks
+                # (README.md, ark/README.md) froze the graph at task start across
+                # 105 edits in run 34064560259: graph_refresh_failed 600,
+                # graph_refresh_scheduled 0.
+                #
+                # The alias's own captured bytes are the link TARGET STRING, so
+                # they must never be fed to the producer. What the producer
+                # actually saw at task start is not in doubt and is not a
+                # judgement call: the initial build stages input with
+                # `shutil.copyfile` (indexer.py, the excluded_roots branch),
+                # which FOLLOWS the link and materialises the alias path holding
+                # the target's content. Reproduce exactly that. Skipping the
+                # entry instead would hand the producer 493 files where task
+                # start had 495, and the rebuilt graph would silently differ
+                # from the one every task-start claim was made against.
                 target = self._symlink_alias_target(item)
-                if target is None or target not in captured_paths:
+                payload = captured_bytes.get(target) if target else None
+                if payload is None:
                     missing.append(str(item.path))
+                else:
+                    files.append((str(item.path), payload))
                 continue
             if item.kind != "file" or item.captured is None:
                 missing.append(str(item.path))
