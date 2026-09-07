@@ -91,17 +91,39 @@ def edit_eligibility(artifacts: list[dict]) -> dict[str, dict]:
     rather than unknown.
     """
     syntax_eligible = signature_eligible = 0
+    syntax_checked = syntax_unchecked = 0
     coverage: collections.Counter = collections.Counter()
     for blob in artifacts:
         for entry in blob.get("syntax") or ():
-            if entry.get("diagnostics"):
-                syntax_eligible += 1
+            # A syntax entry only carries a verdict when a certified post-image
+            # parser exists for the language. `status: unsupported` with
+            # `reason: no_harness_certified_postimage_parser` means the check
+            # DID NOT RUN, and counting those as clean edits inflates the
+            # feature's coverage: 28 of 143 entries in run 34064560259 were
+            # unparseable, so "correctly quiet on every edit" was never true of
+            # every edit.
+            if entry.get("status") == "exact":
+                syntax_checked += 1
+                if entry.get("diagnostics"):
+                    syntax_eligible += 1
+            else:
+                syntax_unchecked += 1
         for entry in blob.get("signatures") or ():
             if entry.get("changed"):
                 signature_eligible += 1
         coverage[blob.get("caller_coverage")] += 1
     return {
-        "syntax_result": {"eligible": syntax_eligible, "of": len(artifacts)},
+        "syntax_result": {
+            "eligible": syntax_eligible,
+            "of": syntax_checked,
+            "unchecked": syntax_unchecked,
+            # No artifact on record contains a non-empty `diagnostics`, so this
+            # negative has never been positively controlled - the query has not
+            # been shown capable of finding one. `valid: True` on every parsed
+            # entry corroborates it independently; corroboration is not a
+            # control, and the row says so rather than implying otherwise.
+            "uncontrolled_negative": True,
+        },
         "signature_delta": {
             "eligible": signature_eligible,
             "of": len(artifacts),
@@ -235,7 +257,11 @@ def account(events: list[dict], artifacts: list[dict] | None = None) -> dict:
             elif not elig["eligible"]:
                 state = "DECLINED_CORRECTLY"
                 evidence = (f"no delivery at {where}; its precondition never held "
-                            f"in {elig['of']} edit transactions")
+                            f"in {elig['of']} checked edit transactions")
+                if elig.get("unchecked"):
+                    evidence += f"; {elig['unchecked']} could not be checked"
+                if elig.get("uncontrolled_negative"):
+                    evidence += "; negative uncontrolled - no artifact on record trips it"
             else:
                 state = "STARVED"
                 detail = ""
