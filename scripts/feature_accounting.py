@@ -168,9 +168,26 @@ def account(events: list[dict]) -> dict:
             # who happens to know which features are post-edit. "The boundary
             # happened 105 times and this feature said nothing" is a symptom;
             # "the boundary never happened" is not.
-            state = "SILENT"
-            evidence = "delivered nothing at " + ", ".join(
-                f"{b} x{n}" for b, n in sorted(hits.items()))
+            # NOT "SILENT". That word reads as failure, and this state cannot
+            # distinguish failure from correct silence.
+            #
+            # A feature's BOUNDARY firing is not the same as its own precondition
+            # firing. syntax_result is eligible only when an edit produced a
+            # syntax or name error (bridge.py:2253); across fourteen CLEAN edits
+            # its silence is correct behaviour. The producer emits the deciding
+            # boolean - _trace_record("feature.evaluated", ..., {"eligible": ...})
+            # - but GTBridge, which owns that call, is never constructed on this
+            # path: create_bridge (gt_engine/__init__.py:13) is its only
+            # instantiation site and has ZERO callers in gt_engine, scripts or
+            # eval, and the pinned wheel does not reference it either. So no
+            # eligibility row exists to read, in this run or any other.
+            #
+            # Say what is known. The delivery did not happen; whether the feature
+            # declined, failed, or was never eligible is unrecorded.
+            state = "NO_DELIVERY"
+            evidence = "no delivery at " + ", ".join(
+                f"{b} x{n}" for b, n in sorted(hits.items())
+            ) + "; eligibility unrecorded"
         elif derivable:
             state = "NOT_REACHED"
             evidence = "its boundary never occurred: " + ", ".join(sorted(derivable))
@@ -197,11 +214,11 @@ def account(events: list[dict]) -> dict:
             # Collapsing them loses the distinction that matters: a feature that
             # never had the chance is not a feature that failed.
             "triggered": {
-                "DELIVERED": "yes", "REFUSED": "yes", "SILENT": "yes",
+                "DELIVERED": "yes", "REFUSED": "yes", "NO_DELIVERY": "yes",
                 "NOT_REACHED": "no", "BOUNDARY_UNKNOWN": "unknown",
             }[state],
             "worked": {
-                "DELIVERED": "yes", "REFUSED": "no", "SILENT": "no",
+                "DELIVERED": "yes", "REFUSED": "no", "NO_DELIVERY": "unknown",
                 "NOT_REACHED": "n/a", "BOUNDARY_UNKNOWN": "unknown",
             }[state],
             "trigger": DIRECT_FEATURES[source].get("trigger", ""),
@@ -215,7 +232,7 @@ def account(events: list[dict]) -> dict:
         "deliveries_resolved": len(identity_feature),
         "delivered": sum(1 for row in rows if row["state"] == "DELIVERED"),
         "refused": sum(1 for row in rows if row["state"] == "REFUSED"),
-        "silent": sum(1 for row in rows if row["state"] == "SILENT"),
+        "no_delivery": sum(1 for row in rows if row["state"] == "NO_DELIVERY"),
         "not_reached": sum(1 for row in rows if row["state"] == "NOT_REACHED"),
         "boundary_unknown": sum(1 for row in rows if row["state"] == "BOUNDARY_UNKNOWN"),
         "boundaries_reached": dict(sorted(reached.items())),
