@@ -650,7 +650,7 @@ def _promoted(edges, *, digest="a" * 64):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r0",
          "artifact_sha256": digest, "artifact_blob": f"lsp_receipts/{digest}.json"},
-        {digest: {"verified": edges, "corrected": 0, "deleted": 0}},
+        {digest: {"verified": edges, "corrected": 0, "deleted": 0, "selection_complete": True}},
     )
 
 
@@ -792,7 +792,7 @@ def test_a_superseded_enrichment_does_not_override_the_final_one(tmp_path):
          "artifact_blob": f"lsp_receipts/{digest}.json"},
         {"event": "lsp_promotion_terminal", "status": "cancelled",
          "disposition": "obsolete", "input_graph_revision": "r0"},
-    ], {digest: {"verified": 1, "corrected": 1, "deleted": 0}})
+    ], {digest: {"verified": 1, "corrected": 1, "deleted": 0, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "WORKING", "terminal_succeeded:published:2_edges:last_of_2"
@@ -908,7 +908,7 @@ def test_agreeing_terminals_do_not_raise_a_count_alarm(tmp_path):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r1",
          "artifact_blob": f"lsp_receipts/{digest}.json"},
-    ], {digest: {"verified": 4, "corrected": 0, "deleted": 0}})
+    ], {digest: {"verified": 4, "corrected": 0, "deleted": 0, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "WORKING", "terminal_succeeded:published:4_edges"
@@ -1115,7 +1115,7 @@ def test_an_early_failure_does_not_outrank_later_successes(tmp_path):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r1",
          "artifact_blob": f"lsp_receipts/{digest}.json"},
-    ], {digest: {"verified": 9, "corrected": 0, "deleted": 0}})
+    ], {digest: {"verified": 9, "corrected": 0, "deleted": 0, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "WORKING", "terminal_succeeded:published:9_edges:last_of_2"
@@ -1138,7 +1138,7 @@ def test_tombstones_alone_are_not_a_populated_tier(tmp_path):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r0",
          "artifact_blob": f"lsp_receipts/{digest}.json"},
-    ], {digest: {"verified": 0, "corrected": 0, "deleted": 40}})
+    ], {digest: {"verified": 0, "corrected": 0, "deleted": 40, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "DEGRADED", "terminal_succeeded:published:0_edges:40_tombstoned"
@@ -1154,7 +1154,7 @@ def test_promoted_edges_and_tombstones_are_both_reported(tmp_path):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r0",
          "artifact_blob": f"lsp_receipts/{digest}.json"},
-    ], {digest: {"verified": 7, "corrected": 5, "deleted": 3}})
+    ], {digest: {"verified": 7, "corrected": 5, "deleted": 3, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "WORKING", "terminal_succeeded:published:12_edges:3_tombstoned"
@@ -1250,7 +1250,7 @@ def test_terminal_order_survives_a_journal_with_missing_sequences(tmp_path):
         {"event": "lsp_promotion_terminal", "status": "succeeded",
          "disposition": "published", "input_graph_revision": "r0",
          "artifact_blob": f"lsp_receipts/{digest}.json"},
-    ], {digest: {"verified": 2, "corrected": 0, "deleted": 0}})
+    ], {digest: {"verified": 2, "corrected": 0, "deleted": 0, "selection_complete": True}})
 
     assert rows["lsp_promotion"] == (
         "WORKING", "terminal_succeeded:published:2_edges:last_of_2"
