@@ -36,6 +36,15 @@ def successful_receipt(source: str = "r1", graph: str = "g1") -> dict:
         "input_graph_revision": graph,
         "candidate_path": "candidate.db",
         "output_graph_sha256": "a" * 64,
+        # A promotion that SUCCEEDED produced edges. Publication is now gated on
+        # verified+corrected+deleted > 0, because run 34077224456 published four
+        # 912MB candidates carrying zero new edges - each one changing the graph
+        # identity the agent queried against for nothing, and cancelling the
+        # enrichment in flight behind it. A fixture named successful_receipt
+        # that yields nothing was describing the churn, not the success.
+        "verified": 12,
+        "corrected": 3,
+        "deleted": 0,
     }
 
 
