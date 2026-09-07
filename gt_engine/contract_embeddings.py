@@ -98,6 +98,7 @@ __all__ = [
     "EmbeddingBudgetInsufficient",
     "EmbeddingPlan",
     "SECONDS_PER_BATCH_ESTIMATE",
+    "onnx_token_lengths",
     "DocumentVectorLookup",
     "StoreLookup",
     "SymbolEmbeddingInput",
@@ -507,6 +508,24 @@ def default_store_path(graph_path: str | Path) -> Path:
     return graph.with_name(f"{graph.stem}.contract-{digest}.sqlite")
 
 
+def onnx_token_lengths(model_dir: str | Path):
+    """Exact token counts from the same tokenizer that will encode the batch.
+
+    Length-bucketing only pays if the key is the quantity that drives the cost,
+    and that quantity is TOKENS. Sorting by ``len(text)`` is a proxy: on the
+    arktype corpus it recovers 3.21x of the 3.78x available, so the proxy costs
+    17.7% more compute than the property. Small, but it is the same substitution
+    this ticket has been caught by all day, and the exact key is one tokenizer
+    pass over text that is about to be tokenized anyway.
+    """
+    root = Path(model_dir)
+
+    def _lengths(texts: Sequence[str]) -> list[int]:
+        return dense_runtime.token_lengths(root, texts)
+
+    return _lengths
+
+
 def onnx_embedder(model_dir: str | Path) -> Embedder:
     """The production embedder: the verified local ONNX arctic-embed-m runtime.
 
@@ -615,6 +634,7 @@ class ContractEmbeddingStore:
         embed_fn: Embedder,
         batch_size: int = DEFAULT_BATCH_SIZE,
         deadline: float | None = None,
+        length_fn=None,
     ) -> dict[str, Any]:
         """Bring the store level with ``db_path`` and report exactly what moved."""
         inputs = embedding_inputs(db_path)
@@ -635,7 +655,7 @@ class ContractEmbeddingStore:
             estimated = batches * SECONDS_PER_BATCH_ESTIMATE
             if estimated > budget:
                 raise EmbeddingBudgetInsufficient(len(plan.to_embed), estimated, budget)
-        vectors = self._embed_plan(plan, embed_fn, batch_size, deadline)
+        vectors = self._embed_plan(plan, embed_fn, batch_size, deadline, length_fn)
         # Vector bytes and their current graph bindings are one SQLite commit.
         # A crash or callback failure rolls both back, so readers never observe
         # a new vector with an old source location (or the inverse).
@@ -646,7 +666,7 @@ class ContractEmbeddingStore:
 
     def _embed_plan(
         self, plan: EmbeddingPlan, embed_fn: Embedder, batch_size: int,
-        deadline: float | None = None,
+        deadline: float | None = None, length_fn=None,
     ) -> dict[str, tuple[float, ...]]:
         vectors: dict[str, tuple[float, ...]] = {}
         planned = len(plan.to_embed)
@@ -662,7 +682,18 @@ class ContractEmbeddingStore:
         # This is why run 34077224456 spent 3,583s - 70% of its budget - on one
         # embedding pass. Order is irrelevant to the result: every vector is
         # stored by stable_id, so sorting changes only what shares a batch.
-        ordered = sorted(plan.to_embed, key=lambda item: len(item.text))
+        # Sort by TOKENS when the embedder can say so, characters otherwise.
+        # Characters recover 3.21x of the 3.78x available; tokens are the
+        # quantity the transformer actually pays for.
+        if length_fn is not None and plan.to_embed:
+            try:
+                counts = length_fn([item.text for item in plan.to_embed])
+                key = dict(zip((id(i) for i in plan.to_embed), counts, strict=True))
+                ordered = sorted(plan.to_embed, key=lambda item: key[id(item)])
+            except Exception:  # noqa: BLE001 - a length hint must never fail a refresh
+                ordered = sorted(plan.to_embed, key=lambda item: len(item.text))
+        else:
+            ordered = sorted(plan.to_embed, key=lambda item: len(item.text))
         for batch in _batched(ordered, batch_size):
             # Checked between batches, never inside one: a batch is a single
             # opaque call into the ONNX session and cannot be interrupted, so

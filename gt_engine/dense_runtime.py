@@ -79,6 +79,24 @@ def _embed(model: Path, tokenizer_path: Path, texts: list[str]) -> list[tuple[fl
     return [tuple(float(value) for value in row) for row in normalized]
 
 
+def token_lengths(model_dir: Path, texts: Sequence[str]) -> list[int]:
+    """Token counts under the pinned tokenizer, truncation included.
+
+    Same tokenizer, same truncation, same encoder cache as ``embed_texts`` -
+    so the number returned is the width the batch will actually be padded to,
+    not an estimate of it.
+    """
+    if not texts:
+        return []
+    model, tokenizer_path = _verified_assets(Path(model_dir).resolve())
+    tokenizer, _session = _load_encoder(model, tokenizer_path)
+    # attention_mask, not len(ids). The shared encoder has padding ENABLED -
+    # that is what makes the batch rectangular for the session - so len(ids)
+    # returns the PADDED width, identical for every row in the call, and a sort
+    # on it is a sort on a constant. The mask sums the real tokens.
+    return [sum(row.attention_mask) for row in tokenizer.encode_batch(list(texts))]
+
+
 def model_identity() -> dict[str, str | int]:
     """The pinned asset identity every stored vector must be attributed to.
 

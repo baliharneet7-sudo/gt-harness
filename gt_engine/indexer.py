@@ -2174,6 +2174,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 EmbeddingBudgetInsufficient,
                 default_store_path,
                 onnx_embedder,
+                onnx_token_lengths,
             )
 
             store_path = os.environ.get("GT_CONTRACT_EMBEDDING_INDEX") or default_store_path(graph_path)
@@ -2193,6 +2194,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
             try:
                 receipt = store.refresh(
                     graph_path, embed_fn=onnx_embedder(model_dir), deadline=deadline,
+                    length_fn=onnx_token_lengths(model_dir),
                 )
             finally:
                 store.close()
