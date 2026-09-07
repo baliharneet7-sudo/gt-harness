@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -957,6 +958,25 @@ class MiniSweAdapter(GroundtruthController):
             snapshot.history,
         )
 
+    # A REBUILD's embedding plan is incremental by construction: the agent
+    # edited a few files, so a few contracts moved. 60s is ~5 batches at the
+    # measured 12.1s, which is generous for that and refuses a full-corpus
+    # re-embed outright.
+    #
+    # It has to refuse, because the full corpus costs ~1,458s (3,808 symbols)
+    # and a rebuild that takes 25 minutes is a rebuild that never finishes
+    # before the next edit. engine_state.graph_current would then stay false for
+    # the rest of the run, every refresh_graph would schedule another rebuild,
+    # and consider_enrichment -- which requires graph_current -- would never
+    # fire. LSP promotion would still never run, for a brand-new reason, and
+    # ad58b7d9 would have traded one permanent staleness for another.
+    #
+    # Until ad58b7d9 this call site was dead: _frozen_graph_input raised on
+    # every one of 600 attempts, so no rebuild ever happened and the missing
+    # budget could not be observed. The initial index in build_agent got its
+    # budget; this one was never reached to need one.
+    REBUILD_EMBEDDING_BUDGET_SECONDS = 60.0
+
     def _build_frozen_graph(self, request: FrozenBuildInput) -> GraphBuildArtifact:
         from .indexer import _freeze_history, ensure_index_with_receipt
 
@@ -972,6 +992,7 @@ class MiniSweAdapter(GroundtruthController):
             receipt = ensure_index_with_receipt(
                 root, layout=self.engine_state.layout,
                 source_revision=request.source_revision,
+                embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
             )
         return GraphBuildArtifact(
             bool(receipt.success and receipt.graph_db), str(receipt.graph_db or ""),
@@ -1067,11 +1088,52 @@ class MiniSweAdapter(GroundtruthController):
         )
         self._lsp_requests.pop(str(terminal.get("task_id") or ""), None)
 
+    # How long to let a cancelled promotion actually stop before giving up on
+    # it. close(wait=False) cancels queued work but a RUNNING _execute keeps
+    # going, and CPython joins non-daemon ThreadPoolExecutor threads at
+    # interpreter exit - so an in-flight pass holds the process open past its
+    # deadline and the supervisor SIGTERMs it, turning a scored submission into
+    # an infra timeout on a run that had already succeeded.
+    #
+    # This could not happen before ad58b7d9: promotion was never scheduled, so
+    # nothing was ever in flight at submit. It can now, with a 912MB copy and
+    # thousands of callsites in front of it.
+    #
+    # The wait is bounded and its outcome is journaled either way, so "the
+    # promotion stopped" and "we stopped waiting for it" never read alike.
+    PROMOTION_DRAIN_SECONDS = 20.0
+
     def close_graph_coordinator(self) -> None:
         if self._graph_coordinator is not None:
             self._graph_coordinator.close(wait=False)
         if self._lsp_scheduler is not None:
             self._lsp_scheduler.close(wait=False)
+            self._drain_promotions()
+
+    def _drain_promotions(self) -> None:
+        handles = list(getattr(self._lsp_scheduler, "_handles", ()) or ())
+        pending = [handle for handle in handles if not getattr(handle, "done", True)]
+        if not pending:
+            return
+        deadline = time.monotonic() + self.PROMOTION_DRAIN_SECONDS
+        for handle in pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                handle.terminal_receipt(timeout=remaining)
+            except Exception:  # noqa: BLE001 - a drain must never fail a run
+                pass
+        stalled = sum(1 for handle in pending if not getattr(handle, "done", True))
+        try:
+            self.store.append(
+                "lsp_promotion_drained",
+                cancelled=len(pending),
+                stalled=stalled,
+                budget_seconds=self.PROMOTION_DRAIN_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _record_graph_refresh_failure(self, cause: str, *, phase: str) -> None:
         self.engine_state.mark_graph_failed()

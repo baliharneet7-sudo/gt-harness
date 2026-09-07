@@ -923,6 +923,40 @@ def _publish_graph_failure(
         failure_backup.unlink(missing_ok=True)
 
 
+# How many revision directories to keep beside the live one. Each holds a
+# graph.db and its contract sidecar - 912MB and 65MB on the gate task - so the
+# cost of keeping them all is ~1GB per rebuild.
+#
+# Nothing pruned them because until ad58b7d9 nothing ever produced a second
+# revision: _frozen_graph_input raised on all 600 attempts, so every run had
+# exactly one. A run that rebuilds after each of 105 edits writes ~100GB and
+# fills the runner, and disk exhaustion does not present as disk exhaustion --
+# it surfaces as whatever writes next, which is how it would have been read as
+# a fresh unrelated defect.
+#
+# One superseded revision is retained because certification reads lineage
+# through the graph it was built from; zero would break that, and more buys
+# nothing a rebuild cannot reproduce.
+RETAINED_SUPERSEDED_REVISIONS = 1
+
+
+def _prune_superseded_revisions(live: Path) -> None:
+    """Drop old sibling revisions, newest first, keeping the live one."""
+    parent = live.parent
+    if parent.name != "revisions":
+        return  # not the layout-bound scheme; nothing here is ours to remove
+    try:
+        siblings = [
+            path for path in parent.iterdir()
+            if path.is_dir() and path.resolve() != live.resolve()
+        ]
+    except OSError:
+        return
+    siblings.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale in siblings[RETAINED_SUPERSEDED_REVISIONS:]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def _graph_state_dir(root: str | Path, state_dir: str | Path | None,
                      layout: RuntimeLayout | None = None,
                      reuse_key: IndexReuseKey | None = None) -> Path:
@@ -1192,6 +1226,7 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
             manifest_backup.unlink(missing_ok=True)
         failure_manifest.unlink(missing_ok=True)
         (gt_dir / "index-failure-resource.json").unlink(missing_ok=True)
+        _prune_superseded_revisions(gt_dir)
         # The graph is published and usable from here; promotion only improves it.
         promotion = start_lsp_promotion(db, root)
         # Sealed beside the graph: an unrecorded promotion cannot be told apart
