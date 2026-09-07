@@ -1,18 +1,11 @@
 artifact=groundtruth_mcp-1.0.0-py3-none-any.whl
 source_repository=https://github.com/harneet2512/groundtruth
-source_commit=30edd9ba6fbb227c60b25d64a2e16dc6c3943439
-source_tree=76f5cc0f83fa5b375114be34806dea9620c73279
-sha256=f789face3bcebaaaab491e9f9c37b45a6a251aaa582daa05d75ff17f8d522bbb
+source_commit=193b9d93b0650721be6120ae519ab3a1d8e8137f
+source_tree=7aad36fd4b218fbb681cdcaacc4ccbeae4126245
+sha256=dffc1871f7eedc170524c39f8f9c9595d8e9e4bcb814695c55c4c98d2bf584da
 build_command=python -m pip wheel --no-deps --no-build-isolation (from git archive)
 
 Recorded source tree carries 2428 committed files.
 CI at this revision is green: run 34044180999, all nine jobs.
 This pin records the vendored artifact's identity only. It does not certify installed
 validation or whole-product readiness; those are recorded in Linear HAR-87.
-
-Rebuilt 2026-09-07 to wire the LSP promotion scheduler to a real edge
-budget. Both of its _get_ambiguous_edges call sites took the default
-limit=500 against 6,621 ambiguous callsites on the gate task, so the
-highest-precision edge tier was 7.5% attempted. Verified against the
-previous wheel: 322 files in both, identical file set, and exactly two
-differ - background_promotion.py and its RECORD entry.
