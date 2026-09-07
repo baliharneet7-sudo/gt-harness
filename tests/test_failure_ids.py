@@ -146,7 +146,13 @@ def test_common_hook_installation_and_post_commit_contract_are_tracked():
     assert "core.hooksPath" in install
     assert "post-commit" in install
     assert "core.hooksPath" in pre_commit
-    assert "common repository .githooks" in pre_commit
+    # The hook asserts REACHABILITY now, not configuration: it compares the
+    # pre-commit git resolves for this worktree against its own path. The
+    # old message pinned here ("common repository .githooks") belonged to a
+    # check that passed while the hook was never executed - core.hooksPath
+    # did equal the common .githooks, which is exactly why nothing
+    # complained for three commits.
+    assert "git runs a different pre-commit than this one" in pre_commit
     assert "git push --porcelain" in post_commit
     assert "GNX_PUSH_REMOTE" in post_commit
     assert "gnx-autopush.failures.log" in post_commit
@@ -177,9 +183,28 @@ def test_pre_commit_direct_command_bootstraps_repository_import_path():
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0
+    # What this test is for is the import bootstrap - the hook must reach its
+    # own gates without a ModuleNotFoundError. It used to evidence that by
+    # asserting a non-zero exit and a LINEAGE_MISMATCH refusal, both of which
+    # were side effects of the failure-gate manifest being re-checked at every
+    # HEAD. That manifest is a verdict about ONE commit (its lineage pins
+    # head_sha to 81e40b44), so re-checking it anywhere else refused by
+    # construction, forever - the first commit that ever reached this hook was
+    # refused by it. The hook now says so and continues, so the evidence that it
+    # ran end to end is the report itself rather than the refusal.
+    #
+    # The observable differs by environment and neither form may be pinned: where
+    # core.hooksPath resolves to this file the hook proceeds and reports the
+    # manifest lineage; where it does not, the hook refuses at the reachability
+    # check. Both prove the body ran. Asserting either one alone pins an
+    # environment rather than the property, which is what the old assertions did.
     assert "ModuleNotFoundError" not in result.stderr
-    assert "LINEAGE_MISMATCH" in result.stdout
+    spoke = result.stdout + result.stderr
+    assert any(mark in spoke for mark in (
+        "construction gate refused",       # reachability refused: hooksPath elsewhere
+        "failure-gate.json attests",       # reached the failure gate and reported
+        "LINEAGE_MISMATCH",                # reached it and the manifest attests HEAD
+    )), spoke[:400]
 
 def test_final_readiness_requires_verdict_registry(tmp_path):
     root, manifest = _fixture(tmp_path)
