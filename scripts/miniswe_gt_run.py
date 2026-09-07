@@ -622,13 +622,20 @@ def build_agent(
     # round-11 the model read GT_* from `env` and audited the harness source).
     # _ensure_gateway_flags covers the 6 producer flags; submit suppression is
     # the enforcement arm the submit gate reads.
-    try:
-        from gt_engine.engine.runner import _ensure_gateway_flags
-
-        _ensure_gateway_flags()
-        os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
-    except Exception:  # noqa: BLE001 - flags default off; engine sets them lazily
-        pass
+    # apply_profile_env above already fans out the 53 Profile-2 flags through
+    # groundtruth.runtime.rl_profile, including GT_GATEWAY, GT_GATEWAY_EDIT_BRIDGES,
+    # GT_VERIFY_EXECUTE, GT_EDIT_CHECK and GT_PATCH_DELTA. What it does NOT set is
+    # the submit-suppression enforcement arm, and the line that set it was
+    # unreachable: it sat after `from gt_engine.engine.runner import
+    # _ensure_gateway_flags` inside a bare `except Exception: pass`, and that
+    # module does not exist in this tree or in the pinned wheel. The import
+    # raised ModuleNotFoundError on every run, the handler swallowed it, and the
+    # setdefault below it never executed.
+    #
+    # Imported is not reachable - the same defect shape as the byte-budget
+    # assertion orphaned by a dedent, except here the whole block was dead from
+    # the first line. Set the one flag directly; there is no function to call.
+    os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
     predicates = tuple(
@@ -649,7 +656,20 @@ def build_agent(
         index_receipt = ensure_index_with_receipt(
             cwd, layout=layout, excluded_roots=layout.excluded_roots,
             embedding_budget_seconds=(
-                min(300.0, 0.10 * wall_time_limit_seconds)
+                # The INITIAL build must be allowed to finish, not merely be
+                # bounded. Run 34077224456 proved why: at min(300s, 10%) the
+                # refresh skipped, the contract store came out empty, and dense
+                # retrieval - which falls back to that store (retrieval.py
+                # :1016-1021) - embedded the whole corpus itself with no bound,
+                # for 3,583s. Skipping did not avoid the cost; it moved it
+                # somewhere unguarded and made it worse.
+                #
+                # After length-bucketing the pass projects to ~1,120s, so give
+                # it room to complete and let both consumers read the result.
+                # The per-REBUILD budget stays at 60s (MiniSweAdapter): a
+                # rebuild's plan is incremental and a full re-embed there is
+                # never the right answer.
+                min(1800.0, 0.35 * wall_time_limit_seconds)
                 if wall_time_limit_seconds and wall_time_limit_seconds > 0
                 else None
             ),

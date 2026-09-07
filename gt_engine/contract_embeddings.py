@@ -218,8 +218,20 @@ class EmbeddingBudgetInsufficient(EmbeddingBudgetExhausted):
 # Override for a different machine class rather than editing this: the constant
 # is a property of the hardware, and a wrong one changes whether the refresh
 # runs at all.
+# 12.1 was measured with ARRIVAL-ORDER batching, where a few long contracts
+# padded whole batches to their width. With length-bucketing the same corpus
+# costs 213,696 padded token-cells instead of 686,784 - a 3.2x reduction - so
+# the old constant now over-estimates by the same factor and would skip plans
+# that fit comfortably. Scaled: 3,583s / 3.2 / 119 batches = 9.4s.
+#
+# This one is a PROJECTION from the cell reduction, not a stopwatch reading,
+# and it is the weaker kind of number this file has twice been wrong with. It
+# is safe only because the run now reports its own observed_seconds_per_batch
+# in embedding_measurement: the first completed run replaces this with a
+# measurement, and a wrong value here shows up as an estimate that disagrees
+# with the outcome rather than as a silent skip.
 SECONDS_PER_BATCH_ESTIMATE = float(
-    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 12.1
+    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 9.4
 )
 
 
@@ -630,7 +642,20 @@ class ContractEmbeddingStore:
     ) -> dict[str, tuple[float, ...]]:
         vectors: dict[str, tuple[float, ...]] = {}
         planned = len(plan.to_embed)
-        for batch in _batched(plan.to_embed, batch_size):
+        # LENGTH-BUCKET BEFORE BATCHING. The tokenizer pads every sequence in a
+        # batch to the longest one in it, and the transformer then does full
+        # attention over the padding. On the arktype corpus the contract texts
+        # are p50 22 tokens, p90 102, max 512 - so a handful of long ones,
+        # scattered through arrival order, drag whole 32-wide batches up to
+        # their width. Measured on the real graph: 686,784 padded token-cells
+        # in arrival order against 181,632 sorted, a 73.6% reduction. A batch
+        # padded to 512 takes 14.3x the wall time of the same batch at width 37.
+        #
+        # This is why run 34077224456 spent 3,583s - 70% of its budget - on one
+        # embedding pass. Order is irrelevant to the result: every vector is
+        # stored by stable_id, so sorting changes only what shares a batch.
+        ordered = sorted(plan.to_embed, key=lambda item: len(item.text))
+        for batch in _batched(ordered, batch_size):
             # Checked between batches, never inside one: a batch is a single
             # opaque call into the ONNX session and cannot be interrupted, so
             # the real bound is the deadline plus one batch.
