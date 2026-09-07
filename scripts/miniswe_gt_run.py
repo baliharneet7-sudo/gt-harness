@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -1221,6 +1222,15 @@ def main() -> int:
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONUTF8", "1")
     code = main()
+    # Enumerated rather than assumed: importing this run's whole graph -
+    # gt_engine, the pinned groundtruth wheel, litellm, onnxruntime, sqlite3 -
+    # registers exactly three atexit handlers: logging.shutdown,
+    # colorama reset_all, and certifi's cacert cleanup. Two are cosmetic or
+    # temp-file cleanup. The third flushes logging, so it is called here rather
+    # than trusted not to matter. The executor join that os._exit is here to
+    # skip goes through threading._register_atexit, not atexit, so nothing below
+    # brings it back.
+    logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
     # Leave without joining background threads. A cancelled LSP promotion pass
