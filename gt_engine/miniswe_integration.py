@@ -519,6 +519,104 @@ class MiniSweAdapter(GroundtruthController):
         super().begin_submit()
         self._record_state()
 
+    #: Wall-clock ceiling for one re-verification pass, and the per-command
+    #: bound inside it. Sized against what it replaces: in run 34095557374 the
+    #: model spent roughly 173 iterations at 17.8s re-proving obligations an
+    #: edit had discarded - about 3,000s. A pass costing tens of seconds is
+    #: worth it; one costing minutes is not, so it is bounded rather than
+    #: trusted to be small. Measured there: 16 predicates were ever proven and
+    #: the most reused proof command covered 7 of them, so a pass is roughly
+    #: five to eight distinct commands, not fifteen.
+    REVERIFY_PASS_BUDGET_SECONDS = 30.0
+    REVERIFY_COMMAND_TIMEOUT_SECONDS = 15.0
+
+    def _reverify_after_edit(self, candidates: dict[str, str]) -> None:
+        """Re-establish proofs an edit invalidated, instead of making the model redo them.
+
+        This is early cutoff, in the sense rust-analyzer's salsa uses the term:
+        recompute the cheap thing, and if the result is unchanged, do not
+        propagate the invalidation. GT was propagating unconditionally - run
+        34095557374 shows `unmet` falling to 3 of 18 at iteration 90 of 263 and
+        returning to 18 sixteen times, ending exactly where it started, with 15
+        of 18 obligations proven at some point and none surviving. That is the
+        58% step inflation against the GT-off run of the same task.
+
+        The invalidation itself is CORRECT and stays: after an edit, a proof is
+        no longer known to hold. What was wrong is who pays to re-establish it.
+        The model paid, at roughly ten steps per obligation. The harness can pay
+        by re-running the recorded command, which is the same mechanism
+        _live_renumber already uses at submit and is proven there.
+
+        Correct-or-quiet throughout: a command that cannot be re-run, times out,
+        produces no output, or no longer satisfies its predicate leaves the
+        predicate UNKNOWN, which is exactly today's behaviour. This can only
+        preserve a proof, never invent one.
+        """
+        if not candidates or os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+            return
+        import subprocess
+        # Distinct commands only. A command that proved seven predicates is run
+        # once, and evaluate_observation re-establishes every predicate its real
+        # output satisfies.
+        by_command: dict[str, list[str]] = {}
+        for predicate_id, command in candidates.items():
+            if command:
+                by_command.setdefault(command, []).append(predicate_id)
+        deadline = time.monotonic() + self.REVERIFY_PASS_BUDGET_SECONDS
+        preserved: list[str] = []
+        ran = 0
+        for command, predicate_ids in sorted(by_command.items(), key=lambda kv: -len(kv[1])):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                proc = subprocess.run(
+                    command, shell=True, cwd=self.repo_root,
+                    capture_output=True, text=True,
+                    timeout=min(self.REVERIFY_COMMAND_TIMEOUT_SECONDS, remaining),
+                )
+            except Exception:  # noqa: BLE001 - correct-or-quiet
+                continue
+            ran += 1
+            output = (proc.stdout or "") + (proc.stderr or "")
+            if not output.strip():
+                continue
+            try:
+                satisfied = self.evaluate_observation(
+                    command, output, returncode=proc.returncode,
+                    action_index=self.global_action,
+                )
+            except Exception:  # noqa: BLE001 - correct-or-quiet
+                continue
+            # Re-record, do not merely count. The first draft of this computed
+            # the survivor list, journalled it, and never restored a single
+            # receipt - so every predicate stayed UNKNOWN and the pass did
+            # nothing but spend time. It read as working because the event row
+            # said commands_run=1.
+            for predicate_id in predicate_ids:
+                if predicate_id not in satisfied:
+                    continue
+                try:
+                    self.record_receipt(
+                        predicate_id, command, proc.returncode, output,
+                        epoch=self.workspace_epoch, status="GREEN", semantic=True,
+                    )
+                except Exception:  # noqa: BLE001 - correct-or-quiet
+                    continue
+                preserved.append(predicate_id)
+        try:
+            self.store.append(
+                "obligation_reverified",
+                candidates=sorted(candidates),
+                distinct_commands=len(by_command),
+                commands_run=ran,
+                preserved=sorted(set(preserved)),
+                epoch=self.workspace_epoch,
+                budget_seconds=self.REVERIFY_PASS_BUDGET_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - reporting never fails an edit
+            pass
+
     def note_edit(self, paths: Iterable[str]) -> None:
         normalized_paths = tuple(str(p) for p in paths)
         affected = set(self._affected_predicate_ids(normalized_paths))
@@ -565,7 +663,17 @@ class MiniSweAdapter(GroundtruthController):
             )
         except Exception:  # noqa: BLE001 - reporting never fails an edit
             pass
+        # Capture what this edit is about to discard, WITH the command that
+        # proved it, before the controller resets the statuses. After the reset
+        # the receipts are gone, so this is the only moment the pair exists.
+        reverify_candidates = {
+            predicate_id: (receipt.command or "")
+            for predicate_id, receipt in self._receipts.items()
+            if predicate_id in affected
+            and self._status.get(predicate_id) is PredicateStatus.GREEN
+        }
         super().note_edit(normalized_paths, invalidate=affected)
+        self._reverify_after_edit(reverify_candidates)
         if self._pending_recovery is not None:
             self.store.append("recovery_invalidated", epoch=self.workspace_epoch)
             self._pending_recovery = None
