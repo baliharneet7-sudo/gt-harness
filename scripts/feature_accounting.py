@@ -191,6 +191,20 @@ def account(events: list[dict]) -> dict:
             "kind": DIRECT_FEATURES[feature].get("kind", ""),
             "boundaries": list(boundaries),
             "boundaries_reached": hits,
+            # The owner's two questions, separated. A feature declares a
+            # trigger; the only things worth knowing are whether that trigger
+            # fired and, if it did, whether the feature then did its job.
+            # Collapsing them loses the distinction that matters: a feature that
+            # never had the chance is not a feature that failed.
+            "triggered": {
+                "DELIVERED": "yes", "REFUSED": "yes", "SILENT": "yes",
+                "NOT_REACHED": "no", "BOUNDARY_UNKNOWN": "unknown",
+            }[state],
+            "worked": {
+                "DELIVERED": "yes", "REFUSED": "no", "SILENT": "no",
+                "NOT_REACHED": "n/a", "BOUNDARY_UNKNOWN": "unknown",
+            }[state],
+            "trigger": DIRECT_FEATURES[source].get("trigger", ""),
         })
     return {
         "schema": SCHEMA,
@@ -214,20 +228,31 @@ def account(events: list[dict]) -> dict:
 
 
 def render(report: dict) -> str:
-    lines = [f"{'FEATURE':22s} {'STATE':17s} EVIDENCE FROM THE RUN", "-" * 84]
+    lines = [
+        f"{'FEATURE':22s} {'TRIGGERED':10s} {'WORKED':7s} EVIDENCE FROM THE RUN",
+        "-" * 96,
+    ]
     for row in report["rows"]:
-        lines.append(f"{row['feature']:22s} {row['state']:17s} {row['evidence']}")
-    lines.append("-" * 84)
+        lines.append(
+            f"{row['feature']:22s} {row['triggered']:10s} {row['worked']:7s} {row['evidence']}"
+        )
+    lines.append("-" * 96)
+    t = collections.Counter(row["triggered"] for row in report["rows"])
+    w = collections.Counter(row["worked"] for row in report["rows"])
     lines.append(
-        f"{report['delivered']} delivered, {report['refused']} refused, "
-        f"{report['silent']} SILENT at a boundary that occurred, "
-        f"{report['not_reached']} boundary never reached, "
-        f"{report['boundary_unknown']} boundary underivable "
-        f"({report['identities']} identities = "
-        f"{report['direct_features']} features + "
-        f"{report['capability_aliases_shown']} capability aliases, "
-        f"{report['journal_rows']} journal rows)"
+        f"TRIGGERED  yes {t['yes']}  no {t['no']}  unknown {t['unknown']}"
+        f"      WORKED  yes {w['yes']}  no {w['no']}  n/a {w['n/a']}  unknown {w['unknown']}"
     )
+    lines.append(
+        f"{report['identities']} identities = {report['direct_features']} features"
+        f" + {report['capability_aliases_shown']} capability aliases"
+        f"   ({report['journal_rows']} journal rows, terminal {report.get('terminal')})"
+    )
+    lines.append("")
+    lines.append("WHAT EACH ONE IS WAITING FOR:")
+    for row in report["rows"]:
+        if row["trigger"]:
+            lines.append(f"  {row['feature']:22s} {row['trigger']}")
     if report["unattributed_total"]:
         lines.append("")
         lines.append(
