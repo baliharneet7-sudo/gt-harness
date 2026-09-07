@@ -750,8 +750,19 @@ def issue_runtime_receipts(
             raise ValueError("refused_delivery_present")
         if duplicate and refusal["delivery_identity"] not in delivered_identities:
             raise ValueError("invalid_duplicate_delivery_refusal")
-    provider_usage = _provider_usage(event_rows, attempted_calls=provider_calls)
     provider_admissions = _provider_admissions(event_rows)
+    # The provider ATTEMPT boundary is the admission, not the agent's turn
+    # counter. `api_calls` counts calls to model.query(), so a transport retry
+    # inside litellm is invisible to it: run 34144284449 admitted 296 requests,
+    # answered 281, and reported api_calls 280 because the fifteen rate-limited
+    # attempts were retried underneath the agent. Attributing attempts to the
+    # turn counter therefore reported zero failed calls on a run that had
+    # fifteen, and made request_count disagree with provider_calls -- the sole
+    # reason a run that submitted and scored f2p 24/25 came back status ERROR.
+    # Admissions agree with the manifest on both the fixture (3 + bootstrap)
+    # and the live run (296), because both are written at that boundary.
+    provider_attempts = len(provider_admissions) or provider_calls
+    provider_usage = _provider_usage(event_rows, attempted_calls=provider_attempts)
     repro_path, reproduction = _single_optional(state_dir, "reproducibility_manifest.json")
     graph_path, graph = _published_graph(state_dir, event_rows)
     reproduction = reproduction or {}
@@ -768,14 +779,16 @@ def issue_runtime_receipts(
     provider_receipts = reproduction.get("provider_receipts")
     provider_receipts = provider_receipts if isinstance(provider_receipts, dict) else {}
     manifest_count = provider_receipts.get("request_count")
-    if manifest_count is not None and int(manifest_count) != provider_calls:
+    if manifest_count is not None and int(manifest_count) != provider_attempts:
         raise ValueError("provider_manifest_count_mismatch")
 
     exit_code = int(report.get("exit_code") or 0)
     terminal = str(report.get("terminal") or "internal_error")
     status = "COMPLETED" if exit_code == 0 else "ERROR"
+    # Every terminal turn must have been admitted; retried attempts mean there
+    # can be MORE admissions than turns, never fewer.
     if status == "COMPLETED" and (
-        len(provider_admissions) != provider_calls
+        len(provider_admissions) < provider_calls
         or any(row["status"] != "admitted" for row in provider_admissions)
     ):
         raise ValueError("provider_admission_count_mismatch")
