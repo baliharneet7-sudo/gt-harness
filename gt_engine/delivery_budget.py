@@ -52,6 +52,21 @@ MAX_BOUNDARY_CLAIMS = 4
 # the run. A list wrong in both directions was never derived from the code; it
 # was an out-of-date copy of a design note, and the dead entries are what made
 # the missing one hard to see.
+# The events that record GT declining to deliver. Declared here, beside the
+# refusal REASONS, because a consumer asking "is this a refusal" must key on an
+# authority rather than guess at vocabulary.
+#
+# The first version of the feature accounting keyed on the event name containing
+# "refus" or "abstain". It returned the right answer on the only run available -
+# for the wrong reason. No event name contains "abstain" at all, so half the
+# test never fired; and a probe on "invalid" matches graph_invalidated, which is
+# not a refusal. A string-shaped key on an open set keeps producing that class
+# of answer, and a future ..._declined or ..._withheld would be invisible.
+REFUSAL_EVENTS = frozenset({
+    "decision_context_unit_refused",
+    "delivery_refused",
+})
+
 DELIVERY_REFUSAL_REASONS = frozenset({
     "boundary_claim_ceiling",
     "cochange_task_ceiling",
