@@ -297,6 +297,26 @@ class GraphBuildCoordinator:
             self._observe_enrichment(request, base, receipt, "not_publishable")
             self.last_error = "enrichment_not_publishable"
             return 1
+        # A candidate that changed no edges is not worth publishing, and
+        # publishing it is not merely wasteful - it is harmful. The producer
+        # computes the same sum and skips the closure rebuild when it is zero
+        # (background_promotion.py:436-437), yet still marks the candidate
+        # publishable, so the decision lands here.
+        #
+        # Run 34077224456: four of ten graph publications were this - a 912MB
+        # byte-different copy carrying zero new edges, republished at the SAME
+        # repository_revision as the publication before it. Each one changes the
+        # graph identity the agent is querying against for no gain, and the
+        # change cancels whatever enrichment is in flight: two of that run's six
+        # promotions terminated `obsolete` against graphs these republications
+        # had just replaced. The churn was manufacturing its own cancellations.
+        mutations = sum(
+            int(receipt.get(key) or 0) for key in ("verified", "corrected", "deleted")
+        )
+        if not mutations:
+            self._observe_enrichment(request, base, receipt, "no_edge_mutations")
+            self.last_error = "enrichment_added_no_edges"
+            return 1
         if (
             receipt.get("source_revision") != request.source_revision
             or receipt.get("input_graph_revision") != base.graph_revision
