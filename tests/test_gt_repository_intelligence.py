@@ -332,8 +332,34 @@ def _question_contract(question: FrozenSourceQuestion) -> TaskContract:
     )
 
 
+_PINNED_PRODUCER_SHA256 = json.loads(
+    (Path(__file__).resolve().parents[1] / "config" / "deepswe_product_bundle_v1.json").read_text(
+        encoding="utf-8"
+    )
+)["groundtruth"]["producer_sha256"]
+
+# The pinned producer is a Linux binary staged by the workflow. Every other suite
+# in this repository that needs it says so and skips; these five reached it
+# through a helper instead and failed, which reads as a defect rather than as an
+# absent dependency. Same predicate, same reason string, no assertion changed.
+requires_pinned_producer = pytest.mark.skipif(
+    os.name != "posix" or not os.environ.get("GT_INDEX_BINARY"),
+    reason="installed Linux producer required",
+)
+
+
 def _producer_environment() -> dict[str, str]:
-    """Identify the exact gt-index binary and runner environment in use."""
+    """Identify the exact gt-index binary and runner environment in use.
+
+    ``find_binary`` will DOWNLOAD a release build when none is installed, so
+    resolving it is not the same as using the pinned producer: on a machine with
+    network the proof would bind to gt-index v1.1.0 and read as green while
+    measuring a producer the benchmark never runs. ``_verify_producer_environment``
+    does not close that - it checks the recorded digest against the binary on
+    disk, which is self-consistency, not identity. The bundle's declared
+    ``producer_sha256`` is the only thing that says WHICH producer, so it decides
+    here.
+    """
     try:
         from groundtruth._binary import find_binary
 
@@ -344,6 +370,11 @@ def _producer_environment() -> dict[str, str]:
         binary_sha256 = _sha256(binary.read_bytes())
     except (OSError, RuntimeError, ImportError) as exc:
         raise SourceProofError("pinned gt-index producer is unavailable") from exc
+    if binary_sha256 != _PINNED_PRODUCER_SHA256:
+        raise SourceProofError(
+            f"resolved producer is not the pinned one: {binary} "
+            f"is {binary_sha256}, declared {_PINNED_PRODUCER_SHA256}"
+        )
     return {
         "producer": "gt-index",
         "binary_path": str(binary),
@@ -656,6 +687,7 @@ def _execute_questions(
     return proof_path
 
 
+@requires_pinned_producer
 def test_frozen_questions_execute_through_production_graph_path_and_replay(tmp_path):
     root = tmp_path / "frozen-source"
     state = tmp_path / "state"
@@ -679,6 +711,7 @@ def test_frozen_questions_execute_through_production_graph_path_and_replay(tmp_p
     assert all(answer["coverage"]["fact_count"] > 0 for answer in first["answers"])
 
 
+@requires_pinned_producer
 def test_frozen_question_proof_abstains_on_source_mutation(tmp_path):
     root = tmp_path / "frozen-source"
     state = tmp_path / "state"
@@ -698,6 +731,7 @@ def test_frozen_question_proof_abstains_on_source_mutation(tmp_path):
     assert proof_path.read_bytes() == before
 
 
+@requires_pinned_producer
 def test_persisted_question_mutation_is_rejected(tmp_path):
     root = tmp_path / "frozen-source"
     state = tmp_path / "state"
@@ -712,6 +746,7 @@ def test_persisted_question_mutation_is_rejected(tmp_path):
         _read_verified_proof(proof_path, root=root, expected=expected)
 
 
+@requires_pinned_producer
 def test_persisted_prompt_mutation_is_rejected_even_with_recomputed_digest(tmp_path):
     root = tmp_path / "frozen-source"
     state = tmp_path / "state"
@@ -764,6 +799,7 @@ def test_archive_without_git_is_explicitly_unverified_and_not_accepted(
         _execute_questions(root, state, expected)
 
 
+@requires_pinned_producer
 def test_persisted_unverified_archive_head_is_rejected(tmp_path):
     root = tmp_path / "frozen-source"
     state = tmp_path / "state"

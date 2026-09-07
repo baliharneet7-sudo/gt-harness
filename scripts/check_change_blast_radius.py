@@ -32,17 +32,26 @@ What BLOCKS and what REPORTS, and why the line is where it is
 Ruff blocks: it is deterministic, environment-independent, and F821 is exactly
 the NameError class.
 
-The derived suites REPORT. They cannot block, because this repository's local
-interpreter resolves `groundtruth` to a working checkout at a different revision
-than the pinned wheel, so a large set of suites fails here for reasons no commit
-caused. A gate that refuses every commit is a gate that gets bypassed within the
-hour, and then catches nothing at all - which is worse than one that reports.
+The derived suites block WHEN THE INTERPRETER IS PROVABLY THE RIGHT ONE, and
+report otherwise. That condition is machine-checked, not remembered: the suites
+run under `.venv` when this repository has one, and the root `conftest.py`
+refuses collection unless the installed `groundtruth-mcp` is byte-for-byte the
+pinned wheel. A refusal comes back as pytest's usage exit and is reported rather
+than blocking, because it means the environment could not answer - not that the
+change is bad. Anything else from a verified interpreter is a real failure and
+stops the commit.
 
-The authority for green remains the CI gate, which has the pinned wheel and a
-clean interpreter and already runs everything. What this adds is the derived set
-IN ONE PROCESS, printed before the push rather than six minutes into CI - and
-that single-process property is the part that matters, because the env leak
-passed in isolation and failed only in aggregate.
+This version of the file reported unconditionally. That was a workaround for an
+interpreter resolving `groundtruth` to an editable checkout at a revision the
+benchmark never installs, and a gate that only works if someone reads it has the
+exact property that made these three defects necessary in the first place. The
+environment was fixed instead; the report path survives only for a machine that
+has not been set up yet.
+
+The authority for green remains the CI gate, which already runs everything. What
+this adds is the derived set IN ONE PROCESS, printed before the push rather than
+six minutes into CI - and that single-process property is the part that matters,
+because the env leak passed in isolation and failed only in aggregate.
 """
 from __future__ import annotations
 
@@ -52,6 +61,23 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# pytest's usage exit. The root conftest refuses collection when the installed
+# producer is not the pinned wheel, and that is a statement about the machine,
+# not about the diff, so it must not block.
+PYTEST_USAGE_ERROR = 4
+
+
+def _verified_interpreter() -> tuple[str, bool]:
+    """The interpreter carrying the pinned producer, and whether it is one.
+
+    A repository-local `.venv` is the environment this gate can make claims
+    about; the ambient interpreter is whatever the machine happens to have, and
+    on this machine that was an editable checkout of a different revision.
+    """
+    for candidate in (ROOT / ".venv" / "Scripts" / "python.exe", ROOT / ".venv" / "bin" / "python"):
+        if candidate.is_file():
+            return str(candidate), True
+    return sys.executable, False
 
 GLOBAL_MUTATION = re.compile(
     r"^\+\s*(?:os\.environ\[[^\]]+\]\s*=|os\.environ\.setdefault\(|os\.environ\.update\(|"
@@ -108,20 +134,37 @@ def main() -> int:
     print(f"blast-radius gate: {len(ordered)} suite(s), one process:", file=sys.stderr)
     for s in ordered:
         print(f"    {s}", file=sys.stderr)
-    proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "--no-header",
+    interpreter, verified = _verified_interpreter()
+    # No -q here: pyproject already sets `-ra -q`, and a second -q is -qq, which
+    # suppresses the count line outright. The first run of this gate printed a
+    # suite list and then nothing at all, which is precisely the failure this
+    # file exists to prevent - a check whose output nobody can read.
+    proc = subprocess.run([interpreter, "-m", "pytest", "--no-header",
                            "-p", "no:cacheprovider", *ordered],
                           capture_output=True, text=True, cwd=ROOT)
     tail = [ln for ln in proc.stdout.splitlines() if ln.startswith("FAILED") or " passed" in ln
             or " failed" in ln or " error" in ln]
     for line in tail[-12:]:
         print(f"    {line}", file=sys.stderr)
-    if proc.returncode != 0:
-        print("blast-radius gate: the derived set is NOT green. This does not block - "
-              "the local interpreter resolves `groundtruth` to a different revision "
-              "than the pinned wheel - but read the failures above before pushing, "
-              "and treat any that name a symbol you just changed as yours.",
+    if proc.returncode == 0:
+        return 0
+    if proc.returncode == PYTEST_USAGE_ERROR:
+        print(proc.stdout.strip() or proc.stderr.strip(), file=sys.stderr)
+        print("blast-radius gate: the derived set could not be collected, so this "
+              "reports rather than blocks - the message above is about the machine, "
+              "not about the diff. Fix it and the derived set starts blocking.",
               file=sys.stderr)
-    return 0
+        return 0
+    if not verified:
+        print("blast-radius gate: the derived set is NOT green, and this interpreter "
+              "is the ambient one rather than a repository .venv carrying the pinned "
+              "producer, so the failures are not attributable and this does not block. "
+              "Create the .venv and they will be.", file=sys.stderr)
+        return 0
+    print(f"blast-radius gate: the derived set is NOT green under {interpreter}, which "
+          f"carries the pinned producer. These failures are attributable to the staged "
+          f"change. Fix them or unstage.", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
