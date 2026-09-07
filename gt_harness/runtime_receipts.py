@@ -768,37 +768,8 @@ def issue_runtime_receipts(
     provider_receipts = reproduction.get("provider_receipts")
     provider_receipts = provider_receipts if isinstance(provider_receipts, dict) else {}
     manifest_count = provider_receipts.get("request_count")
-    if manifest_count is not None:
-        # RECONCILE, do not compare across boundaries. The comment above
-        # provider_calls says every count compared here is measured at the same
-        # transport boundary, and this one was not: request_count counts every
-        # request GT DELIVERED, while provider_calls counts the agent turns that
-        # COMPLETED. They differ by deliveries that never received a response -
-        # a retried or dropped call is delivered once more and answered once
-        # less.
-        #
-        # Run 34144284449 submitted, was graded 24/25 f2p and 1679/1679 p2p, and
-        # still reported status ERROR because 296 != 281. Measured there:
-        #     delivered 296, responded 281, deliveries with no reply 15
-        #     296 - 15 = 281 = provider_calls
-        # The run was correct and the check was comparing two populations.
-        #
-        # Subtracting the unanswered deliveries keeps the check strict: an
-        # excess that is NOT explained by a missing response still refuses.
-        unanswered = 0
-        pending = False
-        for row in event_rows:
-            event = row.get("event")
-            if event == "provider_delivery":
-                if pending:
-                    unanswered += 1
-                pending = True
-            elif event == "provider_response":
-                pending = False
-        if pending:
-            unanswered += 1
-        if int(manifest_count) - unanswered != provider_calls:
-            raise ValueError("provider_manifest_count_mismatch")
+    if manifest_count is not None and int(manifest_count) != provider_calls:
+        raise ValueError("provider_manifest_count_mismatch")
 
     exit_code = int(report.get("exit_code") or 0)
     terminal = str(report.get("terminal") or "internal_error")
