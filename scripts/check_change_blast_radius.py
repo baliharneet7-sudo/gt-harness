@@ -111,8 +111,29 @@ def _staged() -> list[str]:
 
 
 def main() -> int:
+    # Say what could NOT be derived from. Symbol-derived selection cannot reach a
+    # file that has no symbols, and this repository has four such classes, all
+    # load-bearing: .githooks/*, workflow YAML, config JSON, the bundle manifest.
+    # Twelve commits were reported as "derived set green" while the diff that
+    # broke CI touched .githooks/pre-commit - true statement, narrower than what
+    # the reader took from it. A witness must cover the claim's scope, and the
+    # claim must state the witness's scope; printing the gap is how the commit
+    # message gets written honestly without anyone remembering to.
+    all_staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
+        capture_output=True, text=True, cwd=ROOT).stdout.splitlines()
+    undecidable = [path for path in all_staged if path.strip() and not _is_python(path)]
+    if undecidable:
+        print(f"    NOT DERIVABLE ({len(undecidable)}): no symbols to select tests by "
+              f"- CI is the only authority for these", file=sys.stderr)
+        for path in undecidable:
+            print(f"        {path}", file=sys.stderr)
     staged = _staged()
     if not staged:
+        # Not "nothing to check" - nothing this gate CAN check. A diff of only
+        # config, hooks or YAML lands here, and e559c1c3 - the hook rewrite that
+        # broke CI - was exactly that: .githooks/pre-commit had no .py extension
+        # until be8d2d67, so this returned 0 before printing anything at all.
         return 0
     diff = subprocess.run(["git", "diff", "--cached", "-U0", "--"] + staged,
                           capture_output=True, text=True, cwd=ROOT).stdout
