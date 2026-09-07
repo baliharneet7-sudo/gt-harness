@@ -1470,6 +1470,20 @@ class GTSession:
                     # failed both mean the highest-precision edge tier is empty
                     # for a reason the run could have prevented.
                     lsp_state = CapabilityState.FAILED
+                # An enrichment publishes only if no edit landed while it ran
+                # (graph_coordinator marks it "obsolete" otherwise). A pass over
+                # 6,621 callsites takes ~21 minutes at the measured 0.19s/edge,
+                # against an observed edit cadence of one every ~47s - so the
+                # tier can be empty for a purely structural reason with nothing
+                # wrong. Say how many times that happened, in the run's own
+                # words, instead of leaving it to be diagnosed afterwards from
+                # a single DEGRADED row.
+                obsolete = sum(
+                    1 for row in terminals
+                    if str(row.get("disposition") or "") == "obsolete"
+                )
+                if obsolete:
+                    lsp_evidence += f":{obsolete}_of_{len(terminals)}_obsolete"
                 if len({str(row.get("status") or "") for row in terminals}) > 1:
                     # Only when the terminals DISAGREE. Every published graph
                     # gets an enrichment, so a healthy five-edit task produces
