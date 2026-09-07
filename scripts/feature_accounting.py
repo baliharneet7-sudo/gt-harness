@@ -72,7 +72,45 @@ SUBMIT_TERMINALS = frozenset({"submitted", "submitted_verified", "submitted_unve
 SCHEMA = "gt.feature_accounting.v1"
 
 
-def account(events: list[dict]) -> dict:
+def edit_eligibility(artifacts: list[dict]) -> dict[str, dict]:
+    """What the edit-boundary features were ELIGIBLE for, from the run's blobs.
+
+    Eligibility does not have to come from the eligibility check. The producer
+    writes one ``transaction_artifacts`` blob per edit carrying the same
+    preconditions the features test:
+
+        syntax[].diagnostics non-empty  -> syntax_result was eligible
+        signatures[].changed non-empty  -> signature_delta's FIRST half held
+
+    Both were previously reported as "eligibility unrecorded", and that was a
+    statement about where this script looked, not about the run: the 38 blobs
+    sit in the same directory as the journal. In 34095557374 they say syntax was
+    clean on all 38 edits (correct silence, 38 times) and a signature changed
+    twice - and on both of those, caller_coverage was ``unavailable``, so
+    signature_delta's second half could not hold. Starved, with a named cause,
+    rather than unknown.
+    """
+    syntax_eligible = signature_eligible = 0
+    coverage: collections.Counter = collections.Counter()
+    for blob in artifacts:
+        for entry in blob.get("syntax") or ():
+            if entry.get("diagnostics"):
+                syntax_eligible += 1
+        for entry in blob.get("signatures") or ():
+            if entry.get("changed"):
+                signature_eligible += 1
+        coverage[blob.get("caller_coverage")] += 1
+    return {
+        "syntax_result": {"eligible": syntax_eligible, "of": len(artifacts)},
+        "signature_delta": {
+            "eligible": signature_eligible,
+            "of": len(artifacts),
+            "caller_coverage": dict(coverage),
+        },
+    }
+
+
+def account(events: list[dict], artifacts: list[dict] | None = None) -> dict:
     """Resolve each DELIVERY once, then count deliveries - never events.
 
     The two identity-bearing event classes are disjoint and describe the same
@@ -141,6 +179,7 @@ def account(events: list[dict]) -> dict:
         kind for unit, kind in identity_kinds.items() if unit not in identity_feature
     )
 
+    eligible = edit_eligibility(artifacts or [])
     rows = []
     # All 19 identities, not the 12 owners. Seven of the 19 are capability
     # aliases whose evidence is produced by another feature (CAPABILITY_OWNERS),
@@ -185,9 +224,27 @@ def account(events: list[dict]) -> dict:
             # Say what is known. The delivery did not happen; whether the feature
             # declined, failed, or was never eligible is unrecorded.
             state = "NO_DELIVERY"
-            evidence = "no delivery at " + ", ".join(
-                f"{b} x{n}" for b, n in sorted(hits.items())
-            ) + "; eligibility unrecorded"
+            where = ", ".join(f"{b} x{n}" for b, n in sorted(hits.items()))
+            elig = eligible.get(source)
+            if elig is None:
+                # An UNKNOWN is a claim about the world; "I did not look" is a
+                # claim about the reader. Only one of those is verifiable from
+                # in here, and this script used to emit the other. Say the scope.
+                evidence = (f"no delivery at {where}; eligibility not derivable "
+                            f"(examined: events.jsonl, transaction_artifacts/)")
+            elif not elig["eligible"]:
+                state = "DECLINED_CORRECTLY"
+                evidence = (f"no delivery at {where}; its precondition never held "
+                            f"in {elig['of']} edit transactions")
+            else:
+                state = "STARVED"
+                detail = ""
+                if elig.get("caller_coverage"):
+                    unavail = elig["caller_coverage"].get("unavailable", 0)
+                    detail = (f"; caller_coverage unavailable on {unavail}/"
+                              f"{elig['of']} edits")
+                evidence = (f"eligible {elig['eligible']}x in {elig['of']} edit "
+                            f"transactions and delivered nothing{detail}")
         elif derivable:
             state = "NOT_REACHED"
             evidence = "its boundary never occurred: " + ", ".join(sorted(derivable))
@@ -195,7 +252,8 @@ def account(events: list[dict]) -> dict:
                 evidence += f" (run ended {terminal})"
         else:
             state = "BOUNDARY_UNKNOWN"
-            evidence = "no journal evidence defines " + ", ".join(sorted(boundaries))
+            evidence = ("no journal evidence defines " + ", ".join(sorted(boundaries))
+                        + " (examined: events.jsonl, transaction_artifacts/)")
         if owner:
             evidence = f"via {owner}: {evidence}"
         rows.append({
@@ -216,10 +274,12 @@ def account(events: list[dict]) -> dict:
             "triggered": {
                 "DELIVERED": "yes", "REFUSED": "yes", "NO_DELIVERY": "yes",
                 "NOT_REACHED": "no", "BOUNDARY_UNKNOWN": "unknown",
+                "DECLINED_CORRECTLY": "yes", "STARVED": "yes",
             }[state],
             "worked": {
                 "DELIVERED": "yes", "REFUSED": "no", "NO_DELIVERY": "unknown",
                 "NOT_REACHED": "n/a", "BOUNDARY_UNKNOWN": "unknown",
+                "DECLINED_CORRECTLY": "yes", "STARVED": "no",
             }[state],
             "trigger": DIRECT_FEATURES[source].get("trigger", ""),
         })
@@ -299,7 +359,9 @@ def main() -> int:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    report = account(events)
+    blobs = sorted(path.parent.glob("transaction_artifacts/*.json"))
+    artifacts = [json.loads(b.read_text(encoding="utf-8")) for b in blobs]
+    report = account(events, artifacts)
     print(render(report))
     if args.json_out:
         Path(args.json_out).write_text(
