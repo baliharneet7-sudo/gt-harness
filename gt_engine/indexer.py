@@ -940,8 +940,44 @@ def _publish_graph_failure(
 RETAINED_SUPERSEDED_REVISIONS = 1
 
 
+def _referenced_revisions(parent: Path) -> set[Path]:
+    """Revisions some manifest still points at, which must never be pruned.
+
+    Certification is one-level -- certify_lsp_candidate says so and resolves
+    base_graph/base_manifest/base_resource/terminal_receipt against the
+    revisions root without recursing. But certification TIME is not the
+    artifact's lifetime: a published enrichment's manifest records portable
+    references to its base (:1676-1686), and attest, gt_audit or any later
+    re-read needs those files to still be there. Count-based retention cannot
+    express "this old one is load-bearing", so read the references instead of
+    guessing a depth.
+    """
+    referenced: set[Path] = set()
+    for manifest in parent.glob("*/graph.manifest.json"):
+        try:
+            derivation = json.loads(manifest.read_text(encoding="utf-8")).get("derivation")
+        except (OSError, ValueError):
+            # Unreadable means unknown, and unknown must not authorise a delete.
+            referenced.add(manifest.parent.resolve())
+            continue
+        if not isinstance(derivation, dict):
+            continue
+        for key in ("base_graph", "base_manifest", "base_resource", "terminal_receipt"):
+            reference = str(derivation.get(key) or "")
+            if not reference:
+                continue
+            candidate = (parent / reference).resolve() if "/" in reference else None
+            if candidate is None:
+                continue
+            for ancestor in (candidate, *candidate.parents):
+                if ancestor.parent == parent.resolve():
+                    referenced.add(ancestor)
+                    break
+    return referenced
+
+
 def _prune_superseded_revisions(live: Path) -> None:
-    """Drop old sibling revisions, newest first, keeping the live one."""
+    """Drop superseded sibling revisions that nothing still references."""
     parent = live.parent
     if parent.name != "revisions":
         return  # not the layout-bound scheme; nothing here is ours to remove
@@ -952,9 +988,35 @@ def _prune_superseded_revisions(live: Path) -> None:
         ]
     except OSError:
         return
-    siblings.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    protected = _referenced_revisions(parent)
+    siblings = [path for path in siblings if path.resolve() not in protected]
+    # Order by the GRAPH's mtime, not the directory's. A directory's mtime moves
+    # whenever an entry is added or removed - lsp-promotion.json is written into
+    # a revision after publication, and candidate cleanup touches it later - so
+    # directory order can rank an older revision above a newer one and delete
+    # the wrong thing. That is the proxy-for-property shape, in the one change
+    # here that destroys data.
+    def _published_at(path: Path) -> float:
+        graph = path / "graph.db"
+        try:
+            return graph.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    siblings.sort(key=_published_at, reverse=True)
     for stale in siblings[RETAINED_SUPERSEDED_REVISIONS:]:
-        shutil.rmtree(stale, ignore_errors=True)
+        # Rename out of the scheme before deleting. rmtree(ignore_errors=True)
+        # can leave a revision holding graph.manifest.json without graph.db, and
+        # a partial like that still answers every rglob scan - _single_optional
+        # counts it and a manifest can digest-match a graph that is gone. Clean
+        # absence beats a half-present revision; an interrupted rename leaves a
+        # directory outside the scheme, which is discoverable and harmless.
+        try:
+            condemned = stale.with_name(f".pruned-{stale.name}")
+            os.replace(stale, condemned)
+        except OSError:
+            continue
+        shutil.rmtree(condemned, ignore_errors=True)
 
 
 def _graph_state_dir(root: str | Path, state_dir: str | Path | None,

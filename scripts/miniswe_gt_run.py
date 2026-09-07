@@ -1220,4 +1220,18 @@ def main() -> int:
 
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONUTF8", "1")
-    raise SystemExit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Leave without joining background threads. A cancelled LSP promotion pass
+    # keeps running inside a non-daemon ThreadPoolExecutor, and CPython joins
+    # those at interpreter exit - so an uncooperative pass holds the process
+    # open past its deadline, the supervisor SIGTERMs it, and a run that had
+    # already produced a verdict is recorded as an infra timeout. The bounded
+    # drain in close_graph_coordinator makes that visible; only this prevents it.
+    #
+    # Safe here precisely because nothing this run owes anyone is written at
+    # exit: store.append fsyncs every journal row, the patch, receipts and
+    # metrics are written explicitly above, and both streams are flushed on the
+    # two lines before this one.
+    os._exit(code)

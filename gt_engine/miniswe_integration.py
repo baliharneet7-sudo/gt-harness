@@ -994,6 +994,25 @@ class MiniSweAdapter(GroundtruthController):
                 source_revision=request.source_revision,
                 embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
             )
+        # Say what the bound above actually did. The 60s allowance rests on an
+        # assumption I have not measured - that a rebuild's plan is small
+        # because only a few contracts moved - and if a single edit to a widely
+        # imported file moves hundreds of digests, every rebuild skips and dense
+        # retrieval degrades for the whole run with nothing calling it a fault.
+        # Reporting it turns an unmeasured assumption into an observed one: a
+        # journal carrying "planned 3808, budget 60s, skipped" fifteen times
+        # says so plainly, and the run corrects the constant instead of the
+        # constant silently deciding the run.
+        try:
+            self.store.append(
+                "graph_rebuild_embedding",
+                state=receipt.embedding_state,
+                measurement=receipt.embedding_measurement,
+                reason=receipt.embedding_failure_reason,
+                budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - reporting never fails a rebuild
+            pass
         return GraphBuildArtifact(
             bool(receipt.success and receipt.graph_db), str(receipt.graph_db or ""),
             str(receipt.graph_revision or ""), receipt.error_type or "",
