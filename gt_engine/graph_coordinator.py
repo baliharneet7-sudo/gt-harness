@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from .engine_state import EngineState
@@ -361,6 +362,44 @@ class GraphBuildCoordinator:
         self._observe_enrichment(request, base, receipt, "published")
         return 1
 
+    @staticmethod
+    def _discard_candidate(receipt: Mapping[str, Any]) -> None:
+        """Delete a candidate database this coordinator has refused.
+
+        The producer deletes on ITS OWN failure paths - no_op, unavailable,
+        cancelled, failed all call _delete_sqlite_candidate - and deliberately
+        keeps the candidate on success, because publication consumes it. Zero
+        edge mutations is not one of the producer's failures: it skips the
+        closure rebuild, finalizes, seals, and returns `succeeded` with
+        publishable=True. The refusal happens HERE, in the churn gate, and
+        nothing deleted what it refused.
+
+        Run 34095557374 shows the correlation across all fifteen receipts with
+        no exception:
+
+            cancelled  x7   producer deleted   graph.db on disk: no
+            succeeded  x8   producer kept      graph.db on disk: YES
+
+        Ten surviving candidates at ~920MB each - 9.3GB, 96% of an 11.6GB task
+        artifact - and every one of them carried zero edge mutations.
+
+        This lives in _observe_enrichment rather than in each refusal branch
+        because there are ten of those and a future eleventh would forget. The
+        `published` disposition is the only one that must NOT delete, so it is
+        the only one named.
+        """
+        candidate = receipt.get("candidate_path")
+        if not isinstance(candidate, str) or not candidate:
+            return
+        path = Path(candidate)
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                path.with_name(path.name + suffix).unlink(missing_ok=True)
+            except OSError:
+                # Reporting a refusal must never fail on cleanup, and a
+                # candidate left behind is wasteful rather than incorrect.
+                pass
+
     def _observe_enrichment(
         self,
         request: FrozenBuildInput,
@@ -368,6 +407,8 @@ class GraphBuildCoordinator:
         receipt: Mapping[str, Any],
         disposition: str,
     ) -> None:
+        if disposition != "published":
+            self._discard_candidate(receipt)
         if self._enrichment_observer is None:
             return
         try:
