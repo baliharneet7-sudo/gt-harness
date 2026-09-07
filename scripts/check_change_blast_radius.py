@@ -86,10 +86,28 @@ GLOBAL_MUTATION = re.compile(
 DEFINITION = re.compile(r"^\+?\s*(?:def|class)\s+([A-Za-z_]\w*)")
 
 
+def _is_python(path: str) -> bool:
+    """.py, or a file whose shebang says python.
+
+    `.githooks/pre-commit` is Python with no extension, so an extension filter
+    never linted it - and a syntax error went in that only git found, by trying
+    to execute it. The hook is the one file where "ruff would have caught it"
+    is not a hypothetical.
+    """
+    if path.endswith(".py"):
+        return True
+    try:
+        with (ROOT / path).open("rb") as handle:
+            first = handle.readline(200)
+    except OSError:
+        return False
+    return first.startswith(b"#!") and b"python" in first
+
+
 def _staged() -> list[str]:
     out = subprocess.run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
                          capture_output=True, text=True, cwd=ROOT).stdout
-    return [line for line in out.splitlines() if line.endswith(".py")]
+    return [line for line in out.splitlines() if _is_python(line)]
 
 
 def main() -> int:
