@@ -1456,15 +1456,58 @@ func runIncremental(root, relpath, dbPath string) error {
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
 		return fmt.Errorf("bind stale graph resolution revision: %w", err)
 	}
-	// A single-file refresh cannot prove repository-wide candidate parity because
-	// callers in other files may depend on the changed identities. Remove the
-	// entire attached resolution overlay in this same transaction. Metadata-only
-	// invalidation is insufficient: direct SQL and generic graph readers do not
-	// necessarily consult project_meta before traversing nodes and edges.
-	if _, err := tx.Exec(`DELETE FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT') OR (type='CALLS' AND callsite_stable_id IS NOT NULL)`); err != nil {
+	// A single-file refresh cannot prove repository-wide candidate parity, so the
+	// attached resolution overlay must be invalidated where this edit can reach.
+	// It used to be invalidated EVERYWHERE, and that unconditional purge is what
+	// made incremental indexing unusable: on the arktype graph it deleted 177,390
+	// of 181,200 nodes (97.9%) and 459,523 of 466,421 edges (98.5%) for a
+	// twenty-node file, because the overlay IS the graph. One -file reindex left
+	// nothing that could answer a caller query, so every consumer fell back to a
+	// full rebuild -- ~115s against a ~50s edit interval, which never converges.
+	// Measured downstream on run 34144284449: caller_coverage unavailable on 189
+	// of 255 reads (74%) and caller_contract_view delivered 3 times in 280 steps.
+	//
+	// An edit to F can only change resolution for a callsite that is IN F, that
+	// resolves INTO F, or that lives in a file importing F. A file that neither
+	// references nor imports F cannot bind to it, so its overlay is still valid
+	// and deleting it discards proven work. Scope the purge to that blast radius.
+	// The newly-resolvable case -- an unresolved callsite that F now satisfies --
+	// is handled after insertion below, where F's NEW symbols are visible.
+	if _, err := tx.Exec(`CREATE TEMP TABLE IF NOT EXISTS gt_incr_affected(path TEXT PRIMARY KEY)`); err != nil {
+		return fmt.Errorf("stage incremental blast radius: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM gt_incr_affected`); err != nil {
+		return fmt.Errorf("reset incremental blast radius: %w", err)
+	}
+	if _, err := tx.Exec(`
+		INSERT OR IGNORE INTO gt_incr_affected(path)
+		  SELECT ?1
+		  UNION
+		  SELECT n.file_path FROM nodes n JOIN edges e ON e.source_id = n.id
+		   WHERE e.target_id IN (SELECT id FROM nodes WHERE file_path = ?1)
+		     AND n.file_path IS NOT NULL AND n.file_path <> ''
+		  UNION
+		  SELECT e.source_file FROM edges e
+		   WHERE e.type = 'IMPORTS'
+		     AND e.target_id IN (SELECT id FROM nodes WHERE file_path = ?1)
+		     AND e.source_file IS NOT NULL AND e.source_file <> ''`, relSlash); err != nil {
+		return fmt.Errorf("derive incremental blast radius: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM edges
+		 WHERE (type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT')
+		        OR (type='CALLS' AND callsite_stable_id IS NOT NULL))
+		   AND (source_file IN (SELECT path FROM gt_incr_affected)
+		     OR source_id IN (SELECT id FROM nodes
+		                       WHERE file_path IN (SELECT path FROM gt_incr_affected)
+		                         AND (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'))
+		     OR target_id IN (SELECT id FROM nodes
+		                       WHERE file_path IN (SELECT path FROM gt_incr_affected)
+		                         AND (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite')))`); err != nil {
 		return fmt.Errorf("remove stale attached resolution edges: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM nodes WHERE node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM nodes
+		 WHERE (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite')
+		   AND file_path IN (SELECT path FROM gt_incr_affected)`); err != nil {
 		return fmt.Errorf("remove stale attached resolution nodes: %w", err)
 	}
 
@@ -1508,6 +1551,18 @@ func runIncremental(root, relpath, dbPath string) error {
 				}
 			}
 		}
+	}
+
+	// The one case the blast radius above cannot see: a callsite elsewhere that
+	// was UNRESOLVED and that F now satisfies. F's new symbols only exist after
+	// the insert, so the match runs here rather than beside the scoped purge.
+	if _, err := tx.Exec(`DELETE FROM nodes
+		 WHERE node_type = 'unresolved_fact'
+		   AND name IN (SELECT name FROM nodes WHERE file_path = ?1)`, relSlash); err != nil {
+		return fmt.Errorf("remove newly-resolvable unresolved facts: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS gt_incr_affected`); err != nil {
+		return fmt.Errorf("release incremental blast radius: %w", err)
 	}
 
 	// Re-resolve outgoing calls. The pre-fetched allNodes/allIDs include the
