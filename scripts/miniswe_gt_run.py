@@ -636,31 +636,6 @@ def build_agent(
     # assertion orphaned by a dedent, except here the whole block was dead from
     # the first line. Set the one flag directly; there is no function to call.
     os.environ.setdefault("GT_SUBMIT_SUPPRESSION_ENFORCE", "1")
-    # PIN THE CONTRACT EMBEDDING STORE TO THE TASK, NOT TO A GRAPH REVISION.
-    #
-    # default_store_path derives the store from the graph PATH, and the graph
-    # lives at revisions/<reuse_key>/graph.db - so every republication names a
-    # store that does not exist yet. Run 34077224456 shows the consequence
-    # exactly: ten rebuild refreshes, every one reporting
-    # `planned=3809..3821` - the FULL corpus, never a delta - because each new
-    # revision started from an empty store. The 60s rebuild budget could
-    # therefore never be enough, and every rebuild skipped by construction.
-    #
-    # The store's LOCATION was graph-keyed; its CONTENT never was. Entries key
-    # on (producer fingerprint, contract text digest) and the plan already
-    # computes contract_changed / fingerprint_changed / model_changed, so one
-    # store shared across revisions is correct by construction rather than a
-    # compromise. Pinned here, the initial build populates it once and each
-    # rebuild embeds only what the edit moved - which is the edit-scoped delta
-    # the 60s budget was sized for.
-    #
-    # Both consumers already honour this variable: indexer.py reads it before
-    # falling back to default_store_path, and retrieval.py resolves it before
-    # its own fallback. Nothing new is introduced; a fallback stops being taken.
-    os.environ.setdefault(
-        "GT_CONTRACT_EMBEDDING_INDEX",
-        str(Path(state_dir).resolve() / task_id / "contract-embeddings.sqlite"),
-    )
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
     predicates = tuple(
@@ -680,6 +655,25 @@ def build_agent(
         # of the run; it may not cost the run.
         index_receipt = ensure_index_with_receipt(
             cwd, layout=layout, excluded_roots=layout.excluded_roots,
+            # PIN THE CONTRACT STORE TO THE TASK, NOT TO A GRAPH REVISION.
+            # default_store_path derives it from the graph path, and the graph
+            # lives at revisions/<reuse_key>/graph.db - so every republication
+            # names a store that does not exist yet. Run 34077224456 shows it:
+            # ten rebuild refreshes, every one reporting planned=3809..3821, the
+            # FULL corpus, never a delta, because each new revision started
+            # cold. The 60s rebuild budget was sized for an edit-scoped delta it
+            # was never given.
+            #
+            # The store's LOCATION was graph-keyed; its CONTENT never was -
+            # entries key on (producer fingerprint, contract text digest). One
+            # store per task is correct by construction.
+            #
+            # Passed explicitly rather than through GT_CONTRACT_EMBEDDING_INDEX:
+            # an os.environ.setdefault here is process-global, and retrieval.py
+            # reads the same variable, so it leaked out of the run and into
+            # everything sharing the interpreter. The gate caught that as five
+            # failures in test_hybrid_retrieval that pass in isolation.
+            contract_store_path=layout.task_root / "contract-embeddings.sqlite",
             embedding_budget_seconds=(
                 # The INITIAL build must be allowed to finish, not merely be
                 # bounded. Run 34077224456 proved why: at min(300s, 10%) the

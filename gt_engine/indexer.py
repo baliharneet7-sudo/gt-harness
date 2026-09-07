@@ -1970,6 +1970,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                               source_revision: str = "",
                               excluded_roots: tuple[Path, ...] = (),
                               embedding_budget_seconds: float | None = None,
+                              contract_store_path: "Path | None" = None,
                               layout: RuntimeLayout | None = None) -> IndexBuildReceipt:
     root_path = Path(root)
     if layout is not None:
@@ -2177,7 +2178,11 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 onnx_token_lengths,
             )
 
-            store_path = os.environ.get("GT_CONTRACT_EMBEDDING_INDEX") or default_store_path(graph_path)
+            store_path = (
+                contract_store_path
+                or os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
+                or default_store_path(graph_path)
+            )
             store = ContractEmbeddingStore(store_path)
             # The refresh is a cache the retrieval side degrades from, but it
             # is CPU-bound ONNX inference over every moved contract and it runs

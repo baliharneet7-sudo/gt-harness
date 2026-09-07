@@ -1955,7 +1955,16 @@ class MiniSweAdapter(GroundtruthController):
                 k=8,
                 use_dense=True,
                 model_dir=model_dir,
-                store_path=os.environ.get("GT_CONTRACT_EMBEDDING_INDEX") or None,
+                # The same task-pinned store the index writes, so retrieval
+                # reads what the refresh populated instead of falling back to
+                # default_store_path - which is derived from the graph path and
+                # therefore empty on every republication. The env var stays as
+                # an operator override; it is no longer how the run addresses
+                # its own store.
+                store_path=(
+                    os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
+                    or str(self.engine_state.layout.task_root / "contract-embeddings.sqlite")
+                ),
             )
             dense = next(
                 source for source in ranking.sources
