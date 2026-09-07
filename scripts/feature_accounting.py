@@ -142,11 +142,17 @@ def account(events: list[dict]) -> dict:
     )
 
     rows = []
+    # All 19 identities, not the 12 owners. Seven of the 19 are capability
+    # aliases whose evidence is produced by another feature (CAPABILITY_OWNERS),
+    # and collapsing them silently reported a 12-row table for a 19-feature
+    # census - a reader counting rows would conclude seven features had been
+    # dropped. Show every identity; an alias states its owner and inherits its
+    # state, so nothing is double counted and nothing is hidden.
     for feature in sorted(DIRECT_FEATURES):
-        if feature in CAPABILITY_OWNERS:
-            continue  # an alias; its owner reports for it
-        count, declined = delivered[feature], refused[feature]
-        boundaries = tuple(DIRECT_FEATURES[feature].get("boundaries", ()))
+        owner = CAPABILITY_OWNERS.get(feature)
+        source = owner or feature
+        count, declined = delivered[source], refused[source]
+        boundaries = tuple(DIRECT_FEATURES[source].get("boundaries", ()))
         derivable = [b for b in boundaries if b in BOUNDARY_EVIDENCE]
         hits = {b: reached[b] for b in derivable if reached[b]}
         if "submit" in boundaries and terminal is not None:
@@ -173,8 +179,11 @@ def account(events: list[dict]) -> dict:
         else:
             state = "BOUNDARY_UNKNOWN"
             evidence = "no journal evidence defines " + ", ".join(sorted(boundaries))
+        if owner:
+            evidence = f"via {owner}: {evidence}"
         rows.append({
             "feature": feature,
+            "alias_of": owner or "",
             "state": state,
             "delivered": count,
             "refused": declined,
@@ -186,7 +195,9 @@ def account(events: list[dict]) -> dict:
     return {
         "schema": SCHEMA,
         "journal_rows": len(events),
-        "direct_features": len(rows),
+        "identities": len(rows),
+        "direct_features": sum(1 for row in rows if not row["alias_of"]),
+        "capability_aliases_shown": sum(1 for row in rows if row["alias_of"]),
         "deliveries_resolved": len(identity_feature),
         "delivered": sum(1 for row in rows if row["state"] == "DELIVERED"),
         "refused": sum(1 for row in rows if row["state"] == "REFUSED"),
@@ -212,7 +223,9 @@ def render(report: dict) -> str:
         f"{report['silent']} SILENT at a boundary that occurred, "
         f"{report['not_reached']} boundary never reached, "
         f"{report['boundary_unknown']} boundary underivable "
-        f"({report['direct_features']} direct features, "
+        f"({report['identities']} identities = "
+        f"{report['direct_features']} features + "
+        f"{report['capability_aliases_shown']} capability aliases, "
         f"{report['journal_rows']} journal rows)"
     )
     if report["unattributed_total"]:
