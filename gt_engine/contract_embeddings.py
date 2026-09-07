@@ -218,20 +218,28 @@ class EmbeddingBudgetInsufficient(EmbeddingBudgetExhausted):
 # Override for a different machine class rather than editing this: the constant
 # is a property of the hardware, and a wrong one changes whether the refresh
 # runs at all.
-# 12.1 was measured with ARRIVAL-ORDER batching, where a few long contracts
-# padded whole batches to their width. With length-bucketing the same corpus
-# costs 213,696 padded token-cells instead of 686,784 - a 3.2x reduction - so
-# the old constant now over-estimates by the same factor and would skip plans
-# that fit comfortably. Scaled: 3,583s / 3.2 / 119 batches = 9.4s.
+# MEASURED, at last, on the machine class that runs it - a container capped at
+# the task's own CPU allocation, with the pinned model (sha256 564e6c65) and
+# onnxruntime==1.20.1, over the real arktype length distribution.
 #
-# This one is a PROJECTION from the cell reduction, not a stopwatch reading,
-# and it is the weaker kind of number this file has twice been wrong with. It
-# is safe only because the run now reports its own observed_seconds_per_batch
-# in embedding_measurement: the first completed run replaces this with a
-# measurement, and a wrong value here shows up as an estimate that disagrees
-# with the outcome rather than as a silent skip.
+#            arrival order   length-sorted   speedup
+#   2 vCPU     12.57 s/batch    3.68 s/batch    3.4x
+#   1 vCPU     25.29 s/batch    7.61 s/batch    3.3x
+#
+# The 3.2x predicted from padded token-cells is confirmed by wall clock, and the
+# 119-batch pass falls from ~3,000s to ~900s at one core, ~440s at two.
+#
+# 7.61 - the SINGLE-core figure - is the value, deliberately. The two-core
+# measurement had both cores to itself; in the task container the model loop and
+# graph rebuilds share them. An under-estimate is the dangerous direction: it
+# starts work that cannot finish, where an over-estimate only skips work that
+# would have fitted, and the skip is reported. Take the pessimistic bound until a
+# completed run's observed_seconds_per_batch replaces it.
+#
+# Three previous values were 13.1 from a docstring, 12.1 from a division and 9.4
+# from scaling that division. This is the first one from a stopwatch.
 SECONDS_PER_BATCH_ESTIMATE = float(
-    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 9.4
+    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 7.61
 )
 
 
