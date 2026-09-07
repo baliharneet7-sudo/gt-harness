@@ -1064,6 +1064,51 @@ class MiniSweAdapter(GroundtruthController):
             str(receipt.graph_revision or ""), receipt.error_type or "",
         )
 
+    #: Wall-clock at import, so a directory older than this process cannot be
+    #: one of its own candidates. Compared against mtime rather than tracked in
+    #: a set, because the case being swept is precisely the one where no
+    #: in-process record survived.
+    _PROCESS_START = time.time()
+
+    def _sweep_dead_enrichments(self, namespace: Path) -> None:
+        """Remove candidate databases orphaned by a process that did not exit.
+
+        The coordinator now deletes what it refuses, and the producer deletes
+        what it fails. Neither runs when the process is killed mid-enrichment -
+        and run 34095557374 ended on a deadline with sixteen enrichment
+        directories against fifteen receipts, so exactly one candidate had no
+        disposition at all and its ~920MB survived unreferenced.
+
+        A directory whose mtime predates this process cannot be one of this
+        run's candidates, and nothing outside the run refers to it: candidates
+        live under graph_root/enrichments. Comparing mtime rather than consulting
+        a registry is deliberate - the whole point is that the registry died
+        with the process.
+
+        A PUBLISHED CANDIDATE IS THE LIVE GRAPH AND MUST SURVIVE.
+        certify_lsp_candidate returns GraphBuildArtifact(True, str(candidate))
+        with the candidate path UNCHANGED (indexer.py:1773) and the coordinator
+        publishes exactly that, so the live graph_path can point INTO this
+        namespace. The mtime guard already covers it - a graph published by this
+        process is newer than this process - but that is incidental protection
+        for a catastrophic mistake, so the live directory is excluded by name as
+        well. It is also why the tempting one-liner, excluding enrichments/ from
+        the artifact upload, is wrong: it would drop the live graph.
+        """
+        live = getattr(self.engine_state, "graph_path", "")
+        live_dir = Path(live).parent.resolve() if live else None
+        for entry in sorted(namespace.glob("lsp-*")):
+            try:
+                if not entry.is_dir() or entry.stat().st_mtime >= self._PROCESS_START:
+                    continue
+                if live_dir is not None and entry.resolve() == live_dir:
+                    continue
+                shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                # Sweeping is an optimisation; failing it must never stop an
+                # enrichment from being scheduled.
+                continue
+
     def _schedule_lsp_candidate(self, request: FrozenBuildInput, base: GraphBuildArtifact) -> Any:
         from groundtruth.lsp.background_promotion import (
             LSPPromotionRequest,
@@ -1083,6 +1128,7 @@ class MiniSweAdapter(GroundtruthController):
         layout = self.engine_state.layout
         namespace = layout.graph_root / "enrichments"
         namespace.mkdir(parents=True, exist_ok=True)
+        self._sweep_dead_enrichments(namespace)
         directory = Path(tempfile.mkdtemp(prefix="lsp-", dir=namespace))
         source = directory / "source"
         source.mkdir()
