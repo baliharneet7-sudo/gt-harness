@@ -61,6 +61,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os as _os
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -94,7 +95,9 @@ __all__ = [
     "Binding",
     "ContractEmbeddingStore",
     "EmbeddingBudgetExhausted",
+    "EmbeddingBudgetInsufficient",
     "EmbeddingPlan",
+    "SECONDS_PER_BATCH_ESTIMATE",
     "DocumentVectorLookup",
     "StoreLookup",
     "SymbolEmbeddingInput",
@@ -168,6 +171,45 @@ class EmbeddingBudgetExhausted(RuntimeError):
         super().__init__(f"contract_embedding_budget_exhausted:{embedded}/{planned}")
         self.embedded = int(embedded)
         self.planned = int(planned)
+
+
+class EmbeddingBudgetInsufficient(EmbeddingBudgetExhausted):
+    """The plan could not have finished, so no batch was run.
+
+    Because a partial plan is discarded rather than published, an exhausted
+    refresh and a skipped one leave the store in the SAME state -- the exhausted
+    one just spends the budget first. Estimating ahead of the first batch turns
+    an always-firing guard into one honest decision, and the numbers it reports
+    (planned, estimated, budget) are the argument for moving this work out of
+    the timed window and into the image.
+    """
+
+    def __init__(self, planned: int, estimated: float, budget: float) -> None:
+        RuntimeError.__init__(
+            self,
+            f"contract_embedding_budget_insufficient:planned={planned}:"
+            f"estimated={estimated:.0f}s:budget={budget:.0f}s",
+        )
+        self.embedded = 0
+        self.planned = int(planned)
+        self.estimated_seconds = float(estimated)
+        self.budget_seconds = float(budget)
+
+
+# Seconds for one batch of DEFAULT_BATCH_SIZE contract texts through
+# snowflake-arctic-embed-m on the two-vCPU benchmark image. DERIVED FROM THE
+# ONLY MEASUREMENT THERE IS, not chosen: run 34062325608 built its graph in
+# 37.4s (index-resource.json `elapsed_ms`), its worker was SIGTERMed at
+# 1500.07s (miniswe_report.json `elapsed_seconds`), and the ~1,440s in between
+# went entirely into this refresh. The arktype reference graph carries 3,511
+# contract symbols (module docstring above), so 110 batches / 1,440s = 13.1s.
+#
+# Override for a different machine class rather than editing this: the constant
+# is a property of the hardware, and a wrong one here silently changes whether
+# the refresh runs at all.
+SECONDS_PER_BATCH_ESTIMATE = float(
+    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 13.1
+)
 
 
 _FINGERPRINT_KIND = "fingerprint"
@@ -556,6 +598,12 @@ class ContractEmbeddingStore:
             model_id=self.model_id,
             dimension=self.dimension,
         )
+        if deadline is not None and plan.to_embed:
+            budget = deadline - time.monotonic()
+            batches = -(-len(plan.to_embed) // max(1, batch_size))
+            estimated = batches * SECONDS_PER_BATCH_ESTIMATE
+            if estimated > budget:
+                raise EmbeddingBudgetInsufficient(len(plan.to_embed), estimated, budget)
         vectors = self._embed_plan(plan, embed_fn, batch_size, deadline)
         # Vector bytes and their current graph bindings are one SQLite commit.
         # A crash or callback failure rolls both back, so readers never observe

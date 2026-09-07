@@ -2420,6 +2420,15 @@ class MiniSweAdapter(GroundtruthController):
         turn must never increment it. Receipt reconciliation therefore compares
         api_calls + bootstrap calls against admissions and responses. Usage and
         cost continue to include this call: it is real spend.
+
+        COUNTS ATTEMPTS, NOT SUCCESSES. The call is spent the moment the
+        transport returns, so this is incremented there and a failure in the
+        response handling below it does not decrement. Every consumer wants
+        exactly that -- all three are arithmetic on spend
+        (`runtime_receipts.py` validates the range, records it verbatim, and
+        adds it to `agent_turn_calls`). Nothing may read it as evidence that a
+        catalog was obtained; that lives in the `select_catalog_lifecycle`
+        rows, which carry the stage the ladder actually reached.
         """
         self._select_catalog_bootstrap_calls += 1
 

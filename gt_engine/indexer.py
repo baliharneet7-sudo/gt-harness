@@ -2067,6 +2067,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
             from gt_engine.contract_embeddings import (
                 ContractEmbeddingStore,
                 EmbeddingBudgetExhausted,
+                EmbeddingBudgetInsufficient,
                 default_store_path,
                 onnx_embedder,
             )
@@ -2091,6 +2092,14 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
             finally:
                 store.close()
             embedding_state = "refreshed"
+        except EmbeddingBudgetInsufficient as exc:
+            # One honest state, nothing spent. The numbers are the case for
+            # building this store at bundle time instead.
+            embedding_state = "budget_insufficient"
+            embedding_failure = (
+                f"planned={exc.planned}:estimated={exc.estimated_seconds:.0f}s:"
+                f"budget={exc.budget_seconds:.0f}s"
+            )
         except EmbeddingBudgetExhausted as exc:
             embedding_state = "budget_exhausted"
             embedding_failure = f"{exc.embedded}/{exc.planned}"
