@@ -482,24 +482,26 @@ jobs:
             echo "  SOURCE-COMMIT         : $vendored" >&2
             exit 1
           fi
-          # SOURCE-COMMIT is a promise: it binds tree to binary by assertion and
-          # nothing checks the CONTENTS. The producer's own build script computes
-          # a content digest over exactly these extensions, so recompute it here
-          # and compare against build-info's source_fingerprint. Reported, not yet
-          # asserted, for one reason stated plainly: the digest hashes file bytes
-          # and so is line-ending sensitive, and it could not be reproduced off
-          # the Windows working tree where this landed. This step records the
-          # Linux value; the moment it agrees with build-info it becomes the
-          # assertion and SOURCE-COMMIT can go, because a content digest is
-          # strictly stronger than a stamp.
+          # SOURCE-COMMIT above is a promise: it binds tree to binary by
+          # assertion and nothing checks the CONTENTS. This checks the contents.
+          # The digest is the producer's own recipe (build_gt_index_linux.sh:73)
+          # and reproduces build-info's source_fingerprint exactly from the
+          # vendored tree, so a source change without a rebuild fails here.
+          #
+          # It hashes file BYTES, so vendor/gt-index-src carries `* -text` to
+          # stop any checkout translating line endings. Getting this to agree
+          # took two corrections worth recording: the tree was first vendored
+          # from a Windows working copy with CRLF, which no Linux build can
+          # match; and the digest was first computed with Git Bash's sha256sum,
+          # which marks binary mode with `*` and so produces a different second
+          # hash than GNU coreutils on Linux. Neither was a defect in the source.
           computed="$(find . -type f \( -name '*.go' -o -name '*.c' -o -name '*.cc'             -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.s'             -o -name 'go.mod' -o -name 'go.sum' \) -print0             | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           declared="$(python3 -c "import json;print(json.load(open('../gt-index-linux-amd64.build-info.json'))['source_fingerprint'])")"
           echo "source_fingerprint declared : $declared"
           echo "source_fingerprint computed : $computed"
-          if [ "$declared" = "$computed" ]; then
-            echo "source_fingerprint MATCHES - promote this to a hard assertion"
-          else
-            echo "source_fingerprint differs - vendored tree not yet byte-equal to the built tree"
+          if [ "$declared" != "$computed" ]; then
+            echo "vendored producer source does not hash to what the binary declares" >&2
+            exit 1
           fi
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools
