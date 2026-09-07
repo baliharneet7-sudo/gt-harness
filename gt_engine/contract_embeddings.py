@@ -197,18 +197,29 @@ class EmbeddingBudgetInsufficient(EmbeddingBudgetExhausted):
 
 
 # Seconds for one batch of DEFAULT_BATCH_SIZE contract texts through
-# snowflake-arctic-embed-m on the two-vCPU benchmark image. DERIVED FROM THE
-# ONLY MEASUREMENT THERE IS, not chosen: run 34062325608 built its graph in
-# 37.4s (index-resource.json `elapsed_ms`), its worker was SIGTERMed at
-# 1500.07s (miniswe_report.json `elapsed_seconds`), and the ~1,440s in between
-# went entirely into this refresh. The arktype reference graph carries 3,511
-# contract symbols (module docstring above), so 110 batches / 1,440s = 13.1s.
+# snowflake-arctic-embed-m on the two-vCPU benchmark image. Derived, not chosen.
+#
+# Run 34062325608 built its graph in 37.4s (index-resource.json `elapsed_ms`)
+# and its worker was SIGTERMed at 1500.07s (miniswe_report.json
+# `elapsed_seconds`); the interval between went into this refresh, which is why
+# its sidecar arrived holding 38MB of pages, a live rollback journal and zero
+# rows. The plan size is measured off that run's own graph.db rather than
+# quoted: `embedding_inputs` returns 3,808 inputs, so 119 batches.
+#
+#   1,440s / 119 batches = 12.10s
+#
+# 1,440s is the conservative end of the interval (the true gap is nearer
+# 1,460s), and the bias is deliberate: an UNDER-estimate is caught by the
+# between-batch deadline, while an OVER-estimate silently skips a plan that
+# would have fitted and nothing reports that as a mistake. Round toward
+# running. An earlier draft said 3,511 from the module docstring above and
+# 13.1s; the docstring describes a different graph revision.
 #
 # Override for a different machine class rather than editing this: the constant
-# is a property of the hardware, and a wrong one here silently changes whether
-# the refresh runs at all.
+# is a property of the hardware, and a wrong one changes whether the refresh
+# runs at all.
 SECONDS_PER_BATCH_ESTIMATE = float(
-    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 13.1
+    _os.environ.get("GT_EMBEDDING_SECONDS_PER_BATCH", "") or 12.1
 )
 
 
