@@ -12,8 +12,10 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -23,7 +25,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/resolver"
 	"github.com/harneet2512/groundtruth/gt-index/internal/specs"
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
+	"github.com/harneet2512/groundtruth/gt-index/internal/taxonomy"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 	// Note: specs is imported above (named); its init() functions register all language specs.
 )
@@ -48,10 +50,57 @@ import (
 // TODO(RC-17-build): rebuild on Linux host with the build script — this
 // Windows worktree cannot regenerate bin/gt-index-linux.
 var (
-	commitSHA    = "unknown"
-	buildTimeUTC = "unknown"
-	goToolchain  = "unknown"
+	commitSHA         = "unknown"
+	buildTimeUTC      = "unknown"
+	goToolchain       = "unknown"
+	sourceFingerprint = "unknown"
+	compiledBuildTags = "unknown"
 )
+
+func repoCommit(root string) string {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func repositoryIdentity(root string) string {
+	out, err := exec.Command("git", "-C", root, "config", "--get", "remote.origin.url").Output()
+	identity := strings.TrimSpace(string(out))
+	if err != nil || identity == "" {
+		identity = filepath.Base(filepath.Clean(root))
+	}
+	identity = strings.ToLower(strings.TrimSuffix(strings.ReplaceAll(identity, "\\", "/"), ".git"))
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:])
+}
+
+func qualifiedCallChain(qualified string) []string {
+	if qualified == "" {
+		return []string{}
+	}
+	parts := strings.FieldsFunc(qualified, func(r rune) bool { return r == '.' || r == ':' })
+	if len(parts) <= 1 {
+		return []string{}
+	}
+	return parts[:len(parts)-1]
+}
+
+func setRequiredMetadata(db *store.DB, values map[string]string) error {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := db.SetMeta(key, values[key]); err != nil {
+			return fmt.Errorf("set required metadata %s: %w", key, err)
+		}
+	}
+	return nil
+}
 
 // FINAL_ARCH_V2 schema contract.
 // Bump when edges/nodes columns change; Python readers gate on >= this.
@@ -64,16 +113,163 @@ type fileParseResult struct {
 	err     error
 }
 
+func collectParseResults(files []walker.SourceFile, resultCh <-chan fileParseResult) ([]*parser.ParseResult, int, []string) {
+	results := make([]*parser.ParseResult, len(files))
+	parseFailures := 0
+	var failSample []string
+	for pr := range resultCh {
+		if pr.err == nil && pr.result != nil && !pr.result.ParserIncomplete {
+			results[pr.fileIdx] = pr.result
+			continue
+		}
+		parseFailures++
+		if pr.err == nil && pr.result != nil {
+			// Keep recoverable partial AST facts, but account for the damaged
+			// source and let ParserIncomplete suppress target authority.
+			results[pr.fileIdx] = pr.result
+		}
+		if len(failSample) >= 10 || pr.fileIdx < 0 || pr.fileIdx >= len(files) {
+			continue
+		}
+		if pr.err != nil {
+			failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
+		} else if pr.result != nil && pr.result.ParserIncomplete {
+			failSample = append(failSample, fmt.Sprintf("%s: parser-incomplete syntax tree", files[pr.fileIdx].Path))
+		} else {
+			failSample = append(failSample, fmt.Sprintf("%s: parser returned no result", files[pr.fileIdx].Path))
+		}
+	}
+	return results, parseFailures, failSample
+}
+
+func selectedTargetForDispatch(dispatchState string, selected *int64) *int64 {
+	if dispatchState != string(resolver.DispatchUnique) {
+		return nil
+	}
+	return selected
+}
+
+func candidateDispatchStateForCount(count int) string {
+	switch count {
+	case 0:
+		return string(resolver.DispatchZero)
+	case 1:
+		return string(resolver.DispatchCandidateOnly)
+	default:
+		return string(resolver.DispatchAmbiguous)
+	}
+}
+
+// vtaCallsiteMechanism reports the mechanism a flow-influenced callsite may
+// claim over its published candidate set.
+//
+// "vta" publishes the variable_type_flow derivation, and the store holds every
+// candidate of such a callsite to carrying flow proof. That is only true while
+// the published set IS the flow set. The partial branch merges conservative
+// hierarchy candidates in so incomplete flow does not erase them, and those
+// have no flow proof -- claiming "vta" over them asserts evidence that does not
+// exist, which the store rejects. Publication is atomic, so that rejection
+// discards the whole graph rather than one edge.
+//
+// A merged set is the conservative implementor set, which is what impl_method
+// names. The hierarchy evidence is conserved either way; only the claim about
+// how it was derived changes. An empty flow set claims nothing and leaves the
+// resolver its own attribution.
+// dedupeCandidatesByStableIdentity collapses candidates whose targets share a
+// stable id, keeping the original order.
+//
+// A candidate is identified by its target's stable id, so one callsite cannot
+// carry the same target twice. Distinct nodes can nonetheless share a stable
+// id -- aiomonitor resolves seven distinct nodes named "set" to one -- and
+// publishing each separately produced duplicate CANDIDATE_TARGET edge ids,
+// whose stable id is (callsite, target stable id) with no ordinal. That is a
+// UNIQUE violation, and publication is atomic, so it discarded the whole graph.
+//
+// It also mattered before the crash: candidate_count decides candidate_only
+// versus ambiguous dispatch, so repeats pushed single-target callsites into
+// ambiguous.
+//
+// The selected node is preferred as its identity's representative -- dropping
+// it would leave the callsite with nothing marked selected. Nodes missing from
+// the symbol table are passed through untouched: the publication loop already
+// skips them, and removing them here would break the candidate-conservation
+// check, which compares these two lengths.
+func dedupeCandidatesByStableIdentity(ids []int64, selected *int64, stableID func(int64) (string, bool)) []int64 {
+	representative := make(map[string]int64, len(ids))
+	if selected != nil {
+		if key, ok := stableID(*selected); ok {
+			representative[key] = *selected
+		}
+	}
+	kept := make([]int64, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		key, ok := stableID(id)
+		if !ok {
+			kept = append(kept, id)
+			continue
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if chosen, ok := representative[key]; ok {
+			kept = append(kept, chosen)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	return kept
+}
+
+func vtaCallsiteMechanism(vtaCandidates, publishedCandidates []int64) string {
+	if len(vtaCandidates) == 0 {
+		return ""
+	}
+	if len(publishedCandidates) > len(vtaCandidates) {
+		return "impl_method"
+	}
+	return "vta"
+}
+
 func main() {
 	root := flag.String("root", ".", "Project root directory")
-	roots := flag.String("roots", "", "SM-9a MULTI-REPO: comma-separated ADDITIONAL repository roots to index into ONE graph.db alongside -root (repo_id-partitioned, cross-repo import edges). Empty (default) = single-root behavior, byte-identical to before.")
 	output := flag.String("output", "graph.db", "Output SQLite database path")
 	maxFiles := flag.Int("max-files", 10000, "Maximum files to index")
 	workers := flag.Int("workers", 0, "Parallel parse workers (0 = NumCPU)")
 	file := flag.String("file", "", "Incremental mode: re-index only this single file (relative to -root) into an existing -output graph.db")
 	closureEnabled := flag.Bool("closure", true, "C7: compute the transitive-closure sidecar over VERIFIED CALLS edges (default on)")
 	rebuildClosure := flag.Bool("rebuild-closure", false, "Recompute the closure sidecar on an existing -output graph.db over its CURRENT edges. Run AFTER the LSP resolve pass so the closure reflects LSP-promoted/re-pointed/deleted edges (it is built once at index time and goes stale otherwise). Clears the old closure first.")
+	buildInfo := flag.Bool("build-info", false, "Print the gt-index.build.v1 binary identity JSON and exit")
+	frameworkValidation := flag.Bool("framework-validation", false, "Print the HAR-70 framework overlay validation report and exit")
+	inspectJSONL := flag.Bool("inspect-jsonl", false, "Parse caller-supplied source bytes as pure JSONL without graph mutation")
 	flag.Parse()
+	if *inspectJSONL {
+		if err := runInspectionJSONL(os.Stdin, os.Stdout); err != nil {
+			log.Fatalf("inspect-jsonl: %v", err)
+		}
+		return
+	}
+	if *frameworkValidation {
+		payload := struct {
+			Schema string                            `json:"schema"`
+			Rows   []resolver.FrameworkValidationRow `json:"rows"`
+			Digest string                            `json:"validation_digest_sha256"`
+		}{Schema: "gt.framework_resolution_validation.v1", Rows: resolver.FrameworkValidationReport()}
+		payload.Digest = resolver.FrameworkValidationDigest(payload.Rows)
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(payload); err != nil {
+			log.Fatalf("framework-validation: %v", err)
+		}
+		return
+	}
+	if *buildInfo {
+		if err := writeBuildInfo(os.Stdout); err != nil {
+			log.Fatalf("build-info: %v", err)
+		}
+		return
+	}
 
 	if *workers <= 0 {
 		*workers = runtime.NumCPU()
@@ -83,14 +279,7 @@ func main() {
 	// existing graph.db. Does not rebuild from scratch; expects -output to exist.
 	if *file != "" {
 		if err := runIncremental(*root, *file, *output); err != nil {
-			// Executor contract (requirement a): every failure class — missing
-			// source file, absent/unwritable db, parse-fatal, unsupported
-			// extension — exits NONZERO with a CLEAR one-line stderr and NO
-			// stdout summary. Flatten any embedded newline so the overlay always
-			// reads a single diagnostic line (not log.Fatalf's timestamped form).
-			msg := strings.ReplaceAll(err.Error(), "\n", " ")
-			fmt.Fprintf(os.Stderr, "gt-index -file: %s\n", msg)
-			os.Exit(1)
+			log.Fatalf("incremental: %v", err)
 		}
 		return
 	}
@@ -127,48 +316,36 @@ func main() {
 		if err := db.PopulateFTS5(); err != nil {
 			log.Printf("[WARN] rebuild-closure: FTS5 re-population failed: %v", err)
 		}
-		// Graph-F1 (bounce 2026-07-10): rebuild-closure runs AFTER the LSP resolve pass
-		// (groundtruth.resolve UPDATE/DELETEs edges + UPDATEs nodes), so the edge_metadata
-		// sub-table and the composite post_revision + subrev_<surface> stamped by the
-		// earlier full index now fingerprint the PRE-LSP graph. Refresh both here — LAST,
-		// after the closure + FTS refresh — so the LIVE-read B-11 revision + every
-		// envelope's graph_revision/valid_until + the B-21 latch re-permit + the
-		// incremental "did the graph change" contract key the CURRENT (post-LSP) graph.
-		// Mirror the -file path's fail-closed contract: PopulateEdgeMetadata is a derived
-		// index (non-fatal — the raw metadata stands; consumers fall back to
-		// ParseEdgeMetadata), StampCompositeRevision is the fingerprint contract (fatal —
-		// a stale/unstampable revision must abort, not ship silently).
-		if err := db.PopulateEdgeMetadata(); err != nil {
-			log.Printf("WARNING: rebuild-closure: populate edge_metadata: %v", err)
-		}
-		if _, err := db.StampCompositeRevision(); err != nil {
-			log.Fatalf("rebuild-closure: stamp composite revision: %v", err)
+		if err := db.PopulatePropertiesFTS5(); err != nil {
+			log.Printf("[WARN] rebuild-closure: properties FTS5 re-population failed: %v", err)
 		}
 		db.CheckpointWAL()
 		return
 	}
 
-	// SM-9a MULTI-REPO: when >1 root is requested (via -roots), take the dedicated
-	// multi-repository ingest path (repo_id partitioning + coordinate-verified
-	// cross-repo import edges). The single-root path below is LEFT BYTE-IDENTICAL —
-	// it only runs when -roots is empty, so a single-repo index is unchanged.
-	if rootList := buildRootList(*root, *roots); len(rootList) > 1 {
-		if err := runMultiRepo(rootList, *output, *maxFiles, *workers); err != nil {
-			fmt.Fprintf(os.Stderr, "gt-index -roots: %s\n", strings.ReplaceAll(err.Error(), "\n", " "))
-			os.Exit(1)
-		}
-		return
-	}
-
 	start := time.Now()
 
-	// Remove old DB if it exists
-	os.Remove(*output)
+	// Full builds are assembled beside the requested output and published only
+	// after every pass, integrity check, and WAL checkpoint succeeds. The previous
+	// complete graph therefore remains authoritative if parsing, indexing, or
+	// finalization terminates early.
+	requestedOutput := *output
+	stagedOutput, err := createStagedOutput(requestedOutput)
+	if err != nil {
+		log.Fatalf("create staged output: %v", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			cleanupStagedOutput(stagedOutput)
+		}
+	}()
+	*output = stagedOutput
 
 	// Open database
-	db, err := store.Open(*output)
+	db, err := store.Open(stagedOutput)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		abortStagedBuild(nil, stagedOutput, "open db: %v", err)
 	}
 	defer db.Close()
 
@@ -176,7 +353,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "Pass 1: discovering files in %s...\n", *root)
 	files, err := walker.Walk(*root, *maxFiles)
 	if err != nil {
-		log.Fatalf("walk: %v", err)
+		abortStagedBuild(db, stagedOutput, "walk: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "  Found %d source files\n", len(files))
 
@@ -235,22 +412,8 @@ func main() {
 		close(resultCh)
 	}()
 
-	// Collect results — COUNT + SAMPLE parse failures (industrial hardening: never
-	// silently ship a thin graph. SAY the problem, LOG it, IDENTIFY the files. A failure
-	// here used to be dropped on the floor — a repo where N% of files failed to parse
-	// produced a thin graph with zero warning. Now it is surfaced + fail-closed.)
-	parseFailures := 0
-	var failSample []string
-	for pr := range resultCh {
-		if pr.err == nil && pr.result != nil {
-			results[pr.fileIdx] = pr.result
-		} else if pr.err != nil {
-			parseFailures++
-			if len(failSample) < 10 && pr.fileIdx >= 0 && pr.fileIdx < len(files) {
-				failSample = append(failSample, fmt.Sprintf("%s: %v", files[pr.fileIdx].Path, pr.err))
-			}
-		}
-	}
+	// Collect results and preserve parser failures in project_meta.
+	results, parseFailures, failSample := collectParseResults(files, resultCh)
 
 	parseElapsed := time.Since(parseStart)
 	parsedOK := len(files) - parseFailures
@@ -258,25 +421,23 @@ func main() {
 	if len(files) > 0 {
 		failRate = float64(parseFailures) / float64(len(files))
 	}
-	fmt.Fprintf(os.Stderr, "  Parsed %d/%d files in %s (%d parse failures, %.1f%%)\n",
-		parsedOK, len(files), parseElapsed.Round(time.Millisecond), parseFailures, failRate*100)
+	fmt.Fprintf(os.Stderr, "  Parsed %d/%d files in %s (%d parse failures, %.1f%%)\n", parsedOK, len(files), parseElapsed.Round(time.Millisecond), parseFailures, failRate*100)
 	if parseFailures > 0 {
-		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d, IDENTIFY the cause):\n", len(failSample))
-		for _, s := range failSample {
-			fmt.Fprintf(os.Stderr, "    - %s\n", s)
+		fmt.Fprintf(os.Stderr, "  [WARN] parse failures (first %d):\n", len(failSample))
+		for _, sample := range failSample {
+			fmt.Fprintf(os.Stderr, "    - %s\n", sample)
 		}
 	}
-	// Fail-closed on a catastrophic index — a non-zero exit lets the runtime RETRY,
-	// and the log above IDENTIFIES the cause. A silent thin graph is forbidden.
 	if len(files) > 0 && parsedOK == 0 {
-		log.Fatalf("INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
+		abortStagedBuild(db, stagedOutput, "INDEX FAILED: 0/%d files parsed — graph would be empty (sample: %v)", len(files), failSample)
 	}
-	if reqRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); reqRate != "" {
-		var minRate float64
-		fmt.Sscanf(reqRate, "%f", &minRate)
-		if minRate > 0 && len(files) >= 20 && (1.0-failRate) < minRate {
-			log.Fatalf("GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)",
-				minRate, (1.0-failRate)*100, len(files), failSample)
+	if requiredRate := os.Getenv("GT_REQUIRE_PARSE_RATE"); requiredRate != "" {
+		var minimumRate float64
+		if _, err := fmt.Sscanf(requiredRate, "%f", &minimumRate); err != nil {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_PARSE_RATE=%q is not a valid number: %v", requiredRate, err)
+		}
+		if minimumRate > 0 && len(files) >= 20 && (1.0-failRate) < minimumRate {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_PARSE_RATE=%.2f but only %.1f%% of %d files parsed — index too thin, failing closed (sample: %v)", minimumRate, (1.0-failRate)*100, len(files), failSample)
 		}
 	}
 
@@ -316,19 +477,6 @@ func main() {
 		for _, prop := range result.Properties {
 			p := prop
 			p.NodeIdx = fileNodeStartIdx + prop.NodeIdx
-			// P16 (Fable, defense-in-depth): NEVER store a test node's free-text body-channel
-			// property (string literals / body terms / call names) — they can carry
-			// assertion-adjacent text. These are already gated at extraction (extractBodyChannels
-			// runs only when !isTest), and consumers filter is_test, so there is no active leak;
-			// this is belt-and-suspenders so no future path can slip a test node's free text into
-			// the property surface. Resolver-input kinds (param / data_flow / return_shape /
-			// field_type / ...) are UNTOUCHED, so test-code resolution is unaffected.
-			if p.NodeIdx >= 0 && p.NodeIdx < len(allNodePtrs) && allNodePtrs[p.NodeIdx].IsTest {
-				switch p.Kind {
-				case "string_literals", "body_terms", "calls":
-					continue
-				}
-			}
 			allProps = append(allProps, p)
 		}
 		for _, a := range result.Assertions {
@@ -355,31 +503,15 @@ func main() {
 		}
 	}
 
-	// Fail-closed: files parsed but 0 nodes extracted = a broken graph the cert would
-	// later reject anyway. Fail HERE with a clear cause so the runtime can retry.
-	if len(files) > 0 && len(allNodePtrs) == 0 {
-		log.Fatalf("INDEX FAILED: %d files parsed but 0 nodes extracted — empty graph (lang specs? walker filter?)", parsedOK)
-	}
-
 	// Batch insert all nodes in one transaction
 	insertStart := time.Now()
 	nodeDBIDs, err := db.BatchInsertNodes(allNodePtrs)
 	if err != nil {
-		log.Fatalf("batch insert nodes: %v", err)
+		abortStagedBuild(db, stagedOutput, "batch insert nodes: %v", err)
 	}
 
-	// Fix up parent IDs: map global index → DB ID.
-	// DETERMINISM (Fable S4): apply the UPDATEs in SORTED key order, never Go map-range
-	// order. Each UPDATE resizes a NULL→int parent_id record; a randomized apply order
-	// makes SQLite's page defrag emit byte-DIFFERENT graph.db files on any repo with
-	// classes/methods (measured 6/6 distinct hashes), forfeiting the byte-identity invariant.
-	fixupIdxs := make([]int, 0, len(parentFixups))
-	for nodeIdx := range parentFixups {
-		fixupIdxs = append(fixupIdxs, nodeIdx)
-	}
-	sort.Ints(fixupIdxs)
-	for _, nodeIdx := range fixupIdxs {
-		parentGlobalIdx := parentFixups[nodeIdx]
+	// Fix up parent IDs: map global index → DB ID
+	for nodeIdx, parentGlobalIdx := range parentFixups {
 		pidx := int(parentGlobalIdx) - 1 // convert 1-based to 0-based
 		if pidx >= 0 && pidx < len(nodeDBIDs) {
 			parentDBID := nodeDBIDs[pidx]
@@ -396,27 +528,26 @@ func main() {
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("WARNING: FTS5 population failed: %v", err)
 	}
-	// B1: build the CONTENT surface (symbol_content_fts) over per-symbol body content
-	// so the localizer's content-BM25 leg can RETRIEVE behavior-described (stratum-B)
-	// files the name-only surfaces (nodes_fts/embedder/anchor) structurally miss.
-	// Standalone + additive; FTS5-gated (no-op when FTS5 is absent). Non-fatal — a
-	// content-index failure never blocks the build (the leg degrades to 0).
-	if err := db.EnsureContentFTS(); err != nil {
-		log.Printf("WARNING: content FTS ensure failed: %v", err)
-	}
-	if err := db.PopulateContentFTS(*root); err != nil {
-		log.Printf("WARNING: content FTS population failed: %v", err)
-	}
 	// GT_REQUIRE_FTS5 preflight gate: on a paid benchmark we must NOT silently
 	// degrade to the Python name-match fallback. If FTS5 isn't a real, populated
 	// index, abort the index build so the run never starts. n<=0 means the binary
 	// was built without `-tags sqlite_fts5` (FTS5 compiled out → nodes_fts absent).
 	if os.Getenv("GT_REQUIRE_FTS5") == "1" {
 		if n := db.FTS5RowCount(); n <= 0 {
-			log.Fatalf("GT_REQUIRE_FTS5=1 but nodes_fts has %d rows — FTS5 is not compiled in. "+
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 but nodes_fts has %d rows — FTS5 is not compiled in. "+
 				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.", n)
 		} else {
 			fmt.Fprintf(os.Stderr, "[GT preflight] FTS5 OK: nodes_fts populated (%d rows)\n", n)
+		}
+		// Same gate, second index. properties_fts is empty at this point —
+		// properties are written two passes later — so the only thing that can
+		// be asserted here is that the CREATE VIRTUAL TABLE was accepted at
+		// schema time. -1 means it was not, i.e. FTS5 is compiled out and
+		// property_rank would silently fall back to a whole-table LIKE scan.
+		// Row coverage is asserted at the publication boundary instead.
+		if n := db.PropertiesFTS5RowCount(); n < 0 {
+			abortStagedBuild(db, stagedOutput, "GT_REQUIRE_FTS5=1 but properties_fts does not exist — FTS5 is not compiled in. "+
+				"Rebuild gt-index with `-tags sqlite_fts5`. Aborting to avoid a degraded paid run.")
 		}
 	}
 
@@ -483,13 +614,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  Re-export chaining: %d aliases from %d re-exports\n", chainCount, len(allReExports))
 		}
 	}
-	// Full-index path: the whole-repo re-export set was parsed and (above) folded into
-	// fileMap, so F* is COMPLETE → B1b's DROP is sound here. Reset the incremental marker
-	// explicitly (default is already false; this makes it INVARIANT against any future
-	// same-process mode that runs a full index after a `-file` reindex — batch/server/
-	// watch — where the package var would otherwise still read true and silently downgrade
-	// B1b to demote on a full index). Matches Fable Finding-1 nit 4.
-	resolver.SetReExportGraphIncomplete(false)
 
 	// Build caller ID list
 	callerDBIDs := make([]int64, len(allCalls))
@@ -563,7 +687,67 @@ func main() {
 	// once in the caller (main.go) before Resolve sees the imports.
 	resolver.ExpandRustCrateImports(allImports, filePaths, fileLangs, *root)
 
-	resolved := resolver.Resolve(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
+	resolved, callsites := resolver.ResolveWithProvenance(allCalls, nameIndex, fileIndex, callerDBIDs, allImports, fileMap, nodeMeta)
+	// CHA→RTA is an additive, score-free hierarchy pass. The default boundary
+	// is open; callers may explicitly provide a closed repository boundary with
+	// GT_HIERARCHY_CLOSED=1. In either case its coverage is published alongside
+	// the existing resolver evidence, so an open hierarchy cannot be accepted
+	// as a closed target set by downstream queries.
+	hierarchyClosed := os.Getenv("GT_HIERARCHY_CLOSED") == "1"
+	// Publication is one atomic transaction, so an analysis that does not
+	// terminate costs the entire graph rather than one callsite. The budgets
+	// are the execution rail; exceeding one publishes a typed abstention, not
+	// silence. A malformed setting fails closed here, before any work.
+	budgets, budgetErr := resolveIndexBudgets(os.LookupEnv)
+	if budgetErr != nil {
+		abortStagedBuild(db, stagedOutput, "%v", budgetErr)
+	}
+	receiverTypes := make(map[int]string, len(callsites))
+	resolverCandidates := make([][]int64, len(allCalls))
+	for _, callsite := range callsites {
+		receiverTypes[callsite.CallsiteOrdinal] = callsite.ReceiverType
+		if callsite.CallsiteOrdinal >= 0 && callsite.CallsiteOrdinal < len(resolverCandidates) {
+			resolverCandidates[callsite.CallsiteOrdinal] = append([]int64(nil), callsite.CandidateNodeIDs...)
+		}
+	}
+	hierarchyResults := resolver.AnalyzeCHAThenRTAWithReachability(allCalls, nodeMeta, inhMap, allAssignments, receiverTypes, callerDBIDs, resolverCandidates, hierarchyClosed)
+	hierarchyByOrdinal := make(map[int]resolver.CHAThenRTAResult, len(hierarchyResults))
+	for _, result := range hierarchyResults {
+		hierarchyByOrdinal[result.CallsiteOrdinal] = result
+	}
+	vtaResults := resolver.AnalyzeVTAWithBudget(allCalls, nodeMeta, inhMap, allAssignments, budgets.VTAIterations)
+	vtaByOrdinal := make(map[int]resolver.VTAResult, len(vtaResults))
+	vtaIterations, vtaBudgetExhausted := 0, false
+	for _, result := range vtaResults {
+		vtaByOrdinal[result.CallsiteOrdinal] = result
+		if result.Iterations > vtaIterations {
+			vtaIterations = result.Iterations
+		}
+		if result.BudgetExhausted {
+			vtaBudgetExhausted = true
+		}
+	}
+	fmt.Fprintf(os.Stderr, "  VTA fixed point: %d rounds (budget %d, exhausted=%t); flow-fact budget %d\n",
+		vtaIterations, budgets.VTAIterations, vtaBudgetExhausted, budgets.FlowFacts)
+	// What the publication is about to cost, reported before the transaction
+	// opens rather than inferred from a graph that may never be published. The
+	// fan-out distribution is what a budget has to be set from; the RTA set
+	// sizes are repository-scoped facts that the coverage payload materialises
+	// once per callsite, so they multiply by the callsite count.
+	reportPublicationFanout(os.Stderr, vtaResults, hierarchyResults, budgets.FlowFacts)
+	mergeIDs := func(left, right []int64) []int64 {
+		seen := make(map[int64]struct{}, len(left)+len(right))
+		out := make([]int64, 0, len(left)+len(right))
+		for _, id := range append(append([]int64(nil), left...), right...) {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+		return out
+	}
 
 	resolveElapsed := time.Since(resolveStart)
 
@@ -578,8 +762,13 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr)
 
-	// Batch insert all edges in one transaction
+	// Begin one publication transaction for legacy selected edges, attached
+	// graph-native facts, compatibility rows, and completion metadata. Nodes were
+	// inserted in the preceding structural phase; this transaction prevents any
+	// resolution reader from observing only part of the resolution publication.
 	edgeStart := time.Now()
+	budgetAbstainedCallsites, flowFactsWithheld := 0, 0
+	coverageBudgetedCallsites, coverageSetsWithheld := 0, 0
 	edgePtrs := make([]*store.Edge, len(resolved))
 	for i, rc := range resolved {
 		edgePtrs[i] = &store.Edge{
@@ -590,30 +779,46 @@ func main() {
 			SourceFile:         rc.SourceFile,
 			ResolutionMethod:   rc.Method,
 			Confidence:         rc.Confidence,
-			Metadata:           receiverEdgeMetadata(rc),
 			TrustTier:          rc.TrustTier,
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
 			VerificationStatus: "unverified",
 		}
 	}
-	if err := db.BatchInsertEdges(edgePtrs); err != nil {
-		log.Fatalf("batch insert edges: %v", err)
+	// Phase 1 (core): the files and symbols are already durable, and the
+	// structural CALLS edges commit here on their own. Everything below this
+	// point is analysis, and no analysis failure may cost this layer.
+	publishCorePhase(db, stagedOutput, edgePtrs)
+	// Additive producer-owned resolution contract. The legacy edges above remain
+	// readable; these rows preserve stable identities and ambiguity explicitly.
+	repositoryRevision := repoCommit(*root)
+	if repositoryRevision == "" {
+		repositoryRevision = "unversioned"
 	}
+	repositoryID := repositoryIdentity(*root)
+	// One producer identity binds both receipts, so it is computed once and
+	// before either phase is attested. Failing to compute it is a core failure:
+	// an unattestable build has nothing to publish.
+	producerIdentity, err := currentBuildIdentity()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "compute producer build identity: %v", err)
+	}
+	// Phase 2 (analysis): the resolution graph in its own transaction. A failure
+	// rolls the whole analysis back and returns a named state; the core graph
+	// stays on disk and the receipts below say which layer this graph is.
+	analysis := publishAnalysisPhase(analysisPhaseInput{
+		db: db, stagedOutput: stagedOutput,
+		allNodePtrs: allNodePtrs, allNodes: allNodes, nodeDBIDs: nodeDBIDs,
+		callsites:          callsites,
+		hierarchyByOrdinal: hierarchyByOrdinal, vtaByOrdinal: vtaByOrdinal,
+		mergeIDs:           mergeIDs,
+		repositoryRevision: repositoryRevision, repositoryID: repositoryID,
+		producerIdentity: producerIdentity,
+	})
 	// Containment edges: parent_id → CONTAINS for class-structure queries
 	// Use parentFixups since allNodePtrs had ParentID zeroed before batch insert.
-	// DETERMINISM (B0): iterate parentFixups in SORTED node-index order. A Go `range`
-	// over a map is randomized, so the CONTAINS edges were appended (and thus assigned
-	// rowids) in nondeterministic order — graph.db was not byte-identical across builds
-	// even though the edge CONTENT was identical (the double-index harness caught this).
 	var containsPtrs []*store.Edge
-	fixupNodeIdxs := make([]int, 0, len(parentFixups))
-	for nodeIdx := range parentFixups {
-		fixupNodeIdxs = append(fixupNodeIdxs, nodeIdx)
-	}
-	sort.Ints(fixupNodeIdxs)
-	for _, nodeIdx := range fixupNodeIdxs {
-		parentGlobalIdx := parentFixups[nodeIdx]
+	for nodeIdx, parentGlobalIdx := range parentFixups {
 		pidx := int(parentGlobalIdx) - 1
 		if pidx >= 0 && pidx < len(nodeDBIDs) && nodeIdx < len(nodeDBIDs) {
 			parentDBID := nodeDBIDs[pidx]
@@ -643,8 +848,25 @@ func main() {
 		}
 	}
 
+	// Symbol taxonomy edges (item 11, delta row 9): DECLARED_IMPLEMENTS,
+	// OVERRIDES, DECORATES, RETURNS_TYPE and PARAM_TYPE, derived in
+	// internal/taxonomy from facts the parser already recorded syntactically.
+	// Strictly additive -- none of these kinds is written anywhere else in the
+	// producer, so no pre-existing edge total can move. Every row carries the
+	// mechanism that produced it and a tier that mechanism earns; CERTIFIED is
+	// unreachable there by construction. The derivation is a pure function over
+	// the nodes, their assigned ids and the property rows, which is what keeps
+	// this call site short.
+	taxonomyPtrs := taxonomy.DeriveEdges(allNodePtrs, nodeDBIDs, allProps)
+	if len(taxonomyPtrs) > 0 {
+		if err := db.BatchInsertEdges(taxonomyPtrs); err != nil {
+			log.Printf("WARNING: taxonomy edges: %v", err)
+		}
+	}
+
 	edgeElapsed := time.Since(edgeStart)
 	fmt.Fprintf(os.Stderr, "  Inserted %d CALLS + %d CONTAINS edges in %s\n", len(edgePtrs), len(containsPtrs), edgeElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Inserted %d symbol-taxonomy edges\n", len(taxonomyPtrs))
 
 	// ── Pass 4: PROPERTIES + ASSERTIONS ─────────────────────────────────
 	propStart := time.Now()
@@ -788,27 +1010,13 @@ func main() {
 		// the CALLS/closure graph without the file->module IMPORTS hops.
 		log.Printf("WARNING: IMPORTS edge materialization failed: %v", impErr)
 	}
-	// RE_EXPORTS edges from the parser's ReExportRef AST (TS/JS barrels, Python
-	// __init__.py, Rust pub use) — language-agnostic, replaces the JS/TS-only regex
-	// that left RE_EXPORTS at 0 edges. Non-fatal, additive (file->file anchors).
-	reExportCount, reErr := resolver.ResolveReExports(db, allReExports, fileMap, files)
-	if reErr != nil {
-		log.Printf("WARNING: RE_EXPORTS edge materialization failed: %v", reErr)
-	}
 	promotedCount, promErr := resolver.PromotePropertyEdges(db)
 	if promErr != nil {
 		log.Printf("WARNING: property->edge promotion failed: %v", promErr)
 	}
-	// Instance-attribute COMPOSES: self.x=Class() / self.x:Class (Python __init__) +
-	// this.x=new Foo() (JS/TS ctor) — the dynamic-language composition idiom invisible to
-	// the class-body field scan. Runs AFTER promote so it dedups against class-level COMPOSES.
-	composesInitCount, ciErr := resolver.ResolveComposesFromAssignments(db, allAssignments)
-	if ciErr != nil {
-		log.Printf("WARNING: instance-attribute COMPOSES failed: %v", ciErr)
-	}
 	importElapsed := time.Since(importStart)
-	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS, %d RE_EXPORTS, %d promoted, %d init-COMPOSES in %s\n",
-		importEdgeCount, reExportCount, promotedCount, composesInitCount, importElapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "  Pass 4f: %d IMPORTS edges, %d promoted relations in %s\n",
+		importEdgeCount, promotedCount, importElapsed.Round(time.Millisecond))
 
 	// ── Pass 4e: TRANSITIVE CLOSURE (C7 / RF-4) ─────────────────────────
 	// Runs AFTER CALLS resolution + edge persistence (Pass 3) so it sees the
@@ -833,44 +1041,120 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  Computed %d closure rows in %s\n", closureCount, closureElapsed.Round(time.Millisecond))
 	}
 
+	// ── Pass 4g: DERIVED LAYERS — co-change, communities, processes ─────
+	// Runs after the resolution graph is attached and the assertions are
+	// inserted, because communities cluster certified CALLS edges and processes
+	// are witnessed by assertions. Every outcome, including every failure, is a
+	// named state in project_meta: an analysis sidecar must degrade the receipt,
+	// never the graph. GT_REQUIRE_DERIVED=1 turns any non-ok state into a build
+	// failure for an operator who needs the layers rather than merely wants them.
+	// See derived.go.
+	derivedOptions, derivedOptionsErr := resolveDerivedOptions(os.LookupEnv)
+	if derivedOptionsErr != nil {
+		abortStagedBuild(db, stagedOutput, "%v", derivedOptionsErr)
+	}
+	fmt.Fprintf(os.Stderr, "Pass 4g: deriving co-change, communities and processes...\n")
+	derived := runDerivedLayers(context.Background(), db, stagedOutput, *root, derivedOptions)
+	fmt.Fprintf(os.Stderr, "  %s\n", derived.Summary())
+	if err := setRequiredMetadata(db, derived.Metadata); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
+	if err := derived.Err(derivedOptions); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
+
 	// ── Pass 5: EXTRAS — store metadata ─────────────────────────────────
 	fmt.Fprintf(os.Stderr, "Pass 5: storing metadata...\n")
 	elapsed := time.Since(start)
-	db.SetMeta("root", *root)
+	requiredMetadata := map[string]string{"root": *root}
 	// RC-17 (F-004): build_time_ms removed from project_meta — it's wall-
 	// clock dependent and breaks byte-equality across two builds of the
 	// same commit. Diagnostic value only; emitted to stderr below instead.
-	db.SetMeta("file_count", fmt.Sprintf("%d", len(files)))
-	db.SetMeta("node_count", fmt.Sprintf("%d", len(allNodePtrs)))
-	db.SetMeta("edge_count", fmt.Sprintf("%d", len(resolved)))
-	db.SetMeta("import_count", fmt.Sprintf("%d", len(allImports)))
-	db.SetMeta("property_count", fmt.Sprintf("%d", len(propPtrs)))
-	db.SetMeta("assertion_count", fmt.Sprintf("%d", len(assertPtrs)))
-	db.SetMeta("indexer_version", "v16-multilang")
+	requiredMetadata["file_count"] = fmt.Sprintf("%d", len(files))
+	requiredMetadata["parse_failures"] = fmt.Sprintf("%d", parseFailures)
+	requiredMetadata["node_count"] = fmt.Sprintf("%d", len(allNodePtrs))
+	requiredMetadata["edge_count"] = fmt.Sprintf("%d", len(resolved))
+	requiredMetadata["import_count"] = fmt.Sprintf("%d", len(allImports))
+	requiredMetadata["property_count"] = fmt.Sprintf("%d", len(propPtrs))
+	requiredMetadata["assertion_count"] = fmt.Sprintf("%d", len(assertPtrs))
+	requiredMetadata["indexer_version"] = "v16-multilang"
+	// The two phase receipts. They are project_meta rows rather than fields on
+	// GraphCompletionIdentity, whose every field its own verifier requires: a
+	// core-only graph could not carry one, and adding an optional field would
+	// change a reader-visible contract. analysis_state is what a reader keys on;
+	// the receipts carry the counts that separate "analysis ran and found
+	// nothing" from "analysis did not run". closure_row_count is reported on the
+	// analysis receipt but computed over the core CALLS graph, so it survives an
+	// analysis failure.
+	corePayload, coreSHA, err := store.CorePhaseReceipt{
+		Schema: store.CorePhaseReceiptSchema, State: store.CorePhaseCommitted,
+		RepositoryRevision: repositoryRevision, BuildID: producerIdentity.BuildID,
+		SourceFingerprint: producerIdentity.SourceFingerprint,
+		ExecutableSHA256:  producerIdentity.ExecutableSHA256,
+		FileCount:         len(files), SymbolCount: len(allNodePtrs),
+		StructuralEdgeCount: len(edgePtrs) + len(containsPtrs),
+	}.Seal()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "seal core phase receipt: %v", err)
+	}
+	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
+		Schema: store.AnalysisPhaseReceiptSchema, State: analysis.State,
+		RepositoryRevision: repositoryRevision, BuildID: producerIdentity.BuildID,
+		FailureReason: analysis.Reason, RolledBack: analysis.RolledBack,
+		CallsiteCount: analysis.CallsiteCount, CandidateCount: analysis.CandidateCount,
+		ClosureRowCount: closureCount,
+	}.Seal()
+	if err != nil {
+		abortStagedBuild(db, stagedOutput, "seal analysis phase receipt: %v", err)
+	}
+	requiredMetadata[store.CorePhaseStateKey] = store.CorePhaseCommitted
+	requiredMetadata[store.CorePhaseReceiptKey] = corePayload
+	requiredMetadata[store.CorePhaseReceiptSHA256Key] = coreSHA
+	requiredMetadata[store.AnalysisStateKey] = analysis.State
+	requiredMetadata[store.AnalysisFailureReasonKey] = analysis.Reason
+	requiredMetadata[store.AnalysisPhaseReceiptKey] = analysisPayload
+	requiredMetadata[store.AnalysisPhaseReceiptSHA256Key] = analysisSHA
 	// FINAL_ARCH_V2 Track-A (B-1/B-5): schema_version is a contract between
 	// the Go writer and Python readers. Readers MUST fail fast if this row
 	// is missing (= old binary) or older than the version the reader expects.
 	// Bump on every breaking edges/nodes schema change.
-	db.SetMeta("schema_version", schemaVersion)
+	requiredMetadata["schema_version"] = schemaVersion
 	// RC-17 (F-003): forensics-grade provenance. commitSHA / buildTimeUTC
 	// / goToolchain are injected by the build script via -ldflags. With
 	// "unknown" defaults, callers can still distinguish a stamped binary
 	// from a bare `go build`.
-	db.SetMeta("git_commit", commitSHA)
-	db.SetMeta("build_time_utc", buildTimeUTC)
-	db.SetMeta("go_toolchain", goToolchain)
-	db.SetMeta("workers", fmt.Sprintf("%d", *workers))
+	requiredMetadata["git_commit"] = commitSHA
+	requiredMetadata["build_time_utc"] = buildTimeUTC
+	requiredMetadata["go_toolchain"] = goToolchain
+	requiredMetadata["workers"] = fmt.Sprintf("%d", *workers)
 
 	// RC-04: per-repo MIN_CONFIDENCE — write the median (P50) of resolved edge
 	// confidences so downstream readers can stop hardcoding 0.7. Writing to
 	// project_meta (existing table, no schema change). Readers fall back to
 	// 0.5 (brief-layer parity) when this key is missing.
-	db.SetMeta("min_confidence", fmt.Sprintf("%.4f", computeMedianConfidence(resolved)))
+	requiredMetadata["min_confidence"] = fmt.Sprintf("%.4f", computeMedianConfidence(resolved))
 
 	// C7 (RF-4): closure row count. Diagnostic + lets readers detect a
 	// closure-bearing db without a table probe. 0 means closure disabled or
 	// no verified edges to close over — readers fall back to live BFS.
-	db.SetMeta("closure_count", fmt.Sprintf("%d", closureCount))
+	requiredMetadata["closure_count"] = fmt.Sprintf("%d", closureCount)
+
+	// The budget in force is sealed into the receipt so a degraded graph is
+	// provably degraded: a reader can tell a bounded publication from a
+	// complete one without re-running the producer. 0 means the budget was
+	// disabled and the counts are the unbudgeted ones.
+	requiredMetadata["vta_iteration_budget"] = fmt.Sprintf("%d", budgets.VTAIterations)
+	requiredMetadata["flow_fact_budget"] = fmt.Sprintf("%d", budgets.FlowFacts)
+	requiredMetadata["vta_iterations"] = fmt.Sprintf("%d", vtaIterations)
+	requiredMetadata["vta_budget_exhausted"] = fmt.Sprintf("%t", vtaBudgetExhausted)
+	requiredMetadata["budget_abstained_callsites"] = fmt.Sprintf("%d", budgetAbstainedCallsites)
+	requiredMetadata["budget_withheld_flow_facts"] = fmt.Sprintf("%d", flowFactsWithheld)
+	requiredMetadata["coverage_set_budget"] = fmt.Sprintf("%d", budgets.CoverageSets)
+	requiredMetadata["budget_coverage_set_callsites"] = fmt.Sprintf("%d", coverageBudgetedCallsites)
+	requiredMetadata["budget_withheld_coverage_ids"] = fmt.Sprintf("%d", coverageSetsWithheld)
+	if err := setRequiredMetadata(db, requiredMetadata); err != nil {
+		abortStagedBuild(db, stagedOutput, "%v", err)
+	}
 
 	// ── Pass 5b: FILE HASHES — populate file_hashes for incremental reindex ──
 	fmt.Fprintf(os.Stderr, "Pass 5b: recording file hashes for %d files...\n", len(files))
@@ -891,33 +1175,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  WARNING: %d file hash errors\n", hashErrors)
 	}
 
-	// ── Pass 5c: CO-CHANGE MINING — git log analysis for file co-occurrence ──
-	fmt.Fprintf(os.Stderr, "Pass 5c: mining co-change from git history...\n")
-	cochangeCount := mineCochanges(db, *root)
-	fmt.Fprintf(os.Stderr, "  Stored %d co-change pairs\n", cochangeCount)
-	// DCC set-form co-change (NEW table, separate pass; legacy pair table above
-	// is untouched). Base-ancestor-pinned, leak-safe, shallow-skipped.
-	cochangeSetCount := mineCochangeSets(db, *root)
-	fmt.Fprintf(os.Stderr, "  Stored %d co-change sets\n", cochangeSetCount)
-
-	// B-24: normalize edges.metadata into the queryable edge_metadata sub-table. Runs AFTER
-	// all edges + their metadata are final (Pass 4f promote wrote dataflow/usage; receiver_type
-	// was stamped at edge construction). Non-fatal — a derived index; the raw metadata stands.
-	if err := db.PopulateEdgeMetadata(); err != nil {
-		log.Printf("WARNING: populate edge_metadata: %v", err)
-	}
-	// B-29: stamp the COMPOSITE post_revision + per-surface sub-revisions and back-fill
-	// property source_revision. Runs LAST, after every fact surface (nodes/edges/properties/
-	// assertions/closure/cochange/content_fts/file_hashes) is populated, so the composite is
-	// over the final graph state. Non-fatal on the full-index path (an expensive rebuild must
-	// not abort over a revision-stamp hiccup; the incremental executor contract is fail-closed).
-	if _, err := db.StampCompositeRevision(); err != nil {
-		log.Printf("WARNING: stamp composite revision: %v", err)
-	}
+	// Pass 5c (co-change mining) is gone: internal/cochange now owns the
+	// cochanges table and writes it in Pass 4g. Two writers with different
+	// support thresholds would have fought over the same primary key, and only
+	// the second would have survived.
 
 	// Post-insert FK validation (non-fatal)
 	if err := db.ValidateForeignKeys(); err != nil {
-		log.Fatalf("foreign-key validation failed: %v", err)
+		abortStagedBuild(db, stagedOutput, "foreign-key validation failed: %v", err)
+	}
+
+	// properties_fts coverage at the publication boundary. Every batch writer
+	// maintains the index in its own transaction, so this is an assertion, not
+	// a repair — but it is the only place that can compare the index against
+	// the finished table, and a desynced index is the failure mode that looks
+	// healthy (COUNT reads plausible, MATCH returns nothing). Under
+	// GT_REQUIRE_FTS5 a mismatch aborts rather than publishes.
+	if indexed, facts := db.PropertiesFTS5RowCount(), db.PropertyCount(); indexed != facts {
+		if os.Getenv("GT_REQUIRE_FTS5") == "1" {
+			abortStagedBuild(db, stagedOutput,
+				"GT_REQUIRE_FTS5=1 but properties_fts covers %d of %d property rows — refusing to publish a desynced index.",
+				indexed, facts)
+		}
+		log.Printf("[WARN] properties_fts covers %d of %d property rows; property_rank will under-recall", indexed, facts)
 	}
 
 	// Fold the WAL into graph.db so the file is SELF-CONTAINED before the process
@@ -930,16 +1210,33 @@ func main() {
 	// index → `nodes_fts` COUNT looks full (external-content reads `nodes`) but a
 	// real MATCH returns 0 / "database disk image is malformed". The incremental
 	// path already checkpoints (RC-04); the full-index path must too.
-	db.CheckpointWAL()
+	if err := db.CheckpointWALRequired(); err != nil {
+		abortStagedBuild(db, stagedOutput, "checkpoint staged graph: %v", err)
+	}
+
+	// Capture summary values while the staged database is still open, then close
+	// every SQLite handle before the platform-specific atomic replacement.
+	nodeCount := db.NodeCount()
+	edgeCount := db.EdgeCount()
+	propertyCount := db.PropertyCount()
+	assertionCount := db.AssertionCount()
+	if err := db.Close(); err != nil {
+		abortStagedBuild(nil, stagedOutput, "close staged graph: %v", err)
+	}
+	if err := publishStagedOutput(stagedOutput, requestedOutput); err != nil {
+		abortStagedBuild(nil, stagedOutput, "publish staged graph: %v", err)
+	}
+	published = true
+	*output = requestedOutput
 
 	// Summary
 	fmt.Fprintf(os.Stderr, "\nDone in %s\n", elapsed.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "  Files:      %d\n", len(files))
-	fmt.Fprintf(os.Stderr, "  Nodes:      %d\n", db.NodeCount())
-	fmt.Fprintf(os.Stderr, "  Edges:      %d\n", db.EdgeCount())
+	fmt.Fprintf(os.Stderr, "  Nodes:      %d\n", nodeCount)
+	fmt.Fprintf(os.Stderr, "  Edges:      %d\n", edgeCount)
 	fmt.Fprintf(os.Stderr, "  Imports:    %d\n", len(allImports))
-	fmt.Fprintf(os.Stderr, "  Properties: %d\n", db.PropertyCount())
-	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", db.AssertionCount())
+	fmt.Fprintf(os.Stderr, "  Properties: %d\n", propertyCount)
+	fmt.Fprintf(os.Stderr, "  Assertions: %d\n", assertionCount)
 	fmt.Fprintf(os.Stderr, "  Workers:    %d\n", *workers)
 	// RC-17 (F-004): build_time_ms is diagnostic-only now (stderr, not DB).
 	fmt.Fprintf(os.Stderr, "  BuildTime:  %d ms (diagnostic; not in project_meta)\n",
@@ -956,11 +1253,61 @@ func main() {
 	sameFileResolved := methodCounts["same_file"]
 	nameMatchResolved := methodCounts["name_match"]
 	fmt.Printf(`{"files":%d,"nodes":%d,"edges":%d,"imports":%d,"properties":%d,"assertions":%d,"edges_import":%d,"edges_same_file":%d,"edges_name_match":%d,"time_ms":%d,"workers":%d}`,
-		len(files), db.NodeCount(), db.EdgeCount(), len(allImports),
-		db.PropertyCount(), db.AssertionCount(),
+		len(files), nodeCount, edgeCount, len(allImports),
+		propertyCount, assertionCount,
 		importResolved, sameFileResolved, nameMatchResolved,
 		elapsed.Milliseconds(), *workers)
 	fmt.Println()
+
+	// Fail-closed stays fail-closed: an operator who requires the analysis layer
+	// still gets a non-zero exit. What changed is that the core graph is on disk
+	// with its receipt to diagnose from, instead of the whole index being thrown
+	// away over one rejected candidate or one analysis that ran out of budget.
+	if analysis.State != store.AnalysisStateComplete {
+		fmt.Fprintf(os.Stderr, "  WARNING: analysis phase %s — this graph is core-only (analysis_state=%s): %s\n",
+			analysis.State, analysis.State, analysis.Reason)
+		if os.Getenv("GT_REQUIRE_ANALYSIS") == "1" {
+			fmt.Fprintf(os.Stderr, "GT_REQUIRE_ANALYSIS=1 but the analysis phase %s: %s\n",
+				analysis.State, analysis.Reason)
+			os.Exit(1)
+		}
+	}
+}
+
+// candidateVTAProofs validates the producer's target-keyed provenance before
+// any candidate rows are published. Aggregate callsite evidence is retained
+// for diagnostics but is never copied into each candidate.
+func candidateVTAProofs(vta resolver.VTAResult) (map[int64]resolver.VTAFlowProof, error) {
+	proofs := make(map[int64]resolver.VTAFlowProof, len(vta.FlowProofs))
+	candidates := make(map[int64]struct{}, len(vta.CandidateNodeIDs))
+	for _, id := range vta.CandidateNodeIDs {
+		if _, duplicate := candidates[id]; duplicate {
+			return nil, fmt.Errorf("duplicate candidate %d", id)
+		}
+		candidates[id] = struct{}{}
+	}
+	for _, proof := range vta.FlowProofs {
+		if _, duplicate := proofs[proof.CandidateNodeID]; duplicate {
+			return nil, fmt.Errorf("duplicate proof for candidate %d", proof.CandidateNodeID)
+		}
+		if _, expected := candidates[proof.CandidateNodeID]; !expected {
+			return nil, fmt.Errorf("proof for non-retained candidate %d", proof.CandidateNodeID)
+		}
+		if len(proof.SourceStableIDs) == 0 && len(proof.EdgeStableIDs) == 0 &&
+			(len(vta.FlowSourceStableIDs) > 0 || len(vta.FlowEdgeStableIDs) > 0) {
+			return nil, fmt.Errorf("empty proof for candidate %d", proof.CandidateNodeID)
+		}
+		proofs[proof.CandidateNodeID] = proof
+	}
+	if len(proofs) != len(candidates) {
+		return nil, fmt.Errorf("proof count %d does not equal candidate count %d", len(proofs), len(candidates))
+	}
+	return proofs, nil
+}
+
+func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) string {
+	sum := sha256.Sum256([]byte(prefix + "\x00" + sourceID + "\x00" + callsiteID + "\x00" + targetStableID))
+	return prefix + hex.EncodeToString(sum[:])
 }
 
 // runIncremental performs a file-keyed delete-and-replace reindex of a
@@ -1009,35 +1356,15 @@ func runIncremental(root, relpath, dbPath string) error {
 	sum := sha256.Sum256(contents)
 	newHash := hex.EncodeToString(sum[:])
 
-	// Step 3 — short-circuit if hash matches stored value. HONEST short-circuit:
-	// exit 0, changed=false, and post_revision computed over the UNCHANGED db so
-	// the overlay still learns the exact graph state it is running against
-	// (identical to what a re-run after the last real reindex would report).
+	// Step 3 — short-circuit if hash matches stored value.
 	storedHash := db.GetFileHash(relSlash)
 	if storedHash == newHash {
-		// Stamp the COMPOSITE revision (post_revision + subrev_<surface> + property
-		// source_revision) so the meta table always reflects the summary the overlay just
-		// parsed (idempotent: the db content is unchanged, so it re-computes identically).
-		postRev, revErr := db.StampCompositeRevision()
-		if revErr != nil {
-			return fmt.Errorf("compute/stamp post_revision (short-circuit): %w", revErr)
-		}
-		db.CheckpointWAL()
 		dur := time.Since(startWall)
 		fmt.Printf(
-			`{"file":%q,"changed":false,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true,"post_revision":%q}`+"\n",
-			relSlash, dur.Milliseconds(), postRev,
+			`{"file":%q,"nodes_replaced":0,"edges_replaced":0,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":true}`+"\n",
+			relSlash, dur.Milliseconds(),
 		)
 		return nil
-	}
-
-	// Overlay-revision baseline: the logical-content hash BEFORE this reindex
-	// mutates anything. `changed` in the summary is the honest pre!=post
-	// comparison (a comment-only edit that re-parses to the identical graph
-	// reports changed=false even though the reindex ran).
-	preRev, err := db.ComputeRevision()
-	if err != nil {
-		return fmt.Errorf("compute pre-reindex revision: %w", err)
 	}
 
 	// Step 7 (early) — re-parse the single file BEFORE opening the write tx,
@@ -1058,6 +1385,28 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	if pr == nil {
 		pr = &parser.ParseResult{}
+	}
+	repositoryRevision := repoCommit(root)
+	if repositoryRevision == "" {
+		repositoryRevision = "unversioned"
+	}
+	producerIdentity, err := currentBuildIdentity()
+	if err != nil {
+		return fmt.Errorf("compute producer identity for incremental receipt: %w", err)
+	}
+	const incrementalAnalysisReason = "incremental_reindex_requires_full_analysis"
+	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
+		Schema:             store.AnalysisPhaseReceiptSchema,
+		State:              store.AnalysisStateNotRun,
+		RepositoryRevision: repositoryRevision,
+		BuildID:            producerIdentity.BuildID,
+		FailureReason:      incrementalAnalysisReason,
+		RolledBack: []string{
+			"resolution", "closure", "cochange", "community", "process",
+		},
+	}.Seal()
+	if err != nil {
+		return fmt.Errorf("seal incremental analysis receipt: %w", err)
 	}
 
 	// Pre-fetch resolver inputs from the existing DB BEFORE the delete (so the
@@ -1085,6 +1434,39 @@ func runIncremental(root, relpath, dbPath string) error {
 			tx.Rollback()
 		}
 	}()
+
+	// Resolution provenance is revision-bound. A single-file edit changes node
+	// identities and call candidates, so retain no old complete sidecar beside
+	// the new graph. Full indexing will repopulate it; until then consumers must
+	// fail closed on the explicit incomplete marker.
+	if err := store.InvalidateAnalysisForIncrementalTx(
+		tx, analysisPayload, analysisSHA, incrementalAnalysisReason,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("invalidate resolution metadata: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('resolution_repository_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("bind stale resolution revision: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("invalidate graph resolution metadata: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("bind stale graph resolution revision: %w", err)
+	}
+	// A single-file refresh cannot prove repository-wide candidate parity because
+	// callers in other files may depend on the changed identities. Remove the
+	// entire attached resolution overlay in this same transaction. Metadata-only
+	// invalidation is insufficient: direct SQL and generic graph readers do not
+	// necessarily consult project_meta before traversing nodes and edges.
+	if _, err := tx.Exec(`DELETE FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT') OR (type='CALLS' AND callsite_stable_id IS NOT NULL)`); err != nil {
+		return fmt.Errorf("remove stale attached resolution edges: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes WHERE node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'`); err != nil {
+		return fmt.Errorf("remove stale attached resolution nodes: %w", err)
+	}
 
 	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
 	// stripped by the upcoming target_id-based DELETE; without this snapshot
@@ -1169,20 +1551,6 @@ func runIncremental(root, relpath, dbPath string) error {
 		resolver.RegisterTSConfigPaths(fileMap, tsCfg)
 	}
 	resolver.RegisterJSPackagePaths(fileMap, root)
-	// B2 (Fable 2026-07-05): full≡incremental parity — the full index also registers Go
-	// module/package/vendor + Rust crate fileMap aliases (main.go ~411-428). Without them a
-	// `-file` reindex resolves Go/Rust cross-file imports as name_match instead of import@1.0
-	// (a LANGUAGE-KEYED inequivalence — JS/TS already had parity here, Go/Rust did not). All 4
-	// are computable from the whole-repo file list the incremental path already holds
-	// (allFiles/allLangs + root). The AST-derived Rust mod-tree + re-export chaining need the
-	// whole-repo parse (unavailable on -file) → degraded gracefully (SetReExportGraphIncomplete
-	// is already set true below), never mis-registered from a single file.
-	if goModPath := resolver.FindGoModulePath(root); goModPath != "" {
-		resolver.RegisterGoModulePaths(fileMap, goModPath)
-	}
-	resolver.RegisterGoPackageNames(fileMap, allFiles, allLangs)
-	resolver.RegisterGoVendorPaths(fileMap)
-	resolver.RegisterRustCratePaths(fileMap, root)
 
 	callerDBIDs := make([]int64, len(pr.Calls))
 	for i, call := range pr.Calls {
@@ -1205,17 +1573,6 @@ func runIncremental(root, relpath, dbPath string) error {
 	if len(pr.Assignments) > 0 {
 		resolver.SetAssignmentIndex(resolver.BuildAssignmentIndex(pr.Assignments))
 	}
-
-	// B1b soundness on `-file`: the full-index path folds re-export SOURCES into fileMap via
-	// ChainReExports (main.go:420-421) BEFORE Resolve; the incremental path does NOT re-parse
-	// the whole repo's re-exports, so fileMap here is a bare direct-module resolution. B1b's
-	// import-consistency DROP ("no candidate in the imported file-set F*") is only sound when
-	// F* is complete, so mark the re-export graph incomplete → B1b DEMOTES the shadowed
-	// candidates to sub-floor name_match (conf 0.2) instead of dropping a legitimately
-	// re-exported def whose source this path never folded into F* — and (critically) instead
-	// of abstaining, which would let the call re-mint at verified_unique 0.95 CERTIFIED
-	// (Fable Finding 1). Full-index path resets this to false (active DROP) before Resolve.
-	resolver.SetReExportGraphIncomplete(true)
 
 	// G09 -file degradation fix: the class inheritanceMap (consumed by
 	// lookupMethodWithInheritance for the CHA rungs 1.75 super/inherited,
@@ -1279,7 +1636,6 @@ func runIncremental(root, relpath, dbPath string) error {
 			SourceFile:         rc.SourceFile,
 			ResolutionMethod:   rc.Method,
 			Confidence:         rc.Confidence,
-			Metadata:           receiverEdgeMetadata(rc),
 			TrustTier:          rc.TrustTier,
 			CandidateCount:     rc.CandidateCount,
 			EvidenceType:       rc.EvidenceType,
@@ -1289,45 +1645,14 @@ func runIncremental(root, relpath, dbPath string) error {
 	if err := store.BatchInsertEdgesTx(tx, edgePtrs); err != nil {
 		return fmt.Errorf("insert new edges: %w", err)
 	}
-
-	// B1 (Fable 2026-07-05): full≡incremental parity — the full index emits parent→child
-	// CONTAINS edges (main.go ~565-606). The -file reindex DELETED this file's CONTAINS (via
-	// DeleteFileEdgesAndNodesTx) but never re-emitted them, so the containment graph THINNED on
-	// every L6 edit. Re-emit from parentLocal/newDBIDs inside the tx — iterated in node-index
-	// order (deterministic, matching the full path's sorted emission) with identical fields.
-	var containsPtrsIncr []*store.Edge
-	for i, plocal := range parentLocal {
-		if plocal <= 0 {
-			continue
-		}
-		pidx := int(plocal) - 1
-		if pidx < 0 || pidx >= len(newDBIDs) || i >= len(newDBIDs) {
-			continue
-		}
-		parentDBID, childDBID := newDBIDs[pidx], newDBIDs[i]
-		if parentDBID <= 0 || childDBID <= 0 {
-			continue
-		}
-		filePath := ""
-		if i < len(pr.Nodes) {
-			filePath = pr.Nodes[i].FilePath
-		}
-		containsPtrsIncr = append(containsPtrsIncr, &store.Edge{
-			SourceID:           parentDBID,
-			TargetID:           childDBID,
-			Type:               "CONTAINS",
-			SourceFile:         filePath,
-			ResolutionMethod:   "structural",
-			Confidence:         1.0,
-			TrustTier:          "CERTIFIED",
-			EvidenceType:       "parent_id",
-			VerificationStatus: "verified",
-		})
+	// This transaction only re-resolves the edited file. Other callsites may
+	// depend on symbols whose identity changed, so the attached overlay remains
+	// absent until a subsequent full build restores repository-wide authority.
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`); err != nil {
+		return fmt.Errorf("mark incremental graph resolution incomplete: %w", err)
 	}
-	if len(containsPtrsIncr) > 0 {
-		if err := store.BatchInsertEdgesTx(tx, containsPtrsIncr); err != nil {
-			return fmt.Errorf("insert CONTAINS edges: %w", err)
-		}
+	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
+		return fmt.Errorf("mark incremental graph resolution stale: %w", err)
 	}
 
 	// IMPORTS edges for the reparsed file. Stale IMPORTS edges (source_file=relSlash)
@@ -1342,17 +1667,6 @@ func runIncremental(root, relpath, dbPath string) error {
 	propPtrs := make([]*store.Property, 0, len(pr.Properties))
 	for _, p := range pr.Properties {
 		if p.NodeIdx >= 0 && p.NodeIdx < len(newDBIDs) {
-			// A-Finding2 (Fable LIPI): mirror the full-index-path P16 guard on the incremental
-			// (-file) path — never store a test node's free-text body-channel property
-			// (string_literals/body_terms/calls). The extraction gate (parser.go !isTest) already
-			// prevents these for test nodes, so this is defense-in-depth; the point is that the two
-			// write paths stay EQUIVALENT (the full path had the guard, the incremental path did not).
-			if p.NodeIdx < len(pr.Nodes) && pr.Nodes[p.NodeIdx].IsTest {
-				switch p.Kind {
-				case "string_literals", "body_terms", "calls":
-					continue
-				}
-			}
 			propPtrs = append(propPtrs, &store.Property{
 				NodeID:     newDBIDs[p.NodeIdx],
 				Kind:       p.Kind,
@@ -1369,7 +1683,7 @@ func runIncremental(root, relpath, dbPath string) error {
 	// (filteredNodes already contains all DB nodes minus stale file + fresh nodes)
 	incrNameToIDs := make(map[string][]int64)
 	for i, n := range filteredNodes {
-		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+		if resolver.IsCallTargetLabel(n.Label) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
 			incrNameToIDs[n.Name] = append(incrNameToIDs[n.Name], filteredIDs[i])
 		}
 	}
@@ -1401,7 +1715,7 @@ func runIncremental(root, relpath, dbPath string) error {
 	// File-scoped node IDs for import-guided resolution
 	incrFileNodeIDs := make(map[string]map[string][]int64)
 	for i, n := range filteredNodes {
-		if n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
+		if resolver.IsCallTargetLabel(n.Label) && n.Label != "Class" && n.Label != "Interface" && !n.IsTest {
 			byName, ok := incrFileNodeIDs[n.FilePath]
 			if !ok {
 				byName = make(map[string][]int64)
@@ -1467,11 +1781,6 @@ func runIncremental(root, relpath, dbPath string) error {
 	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
 		log.Printf("WARNING: incremental property->edge promotion: %v", promErr)
 	}
-	// B-24: refresh the normalized edge_metadata sub-table after the promote pass finalized
-	// the dataflow/usage annotations. Non-fatal (a derived index over edges.metadata).
-	if err := db.PopulateEdgeMetadata(); err != nil {
-		log.Printf("WARNING: incremental populate edge_metadata: %v", err)
-	}
 
 	// Stamp schema_version + indexer provenance on every incremental run.
 	// The full-index path (Pass 5) writes these in project_meta, but an older
@@ -1479,55 +1788,17 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Without it, the Python router_v2 reader raises SchemaMismatch and L3b
 	// evidence is dead on every turn. INSERT OR REPLACE is idempotent so this
 	// is safe on DBs that already have the row.
-	db.SetMeta("schema_version", schemaVersion)
-	db.SetMeta("indexer_version", "v16-multilang")
-	db.SetMeta("git_commit", commitSHA)
-	db.SetMeta("build_time_utc", buildTimeUTC)
-	db.SetMeta("go_toolchain", goToolchain)
-
-	// NOTE (B-29): post_revision is now stamped AFTER the FTS/content refresh below (not
-	// here), because the COMPOSITE revision hashes the content_fts surface — it must see the
-	// refreshed body content so a same-span body edit moves post_revision.
+	if err := setRequiredMetadata(db, map[string]string{
+		"schema_version": schemaVersion, "indexer_version": "v16-multilang",
+		"git_commit": commitSHA, "build_time_utc": buildTimeUTC, "go_toolchain": goToolchain,
+	}); err != nil {
+		return err
+	}
 
 	// Refresh FTS5 index after incremental node changes so BM25 queries
 	// stay current. Same call as the full-index path (idempotent).
 	if err := db.PopulateFTS5(); err != nil {
 		log.Printf("[WARN] FTS5 refresh after incremental reindex: %v", err)
-	}
-	// B1: refresh the content surface for the reindexed file only (delete + re-insert
-	// its symbols) so symbol_content_fts stays current after a -file reindex. No-op when
-	// the table is absent (a graph.db built before B1, or FTS5 off).
-	if err := db.RepopulateContentFTSForFile(root, relSlash); err != nil {
-		log.Printf("[WARN] content FTS refresh after incremental reindex: %v", err)
-	}
-
-	// B-29: stamp the COMPOSITE post_revision + per-surface sub-revisions + property
-	// source_revision LAST — AFTER the FTS/content refresh above, because the composite
-	// hashes the content_fts surface (a same-span body edit changes body content but not the
-	// node/edge columns, so the old nodes+edges-only revision missed it). Fail-closed: the
-	// executor contract REQUIRES post_revision in the summary; if it cannot be computed or
-	// stamped, this run exits nonzero and the overlay treats the reindex as failed (a retry
-	// short-circuits and re-computes).
-	postRev, revErr := db.StampCompositeRevision()
-	if revErr != nil {
-		return fmt.Errorf("compute/stamp post_revision: %w", revErr)
-	}
-
-	// R#6: verify the orphan-edge invariant (incremental.go:13,422) actually held.
-	// The full-index path FK-checks post-insert (main.go:821); the live -file path
-	// never did, so a delete/reinsert gap that stranded an edge on a missing node
-	// (source_id/target_id → a deleted row) would ship silently. It must be a WHOLE-DB
-	// check (a scoped one would miss INCOMING cross-file edges whose target was a just-
-	// deleted node — the more dangerous orphan). PRAGMA foreign_key_check is O(all edges),
-	// so it is GATED behind GT_VALIDATE_FK (LIPI BUG 4): OFF for casual local reindexes
-	// (zero per-turn cost), ON for the proof/substrate path (set GT_VALIDATE_FK=1 there),
-	// where a silent orphan would poison a paid run and the O(edges) scan is dominated by
-	// the reparse+resolve anyway. Logged LOUDLY, never fatal (the reindex tx already
-	// committed; the signal lets us fix the delete logic, the graph stays otherwise current).
-	if os.Getenv("GT_VALIDATE_FK") == "1" {
-		if err := db.ValidateForeignKeys(); err != nil {
-			log.Printf("[WARN] incremental reindex of %s breached the orphan-edge invariant: %v", relSlash, err)
-		}
 	}
 	// RC-04: fold WAL frames into the main DB file immediately so concurrent
 	// readers (gt_query/gt_search/gt_navigate/gt_validate) never see a partial
@@ -1535,49 +1806,19 @@ func runIncremental(root, relpath, dbPath string) error {
 	// the only writer that overlaps with reader processes in practice.
 	db.CheckpointWAL()
 
-	// Step 11 — JSON line on stdout (the machine-readable executor summary the
-	// Python overlay parses; never scrape stderr logs). nodes_replaced = inserted
-	// count; edges_replaced = max(deleted, inserted) edges so callers see the
-	// size of the change, not just the new ones. changed = pre!=post revision
-	// (honest: a reindex whose re-parsed graph is logically identical — e.g. a
-	// comment-only edit — reports changed=false). post_revision = the stamped
-	// deterministic content hash (identical runs match; a real change differs).
+	// Step 11 — JSON line on stdout. nodes_replaced = inserted count;
+	// edges_replaced = max(deleted, inserted) edges so callers see the size of
+	// the change, not just the new ones.
 	replacedEdges := int64(len(edgePtrs))
 	if edgesDeleted > replacedEdges {
 		replacedEdges = edgesDeleted
 	}
-	changed := postRev != preRev
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"changed":%v,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false,"post_revision":%q}`+"\n",
-		relSlash, changed, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(), postRev,
+		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
+		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
 	)
 	return nil
-}
-
-// receiverEdgeMetadata renders the resolver's CALL-SITE receiver-type provenance as the
-// additive `receiver_type=<T>` tag on edges.metadata — the SAME `;`-separated key=value
-// convention the promote pass uses for `dataflow=` (promoteDataFlowAnnotations), so a
-// later promote append yields `receiver_type=Foo;dataflow=bar` and every existing metadata
-// reader (curation_map `metadata LIKE '%dataflow=%'`, the promote idempotency `instr`
-// guard) is unaffected. Empty on every receiver-blind / name_match / unproven edge
-// (rc.ReceiverType == ""), leaving those edges' metadata byte-identical to before.
-//
-// ENCODING GUARD (deterministic, correct-or-quiet): a receiver type containing `;`,
-// `=`, or whitespace cannot be encoded as one `;`-separated key=value segment — a
-// `;`/`=` would fabricate a fake key (e.g. a spoofed `dataflow=`) for every LIKE/
-// instr reader. Class names never legitimately contain these (the resolver's
-// receiverTypeName already normalizes generics/unions/pointers), so an exotic
-// tree-sitter capture that does is untrusted input → drop the provenance entirely
-// rather than write a malformed or spoofable tag.
-func receiverEdgeMetadata(rc resolver.ResolvedCall) string {
-	if rc.ReceiverType == "" {
-		return ""
-	}
-	if strings.ContainsAny(rc.ReceiverType, ";= \t\n\r") {
-		return ""
-	}
-	return "receiver_type=" + rc.ReceiverType
 }
 
 // computeMedianConfidence returns the P50 of confidences across all resolved
@@ -2170,205 +2411,6 @@ func matchesTwinPair(nameA, nameB string) (bool, string) {
 		}
 	}
 	return false, ""
-}
-
-// cochangeMinCount is the single shared co-occurrence floor: a pair must be
-// changed together at least this many times to be stored. The consumer query
-// (gt_mini_patch.py `_cochange_block`, "AND count >= 2") MUST equal this value,
-// so no row is advertised that the producer never stored, and no stored row is
-// excluded by the query. One value, both sides.
-const cochangeMinCount = 2
-
-// normCochangePath re-frames a git-log path into the SAME frame walker.go stores
-// (filepath.Rel(root, abs) + ToSlash), so the producer's file_a/file_b keys are
-// byte-identical to what the consumer's `_norm_fp(rel)` produces and the EXACT
-// `file_a = ?` join lands regardless of where the repo toplevel sits relative to
-// the gt-index -root. Steps: (i) un-quote a C-quoted git path; (ii) re-base the
-// git-toplevel-relative path onto -root; (iii) ToSlash + strip leading "./".
-// Returns "" (dropped, correct-or-quiet) on unquote error or if the path escapes
-// root (Rel begins with "..").
-func normCochangePath(p, root, gitTop string) string {
-	if p == "" {
-		return ""
-	}
-	// (i) git C-quotes paths with special bytes: "\303\244/x.go". Unquote.
-	if strings.HasPrefix(p, "\"") {
-		uq, err := strconv.Unquote(p)
-		if err != nil {
-			return "" // unquotable -> drop (quiet), never a wrong key
-		}
-		p = uq
-	}
-	// (ii) git-log paths are relative to the repo toplevel; re-base onto -root.
-	if gitTop != "" && gitTop != root {
-		abs := filepath.Join(gitTop, p)
-		rel, err := filepath.Rel(root, abs)
-		if err != nil {
-			return ""
-		}
-		p = rel
-	}
-	// (iii) slash-normalize, drop a leading "./", and reject out-of-tree paths.
-	p = filepath.ToSlash(p)
-	p = strings.TrimPrefix(p, "./")
-	if p == ".." || strings.HasPrefix(p, "../") {
-		return "" // escapes root -> drop
-	}
-	return p
-}
-
-// mineCochanges analyzes the last 500 git commits to find files that are
-// frequently changed together. Pairs with >= cochangeMinCount (2) co-occurrences
-// are stored in the cochanges table. Returns the number of pairs stored.
-// Silently returns 0 if git is unavailable or the repo has no history.
-func mineCochanges(db *store.DB, root string) int {
-	// Resolve the repo toplevel once so each git-log path can be re-based onto
-	// -root before keying the map (git-log is toplevel-relative; walker stores
-	// root-relative). When toplevel == root the re-base is a no-op.
-	gitTop := ""
-	if tcmd := exec.Command("git", "rev-parse", "--show-toplevel"); true {
-		tcmd.Dir = root
-		if tout, terr := tcmd.Output(); terr == nil {
-			gitTop = strings.TrimSpace(string(tout))
-		}
-	}
-	// Two fixes vs the original: (1) "tformat:%x1e" is a VALID pretty-format —
-	// bare "--format=COMMIT" is not a builtin format name, git rejects it
-	// (exit 128), so this silently returned 0 on EVERY repo since b4761cc6
-	// (2026-05-25). (2) the per-commit delimiter is now the ASCII record-
-	// separator byte 0x1E, which cannot appear in a file path; the old literal
-	// "COMMIT" delimiter corrupted co-change pairs whenever a tracked path
-	// contained the substring "COMMIT".
-	cmd := exec.Command("git", "log", "--name-only", "--format=tformat:%x1e", "-n", "500")
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		// Was a silent return: a missing git binary (ENOENT — git not in the runtime
-		// image, the 2026-06-25 bug) or a non-repo gave 0 pairs with NO signal, hiding an
-		// EMPTY cochanges table on every task/language. Log so it can never hide again.
-		fmt.Fprintf(os.Stderr, "  co-change: git log failed (%v) — 0 pairs stored\n", err)
-		return 0
-	}
-
-	cooccurrence := make(map[[2]string]int)
-	commits := strings.Split(string(out), "\x1e")
-	for _, commit := range commits {
-		files := []string{}
-		for _, line := range strings.Split(strings.TrimSpace(commit), "\n") {
-			f := normCochangePath(strings.TrimSpace(line), root, gitTop)
-			if f != "" {
-				files = append(files, f)
-			}
-		}
-		if len(files) > 50 {
-			continue // skip mega-commits
-		}
-		for i := 0; i < len(files); i++ {
-			for j := i + 1; j < len(files); j++ {
-				a, b := files[i], files[j]
-				if a > b {
-					a, b = b, a // canonical order
-				}
-				cooccurrence[[2]string{a, b}]++
-			}
-		}
-	}
-
-	// Filter: min cochangeMinCount co-occurrences (the single shared floor;
-	// must equal the consumer query floor in gt_mini_patch.py _cochange_block).
-	filtered := make(map[[2]string]int)
-	for pair, count := range cooccurrence {
-		if count >= cochangeMinCount {
-			filtered[pair] = count
-		}
-	}
-
-	if err := db.BatchInsertCochanges(filtered); err != nil {
-		log.Printf("WARNING: co-change insert: %v", err)
-	}
-	return len(filtered)
-}
-
-// mineCochangeSets is a NEW, SEPARATE pass for DCC (Dynamic Concern Consensus). It
-// stores SET-FORM co-change membership with a commit-hash witness in the new
-// `cochange_sets` table, and NEVER touches the legacy pair miner (mineCochanges),
-// the shared cochangeMinCount floor, or the `cochanges` table.
-//
-// Base-pinned + leak-safe: mines ONLY commits that are ANCESTORS of the indexed
-// base (the checked-out HEAD) — `git log <base>` walks base and its ancestors, so
-// no future/sibling commit can leak. A shallow clone (no real ancestry) is skipped
-// (correct-or-quiet: an empty table, never a wrong witness). Set-form, no scores /
-// decay / caps; the SAME <=50-file mega-commit floor the legacy miner uses. Returns
-// the number of (commit, member-set) groups stored.
-func mineCochangeSets(db *store.DB, root string) int {
-	// Shallow repositories have truncated ancestry — a base-pinned ancestor walk
-	// would be a lie. Skip (empty table), never emit a partial/wrong witness.
-	if scmd := exec.Command("git", "rev-parse", "--is-shallow-repository"); true {
-		scmd.Dir = root
-		if sout, serr := scmd.Output(); serr == nil {
-			if strings.TrimSpace(string(sout)) == "true" {
-				fmt.Fprintf(os.Stderr, "  co-change sets: shallow repo — skipped (empty)\n")
-				return 0
-			}
-		}
-	}
-	// Resolve the indexed base commit explicitly so the ancestor walk is pinned.
-	base := "HEAD"
-	if bcmd := exec.Command("git", "rev-parse", "HEAD"); true {
-		bcmd.Dir = root
-		if bout, berr := bcmd.Output(); berr == nil {
-			if h := strings.TrimSpace(string(bout)); h != "" {
-				base = h
-			}
-		}
-	}
-	// Same git-toplevel re-base the pair miner uses (git-log paths are toplevel-
-	// relative; walker stores root-relative).
-	gitTop := ""
-	if tcmd := exec.Command("git", "rev-parse", "--show-toplevel"); true {
-		tcmd.Dir = root
-		if tout, terr := tcmd.Output(); terr == nil {
-			gitTop = strings.TrimSpace(string(tout))
-		}
-	}
-	// %H (the commit hash witness) + the RS record separator, then --name-only.
-	// The 500-commit window matches the legacy miner's proven cost profile; it is
-	// a mining window (bounded by base ancestry), not a data cap on any file.
-	cmd := exec.Command("git", "log", base, "--name-only", "--format=tformat:%x1e%H", "-n", "500")
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  co-change sets: git log failed (%v) — 0 sets stored\n", err)
-		return 0
-	}
-	sets := make(map[string][]string)
-	for _, rec := range strings.Split(string(out), "\x1e") {
-		lines := strings.Split(strings.TrimSpace(rec), "\n")
-		if len(lines) == 0 {
-			continue
-		}
-		hash := strings.TrimSpace(lines[0])
-		if hash == "" {
-			continue
-		}
-		files := []string{}
-		seen := make(map[string]bool)
-		for _, line := range lines[1:] {
-			f := normCochangePath(strings.TrimSpace(line), root, gitTop)
-			if f != "" && !seen[f] {
-				seen[f] = true
-				files = append(files, f)
-			}
-		}
-		if len(files) < 2 || len(files) > 50 {
-			continue // single-file commit has no co-change signal; skip mega-commits
-		}
-		sets[hash] = files
-	}
-	if err := db.BatchInsertCochangeSets(sets); err != nil {
-		log.Printf("WARNING: co-change set insert: %v", err)
-	}
-	return len(sets)
 }
 
 var pyClassInhRe = regexp.MustCompile(`^\s*class\s+(\w+)\s*\(([^)]+)\)\s*:`)

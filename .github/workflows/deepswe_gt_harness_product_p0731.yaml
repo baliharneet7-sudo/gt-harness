@@ -466,6 +466,22 @@ jobs:
           CC: musl-gcc
         run: |
           set -euo pipefail
+          # This step tests and cleanly builds vendor/gt-index-src, then throws
+          # the result away and runs the certified binary instead. That is only
+          # a verification if the two correspond, and for the whole of HAR-87
+          # they did not: the vendored tree carried ZERO occurrences of
+          # node_type, candidate_state, resolution_v2 or completeness_fact while
+          # the pinned binary emits all of them. A green check over source that
+          # is not running is worse than no check, and it produced three
+          # confidently wrong conclusions in this ticket. Bind them.
+          pinned="$(python3 -c "import json;print(json.load(open('../gt-index-linux-amd64.build-info.json'))['git_commit'])")"
+          vendored="$(tr -d '[:space:]' < SOURCE-COMMIT)"
+          if [ "$pinned" != "$vendored" ]; then
+            echo "vendored producer source is not the source of the certified binary" >&2
+            echo "  build-info git_commit : $pinned"  >&2
+            echo "  SOURCE-COMMIT         : $vendored" >&2
+            exit 1
+          fi
           sudo apt-get update -qq
           sudo apt-get install -y musl-tools
           go test -tags sqlite_fts5 ./...

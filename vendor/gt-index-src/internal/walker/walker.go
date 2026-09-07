@@ -164,39 +164,28 @@ func loadGitignore(path string) []string {
 
 func isIgnored(relPath string, patterns []string) bool {
 	base := filepath.Base(relPath)
-	ignored := false
 	for _, p := range patterns {
-		// Gitignore negation: !pattern unignores a previously ignored file.
-		// The last matching rule wins (git semantics).
-		negate := false
-		pat := p
-		if strings.HasPrefix(p, "!") {
-			negate = true
-			pat = p[1:]
-		}
-		matched := false
 		// Glob matching against basename
-		if m, _ := filepath.Match(pat, base); m {
-			matched = true
+		if matched, _ := filepath.Match(p, base); matched {
+			return true
 		}
-		if !matched {
-			// Directory-level matching
-			if strings.Contains(pat, "/") {
-				if m, _ := filepath.Match(pat, relPath); m {
-					matched = true
-				}
-			} else {
-				dirPart := "/" + filepath.ToSlash(relPath) + "/"
-				if strings.Contains(dirPart, "/"+pat+"/") {
-					matched = true
-				}
+		// Directory-level matching: pattern matches a directory component
+		// e.g. "vendor" matches "vendor/foo.go" but NOT "foo_vendor.go"
+		// e.g. "_test" matches "_test/foo.go" but NOT "foo_test.go"
+		if strings.Contains(p, "/") {
+			// Path pattern: match against full relative path
+			if matched, _ := filepath.Match(p, relPath); matched {
+				return true
+			}
+		} else {
+			// Simple name: match as directory component only
+			dirPart := "/" + filepath.ToSlash(relPath) + "/"
+			if strings.Contains(dirPart, "/"+p+"/") {
+				return true
 			}
 		}
-		if matched {
-			ignored = !negate
-		}
 	}
-	return ignored
+	return false
 }
 
 // IsTestFile checks if a file path is a test file based on conventions.
@@ -210,22 +199,12 @@ func IsTestFile(relPath string) bool {
 	if strings.HasPrefix(base, "test_") || strings.HasSuffix(stem, "_test") {
 		return true
 	}
-	// Python pytest/Django FILES the test_/_test rules miss (Fable 2026-07-03 leak: their
-	// bodies carry fixtures/assertions/graded-test names — indexing them bakes test text
-	// into graph.db + the content surface). conftest.py (fixtures), tests.py & test.py
-	// (Django app-level test modules), *_tests.py (plural). Root fix so is_test is right
-	// for EVERY consumer (content FTS, BFS neighbor, witness render), not per-consumer.
-	if ext == ".py" && (base == "conftest.py" || base == "tests.py" || base == "test.py" ||
-		strings.HasSuffix(stem, "_tests")) {
-		return true
-	}
 	// Go: *_test.go
 	if strings.HasSuffix(base, "_test.go") {
 		return true
 	}
-	// JS/TS: *.test.js, *.spec.js, *.test.ts, *.spec.ts (+ plural .tests./.specs.)
-	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") ||
-		strings.Contains(base, ".tests.") || strings.Contains(base, ".specs.") {
+	// JS/TS: *.test.js, *.spec.js, *.test.ts, *.spec.ts
+	if strings.Contains(base, ".test.") || strings.Contains(base, ".spec.") {
 		return true
 	}
 	// JVM (Java/Kotlin/Scala/Groovy): *Test.java, *Tests.java, *Test.kt, etc.
@@ -281,33 +260,10 @@ func IsTestFile(relPath string) bool {
 		return true
 	}
 	// Any path that IsNonSourceFile classifies as non-source (e.g. fuzz/, fuzzing/,
-	// fuzz_targets/, corpus/, integration_tests/, e2e_tests/, as well as demo/example/
-	// docs/vendor dirs already in hasTestDirSegment or nonSourceDirSegments) should also be
-	// flagged by IsTestFile so that the is_test bit is set regardless of which predicate is
-	// the entry point.
-	if IsNonSourceFile(relPath) {
-		return true
-	}
-	return false
-}
-
-// IsTestByStructure reports whether a path is test-classified by a RELIABLE STRUCTURAL
-// signal — a test-directory segment (tests/, spec/, __tests__/), a JVM src/test/ tree, or
-// a non-source directory (fuzz/, corpus/, examples/). Unlike the filename-convention
-// predicates in IsTestFile (test_*, *_test, *Test, *_spec), these have NO production
-// false-positive class: a file living under tests/ is test-associated regardless of its
-// content. The parser corroborates NAME-only is_test flags against file content (a file
-// must actually contain a collectable test unit) but trusts these structural flags as-is,
-// so production test-infrastructure named like a test (base_test.py, AbstractFooTest) is
-// not wrongly excluded from localization. See parser.ParseFile.
-func IsTestByStructure(relPath string) bool {
-	dir := filepath.ToSlash(filepath.Dir(relPath))
-	if hasTestDirSegment(dir) {
-		return true
-	}
-	if strings.Contains(dir, "src/test/") {
-		return true
-	}
+	// fuzz_targets/, corpus/, conformance/, compat/, integration_tests/, e2e_tests/,
+	// as well as demo/example/docs/vendor dirs already in hasTestDirSegment or
+	// nonSourceDirSegments) should also be flagged by IsTestFile so that the
+	// is_test bit is set regardless of which predicate is the entry point.
 	if IsNonSourceFile(relPath) {
 		return true
 	}
@@ -341,19 +297,17 @@ func hasTestDirSegment(dir string) bool {
 // you add a segment here, add it there too (DUPLICATION TRAP — the two copies
 // drifting is exactly the leak path_policy.py warns about).
 var nonSourceDirSegments = map[string]bool{
-	// test dirs (superset of hasTestDirSegment; "e2e" is Python-side too)
+	// test dirs (superset of hasTestDirSegment; "e2e"/"testing" are Python-side too)
 	"test": true, "tests": true, "spec": true, "specs": true,
-	"e2e": true,
+	"e2e": true, "testing": true,
 	// fuzz / mutation / property-based test dirs (universal across all languages)
 	// e.g. crates/fuzz/src/... (Rust), fuzz_targets/ (cargo-fuzz), corpus/ (AFL/libFuzzer),
-	// testcases/ (AFL), integration_tests/ (Python pytest),
-	// e2e_tests/ (end-to-end test dirs distinct from "e2e").
-	// P11: `compat`, `conformance`, and `testing` were REMOVED — they are production-ambiguous
-	// (pandas/compat, numpy/compat, protobuf conformance libs, Go `testing`-helper packages
-	// are real source), so forcing is_test on them dropped production code out of the fact
-	// surface. Only genuinely non-source dirs stay.
+	// testcases/ (AFL), conformance/ (protocol/spec conformance suites),
+	// compat/ (compatibility test suites), integration_tests/ (Python pytest),
+	// e2e_tests/ (end-to-end test dirs distinct from "e2e")
 	"fuzz": true, "fuzzing": true, "fuzz_targets": true,
 	"corpus": true, "testcases": true,
+	"conformance": true, "compat": true,
 	"integration_tests": true, "e2e_tests": true,
 	// demo / example
 	"example": true, "examples": true, "demo": true, "demos": true,

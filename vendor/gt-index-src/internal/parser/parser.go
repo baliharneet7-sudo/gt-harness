@@ -3,12 +3,13 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
-	"sync"
-	"unicode/utf8"
 
 	sitter "github.com/smacker/go-tree-sitter"
 
@@ -16,32 +17,6 @@ import (
 	"github.com/harneet2512/groundtruth/gt-index/internal/store"
 	"github.com/harneet2512/groundtruth/gt-index/internal/walker"
 )
-
-// zeroFieldWarned tracks which languages have already emitted the
-// zero-named-fields warning, so it prints once per language (deterministic:
-// stderr-only, never feeds output ordering).
-var zeroFieldWarned sync.Map
-
-// warnIfZeroFieldGrammar emits a one-time-per-language stderr warning when a
-// spec's tree-sitter grammar exposes zero named fields. Such grammars (e.g.
-// Kotlin) make every ChildByFieldName lookup return nil, so field-based name/
-// body/param extraction silently produces a half-graph. Surfacing it here makes
-// that failure class visible instead of silent.
-func warnIfZeroFieldGrammar(spec *specs.Spec) {
-	if spec == nil || spec.Language == nil {
-		return
-	}
-	// FieldName(1) is the first named field; "" means the grammar has none
-	// (ts_language_field_name_for_id returns NULL when field_count == 0).
-	if spec.Language.FieldName(1) != "" {
-		return
-	}
-	if _, loaded := zeroFieldWarned.LoadOrStore(spec.Name, struct{}{}); loaded {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "[gt-index] WARNING: language %q grammar exposes zero named tree-sitter fields; "+
-		"field-based extraction falls back to node-type scanning (guarding against a silent half-graph)\n", spec.Name)
-}
 
 // ParseResult holds the extracted data from one file.
 type ParseResult struct {
@@ -53,13 +28,10 @@ type ParseResult struct {
 	Assignments []AssignmentRef // PyCG Rule 1: x = ClassName() type tracking
 	ModDecls    []ModDecl       // Rust mod declarations (mod foo;)
 	ReExports   []ReExportRef   // Re-export declarations (barrel files, pub use, __init__.py)
-	// RustImplIdx records the 1-based Nodes index of every Rust `impl_item` Class
-	// node, captured at parse time from the AST node kind. linkRustImplMethods uses
-	// this to distinguish impl blocks from struct/enum/trait definitions — a
-	// const-only or empty `impl Foo {}` has zero child method nodes, so the old
-	// "no children ⇒ canonical struct" heuristic misclassified it and minted a
-	// duplicate `Class` node named Foo.
-	RustImplIdx []int
+	// ParserIncomplete is true when tree-sitter returned a recoverable tree that
+	// contains ERROR/MISSING nodes. Partial facts remain inspectable, but callers
+	// must not treat resolution derived from this file as authoritative.
+	ParserIncomplete bool
 }
 
 // ModDecl is a Rust module declaration (mod foo;) extracted from the AST.
@@ -106,32 +78,50 @@ type AssertionRef struct {
 
 // CallRef is a raw (unresolved) call reference.
 type CallRef struct {
-	CallerNodeIdx   int    // index into ParseResult.Nodes
-	CalleeName      string // the function/method name being called (last component)
-	CalleeQualified string // full qualified name if available (e.g. "obj.method")
-	Line            int
-	File            string
+	CallerNodeIdx    int    // index into ParseResult.Nodes
+	CallerScope      string // qualified enclosing function/method scope
+	CalleeName       string // the function/method name being called (last component)
+	CalleeScope      string // exact statically known callee scope, when available
+	CalleeQualified  string // full qualified name if available (e.g. "obj.method")
+	Line             int
+	File             string
+	ParserIncomplete bool
+	// FlowAnalysisComplete is an explicit upstream proof that the value and
+	// viable-call constraint graph is complete for this call. Parser success
+	// alone never sets it.
+	FlowAnalysisComplete bool
+	DynamicDispatch      bool // computed/callable expression; no stable declared callee identity
+	ASTPath              string
+	ByteStart            uint64
+	ByteEnd              uint64
+	ColumnStart          uint32
+	ArgumentArity        *uint16
+	// ArgumentSpread reports that at least one argument is a splat/spread
+	// (`...xs`, `*args`, `**kw`). ArgumentArity counts argument NODES, so a
+	// spread makes it an unusable lower bound on the real argument count.
+	// Anything that reasons about arity must abstain when this is set.
+	ArgumentSpread bool
+	ArgumentNames  []string // source-visible variable arguments, in call order
+	DispatchForm   string
 }
 
 // AssignmentRef records a variable assignment where the RHS is a constructor call.
 // PyCG Rule 1: x = ClassName() → x has type ClassName.
 // Used by resolver Strategy 1.96 for x.method() resolution.
 type AssignmentRef struct {
-	VarName       string // LHS variable name ("x", "self.client")
-	TypeName      string // RHS class name (constructor) OR callee name (when ViaReturn)
-	TypeQualified string // full qualified RHS if available ("requests.Session")
-	Scope         string // enclosing function name (empty = module level)
-	File          string
-	Line          int
+	VarName        string // LHS variable name ("x", "self.client")
+	TypeName       string // RHS class name (constructor) OR callee name (when ViaReturn)
+	TypeQualified  string // full qualified RHS if available ("requests.Session")
+	Scope          string // enclosing function name (empty = module level)
+	ObjectScope    string // enclosing class/object for self/this fields
+	File           string
+	Line           int
+	IsParameter    bool
+	ParameterIndex int
 	// ViaReturn marks x = factory() (non-constructor call): TypeName holds the CALLEE
 	// name, and the resolver bridges through that callee's declared return type
 	// (PyCG Rule 4 / JARVIS return-type chaining) rather than treating it as a class.
 	ViaReturn bool
-	// AliasOf marks a bare-variable alias `b = a` (RHS is an identifier, not a call):
-	// TypeName is empty and AliasOf holds the SOURCE var name. The resolver's alias
-	// fixpoint (BuildAssignmentIndex) propagates a's inferred type(s) onto b, so chains
-	// `a = C(); b = a; c = b; c.m()` resolve. PyCG assignment-graph alias transition.
-	AliasOf string
 }
 
 // ImportRef is a parsed import statement — maps an imported name to its source module.
@@ -148,9 +138,12 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseBytes(sf, isTest, src)
+}
 
-	warnIfZeroFieldGrammar(sf.Spec)
-
+// ParseBytes parses exactly the caller-supplied bytes. It performs no source
+// filesystem read and is the authority used by the JSONL inspection boundary.
+func ParseBytes(sf walker.SourceFile, isTest bool, src []byte) (*ParseResult, error) {
 	parser := sitter.NewParser()
 	parser.SetLanguage(sf.Spec.Language)
 
@@ -162,26 +155,15 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 
 	result := &ParseResult{}
 	root := tree.RootNode()
-
-	// Content-corroborate a NAME-only is_test flag. Test-runner collection semantics = a
-	// filename gate AND a unit gate: a file is a test iff it is named like one AND actually
-	// contains a collectable test (a test_*/TestXxx function or an @Test-marked def). The
-	// walker's IsTestFile applies only the filename gate, so production test-infrastructure
-	// (base_test.py's BaseTestClass, AbstractFooTest, *_test.go helper bases) whose names end
-	// in _test but define no tests were flagged is_test=1 and DELETED from the localizer's
-	// search space (every recall/score query filters is_test=0). Restore the unit gate: for
-	// corroboratable languages, downgrade a NAME-flagged file (never a test-DIRECTORY one)
-	// that has zero collectable tests. Runs before walkNode so body-channel mining and node
-	// flags see the corrected bit. Byte-identical for dir-flagged files, real tests, and
-	// call-based languages (corroborateIsTest=false) — the false-positive set is the only delta.
-	if isTest && corroborateIsTest(sf.Language) &&
-		!walker.IsTestByStructure(sf.Path) &&
-		!fileHasCollectableTest(root, sf, src) {
-		isTest = false
-	}
+	result.ParserIncomplete = root == nil || root.HasError()
 
 	// Walk the AST to extract definitions and calls
 	walkNode(root, sf, src, isTest, result, 0)
+	if result.ParserIncomplete {
+		for i := range result.Calls {
+			result.Calls[i].ParserIncomplete = true
+		}
+	}
 
 	// Go: link receiver methods (func (r *T) M()) to their struct T. Go methods
 	// are not lexically nested in the type, so walkNode labels them "Function"
@@ -211,14 +193,39 @@ func ParseFile(sf walker.SourceFile, isTest bool) (*ParseResult, error) {
 	// contains a module-linking construct (export/import/from/require/use/mod) —
 	// not TS-specific, no per-repo logic. Skips genuinely empty/comment-only files
 	// so the graph isn't polluted with content-free anchors.
-	maybeAddFileAnchorNode(sf, src, isTest, result)
+	maybeAddFileAnchorNode(sf, src, result)
+
+	stampContentAddress(src, result)
 
 	return result, nil
 }
 
+// stampContentAddress completes every node's content address with the sha256 of
+// the exact bytes this parse saw. The byte range is set at each extraction site
+// -- it comes off the tree-sitter node, so every grammar has it -- while the
+// hash is file-wide and so is applied once here rather than recomputed per
+// symbol. It is the same digest Pass 5b writes to file_hashes for this file,
+// because both hash the file's bytes, so a reader can verify a symbol against
+// either surface.
+//
+// A node whose byte range was never set stays UNADDRESSED: stamping a hash onto
+// a symbol nobody can locate would claim a verifiability the address cannot
+// deliver.
+func stampContentAddress(src []byte, result *ParseResult) {
+	sum := sha256.Sum256(src)
+	digest := hex.EncodeToString(sum[:])
+	for i := range result.Nodes {
+		n := &result.Nodes[i]
+		if n.ByteEnd <= n.ByteStart {
+			continue
+		}
+		n.FileHash = digest
+	}
+}
+
 // maybeAddFileAnchorNode appends a synthetic File node when a file yields zero
 // symbol nodes yet carries module-linking structure. See ParseFile caller for why.
-func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, result *ParseResult) {
+func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, result *ParseResult) {
 	if len(result.Nodes) > 0 {
 		return
 	}
@@ -270,6 +277,7 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, resul
 		base = sf.Path
 	}
 	endLine := strings.Count(text, "\n") + 1
+	idx := len(result.Nodes)
 	result.Nodes = append(result.Nodes, store.Node{
 		Label:         "File",
 		Name:          base,
@@ -279,11 +287,14 @@ func maybeAddFileAnchorNode(sf walker.SourceFile, src []byte, isTest bool, resul
 		EndLine:       endLine,
 		Language:      sf.Language,
 		IsExported:    true,
-		// E3 (Fable 2026-07-05): stamp is_test on the synthetic anchor too. A tests/ barrel
-		// (re-export __init__.py / index.ts) yields zero symbol nodes, so only this anchor is
-		// emitted for it — without the flag it entered the graph as PRODUCTION and became an
-		// FTS-seedable test PATH (the walker's file-level isTest already knows the truth).
-		IsTest: isTest,
+		ByteStart:     0,
+		ByteEnd:       uint64(len(src)),
+	})
+	// Symbol taxonomy: the file kind, so every symbol node carries exactly one
+	// symbol_kind row regardless of which path emitted it.
+	result.Properties = append(result.Properties, PropertyRef{
+		NodeIdx: idx, Kind: PropSymbolKind, Value: specs.KindFile,
+		Line: 1, Confidence: 1.0,
 	})
 }
 
@@ -486,14 +497,10 @@ func linkRustImplMethods(result *ParseResult) {
 	}
 
 	// Phase 1: Build a map of struct/enum names → 1-based index (the canonical struct node).
-	// Only struct_item/enum_item/trait_item are canonical; impl_item is not. We classify
-	// AUTHORITATIVELY by AST node kind: walkNode recorded each impl_item Class node's
-	// 1-based index in result.RustImplIdx. The previous heuristic ("a Class with method
-	// children is an impl, one without is a struct") misclassified a const-only or empty
-	// `impl Foo {}` — which has zero child method nodes — as a canonical struct, minting a
-	// DUPLICATE Class node named Foo (and, when the empty impl was parsed before the real
-	// struct, hijacking the canonical slot so later impl methods reparented to the empty
-	// block). Distinguishing by node kind fixes both.
+	// Only struct_item and enum_item are canonical; impl_item and trait_item are not.
+	// We identify these by label + checking if they came from struct_item/enum_item.
+	// Since we don't store the AST node type, use a heuristic: Class nodes that have
+	// NO methods as children are struct/enum definitions (impl blocks always have methods).
 	type nodeInfo struct {
 		idx1  int // 1-based index
 		name  string
@@ -502,9 +509,12 @@ func linkRustImplMethods(result *ParseResult) {
 	structNodes := make(map[string]int) // type name → 1-based index of canonical struct node
 	var implNodes []nodeInfo            // impl_item Class nodes
 
-	implIdxSet := make(map[int]bool, len(result.RustImplIdx))
-	for _, idx1 := range result.RustImplIdx {
-		implIdxSet[idx1] = true
+	// First pass: identify which Class nodes have children (methods).
+	hasChildren := make(map[int]bool) // 1-based index → has method children
+	for i := range result.Nodes {
+		if result.Nodes[i].ParentID > 0 {
+			hasChildren[int(result.Nodes[i].ParentID)] = true
+		}
 	}
 
 	for i := range result.Nodes {
@@ -513,14 +523,14 @@ func linkRustImplMethods(result *ParseResult) {
 			continue
 		}
 		idx1 := i + 1
-		if implIdxSet[idx1] {
-			// impl_item block (authoritative from AST node kind, incl. empty/const-only)
-			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
-		} else {
-			// struct_item/enum_item/trait_item definition (canonical)
+		if !hasChildren[idx1] {
+			// No children → this is a struct_item/enum_item definition (canonical)
 			if _, exists := structNodes[n.Name]; !exists {
 				structNodes[n.Name] = idx1
 			}
+		} else {
+			// Has children → this is an impl_item block
+			implNodes = append(implNodes, nodeInfo{idx1: idx1, name: n.Name, label: n.Label})
 		}
 	}
 
@@ -553,309 +563,58 @@ func linkRustImplMethods(result *ParseResult) {
 	}
 }
 
-// functionNodeName returns the name walkNode would assign to a function-definition node
-// ("" = anonymous, so walkNode creates NO node for it). Centralized so extractCalls uses the
-// SAME predicate to decide the B1-#5 nested-function boundary: a nested function that WILL
-// get its own node is a boundary (its calls attribute to IT); an anonymous one is traversed
-// through so its calls still attribute to the enclosing named function (no lost edges).
-func functionNodeName(node *sitter.Node, sf walker.SourceFile, src []byte) string {
-	spec := sf.Spec
-	nodeType := node.Type()
-	name := extractFieldText(node, spec.NameField, src)
-	if name == "" {
-		name = extractFirstIdentifier(node, src)
-	}
-	// JS/TS: arrow functions AND function expressions assigned to variables have no name
-	// field — it lives on the parent variable_declarator (`const h = (req,res)=>{}`,
-	// `const f = function(){}`). (B2 FIX1 folded into the B1-#5 helper.)
-	if name == "" && (nodeType == "arrow_function" || nodeType == "function_expression") {
-		parent := node.Parent()
-		if parent != nil && parent.Type() == "variable_declarator" {
-			name = extractFieldText(parent, "name", src)
-		}
-	}
-	// JS/TS: function expressions assigned to variables/properties/exports are executable
-	// module entry points even when not declarations (`const fn = function(){}`,
-	// `exports.fn = function(){}`, `module.exports = function(){}`). Name from the target.
-	if name == "" && (nodeType == "function_expression" || nodeType == "arrow_function") {
-		name = assignedFunctionExpressionName(node, sf, src)
-	}
-	return name
-}
-
-// _testAnnotationNodeTypes: cross-language attribute/annotation/decorator node types that
-// can carry a test marker (Rust attribute_item; Java/Kotlin (marker_)annotation; C#
-// attribute/attribute_list; Python/TS decorator). Node-level test detection over these is
-// language-agnostic — ONE marker vocabulary across every typed language's annotation
-// surface, no per-repo or per-language special-casing.
-var _testAnnotationNodeTypes = map[string]bool{
-	"attribute_item":    true, // Rust  #[test] / #[cfg(test)] / #[bench] / #[tokio::test]
-	"attribute":         true, // Rust inner attr; C#  [Fact] / [Test]
-	"attribute_list":    true, // C#  [TestMethod]
-	"annotation":        true, // Java  @Test (some grammars)
-	"marker_annotation": true, // Java/Kotlin  @Test
-	"decorator":         true, // Python / TS  @pytest.mark.* (rare)
-}
-
-// _testAnnotationWrapperTypes: nodes that hold annotations one level down (Java `modifiers`,
-// C# `attribute_list`) so the direct-child scan still finds an annotated method's marker.
-var _testAnnotationWrapperTypes = map[string]bool{
-	"modifiers":      true,
-	"attribute_list": true,
-}
-
-// _testMarkerTokens: the CURATED, EXACT vocabulary of test-framework marker tokens across
-// every typed language's annotation surface. EXACT match only — broad prefix/suffix "test"
-// matching over-marked PRODUCTION code (P8): `@app.route("/api/test")` (token "test" from a
-// URL string), `@pytest.fixture` ("pytest" ends with "test"), and `contest`/`attestation`
-// all falsely flipped is_test=1. A marker is always an identifier from this set, never a
-// substring of an unrelated token or a fragment of a string-literal argument.
-var _testMarkerTokens = map[string]bool{
-	"test":              true, // Rust #[test]/#[tokio::test]/#[cfg(test)]; Java/Kotlin @Test
-	"bench":             true, // Rust #[bench]
-	"fact":              true, // C# xUnit [Fact]
-	"theory":            true, // C# xUnit [Theory]
-	"testmethod":        true, // C# MSTest [TestMethod]
-	"testcase":          true, // C# NUnit [TestCase]
-	"parameterizedtest": true, // JUnit5 @ParameterizedTest
-}
-
-// stripStringLiterals removes the CONTENTS of quoted string/char literals so a value like
-// @app.route("/api/test") does not surface a bogus `test` token from its URL argument. A
-// test-framework marker is always an identifier (@Test, #[test], [Fact]), never inside a
-// quoted argument. Operates byte-wise on ASCII quote/backslash bytes; multi-byte UTF-8 runes
-// (high bit set) are copied through verbatim outside a string, so the result stays valid.
-func stripStringLiterals(s string) string {
-	var b strings.Builder
-	inStr := false
-	var quote byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if inStr {
-			if c == '\\' { // skip an escaped char inside the string
-				i++
-				continue
-			}
-			if c == quote {
-				inStr = false
-			}
-			continue
-		}
-		if c == '"' || c == '\'' {
-			inStr = true
-			quote = c
-			continue
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
-}
-
-// annotationMarksTest reports whether an attribute/annotation TEXT names a test-framework
-// construct. Token-bounded AND exact-set (see _testMarkerTokens): a marker must be a whole
-// identifier from the curated vocabulary, after string-literal arguments are stripped. This
-// is correct-or-quiet — an unrecognized attribute stays production (its symbols keep their
-// place in the content index) rather than over-marking on a coincidental "test" substring.
-func annotationMarksTest(txt string) bool {
-	for _, tok := range strings.FieldsFunc(strings.ToLower(stripStringLiterals(txt)), func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_')
-	}) {
-		if _testMarkerTokens[tok] {
-			return true
-		}
-	}
-	return false
-}
-
-// nodeMarkedTest reports whether a definition node carries a test-marker attribute/
-// annotation/decorator — as a CHILD (Rust function_item/mod_item; Java via `modifiers`;
-// C# via `attribute_list`) OR as an immediately-PRECEDING SIBLING (grammars that place
-// outer attributes beside the item, not under it). Language-agnostic; callers gate it to
-// definition nodes so it stays cheap.
-func nodeMarkedTest(node *sitter.Node, src []byte) bool {
-	// (a) attributes attached as CHILDREN (or one wrapper level down).
-	for i := 0; i < int(node.ChildCount()); i++ {
-		c := node.Child(i)
-		ct := c.Type()
-		if _testAnnotationNodeTypes[ct] {
-			if annotationMarksTest(c.Content(src)) {
-				return true
-			}
-			continue
-		}
-		if _testAnnotationWrapperTypes[ct] {
-			for j := 0; j < int(c.ChildCount()); j++ {
-				gc := c.Child(j)
-				if _testAnnotationNodeTypes[gc.Type()] && annotationMarksTest(gc.Content(src)) {
-					return true
-				}
-			}
-		}
-	}
-	// (b) attributes as immediately-PRECEDING SIBLINGS — walk back over a stack of
-	// attributes/comments, stop at the first real sibling.
-	for sib := node.PrevSibling(); sib != nil; sib = sib.PrevSibling() {
-		st := sib.Type()
-		if _testAnnotationNodeTypes[st] {
-			if annotationMarksTest(sib.Content(src)) {
-				return true
-			}
-			continue
-		}
-		if st == "line_comment" || st == "block_comment" {
-			continue
-		}
-		break
-	}
-	return false
-}
-
-// corroborateIsTest reports whether a NAME-flagged is_test can be safely corroborated by
-// file CONTENT for this language — i.e. the language's tests are detectable by function
-// name (Go TestXxx, pytest/unittest test*, PHPUnit/XCTest/JUnit3 test*) or by annotation
-// (@Test, #[test], [Fact], captured by nodeMarkedTest). Call/macro-based frameworks
-// (JS/TS it()/describe(), Ruby RSpec, C/C++ gtest TEST()) are NOT corroborated here — their
-// collectable unit is a call the name/annotation pre-scan does not detect, so downgrading
-// them could hide a real test (leak). For those the (already stricter) filename pattern stands.
-func corroborateIsTest(language string) bool {
-	switch language {
-	case "python", "go", "rust", "java", "kotlin", "scala", "groovy", "csharp", "php", "swift":
-		return true
-	}
-	return false
-}
-
-// isTestUnitName reports whether a function/method name is a collectable test unit under the
-// language's test-runner naming convention — the "unit gate" every runner applies on top of
-// the filename gate. base_test.py's methods (setup_class, setup_test, teardown_test) do NOT
-// start with "test", so a BaseTestClass with no test_* methods yields false.
-func isTestUnitName(language, name string) bool {
-	if name == "" {
-		return false
-	}
-	switch language {
-	case "go":
-		// go test collects TestXxx / BenchmarkXxx / ExampleXxx / FuzzXxx where the char after
-		// the prefix is not lowercase ("Testable" is NOT a test — Go's own collection rule).
-		for _, p := range []string{"Test", "Benchmark", "Example", "Fuzz"} {
-			if strings.HasPrefix(name, p) {
-				rest := name[len(p):]
-				if rest == "" {
-					return true
-				}
-				if c := rest[0]; c == '_' || (c >= 'A' && c <= 'Z') {
-					return true
-				}
-			}
-		}
-		return false
-	case "python", "php", "swift", "java", "kotlin", "scala", "groovy":
-		// pytest test_*, unittest testFoo, PHPUnit test*, XCTest test*, JUnit3/TestNG testX.
-		return strings.HasPrefix(name, "test") || strings.HasPrefix(name, "Test")
-	}
-	return false
-}
-
-// fileHasCollectableTest reports whether the file contains at least one unit the language's
-// test runner would collect: an annotation-marked def (@Test / #[test] / [Fact]) or a
-// function/method whose name matches the runner's convention (isTestUnitName). This is the
-// CONTENT half of the runner's own collection rule (filename gate ∧ unit gate). Early-returns
-// on the first hit; a full walk only happens for a name-flagged file that has zero tests.
-func fileHasCollectableTest(root *sitter.Node, sf walker.SourceFile, src []byte) bool {
-	spec := sf.Spec
-	if spec == nil || root == nil {
-		return false
-	}
-	found := false
-	var visit func(n *sitter.Node)
-	visit = func(n *sitter.Node) {
-		if found || n == nil {
-			return
-		}
-		nt := n.Type()
-		if spec.IsFunctionNode(nt) || spec.IsClassNode(nt) || nt == "mod_item" || nt == "module" {
-			if nodeMarkedTest(n, src) {
-				found = true
-				return
-			}
-		}
-		if spec.IsFunctionNode(nt) && isTestUnitName(sf.Language, functionNodeName(n, sf, src)) {
-			found = true
-			return
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			visit(n.Child(i))
-			if found {
-				return
-			}
-		}
-	}
-	visit(root)
-	return found
-}
-
-// javaNodeExported reports whether a Java method/constructor/class node is part of the
-// exported API surface, read from its ACCESS MODIFIER — never from name casing (P13). Java
-// visibility is `public`/`protected`/`private`/(none = package-private); public and protected
-// members are reachable outside their package (protected via subclasses), package-private and
-// private are not. The old name-casing heuristic wrongly marked a package-private member
-// exported (uppercase name) and a lowercase public method unexported.
-func javaNodeExported(node *sitter.Node, src []byte) bool {
+func extractDeclaratorIdentifier(node *sitter.Node, src []byte) string {
 	if node == nil {
-		return false
+		return ""
 	}
-	mod := node.ChildByFieldName("modifiers")
-	if mod == nil {
-		for i := 0; i < int(node.ChildCount()); i++ {
-			if c := node.Child(i); c != nil && c.Type() == "modifiers" {
-				mod = c
-				break
+	for _, field := range []string{"declarator", "name"} {
+		if child := node.ChildByFieldName(field); child != nil {
+			if id := extractDeclaratorIdentifier(child, src); id != "" {
+				return id
 			}
 		}
 	}
-	if mod == nil {
-		return false // no access modifier ⇒ package-private ⇒ not exported
+	switch node.Type() {
+	case "identifier", "field_identifier", "type_identifier":
+		return node.Content(src)
 	}
-	modText := strings.ToLower(mod.Content(src))
-	return containsKeywordAtBoundary(modText, "public") || containsKeywordAtBoundary(modText, "protected")
-}
-
-// nodeExported computes a definition's exported/public bit. Most languages use the spec's
-// name-based rule (Go casing, Python `_` prefix); Java visibility is a structural access
-// modifier, not a naming convention, so it is read from the AST (see javaNodeExported / P13).
-func nodeExported(spec *specs.Spec, node *sitter.Node, src []byte, name, language string) bool {
-	if language == "java" {
-		return javaNodeExported(node, src)
-	}
-	return spec.IsExported != nil && spec.IsExported(name)
+	return ""
 }
 
 func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, result *ParseResult, parentNodeIdx int) {
 	spec := sf.Spec
 	nodeType := node.Type()
 
-	// Node-level test detection (Fable #2/#3): file-level isTest MISSES inline tests — Rust
-	// `#[cfg(test)] mod` / `#[test] fn`, Java/Kotlin `@Test`, C# `[Fact]`/`[Theory]` — so
-	// their bodies were indexed with is_test=0, polluting the content-BM25 IDF and exposing
-	// test names via CONTENT_SEED witnesses. Flip isTest for the whole subtree when a
-	// definition node carries a test-marker annotation. One vocabulary over every annotation
-	// surface (generalized, not per-language); byte-identical on code with no such marker.
-	if !isTest &&
-		(spec.IsFunctionNode(nodeType) || spec.IsClassNode(nodeType) ||
-			nodeType == "mod_item" || nodeType == "module") &&
-		nodeMarkedTest(node, src) {
-		isTest = true
-	}
+	// Symbol taxonomy (item 11): declarations the parser has no entry for --
+	// a TypeScript enum, a Rust mod, a C++ namespace -- become NEW nodes with
+	// NEW labels. Emission does not redirect the walk: parentNodeIdx is passed
+	// on unchanged below, so nothing nested inside one of these is relabelled
+	// and no pre-existing label total can move. See internal/parser/taxonomy.go.
+	emitTaxonomyDeclaration(node, sf, src, result, isTest)
 
 	// Check for function definition
 	if spec.IsFunctionNode(nodeType) {
-		name := functionNodeName(node, sf, src)
+		name := extractFieldText(node, spec.NameField, src)
+		if (sf.Language == "c" || sf.Language == "cpp") && name != "" {
+			if declarator := node.ChildByFieldName(spec.NameField); declarator != nil {
+				if id := extractDeclaratorIdentifier(declarator, src); id != "" {
+					name = id
+				}
+			}
+		}
+		if name == "" {
+			name = extractFirstIdentifier(node, src)
+		}
+		// JS/TS fix: arrow functions assigned to variables have no name field.
+		// The name lives on the parent variable_declarator node.
+		// e.g. const handler = async (req, res) => {}
+		if name == "" && nodeType == "arrow_function" {
+			parent := node.Parent()
+			if parent != nil && parent.Type() == "variable_declarator" {
+				name = extractFieldText(parent, "name", src)
+			}
+		}
 		if name != "" {
-			// B9: the SIGNATURE is a fact/contract surface (typed param list + return, per
-			// D2) — it must NOT carry decorator prose. Decorators previously prepended here
-			// (`@decorator def bar(y):`) polluted the [CALLEE]/Contract render + the resolver's
-			// signature-fingerprint parsers. Decorators remain captured for security tagging
-			// (extractSecurityTags) and, for classes, as class_decorator properties.
 			sig := extractSignature(node, src, spec.BodyField)
 			retType := extractFieldText(node, spec.ReturnTypeField, src)
 
@@ -874,9 +633,11 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				EndLine:       int(node.EndPoint().Row) + 1,
 				Signature:     sig,
 				ReturnType:    retType,
-				IsExported:    nodeExported(spec, node, src, name, sf.Language),
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
 				IsTest:        isTest,
 				Language:      sf.Language,
+				ByteStart:     uint64(node.StartByte()),
+				ByteEnd:       uint64(node.EndByte()),
 			}
 
 			// Check if this is a method (inside a class)
@@ -888,48 +649,32 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
 
-			// Extract calls from this function's body.
-			// childByFieldOrType falls back to node-TYPE scanning for zero-field
-			// grammars (Kotlin), where ChildByFieldName(BodyField) is always nil.
-			callsBefore := len(result.Calls)
-			bodyNode := childByFieldOrType(node, spec.BodyField)
+			// Symbol taxonomy: say WHAT this callable is (function, method,
+			// constructor, accessor) without touching its label.
+			annotateSymbolKind(node, sf, src, result, idx)
+
+			// Extract calls from this function's body
+			bodyNode := node.ChildByFieldName(spec.BodyField)
 			if bodyNode != nil {
-				extractCalls(bodyNode, sf, src, result, idx)
+				scopeName := name
+				objectScope := ""
+				if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
+					objectScope = result.Nodes[parentNodeIdx-1].QualifiedName
+					scopeName = objectScope + "." + name
+				}
+				extractCalls(bodyNode, sf, src, result, idx, scopeName)
 				// PyCG Rule 1: extract x = ClassName() assignments for type tracking
-				extractAssignments(bodyNode, sf, src, result, name)
+				extractAssignments(bodyNode, sf, src, result, scopeName, objectScope)
 			}
 
 			// Extract properties (guard clauses, exception types, return shape)
 			extractProperties(node, sf, src, result, idx)
 
-			// C2a: mine the semantic-passage body channels (string_literals / body_terms /
-			// calls) — the domain vocabulary the name+signature passage lacks. Gated behind
-			// GT_SEM_BODY so graph.db is BYTE-IDENTICAL when off; is_test symbols are excluded
-			// at source (leak=0). result.Calls[callsBefore:] is exactly THIS node's direct
-			// calls (extractCalls does not descend into named nested funcs; nested walkNode
-			// runs after this line).
-			if !isTest && semBodyMiningEnabled() {
-				extractBodyChannels(node, sf, src, result, idx, result.Calls[callsBefore:len(result.Calls)])
-			}
-
 			// Extract assertions from test functions
 			if isTest {
 				extractAssertionRefs(node, sf, src, result, idx)
 			}
-			// B1-#5: recurse into the body to expose NESTED function definitions as nodes
-			// linked to THIS function (idx+1). extractCalls above stops at named-nested-
-			// function boundaries so a nested function's calls attribute to IT, not to this
-			// outer function. Without this, `module.exports = function(C){ C.getX =
-			// function(){ helper() } }` (the NodeBB/express namespace-augmentation pattern)
-			// left getX + the whole augmented API invisible to the graph. Anonymous nested
-			// functions create no node (functionNodeName == "") and are still traversed, so
-			// their calls remain attributed to the nearest named ancestor (no lost edges).
-			if bodyNode != nil {
-				for i := 0; i < int(bodyNode.ChildCount()); i++ {
-					walkNode(bodyNode.Child(i), sf, src, isTest, result, idx+1)
-				}
-			}
-			return
+			return // don't recurse into children (we already extracted from body)
 		}
 	}
 
@@ -973,56 +718,40 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 				}
 			}
 		}
-		// Anonymous class expression assigned to a variable/property:
-		// `const X = class { ... }` / `internals.X = class { ... }` / `module.exports = class { ... }`
-		// Use the LHS name so methods inside get parented to a named class node.
-		// Language-agnostic: any class expression with no name that's the RHS of an assignment.
-		if name == "" && (nodeType == "class" || nodeType == "class_expression") {
-			if p := node.Parent(); p != nil {
-				ptype := p.Type()
-				if ptype == "variable_declarator" || ptype == "assignment_expression" || ptype == "assignment" {
-					lhs := p.ChildByFieldName("name")
-					if lhs == nil {
-						lhs = p.ChildByFieldName("left")
-					}
-					if lhs != nil {
-						lhsText := lhs.Content(src)
-						// For member expressions (internals.Server), use the last segment
-						if dotIdx := strings.LastIndex(lhsText, "."); dotIdx >= 0 {
-							name = lhsText[dotIdx+1:]
-						} else {
-							name = lhsText
-						}
-					}
-				}
-			}
-		}
 		if name != "" {
 			// Classes are top-level or nested; use name as qualified name
 			classQualName := name
 			if parentNodeIdx > 0 && parentNodeIdx-1 < len(result.Nodes) {
 				classQualName = result.Nodes[parentNodeIdx-1].Name + "." + name
 			}
+			label := "Class"
+			if sf.Language == "go" && goTypeDeclarationIsInterface(node) {
+				label = "Interface"
+			}
 			n := store.Node{
-				Label:         "Class",
+				Label:         label,
 				Name:          name,
 				QualifiedName: classQualName,
 				FilePath:      sf.Path,
 				StartLine:     int(node.StartPoint().Row) + 1,
 				EndLine:       int(node.EndPoint().Row) + 1,
-				IsExported:    nodeExported(spec, node, src, name, sf.Language),
+				IsExported:    spec.IsExported != nil && spec.IsExported(name),
 				IsTest:        isTest,
 				Language:      sf.Language,
+				ByteStart:     uint64(node.StartByte()),
+				ByteEnd:       uint64(node.EndByte()),
 			}
 			idx := len(result.Nodes)
 			result.Nodes = append(result.Nodes, n)
 
-			// Authoritative impl-block marker (Rust): record this node's 1-based index
-			// so linkRustImplMethods can distinguish an impl_item from a struct/enum/
-			// trait definition by AST node kind, not by the (broken-for-childless-impls)
-			// "has method children" heuristic.
-			if sf.Language == "rust" && nodeType == "impl_item" {
-				result.RustImplIdx = append(result.RustImplIdx, idx+1) // 1-based
+			// Symbol taxonomy: separate struct / interface / enum / trait /
+			// impl / type_alias, all of which land under this one label today,
+			// and emit the declaration's members. The label is not touched.
+			annotateSymbolKind(node, sf, src, result, idx)
+			emitTaxonomyMembers(node, sf, src, result, isTest, idx+1)
+
+			if label == "Interface" && sf.Language == "go" {
+				extractGoInterfaceMethods(node, sf, src, result, idx+1)
 			}
 
 			// Extract class decorators (above the class definition)
@@ -1064,39 +793,6 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 		}
 		// Fall through: node is both an import and a call node.
 		// Import extraction already ran; now let normal recursion handle call extraction.
-	}
-
-	// Pass 2 module-import extraction: extract module-loading calls as ImportRef
-	// so the import index (built between Pass 2 and Pass 3) includes them.
-	// Language-agnostic: covers require() (JS/TS CommonJS), importlib.import_module()
-	// (Python), and any future module-loading pattern by checking if the call's
-	// first string argument looks like a module path.
-	if spec.IsCallNode(nodeType) {
-		simple, _ := extractCalleeInfo(node, src)
-		if isModuleLoadCall(simple, sf.Language) {
-			extractModuleImport(node, sf, src, result)
-		}
-	}
-
-	// Pass 2 top-level assignment extraction (PyCG assignment-graph, generalized):
-	// Module-level `const x = new Server()` / `x = factory()` / `x = Mod.create()`
-	// must be captured so Strategy 1.96 can resolve `x.method()`. walkNode calls
-	// extractAssignments inside function bodies (line ~548) but NOT for top-level
-	// code. This handles the top-level case: any assignment node at module scope.
-	if nodeType == "variable_declarator" || nodeType == "assignment" ||
-		nodeType == "short_var_declaration" || nodeType == "assignment_statement" ||
-		nodeType == "assignment_expression" {
-		extractAssignments(node, sf, src, result, "")
-		// CommonJS/Node module exports: exports.x = Y / module.exports.x = Y / module.exports = Y
-		// These are assignment_expression nodes where the LHS is a member_expression
-		// starting with "exports." or "module.exports". Extract as ReExportRef so the
-		// resolver knows this module exports symbol X which IS the node Y. Generalized:
-		// the same ReExportRef mechanism handles ES6, Python __init__.py, Rust pub use,
-		// and now CommonJS. The resolver chains re-exports across files so a require()
-		// that imports this module can resolve method calls on the imported symbol.
-		if nodeType == "assignment_expression" {
-			extractCommonJSExports(node, sf, src, result)
-		}
 	}
 
 	// Rust: extract mod declarations (mod foo;) which define the module tree.
@@ -1182,19 +878,33 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 								EndLine:       int(arg.EndPoint().Row) + 1,
 								IsTest:        true,
 								Language:      sf.Language,
+								ByteStart:     uint64(arg.StartByte()),
+								ByteEnd:       uint64(arg.EndByte()),
 							}
 							idx := len(result.Nodes)
 							result.Nodes = append(result.Nodes, n)
+							// Symbol taxonomy: this node is MINTED by GT, not
+							// declared by the grammar -- an `it(...)` callback
+							// turned into a named test case. Its kind is `test`,
+							// which is why the mapping declares it as a
+							// SynthesizedKind rather than a node type.
+							if tax := specs.TaxonomyFor(sf.Language); tax != nil && len(tax.SynthesizedKinds) > 0 {
+								result.Properties = append(result.Properties, PropertyRef{
+									NodeIdx: len(result.Nodes) - 1, Kind: PropSymbolKind,
+									Value: specs.KindTest, Line: int(arg.StartPoint().Row) + 1,
+									Confidence: 1.0,
+								})
+							}
 
 							// Extract calls from the callback body
 							bodyNode := arg.ChildByFieldName("body")
 							if bodyNode != nil {
-								extractCalls(bodyNode, sf, src, result, idx)
-								extractAssignments(bodyNode, sf, src, result, n.Name)
+								extractCalls(bodyNode, sf, src, result, idx, n.Name)
+								extractAssignments(bodyNode, sf, src, result, n.Name, "")
 								findAssertions(bodyNode, sf, src, result, idx, 0)
 							} else {
 								// Arrow function with expression body: () => expr
-								extractCalls(arg, sf, src, result, idx)
+								extractCalls(arg, sf, src, result, idx, n.Name)
 								findAssertions(arg, sf, src, result, idx, 0)
 							}
 						}
@@ -1223,54 +933,104 @@ func walkNode(node *sitter.Node, sf walker.SourceFile, src []byte, isTest bool, 
 	}
 }
 
-func assignedFunctionExpressionName(node *sitter.Node, sf walker.SourceFile, src []byte) string {
-	parent := node.Parent()
-	if parent == nil {
-		return ""
+func goTypeDeclarationIsInterface(typeDecl *sitter.Node) bool {
+	if typeDecl == nil {
+		return false
 	}
-	switch parent.Type() {
-	case "variable_declarator":
-		return normalizeAssignedSymbolName(extractFieldText(parent, "name", src), sf)
-	case "assignment_expression", "assignment":
-		lhs := parent.ChildByFieldName("left")
-		if lhs == nil {
-			lhs = parent.ChildByFieldName("name")
+	var visit func(*sitter.Node) bool
+	visit = func(node *sitter.Node) bool {
+		if node == nil {
+			return false
 		}
-		if lhs == nil {
-			return ""
+		if node.Type() == "interface_type" {
+			return true
 		}
-		return normalizeAssignedSymbolName(lhs.Content(src), sf)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			if visit(node.Child(i)) {
+				return true
+			}
+		}
+		return false
 	}
-	return ""
+	return visit(typeDecl)
 }
 
-func normalizeAssignedSymbolName(raw string, sf walker.SourceFile) string {
-	name := strings.TrimSpace(raw)
-	if name == "" {
-		return ""
-	}
-	if name == "module.exports" || name == "exports" {
-		base := sf.Path
-		if idx := strings.LastIndexAny(base, "/\\"); idx >= 0 {
-			base = base[idx+1:]
+var goInterfaceMethodRE = regexp.MustCompile(`(?m)\b([A-Za-z_]\w*)\s*\([^{}\n]*\)(?:[ \t]+[^{}\n;]+)?`)
+
+func extractGoInterfaceMethods(typeDecl *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, parentID int) {
+	content := typeDecl.Content(src)
+	seen := make(map[string]struct{})
+	var interfaceType *sitter.Node
+	var findInterface func(*sitter.Node)
+	findInterface = func(node *sitter.Node) {
+		if node == nil || interfaceType != nil {
+			return
 		}
-		if dot := strings.LastIndexByte(base, '.'); dot > 0 {
-			base = base[:dot]
+		if node.Type() == "interface_type" {
+			interfaceType = node
+			return
 		}
-		return strings.TrimSpace(base)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			findInterface(node.Child(i))
+		}
 	}
-	if dotIdx := strings.LastIndex(name, "."); dotIdx >= 0 {
-		name = name[dotIdx+1:]
+	findInterface(typeDecl)
+	if interfaceType != nil {
+		var visitMethods func(*sitter.Node)
+		visitMethods = func(node *sitter.Node) {
+			if node == nil {
+				return
+			}
+			if node.Type() == "method_elem" {
+				nameNode := node.ChildByFieldName("name")
+				if nameNode != nil {
+					name := nameNode.Content(src)
+					if _, exists := seen[name]; !exists {
+						seen[name] = struct{}{}
+						line := int(node.StartPoint().Row) + 1
+						result.Nodes = append(result.Nodes, store.Node{
+							Label: "Method", Name: name, QualifiedName: result.Nodes[parentID-1].Name + "." + name,
+							FilePath: sf.Path, StartLine: line, EndLine: int(node.EndPoint().Row) + 1,
+							Signature: strings.TrimSpace(node.Content(src)), ParentID: int64(parentID),
+							IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+							ByteStart: uint64(node.StartByte()), ByteEnd: uint64(node.EndByte()),
+						})
+					}
+				}
+			}
+			for i := 0; i < int(node.ChildCount()); i++ {
+				visitMethods(node.Child(i))
+			}
+		}
+		visitMethods(interfaceType)
 	}
-	name = strings.Trim(name, " \t\r\n[]'\"`")
-	return name
+	if len(seen) > 0 {
+		return
+	}
+	for _, match := range goInterfaceMethodRE.FindAllStringSubmatchIndex(content, -1) {
+		name := content[match[2]:match[3]]
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		line := int(typeDecl.StartPoint().Row) + strings.Count(content[:match[0]], "\n") + 1
+		result.Nodes = append(result.Nodes, store.Node{
+			Label: "Method", Name: name, QualifiedName: result.Nodes[parentID-1].Name + "." + name,
+			FilePath: sf.Path, StartLine: line, EndLine: line, Signature: content[match[0]:match[1]],
+			ParentID: int64(parentID), IsExported: sf.Spec.IsExported != nil && sf.Spec.IsExported(name), Language: sf.Language,
+			// match indexes typeDecl's own text, so the offsets rebase onto the
+			// file by the declaration's start byte.
+			ByteStart: uint64(typeDecl.StartByte()) + uint64(match[0]),
+			ByteEnd:   uint64(typeDecl.StartByte()) + uint64(match[1]),
+		})
+	}
 }
 
-func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int) {
-	extractCallsWithParent(node, sf, src, result, callerIdx, "")
+func extractCalls(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, callerScope string) {
+	extractCallsWithParent(node, sf, src, result, callerIdx, callerScope, "", "0")
 }
 
-func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, parentType string) {
+func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, callerIdx int, callerScope, parentType, astPath string) {
 	spec := sf.Spec
 	nodeType := node.Type()
 
@@ -1342,12 +1102,68 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 				}
 			}
 
+			var argumentArity *uint16
+			argumentSpread := false
+			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+				arity := uint16(arguments.NamedChildCount())
+				argumentArity = &arity
+				for i := 0; i < int(arguments.NamedChildCount()); i++ {
+					arg := arguments.NamedChild(i)
+					if arg == nil {
+						continue
+					}
+					// One spelling covers every grammar that has the construct:
+					// `...xs` in JS/TS/Java/Go, `*args`/`**kw` in Python and Ruby,
+					// `...$xs` in PHP. The leading token is what makes the node a
+					// splat, so a prefix test needs no per-grammar node names.
+					text := strings.TrimSpace(arg.Content(src))
+					if strings.HasPrefix(text, "...") || strings.HasPrefix(text, "*") {
+						argumentSpread = true
+						break
+					}
+				}
+			}
+			argumentNames := []string(nil)
+			if arguments := node.ChildByFieldName("arguments"); arguments != nil {
+				for i := 0; i < int(arguments.NamedChildCount()); i++ {
+					arg := arguments.NamedChild(i)
+					if arg == nil {
+						continue
+					}
+					if arg.Type() == "identifier" || arg.Type() == "field_identifier" || arg.Type() == "type_identifier" {
+						argumentNames = append(argumentNames, strings.TrimSpace(arg.Content(src)))
+					}
+				}
+			}
+			dynamic := callTargetIsDynamic(node)
+			dispatchForm := "static"
+			if dynamic {
+				dispatchForm = "dynamic_name"
+			} else if qualified != "" && qualified != simple {
+				dispatchForm = "virtual"
+			}
 			result.Calls = append(result.Calls, CallRef{
-				CallerNodeIdx:   callerIdx,
-				CalleeName:      simple,
+				CallerNodeIdx: callerIdx,
+				CallerScope:   callerScope,
+				CalleeName:    simple,
+				CalleeScope: func() string {
+					if dispatchForm == "static" {
+						return qualified
+					}
+					return ""
+				}(),
 				CalleeQualified: qualified,
 				Line:            int(node.StartPoint().Row) + 1,
 				File:            sf.Path,
+				DynamicDispatch: dynamic,
+				ASTPath:         astPath,
+				ByteStart:       uint64(node.StartByte()),
+				ByteEnd:         uint64(node.EndByte()),
+				ColumnStart:     uint32(node.StartPoint().Column),
+				ArgumentArity:   argumentArity,
+				ArgumentSpread:  argumentSpread,
+				ArgumentNames:   argumentNames,
+				DispatchForm:    dispatchForm,
 			})
 
 			// Classify caller usage context from parent node type
@@ -1360,7 +1176,7 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 						callerLine = callerLine[:nlIdx]
 					}
 					if len(callerLine) > 120 {
-						callerLine = truncateRune(callerLine, 120)
+						callerLine = callerLine[:120]
 					}
 				}
 				val := usage + ":" + simple
@@ -1379,23 +1195,18 @@ func extractCallsWithParent(node *sitter.Node, sf walker.SourceFile, src []byte,
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		// B1-#5 boundary: do NOT descend into a NAMED nested function definition — its calls
-		// belong to that function (walkNode gives it its own node + its own extractCalls),
-		// not to this enclosing caller. An ANONYMOUS nested function (functionNodeName == "",
-		// no node) is still traversed so its calls attribute to the nearest named ancestor.
-		if spec.IsFunctionNode(child.Type()) && functionNodeName(child, sf, src) != "" {
-			continue
-		}
-		extractCallsWithParent(child, sf, src, result, callerIdx, nodeType)
+		extractCallsWithParent(node.Child(i), sf, src, result, callerIdx, callerScope, nodeType, fmt.Sprintf("%s/%d", astPath, i))
 	}
 }
 
 // extractAssignments finds variable assignments where the RHS is a constructor call.
 // PyCG Rule 1: x = ClassName() → varTypes[x] = ClassName
 // Looks for assignment nodes where right side is a call to a capitalized name.
-func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName string) {
+func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) {
 	nodeType := node.Type()
+	if sf.Language == "go" && node.Parent() != nil && (node.Parent().Type() == "function_declaration" || node.Parent().Type() == "method_declaration") {
+		extractGoTypedAssignments(node, sf, src, result, scopeName, objectScope)
+	}
 
 	// Python: assignment, augmented_assignment
 	// JS/TS: variable_declarator, assignment_expression
@@ -1415,27 +1226,6 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 		}
 		if right == nil {
 			right = node.ChildByFieldName("value") // JS variable_declarator
-		}
-
-		// Go (and any grammar that wraps assignment sides in `expression_list`): unwrap the
-		// SINGLE-variable case so `m := makeMaker()` / `t := m.build()` records an
-		// AssignmentRef exactly like the identifier-LHS grammars (Python/JS/Rust). tree-sitter
-		// -go wraps BOTH sides of `:=`/`=` in `expression_list`, so `left.Type()=="identifier"`
-		// was false and Go produced ZERO assignments — receiver-type resolution via assignment
-		// tracking (Strategy 1.96 + the B2 typeflow fixpoint) was entirely DEAD on a Tier-1
-		// language. Restricted to exactly ONE named child on EACH side: multi-element lists
-		// (`a, b := f()` tuple unpacking) are ABSTAINED because the RHS values do not map 1:1 to
-		// the LHS names, and a guessed type is worse than none (correct-or-quiet). Augmented
-		// assignments (`x += f()`) are skipped: x already has a type and the RHS is not it. The
-		// unwrap only fires when a side IS an `expression_list` with one named child, so the
-		// identifier/attribute/name grammars are byte-identical (their sides are never wrapped).
-		if !isAugmentedAssignment(node) {
-			if left != nil && left.Type() == "expression_list" && left.NamedChildCount() == 1 {
-				left = left.NamedChild(0)
-			}
-			if right != nil && right.Type() == "expression_list" && right.NamedChildCount() == 1 {
-				right = right.NamedChild(0)
-			}
 		}
 
 		if left != nil {
@@ -1487,6 +1277,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 							TypeName:      typeName,
 							TypeQualified: qualified,
 							Scope:         scopeName,
+							ObjectScope:   objectScope,
 							File:          sf.Path,
 							Line:          int(node.StartPoint().Row) + 1,
 						})
@@ -1495,45 +1286,27 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						// callee is a (non-constructor) function — record the CALLEE name with
 						// ViaReturn so the resolver bridges through factory's declared return
 						// type (e.g. `x = get_client(); x.run()` → return type of get_client).
-						// Handles ALL call shapes including qualified calls (Hapi.server(),
-						// http.createServer()) — the type of x is determined by the return
-						// value, and Strategy 1.96 bridges through the callee's return type.
-						// This is the generalized PyCG assignment-graph approach: every
-						// x = f() is an assignment whose type flows from f's return.
-						calleeName196 := simple
-						if qualified != "" {
-							calleeName196 = qualified
+						// Lowercase simple name (capitalized = ctor, handled above) OR, in Go,
+						// a capitalized bare call (`x := Marshal()`) which is an exported func,
+						// not a constructor — it too must bridge through its return type. Skip
+						// qualified receiver-method calls (obj.method()) — their type is unknown
+						// here, left for the demand-driven residual.
+						isLowerBare := simple[0] >= 'a' && simple[0] <= 'z'
+						isGoCapBare := sf.Language == "go" && simple[0] >= 'A' && simple[0] <= 'Z'
+						if (isLowerBare || isGoCapBare) && (qualified == "" || qualified == simple) {
+							result.Assignments = append(result.Assignments, AssignmentRef{
+								VarName:       lhsName,
+								TypeName:      simple,
+								TypeQualified: qualified,
+								Scope:         scopeName,
+								ObjectScope:   objectScope,
+								File:          sf.Path,
+								Line:          int(node.StartPoint().Row) + 1,
+								ViaReturn:     true,
+							})
 						}
-						result.Assignments = append(result.Assignments, AssignmentRef{
-							VarName:       lhsName,
-							TypeName:      calleeName196,
-							TypeQualified: qualified,
-							Scope:         scopeName,
-							File:          sf.Path,
-							Line:          int(node.StartPoint().Row) + 1,
-							ViaReturn:     true,
-						})
 					}
 				}
-			}
-		}
-
-		// PyCG assignment-graph alias rule: `b = a` where RHS is a BARE variable (not a call
-		// or attribute read). Record the source var; the resolver's alias fixpoint propagates
-		// a's inferred type onto b so `a = C(); b = a; c = b; c.m()` resolves. Restricted to
-		// simple identifier←identifier (attribute/subscript RHS excluded — correct-or-quiet,
-		// keeps the over-connection surface tight).
-		if lhsName != "" && left != nil && left.Type() == "identifier" &&
-			right != nil && right.Type() == "identifier" {
-			rhsName := right.Content(src)
-			if rhsName != "" && rhsName != lhsName {
-				result.Assignments = append(result.Assignments, AssignmentRef{
-					VarName: lhsName,
-					AliasOf: rhsName,
-					Scope:   scopeName,
-					File:    sf.Path,
-					Line:    int(node.StartPoint().Row) + 1,
-				})
 			}
 		}
 
@@ -1557,6 +1330,7 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 						TypeName:      typeName,
 						TypeQualified: typeName,
 						Scope:         scopeName,
+						ObjectScope:   objectScope,
 						File:          sf.Path,
 						Line:          int(node.StartPoint().Row) + 1,
 					})
@@ -1567,8 +1341,98 @@ func extractAssignments(node *sitter.Node, sf walker.SourceFile, src []byte, res
 
 	// Recurse
 	for i := 0; i < int(node.ChildCount()); i++ {
-		extractAssignments(node.Child(i), sf, src, result, scopeName)
+		extractAssignments(node.Child(i), sf, src, result, scopeName, objectScope)
 	}
+}
+
+var goTypedBindingRE = regexp.MustCompile(`\b([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b`)
+var goTypedVarRE = regexp.MustCompile(`^\s*var\s+([A-Za-z_]\w*)\s+(\*?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\b`)
+
+// extractGoTypedAssignments records the declared interface/type boundary for
+// Go selectors such as `runner.Run()`. Tree-sitter's Go grammar represents a
+// typed var declaration as a var_declaration/var_spec subtree rather than an
+// assignment with a `type` field, so the generic assignment walker cannot see
+// it. This is deliberately limited to the current function body (and its
+// signature) to avoid turning package-level names into receiver evidence.
+func extractGoTypedAssignments(bodyNode *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, scopeName, objectScope string) {
+	parent := bodyNode.Parent()
+	if parent == nil {
+		return
+	}
+	appendBinding := func(name, typeName string, line int, isParameter bool, parameterIndex int) {
+		name = strings.TrimSpace(name)
+		typeName = normalizedGoTypeName(typeName)
+		if name == "" || typeName == "" {
+			return
+		}
+		result.Assignments = append(result.Assignments, AssignmentRef{
+			VarName: name, TypeName: typeName, TypeQualified: typeName,
+			Scope: scopeName, File: sf.Path, Line: line,
+			ObjectScope: objectScope, IsParameter: isParameter, ParameterIndex: parameterIndex,
+		})
+	}
+
+	// Function and method parameters are in the final parenthesized list before
+	// the body. Restricting the regex to that list avoids recording `func` and
+	// the function name as fake bindings, and preserves formal argument order.
+	headerStart, headerEnd := parent.StartByte(), bodyNode.StartByte()
+	if headerStart <= headerEnd && int(headerEnd) <= len(src) {
+		header := string(src[headerStart:headerEnd])
+		params := header
+		if open := strings.LastIndex(params, "("); open >= 0 {
+			if close := strings.LastIndex(params, ")"); close > open {
+				params = params[open+1 : close]
+			}
+		}
+		parameterIndex := 0
+		for _, match := range goTypedBindingRE.FindAllStringSubmatchIndex(params, -1) {
+			name := params[match[2]:match[3]]
+			typeName := params[match[4]:match[5]]
+			appendBinding(name, typeName, int(parent.StartPoint().Row)+1, true, parameterIndex)
+			parameterIndex++
+		}
+	}
+
+	// Local declarations. Handle both the common one-line form and grouped
+	// `var (...)` declarations, while keeping declaration order for same-name
+	// shadowing and later receiver lookup.
+	lines := strings.Split(bodyNode.Content(src), "\n")
+	grouped := false
+	for offset, lineText := range lines {
+		line := strings.TrimSpace(strings.SplitN(lineText, "//", 2)[0])
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "var (") {
+			grouped = true
+			continue
+		}
+		if grouped && line == ")" {
+			grouped = false
+			continue
+		}
+		if match := goTypedVarRE.FindStringSubmatch(line); len(match) == 3 {
+			appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
+			continue
+		}
+		if grouped {
+			if match := goTypedBindingRE.FindStringSubmatch(line); len(match) == 3 {
+				appendBinding(match[1], match[2], int(bodyNode.StartPoint().Row)+offset+1, false, -1)
+			}
+		}
+	}
+}
+
+func normalizedGoTypeName(typeName string) string {
+	typeName = strings.TrimSpace(typeName)
+	typeName = strings.TrimPrefix(typeName, "*")
+	if dot := strings.LastIndex(typeName, "."); dot >= 0 {
+		typeName = typeName[dot+1:]
+	}
+	if bracket := strings.IndexByte(typeName, '['); bracket >= 0 {
+		typeName = typeName[:bracket]
+	}
+	return strings.TrimSpace(typeName)
 }
 
 // classifyCallContext determines how a call's return value is used based on the parent AST node.
@@ -1581,16 +1445,12 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 	case "assignment", "short_var_declaration", "variable_declaration",
 		"variable_declarator", "assignment_expression", "augmented_assignment",
 		"local_variable_declaration", "let_declaration":
-		// A destructure is a MULTI-TARGET LHS pattern (`a, b = f()` / `(a, b) := f()` /
-		// `[a, b] = f()`). The comma must live in the LHS pattern, NOT the RHS argument list —
-		// P3: the old whole-line comma scan flagged `x = f(a, b)` (comma only in the call's
-		// args) as a destructure, a 93% false-positive rate on a real repo. Read the LHS node
-		// from the assignment's own field and require the comma THERE; abstain (correct-or-quiet)
-		// when the grammar exposes no LHS field rather than guess from the RHS.
-		if lhs := assignmentLHS(callNode.Parent()); lhs != nil {
-			if strings.Contains(lhs.Content(src), ",") {
-				return "destructure_tuple"
-			}
+		lineText := ""
+		if callNode.Parent() != nil {
+			lineText = callNode.Parent().Content(src)
+		}
+		if strings.Contains(lineText, ",") && (strings.Contains(lineText, "=") || strings.Contains(lineText, ":=") || strings.Contains(lineText, "let")) {
+			return "destructure_tuple"
 		}
 		return ""
 
@@ -1619,42 +1479,6 @@ func classifyCallContext(parentType string, callNode *sitter.Node, src []byte) s
 	return ""
 }
 
-// isAugmentedAssignment reports whether an assignment node uses a COMPOUND operator
-// (`+=`, `-=`, `*=`, `&^=`, …) rather than a plain `=`/`:=`. For those the LHS variable
-// already holds a value of some type and the RHS is NOT that type, so no constructor /
-// return-type / alias fact may be recorded from it (correct-or-quiet). tree-sitter emits
-// the operator as a token child whose Type() IS the literal operator string. A plain `=`
-// or a Go `:=` short_var_declaration never matches, so extraction is unaffected for them.
-func isAugmentedAssignment(n *sitter.Node) bool {
-	if n == nil {
-		return false
-	}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		switch n.Child(i).Type() {
-		case "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "&^=",
-			"&&=", "||=", "**=", "??=", ">>>=":
-			return true
-		}
-	}
-	return false
-}
-
-// assignmentLHS returns the left-hand-side (target/pattern) node of an assignment or
-// declaration node, across grammars: "left" (Python/Go/JS assignment_expression),
-// "name" (JS variable_declarator), "pattern" (Rust let_declaration). Returns nil when the
-// grammar exposes no such field so the caller can abstain rather than misread the RHS.
-func assignmentLHS(n *sitter.Node) *sitter.Node {
-	if n == nil {
-		return nil
-	}
-	for _, f := range []string{"left", "name", "pattern"} {
-		if c := n.ChildByFieldName(f); c != nil {
-			return c
-		}
-	}
-	return nil
-}
-
 // extractCalleeInfo returns (simpleName, qualifiedName) for a call expression.
 // simpleName is the last identifier (e.g. "baz" from "foo.bar.baz()").
 // qualifiedName is the full dotted path (e.g. "foo.bar.baz").
@@ -1662,22 +1486,7 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	if callNode.ChildCount() == 0 {
 		return "", ""
 	}
-	// P1/P14: the callee EXPRESSION is a field-named child, NOT necessarily Child(0). For a
-	// Java/C#/Kotlin method_invocation `helper.process()` Child(0) is the receiver `helper`;
-	// for a JSX `<Foo/>` Child(0) is the `<` token. Prefer the grammar's own field for the
-	// callable — "function" (Python/JS/Go/Rust/C#), "name" (Java method_invocation, JSX
-	// elements), "method" (Ruby call) — and only fall back to Child(0) for grammars where the
-	// first child already IS the function expression (the historical, correct path).
-	var funcNode *sitter.Node
-	for _, field := range []string{"function", "name", "method"} {
-		if fn := callNode.ChildByFieldName(field); fn != nil {
-			funcNode = fn
-			break
-		}
-	}
-	if funcNode == nil {
-		funcNode = callNode.Child(0)
-	}
+	funcNode := callNode.Child(0)
 	if funcNode == nil {
 		return "", ""
 	}
@@ -1731,6 +1540,31 @@ func extractCalleeInfo(callNode *sitter.Node, src []byte) (string, string) {
 	return content, content
 }
 
+func callTargetIsDynamic(callNode *sitter.Node) bool {
+	if callNode == nil || callNode.ChildCount() == 0 {
+		return true
+	}
+	target := callNode.ChildByFieldName("function")
+	if target == nil {
+		target = callNode.Child(0)
+	}
+	if target == nil {
+		return true
+	}
+	// Only classify syntax that is intrinsically a runtime value lookup or an
+	// anonymous callable. Unknown grammar node kinds remain static/unknown so a
+	// newly supported language cannot silently lose otherwise resolvable calls.
+	// Generic/template calls use index_expression in Go/C++ grammars and are not
+	// included here.
+	switch target.Type() {
+	case "subscript", "subscript_expression", "computed_member_expression",
+		"lambda", "lambda_expression", "function_expression", "arrow_function":
+		return true
+	default:
+		return false
+	}
+}
+
 // isLiteralReceiver reports whether a tree-sitter node type is a literal value
 // (string / list / dict / set / number / bool / etc.) across Python, JS/TS, Go, Rust.
 // A method call whose receiver is a literal is a stdlib/builtin call, never an
@@ -1755,6 +1589,7 @@ func isLiteralReceiver(t string) bool {
 //     chain head (the call's function's receiver) to the ultimate base.
 //   - parenthesized: `("a").join()` — the receiver is a `parenthesized_expression`
 //     wrapping the literal; we unwrap it.
+//
 // When the chain's ultimate base is a literal, the whole call is a stdlib/builtin
 // call (str/list/dict/…), never an internal call-graph edge. Conservative: any
 // unrecognized shape returns false (keeps the edge — correct-or-quiet, never drops
@@ -1811,37 +1646,17 @@ func extractFieldText(node *sitter.Node, fieldName string, src []byte) string {
 	return child.Content(src)
 }
 
-// childByFieldOrType returns node's child for the given tree-sitter field name.
-// If the grammar exposes zero named fields (e.g. Kotlin, FieldName(1)==""),
-// ChildByFieldName always returns nil, so it falls back to scanning child node
-// TYPES for one matching the field string (e.g. BodyField "function_body" is a
-// Kotlin node TYPE, not a named field). Correct-or-quiet: returns nil if neither
-// path matches.
-func childByFieldOrType(node *sitter.Node, field string) *sitter.Node {
-	if field == "" {
-		return nil
-	}
-	if c := node.ChildByFieldName(field); c != nil {
-		return c
-	}
-	for i := 0; i < int(node.ChildCount()); i++ {
-		c := node.Child(i)
-		if c.Type() == field {
-			return c
-		}
-	}
-	return nil
-}
-
 func extractFirstIdentifier(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		// "simple_identifier" is Kotlin's (and Swift's) identifier node type.
-		// Grammars with zero named fields (e.g. Kotlin, FieldName(1)=="") never
-		// resolve NameField via ChildByFieldName, so this fallback is the only
-		// path that names their functions/classes.
-		if child.Type() == "identifier" || child.Type() == "type_identifier" || child.Type() == "simple_identifier" {
+		if child.Type() == "identifier" || child.Type() == "type_identifier" || child.Type() == "tag_name" {
 			return child.Content(src)
+		}
+		if name := extractFirstIdentifier(child, src); name != "" {
+			return name
 		}
 	}
 	return ""
@@ -1892,144 +1707,15 @@ func normalizeSignature(text string) string {
 			continue
 		}
 		if len(ln) > 200 {
-			ln = strings.TrimSpace(truncateRune(ln, 200))
+			ln = strings.TrimSpace(ln[:200])
 		}
 		parts = append(parts, ln)
 	}
 	out := strings.Join(parts, " ")
 	if len(out) > 1000 {
-		out = strings.TrimSpace(truncateRune(out, 1000))
+		out = strings.TrimSpace(out[:1000])
 	}
 	return out
-}
-
-// extractCommonJSExports handles `exports.x = Y` and `module.exports.x = Y`
-// and `module.exports = { x: Y }` by emitting ReExportRef entries. This is the
-// CommonJS counterpart to the ES6 `export { X } from './mod'` / Python
-// `from .mod import X` / Rust `pub use mod::X` re-export extraction.
-// Language: JS/TS (CommonJS patterns use assignment_expression, not export_statement).
-func extractCommonJSExports(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
-	if sf.Language != "javascript" && sf.Language != "typescript" {
-		return
-	}
-	left := node.ChildByFieldName("left")
-	right := node.ChildByFieldName("right")
-	if left == nil || right == nil {
-		return
-	}
-	lhs := left.Content(src)
-	// exports.x = Y  or  module.exports.x = Y
-	if strings.HasPrefix(lhs, "exports.") || strings.HasPrefix(lhs, "module.exports.") {
-		exportName := lhs
-		if strings.HasPrefix(lhs, "module.exports.") {
-			exportName = lhs[len("module.exports."):]
-		} else {
-			exportName = lhs[len("exports."):]
-		}
-		if exportName == "" {
-			return
-		}
-		// The RHS is the value being exported. If it's an identifier, it names
-		// a symbol defined in this file → the import resolver can match it.
-		rhsText := strings.TrimSpace(right.Content(src))
-		if right.Type() == "identifier" && len(rhsText) > 0 {
-			// exports.server = Server → ReExportRef{ExportedName:"server", SourceModule: this file}
-			// This tells the resolver: when another file does require('./this') and calls
-			// the result's .server(), the symbol "server" IS "Server" defined here.
-			result.ReExports = append(result.ReExports, ReExportRef{
-				ExportedName: exportName,
-				SourceModule: rhsText, // the local symbol name (e.g. "Server")
-				File:         sf.Path,
-				Line:         int(node.StartPoint().Row) + 1,
-			})
-		}
-	}
-}
-
-// isModuleLoadCall returns true if the callee name is a module-loading function
-// in the given language. Language-agnostic: each language has its own patterns
-// but the MECHANISM (extract the module path from the first string arg) is shared.
-func isModuleLoadCall(calleeName, language string) bool {
-	switch calleeName {
-	case "require": // JS/TS CommonJS, Lua, Ruby
-		return language == "javascript" || language == "typescript" ||
-			language == "lua" || language == "ruby"
-	case "import_module": // Python importlib
-		return language == "python"
-	case "dynamic_import", "__import__": // Python builtins
-		return language == "python"
-	case "define": // AMD (JS)
-		return language == "javascript"
-	}
-	return false
-}
-
-// extractModuleImport extracts a module-loading call as ImportRef during Pass 2.
-// Generalized: handles any call where the first string argument is a module path.
-// const X = require('./module')       → ImportRef{ImportedName:"X", ModulePath:"./module"}
-// const {a,b} = require('./module')   → ImportRef per destructured name
-// importlib.import_module('package')  → ImportRef{ImportedName:"package", ModulePath:"package"}
-func extractModuleImport(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult) {
-	argsNode := node.ChildByFieldName("arguments")
-	if argsNode == nil {
-		for k := 0; k < int(node.ChildCount()); k++ {
-			if c := node.Child(k); c.Type() == "arguments" {
-				argsNode = c
-				break
-			}
-		}
-	}
-	if argsNode == nil {
-		return
-	}
-	for k := 0; k < int(argsNode.ChildCount()); k++ {
-		arg := argsNode.Child(k)
-		if arg.Type() == "string" || arg.Type() == "template_string" {
-			modPath := stripQuotes(arg.Content(src))
-			if modPath == "" {
-				break
-			}
-			name := modPath
-			if slashIdx := strings.LastIndex(modPath, "/"); slashIdx >= 0 {
-				name = modPath[slashIdx+1:]
-			}
-			if p := node.Parent(); p != nil {
-				if p.Type() == "variable_declarator" || p.Type() == "assignment_expression" {
-					nameNode := p.ChildByFieldName("name")
-					if nameNode == nil {
-						nameNode = p.ChildByFieldName("left")
-					}
-					if nameNode != nil {
-						if nameNode.Type() == "object_pattern" || nameNode.Type() == "object" {
-							for di := 0; di < int(nameNode.ChildCount()); di++ {
-								dc := nameNode.Child(di)
-								if dc.Type() == "shorthand_property_identifier_pattern" || dc.Type() == "shorthand_property_identifier" || dc.Type() == "identifier" {
-									result.Imports = append(result.Imports, ImportRef{
-										ImportedName: dc.Content(src),
-										ModulePath:   modPath,
-										File:         sf.Path,
-										Line:         int(node.StartPoint().Row) + 1,
-									})
-								}
-							}
-							name = ""
-						} else {
-							name = nameNode.Content(src)
-						}
-					}
-				}
-			}
-			if name != "" {
-				result.Imports = append(result.Imports, ImportRef{
-					ImportedName: name,
-					ModulePath:   modPath,
-					File:         sf.Path,
-					Line:         int(node.StartPoint().Row) + 1,
-				})
-			}
-			break
-		}
-	}
 }
 
 // ── Import extraction ─────────────────────────────────────────────────────
@@ -2085,22 +1771,17 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 	if nodeType == "import_from_statement" {
 		// Get module name from "module_name" field or first dotted_name child
 		modulePath := ""
+		var moduleStart, moduleEnd uint32
 		if mn := node.ChildByFieldName("module_name"); mn != nil {
 			modulePath = mn.Content(src)
+			moduleStart, moduleEnd = mn.StartByte(), mn.EndByte()
 		} else {
-			// Fallback: the module path is the dotted_name BEFORE the `import` keyword.
-			// A-Finding4 (Fable LIPI): stop at the `import` keyword — otherwise, for a purely
-			// relative `from . import x` (no module_name field), this would pick the IMPORTED
-			// symbol `x` (the first dotted_name, which follows `import`) as the module path, and
-			// since P6 dropped the old `name != modulePath` guard, `x` would be recorded as a bogus
-			// ImportRef{ImportedName:"x", ModulePath:"x"}. Position-gating the fallback prevents it.
+			// Fallback: find dotted_name child
 			for i := 0; i < int(node.ChildCount()); i++ {
 				c := node.Child(i)
-				if c.Type() == "import" {
-					break // anything after `import` is an imported symbol, not the module path
-				}
 				if c.Type() == "dotted_name" {
 					modulePath = c.Content(src)
+					moduleStart, moduleEnd = c.StartByte(), c.EndByte()
 					break
 				}
 			}
@@ -2114,24 +1795,15 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 		// Re-exports: __init__.py + relative import (from .submodule import X)
 		isReExport := isInitPy && isRelativeImport && modulePath != ""
 
-		// Extract imported names. P6 (Fable): disambiguate the module-path dotted_name (BEFORE
-		// the `import` keyword) from imported-symbol dotted_names (AFTER it) by NODE POSITION,
-		// not by string equality — the old `name != modulePath` guard silently discarded
-		// `from datetime import datetime` (the imported symbol legitimately shares the module's
-		// name), leaving the resolver unable to bind that call.
-		afterImport := false
+		// Extract imported names
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			if child.Type() == "import" {
-				afterImport = true
-				continue
-			}
 			switch child.Type() {
 			case "dotted_name":
-				// Only dotted_names AFTER the `import` keyword are imported symbols; the one
-				// before it is the module path (already captured in modulePath above).
+				// After "import" keyword — this is an imported name
 				name := child.Content(src)
-				if afterImport && modulePath != "" {
+				// Skip if this is the module path (before "import" keyword)
+				if !(child.StartByte() == moduleStart && child.EndByte() == moduleEnd) && modulePath != "" {
 					importedName := lastDotComponent(name)
 					result.Imports = append(result.Imports, ImportRef{
 						ImportedName: importedName,
@@ -2223,19 +1895,8 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 			} else if child.Type() == "aliased_import" {
 				if nameNode := child.ChildByFieldName("name"); nameNode != nil {
 					fullPath := nameNode.Content(src)
-					// P5 (Fable): `import numpy as np` / `import os.path as op` binds the LOCAL
-					// name to the ALIAS (np / op), which SHADOWS the module name — a call
-					// `np.array()` / `op.join()` uses the alias, so ImportedName must be the alias,
-					// not the module's last component. ModulePath stays the real module so the
-					// import still resolves to the right file. (Rust already records the alias.)
-					localName := lastDotComponent(fullPath)
-					if aliasNode := child.ChildByFieldName("alias"); aliasNode != nil {
-						if a := aliasNode.Content(src); a != "" {
-							localName = a
-						}
-					}
 					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: localName,
+						ImportedName: lastDotComponent(fullPath),
 						ModulePath:   fullPath,
 						File:         file,
 						Line:         line,
@@ -2250,17 +1911,6 @@ func extractPythonImports(node *sitter.Node, file string, src []byte, line int, 
 //   - import_statement: "import { foo, bar } from './utils'" → ImportRef for each name
 //   - Also handles: import X from './utils', import * as X from './utils'
 func extractJSTSImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
-	// TS: `import x = require("mod");` — the string lives inside an
-	// import_require_clause child, not the "source" field. Handle it here so it
-	// is not dropped by the "from"-clause logic below.
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		if child.Type() == "import_require_clause" {
-			extractJSImportRequire(child, file, src, line, result)
-			return
-		}
-	}
-
 	// Get source path (the string literal after "from")
 	sourceNode := node.ChildByFieldName("source")
 	if sourceNode == nil {
@@ -2322,33 +1972,6 @@ func extractJSTSImports(node *sitter.Node, file string, src []byte, line int, re
 	}
 }
 
-// extractJSImportRequire handles TS `import x = require("mod");`.
-// The import_require_clause node is: identifier "=" "require" "(" string ")".
-func extractJSImportRequire(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
-	importedName := ""
-	modulePath := ""
-	for i := 0; i < int(node.ChildCount()); i++ {
-		c := node.Child(i)
-		switch c.Type() {
-		case "identifier":
-			if importedName == "" {
-				importedName = c.Content(src)
-			}
-		case "string", "template_string":
-			modulePath = stripQuotes(c.Content(src))
-		}
-	}
-	if importedName == "" || modulePath == "" {
-		return
-	}
-	result.Imports = append(result.Imports, ImportRef{
-		ImportedName: importedName,
-		ModulePath:   modulePath,
-		File:         file,
-		Line:         line,
-	})
-}
-
 func extractJSImportClause(node *sitter.Node, modulePath, file string, src []byte, line int, result *ParseResult) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -2364,28 +1987,13 @@ func extractJSImportClause(node *sitter.Node, modulePath, file string, src []byt
 		case "named_imports":
 			extractJSNamedImports(child, modulePath, file, src, line, result)
 		case "namespace_import":
-			// import * as X from './m' — register the whole-module wildcard AND the
-			// namespace ALIAS X (B1-followup). The alias lets the resolver's package-alias
-			// branch resolve a qualified `X.foo()` to m.foo at import/1.0; without it the
-			// B1 receiver-blind guard (correctly) skips the bare-name lookup for the
-			// qualified call and it degrades to name_match. CJS `const X = require()`
-			// already emits its alias — this brings ES namespace imports to parity.
+			// import * as X — wildcard
 			result.Imports = append(result.Imports, ImportRef{
 				ImportedName: "*",
 				ModulePath:   modulePath,
 				File:         file,
 				Line:         line,
 			})
-			for j := 0; j < int(child.ChildCount()); j++ {
-				if id := child.Child(j); id != nil && id.Type() == "identifier" {
-					result.Imports = append(result.Imports, ImportRef{
-						ImportedName: id.Content(src),
-						ModulePath:   modulePath,
-						File:         file,
-						Line:         line,
-					})
-				}
-			}
 		}
 	}
 }
@@ -2606,184 +2214,7 @@ func extractJavaImports(node *sitter.Node, file string, src []byte, line int, re
 //   - use_declaration: "use crate::foo::Bar;" → ImportRef{Name:"Bar", Module:"crate::foo"}
 //   - "use std::collections::{HashMap, HashSet};" → multiple ImportRefs
 //   - "pub use crate::foo::Bar;" → also emits ReExportRef (pub use = re-export)
-//
-// AST-walks the use-tree so grouped/nested imports — `use a::{b::{C, D}, e};` — emit one
-// ImportRef per LEAF name (C, D, e) instead of a garbled string split. Falls back to the
-// legacy string parser only if the AST walk emits nothing (unexpected grammar) — quiet.
 func extractRustImports(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
-	before := len(result.Imports)
-	// `pub use ...` (incl pub(crate)/pub(super)) is ALSO a re-export — every imported leaf
-	// must emit a ReExportRef so the resolver's re-export chain resolution sees it (parity
-	// with the JS/Python/fallback paths; the AST walk must not drop re-export tracking).
-	text := strings.TrimSpace(node.Content(src))
-	isPubUse := strings.HasPrefix(text, "pub use ") ||
-		strings.HasPrefix(text, "pub(crate) use ") ||
-		strings.HasPrefix(text, "pub(super) use ")
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		switch child.Type() {
-		case "use", ";", "visibility_modifier", "attribute_item",
-			"line_comment", "block_comment":
-			continue
-		default:
-			walkRustUse(child, "", file, src, line, result, isPubUse)
-		}
-	}
-	if len(result.Imports) > before {
-		return
-	}
-	extractRustImportsFallback(node, file, src, line, result)
-}
-
-// joinRustPath joins a scope prefix and a segment with "::".
-func joinRustPath(prefix, seg string) string {
-	seg = strings.TrimSpace(seg)
-	if prefix == "" {
-		return seg
-	}
-	if seg == "" {
-		return prefix
-	}
-	return prefix + "::" + seg
-}
-
-// rustParent returns the module path of a full path (everything before the last "::").
-func rustParent(full string) string {
-	if idx := strings.LastIndex(full, "::"); idx >= 0 {
-		return full[:idx]
-	}
-	return ""
-}
-
-// emitRustLeaf records one import for a resolved leaf path (e.g. "a::b::C"). When the
-// enclosing use is a `pub use`, the same leaf is ALSO a re-export (ReExportRef) so the
-// resolver's ChainReExports sees the barrel — parity with the string-fallback path.
-func emitRustLeaf(full, file string, line int, result *ParseResult, isPubUse bool) {
-	if full == "" {
-		return
-	}
-	name := lastColonComponent(full)
-	mod := rustParent(full)
-	result.Imports = append(result.Imports, ImportRef{
-		ImportedName: name,
-		ModulePath:   mod,
-		File:         file,
-		Line:         line,
-	})
-	if isPubUse {
-		result.ReExports = append(result.ReExports, ReExportRef{
-			ExportedName: name,
-			SourceModule: mod,
-			File:         file,
-			Line:         line,
-		})
-	}
-}
-
-// walkRustUse recursively descends a Rust use-clause, accumulating the scope
-// prefix, emitting one ImportRef per imported leaf name.
-func walkRustUse(node *sitter.Node, prefix, file string, src []byte, line int, result *ParseResult, isPubUse bool) {
-	switch node.Type() {
-	case "scoped_use_list":
-		// [path] :: { list } — accumulate the path segment(s) into the prefix.
-		p := prefix
-		for i := 0; i < int(node.ChildCount()); i++ {
-			c := node.Child(i)
-			switch c.Type() {
-			case "use_list":
-				walkRustUse(c, p, file, src, line, result, isPubUse)
-			case "identifier", "scoped_identifier", "crate", "super", "self", "metavariable":
-				p = joinRustPath(p, c.Content(src))
-			}
-		}
-	case "use_list":
-		for i := 0; i < int(node.ChildCount()); i++ {
-			c := node.Child(i)
-			switch c.Type() {
-			case "{", "}", ",":
-				continue
-			default:
-				walkRustUse(c, prefix, file, src, line, result, isPubUse)
-			}
-		}
-	case "use_as_clause":
-		// path 'as' alias — the imported name is the alias.
-		var alias string
-		var pathText string
-		seenAs := false
-		for i := 0; i < int(node.ChildCount()); i++ {
-			c := node.Child(i)
-			if c.Type() == "as" {
-				seenAs = true
-				continue
-			}
-			if c.Type() == "identifier" || c.Type() == "scoped_identifier" ||
-				c.Type() == "crate" || c.Type() == "super" || c.Type() == "self" ||
-				c.Type() == "metavariable" {
-				if seenAs {
-					alias = c.Content(src)
-				} else {
-					pathText = c.Content(src)
-				}
-			}
-		}
-		if alias != "" {
-			mod := rustParent(joinRustPath(prefix, pathText))
-			result.Imports = append(result.Imports, ImportRef{
-				ImportedName: alias,
-				ModulePath:   mod,
-				File:         file,
-				Line:         line,
-			})
-			if isPubUse {
-				// aliased re-export: `pub use foo::Bar as Baz` re-exports the ALIAS.
-				result.ReExports = append(result.ReExports, ReExportRef{
-					ExportedName: alias,
-					SourceModule: mod,
-					File:         file,
-					Line:         line,
-				})
-			}
-		}
-	case "use_wildcard":
-		// [path] :: *
-		p := prefix
-		for i := 0; i < int(node.ChildCount()); i++ {
-			c := node.Child(i)
-			switch c.Type() {
-			case "identifier", "scoped_identifier", "crate", "super", "self", "metavariable":
-				p = joinRustPath(p, c.Content(src))
-			}
-		}
-		result.Imports = append(result.Imports, ImportRef{
-			ImportedName: "*",
-			ModulePath:   p,
-			File:         file,
-			Line:         line,
-		})
-		if isPubUse {
-			result.ReExports = append(result.ReExports, ReExportRef{
-				ExportedName: "*",
-				SourceModule: p,
-				File:         file,
-				Line:         line,
-			})
-		}
-	case "scoped_identifier":
-		emitRustLeaf(joinRustPath(prefix, node.Content(src)), file, line, result, isPubUse)
-	case "identifier", "type_identifier", "crate", "super", "metavariable":
-		emitRustLeaf(joinRustPath(prefix, node.Content(src)), file, line, result, isPubUse)
-	case "self":
-		// `use a::b::self;` imports the module `b` itself.
-		if prefix != "" {
-			emitRustLeaf(prefix, file, line, result, isPubUse)
-		}
-	}
-}
-
-// extractRustImportsFallback is the legacy string-based parser, used only when
-// the AST walk produced nothing (unexpected grammar shape).
-func extractRustImportsFallback(node *sitter.Node, file string, src []byte, line int, result *ParseResult) {
 	text := strings.TrimSpace(node.Content(src))
 
 	// Detect pub use → re-export. Strip the visibility modifier before parsing.
@@ -2974,7 +2405,7 @@ func classifyFlow(idNode *sitter.Node, name string, src []byte) string {
 		return "" // bare self-reference / the parameter declaration itself
 	}
 	if len(txt) > 50 {
-		txt = truncateRune(txt, 50)
+		txt = txt[:50]
 	}
 	return txt
 }
@@ -3042,328 +2473,6 @@ func extractDataFlow(node *sitter.Node, bodyNode *sitter.Node, spec *specs.Spec,
 	}
 }
 
-// ── C2a: semantic-passage body channels (GT_SEM_BODY-gated) ─────────────────
-//
-// The semantic passage (graph_localizer._semantic_score_by_file) is built from
-// name+signature+behavioral-props — it lacks the DOMAIN VOCABULARY ("Redis", "TLS",
-// "handshake") that lives in a symbol's body identifiers / strings / comments, so
-// behavior-described issues (stratum B) score ~0. These three additive property KINDS
-// carry that vocabulary INTO graph.db at index time (the right layer — no query-time
-// file I/O). Gated behind GT_SEM_BODY so graph.db stays byte-identical when off. The
-// stratum-B retrieval LIFT is ENV-gated (measure_brief.py + ONNX) => Phase-4; only the
-// CODE + byte-identical-off + channel-load-bearing are offline-provable.
-
-// Budget rails (bounded, order-preserving — NOT fact-gating thresholds).
-const (
-	bodyStringCap = 24  // max distinct string literals per symbol
-	bodyTermCap   = 48  // max distinct identifier/comment terms (mirrors the Py consumer cap)
-	bodyCallCap   = 24  // max distinct callee names per symbol
-	bodyValueLen  = 400 // per-string-value char cap (one huge literal is truncated)
-)
-
-// semBodyMiningEnabled reports whether GT_SEM_BODY is on. Read per-symbol (a cheap env
-// lookup; the value is process-constant in production) so a test toggling it is honoured.
-// Truthiness matches the Python consumer exactly: not in {"", "0", "false", "no"}.
-func semBodyMiningEnabled() bool {
-	v := os.Getenv("GT_SEM_BODY")
-	return v != "" && v != "0" && v != "false" && v != "no"
-}
-
-// isBodyStringNode reports whether a node type is a STRING literal (domain vocabulary).
-// Char/rune literals are excluded (single characters carry no vocabulary).
-func isBodyStringNode(t string) bool {
-	switch t {
-	case "string", "string_literal", "interpreted_string_literal", "raw_string_literal",
-		"concatenated_string", "template_string", "byte_string":
-		return true
-	}
-	return false
-}
-
-// isBodyCommentNode reports whether a node type is a comment (words are vocabulary).
-func isBodyCommentNode(t string) bool {
-	switch t {
-	case "comment", "line_comment", "block_comment":
-		return true
-	}
-	return false
-}
-
-// isBodyIdentifierNode reports whether a node type is an identifier (the base vocabulary).
-func isBodyIdentifierNode(t string) bool {
-	switch t {
-	case "identifier", "type_identifier", "field_identifier", "property_identifier",
-		"shorthand_property_identifier", "shorthand_property_identifier_pattern":
-		return true
-	}
-	return false
-}
-
-// signatureParamText returns the text inside a signature's FIRST balanced parenthesis
-// group (the parameter list) — or "" when there is none. Used to exclude a symbol's own
-// parameter identifiers from body_terms (they already live in the passage head) WITHOUT
-// tokenizing the whole signature string, which for Python can carry a folded-in leading
-// body comment (see the caller). Language-agnostic; no regexp.
-func signatureParamText(sig string) string {
-	i := strings.IndexByte(sig, '(')
-	if i < 0 {
-		return ""
-	}
-	depth := 0
-	for j := i; j < len(sig); j++ {
-		switch sig[j] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return sig[i+1 : j]
-			}
-		}
-	}
-	return sig[i+1:] // unbalanced -> the remainder (bounded by the signature cap)
-}
-
-// stripBodyQuotes removes surrounding quote characters from a raw string-literal slice.
-func stripBodyQuotes(s string) string {
-	s = strings.TrimSpace(s)
-	// Drop common string prefixes (Python r"", b"", f""; Rust b"") before the quote.
-	for len(s) > 0 && (s[0] == 'r' || s[0] == 'b' || s[0] == 'f' || s[0] == 'u') {
-		if len(s) > 1 && (s[1] == '"' || s[1] == '\'' || s[1] == '`') {
-			s = s[1:]
-		} else {
-			break
-		}
-	}
-	for len(s) >= 2 {
-		first, last := s[0], s[len(s)-1]
-		if (first == '"' || first == '\'' || first == '`') && first == last {
-			s = s[1 : len(s)-1]
-		} else {
-			break
-		}
-	}
-	return strings.Join(strings.Fields(s), " ")
-}
-
-// tokenizeIdents extracts identifier-shaped tokens (>=3 chars, [A-Za-z_][A-Za-z0-9_]{2,})
-// from raw text — used for comment words and the Tier-2 raw-slice fallback. Hand-rolled
-// (no regexp import); language-agnostic.
-func tokenizeIdents(s string) []string {
-	var out []string
-	start := -1
-	isIdentStart := func(c byte) bool {
-		return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-	}
-	isIdentCont := func(c byte) bool {
-		return isIdentStart(c) || (c >= '0' && c <= '9')
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if start < 0 {
-			if isIdentStart(c) {
-				start = i
-			}
-			continue
-		}
-		if !isIdentCont(c) {
-			if i-start >= 3 {
-				out = append(out, s[start:i])
-			}
-			start = -1
-		}
-	}
-	if start >= 0 && len(s)-start >= 3 {
-		out = append(out, s[start:])
-	}
-	return out
-}
-
-// extractBodyChannels mines string_literals, body_terms, and calls for ONE symbol.
-// Walks the whole function NODE (not just its body) so a leading comment attached to
-// the function_definition (Python attaches it there, a sibling of `block`) is captured
-// alongside body comments/identifiers/strings. Nested named function/class definitions
-// are PRUNED (their tokens belong to their own node, mirroring extractCalls' boundary).
-// Node-CLASS based (string/comment/identifier) so it generalizes to any grammar; a
-// hand-rolled identifier scan over the raw slice backs a Tier-2 grammar that exposes
-// none of those classes. Dedup + first-appearance order + capped → deterministic. The
-// `calls` channel REUSES the already-extracted call refs (no re-walk of the call AST).
-func extractBodyChannels(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int, calls []CallRef) {
-	if node == nil {
-		return
-	}
-	spec := sf.Spec
-	var strs, terms []string
-	seenStr := map[string]bool{}
-	seenTerm := map[string]bool{}
-
-	// calls: dedup callee names in first-appearance order (REUSE the extracted refs).
-	// Built FIRST so the callee names can be cross-channel-deduped out of body_terms.
-	var callNames []string
-	seenCall := map[string]bool{}
-	for _, c := range calls {
-		nm := c.CalleeName
-		if nm == "" || seenCall[nm] || len(callNames) >= bodyCallCap {
-			continue
-		}
-		seenCall[nm] = true
-		callNames = append(callNames, nm)
-	}
-
-	// Cross-channel dedup (reclaim char-cap budget): a token already carried by another
-	// channel or by the passage HEAD is pure duplication in body_terms. Pre-seed the
-	// term-seen set so the walk's own `!seenTerm[w]` check silently drops:
-	//   - callee names (they are the `calls` channel), and
-	//   - the symbol's own name + every identifier in its signature (they are the passage
-	//     HEAD `{name} {signature}` the consumer prepends — so no signal is lost, only the
-	//     duplicate copy in body_terms).
-	// The `strs` channel (string VALUES, not identifiers) is untouched.
-	for _, nm := range callNames {
-		seenTerm[nm] = true
-	}
-	if nodeIdx >= 0 && nodeIdx < len(result.Nodes) {
-		self := result.Nodes[nodeIdx]
-		if self.Name != "" {
-			seenTerm[self.Name] = true
-		}
-		// Only the PARAM LIST (the first balanced parens), NOT the whole signature: for
-		// Python a leading body comment sits between `:` and the `block` node, so
-		// extractSignature's [start,body) slice can fold that comment INTO the signature
-		// string — tokenizing the whole thing would wrongly drop the comment's domain
-		// vocabulary (redis/tls/…). The parenthesized params come before any such comment.
-		for _, w := range tokenizeIdents(signatureParamText(self.Signature)) {
-			seenTerm[w] = true
-		}
-	}
-
-	var walk func(n *sitter.Node, isRoot bool)
-	walk = func(n *sitter.Node, isRoot bool) {
-		if n == nil {
-			return
-		}
-		t := n.Type()
-		// Prune nested named function/class definitions (their vocabulary is mined on
-		// their own node) — never prune the root symbol itself.
-		if !isRoot && spec != nil && (spec.IsFunctionNode(t) || spec.IsClassNode(t)) {
-			return
-		}
-		switch {
-		case isBodyStringNode(t):
-			if len(strs) < bodyStringCap {
-				v := stripBodyQuotes(n.Content(src))
-				if v != "" && !seenStr[v] {
-					if len(v) > bodyValueLen {
-						// Truncate on a RUNE boundary, never mid-sequence: a byte slice
-						// through a multibyte rune writes INVALID UTF-8 into the property
-						// value, and Python's sqlite3 (default text_factory=str) raises
-						// "Could not decode to UTF-8" on the WHOLE properties fetch —
-						// silently disabling every body channel for the repo because of
-						// one long non-ASCII literal. utf8.RuneStart walks back ≤3 bytes.
-						cut := bodyValueLen
-						for cut > 0 && !utf8.RuneStart(v[cut]) {
-							cut--
-						}
-						v = v[:cut]
-					}
-					seenStr[v] = true
-					strs = append(strs, v)
-				}
-			}
-			return // do not descend into string internals
-		case isBodyCommentNode(t):
-			for _, w := range tokenizeIdents(n.Content(src)) {
-				if len(terms) >= bodyTermCap {
-					break
-				}
-				if !seenTerm[w] {
-					seenTerm[w] = true
-					terms = append(terms, w)
-				}
-			}
-			return
-		case isBodyIdentifierNode(t):
-			w := n.Content(src)
-			if len(w) >= 3 && len(terms) < bodyTermCap && !seenTerm[w] {
-				seenTerm[w] = true
-				terms = append(terms, w)
-			}
-			return
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			walk(n.Child(i), false)
-		}
-	}
-	walk(node, true)
-
-	// Tier-2 fallback: a grammar exposing none of the classes yields nothing — hand-scan
-	// identifier-shaped tokens over the raw slice so the channel is never empty on a
-	// grammar we cannot introspect (correct-or-quiet: only when the walk found nothing).
-	if len(terms) == 0 && len(strs) == 0 {
-		for _, w := range tokenizeIdents(node.Content(src)) {
-			if len(terms) >= bodyTermCap {
-				break
-			}
-			if !seenTerm[w] {
-				seenTerm[w] = true
-				terms = append(terms, w)
-			}
-		}
-	}
-
-	line := int(node.StartPoint().Row) + 1
-	if len(strs) > 0 {
-		result.Properties = append(result.Properties, PropertyRef{
-			NodeIdx: nodeIdx, Kind: "string_literals", Value: strings.Join(strs, " | "), Line: line, Confidence: 1.0,
-		})
-	}
-	if len(terms) > 0 {
-		result.Properties = append(result.Properties, PropertyRef{
-			NodeIdx: nodeIdx, Kind: "body_terms", Value: strings.Join(terms, " "), Line: line, Confidence: 1.0,
-		})
-	}
-	if len(callNames) > 0 {
-		result.Properties = append(result.Properties, PropertyRef{
-			NodeIdx: nodeIdx, Kind: "calls", Value: strings.Join(callNames, " "), Line: line, Confidence: 1.0,
-		})
-	}
-}
-
-// truncateRune returns s truncated to at most n BYTES, cut back to the nearest rune
-// boundary so the result is ALWAYS valid UTF-8 (P2). Byte-slicing a Go string at a fixed
-// offset (s[:n]) can split a multi-byte rune; the invalid UTF-8 that produces makes Python's
-// sqlite3 reader (default text_factory=str) raise "Could not decode to UTF-8" on the WHOLE
-// properties fetch for the repo — silently disabling every downstream channel over one
-// non-ASCII literal. For ASCII input this is byte-identical to s[:n].
-func truncateRune(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if n >= len(s) {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
-}
-
-// countNodesOfType returns how many nodes of the given AST type appear in the subtree
-// rooted at node (inclusive). Used to count facts structurally instead of scanning bytes,
-// so tokens inside string/char literals or comments never inflate the count.
-func countNodesOfType(node *sitter.Node, typ string) int {
-	if node == nil {
-		return 0
-	}
-	n := 0
-	if node.Type() == typ {
-		n++
-	}
-	for i := 0; i < int(node.ChildCount()); i++ {
-		n += countNodesOfType(node.Child(i), typ)
-	}
-	return n
-}
-
 // extractProperties extracts structural facts from a function AST node.
 // Works across all languages by walking tree-sitter nodes generically.
 func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, result *ParseResult, nodeIdx int) {
@@ -3407,12 +2516,9 @@ func extractProperties(node *sitter.Node, sf walker.SourceFile, src []byte, resu
 	// and Result<T,E>/Option<T> return types as properties
 	if sf.Language == "rust" {
 		bodyText := bodyNode.Content(src)
-		// ? operator = implicit guard clause for Result/Option. Count try_expression AST
-		// nodes, NOT `?` bytes (P9): a `?` inside a string/char literal — println!("what?"),
-		// a regex, a doc string — is NOT an early return. Byte-counting fabricated ~75% of
-		// these guards on a real Rust repo. The parser materializes each real `expr?` as a
-		// `try_expression` node, so counting those is exact.
-		if qCount := countNodesOfType(bodyNode, "try_expression"); qCount > 0 {
+		// ? operator = implicit guard clause for Result/Option
+		if strings.Contains(bodyText, "?") {
+			qCount := strings.Count(bodyText, "?")
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
 				Kind:       "guard_clause",
@@ -3534,7 +2640,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 		text := _cleanComment(prevSibling.Content(src))
 		if len(text) >= 5 {
 			if len(text) > 200 {
-				text = truncateRune(text, 200)
+				text = text[:200]
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -3556,7 +2662,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 				text := _cleanComment(parentPrev.Content(src))
 				if len(text) >= 5 {
 					if len(text) > 200 {
-						text = truncateRune(text, 200)
+						text = text[:200]
 					}
 					result.Properties = append(result.Properties, PropertyRef{
 						NodeIdx:    nodeIdx,
@@ -3576,7 +2682,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 		text := _cleanComment(prevSibling.Content(src))
 		if len(text) >= 5 {
 			if len(text) > 200 {
-				text = truncateRune(text, 200)
+				text = text[:200]
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -3606,7 +2712,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 			text = strings.Trim(text, `"'`)
 			text = strings.Trim(text, "`")
 			if len(text) > 200 {
-				text = truncateRune(text, 200)
+				text = text[:200]
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -3625,7 +2731,7 @@ func extractDocstring(funcNode, bodyNode *sitter.Node, sf walker.SourceFile, src
 	if childType == "comment" {
 		text := _cleanComment(firstChild.Content(src))
 		if len(text) > 200 {
-			text = truncateRune(text, 200)
+			text = text[:200]
 		}
 		if text != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -4089,7 +3195,7 @@ func extractExceptionFromNode(node *sitter.Node, sf walker.SourceFile, src []byt
 		}
 		excType = strings.TrimSpace(excType)
 		if len(excType) > 80 {
-			excType = truncateRune(excType, 80)
+			excType = excType[:80]
 		}
 		if excType != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -4125,15 +3231,8 @@ func extractReturnShape(funcNode *sitter.Node, bodyNode *sitter.Node, sf walker.
 		shapeLine = int(funcNode.StartPoint().Row) + 1
 	}
 
-	// Summarize — DETERMINISM (B0): a Go `range` over a map is randomized, so emitting
-	// the return_shape properties in map order made graph.db non-byte-identical across
-	// indexings. Collect + sort the shape keys first (mirrors the receiverCalls sort).
-	shapeKeys := make([]string, 0, len(shapes))
+	// Summarize
 	for shape := range shapes {
-		shapeKeys = append(shapeKeys, shape)
-	}
-	sort.Strings(shapeKeys)
-	for _, shape := range shapeKeys {
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
 			Kind:       "return_shape",
@@ -4154,7 +3253,7 @@ func countReturns(node *sitter.Node, src []byte, shapes map[string]bool) {
 
 		expr := text
 		if len(expr) > 80 {
-			expr = truncateRune(expr, 80)
+			expr = expr[:80]
 		}
 		switch {
 		case text == "" || text == "return" || text == "None" || text == "nil" || text == "null" || text == "undefined":
@@ -4189,7 +3288,7 @@ func rustTailExpr(bodyNode *sitter.Node, src []byte) string {
 		}
 		txt := strings.TrimSpace(c.Content(src))
 		if len(txt) > 80 {
-			txt = truncateRune(txt, 80)
+			txt = txt[:80]
 		}
 		return txt
 	}
@@ -4288,7 +3387,7 @@ func _findReturnsInBlock(block *sitter.Node, ifNode *sitter.Node, src []byte, re
 				value = fmt.Sprintf("if %s: return %s", condText, retText)
 			}
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 
 			result.Properties = append(result.Properties, PropertyRef{
@@ -4322,13 +3421,10 @@ func _walkSideEffects(node *sitter.Node, src []byte, result *ParseResult, nodeId
 	nodeType := node.Type()
 
 	// Go uses "assignment_statement" (and "short_var_declaration" for :=); the
-	// self/this languages use "assignment"/"assignment_expression". Only ACTUAL assignment
-	// AST nodes count (P10): an "expression_statement" is not itself an assignment — including
-	// it made the text `=` scan fire on keyword-argument calls like `self.log(msg=x)`,
-	// emitting a phantom `mutates: self.log(msg` side_effect at confidence 1.0. A real
-	// mutation (`self.x = 1`) is still reached via the assignment node this recurses into.
+	// self/this languages use "assignment"/"assignment_expression". Include all so
+	// named-receiver mutations (c.field = ...) are seen, not just self/this ones.
 	if nodeType == "assignment" || nodeType == "augmented_assignment" ||
-		nodeType == "assignment_expression" ||
+		nodeType == "assignment_expression" || nodeType == "expression_statement" ||
 		nodeType == "assignment_statement" {
 		if _tryExtractSideEffect(node, src, result, nodeIdx, recvName) {
 			return
@@ -4383,7 +3479,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 			if eqIdx >= 0 && eqIdx+1 < len(text) {
 				rhs = strings.TrimSpace(text[eqIdx+1:])
 				if len(rhs) > 60 {
-					rhs = truncateRune(rhs, 60)
+					rhs = rhs[:60]
 				}
 			}
 			value := "mutates: " + recvName + "." + field
@@ -4391,7 +3487,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 				value += " = " + rhs
 			}
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4419,7 +3515,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 			if eqIdx >= 0 && eqIdx+1 < len(text) {
 				rhs = strings.TrimSpace(text[eqIdx+1:])
 				if len(rhs) > 60 {
-					rhs = truncateRune(rhs, 60)
+					rhs = rhs[:60]
 				}
 			}
 			value := "mutates: self." + field
@@ -4427,7 +3523,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 				value += " = " + rhs
 			}
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4454,7 +3550,7 @@ func _tryExtractSideEffect(node *sitter.Node, src []byte, result *ParseResult, n
 		if field != "" {
 			value := "mutates: this." + field
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4621,7 +3717,7 @@ func extractStructuredParams(node *sitter.Node, spec *specs.Spec, src []byte, re
 			}
 		}
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 
 		result.Properties = append(result.Properties, PropertyRef{
@@ -4770,7 +3866,7 @@ func _walkExceptionFlow(node *sitter.Node, src []byte, result *ParseResult, node
 			condText = "?"
 		}
 		if len(condText) > 80 {
-			condText = truncateRune(condText, 80)
+			condText = condText[:80]
 		}
 
 		// Check consequence/body for raise/throw
@@ -4801,7 +3897,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 		if ct == "raise_statement" || ct == "throw_statement" || ct == "throw_expression" {
 			raiseText := strings.TrimSpace(child.Content(src))
 			if len(raiseText) > 100 {
-				raiseText = truncateRune(raiseText, 100)
+				raiseText = raiseText[:100]
 			}
 			// Collect preceding siblings (cleanup/logging before raise)
 			preamble := ""
@@ -4813,7 +3909,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 						line = line[:nlIdx]
 					}
 					if len(line) > 60 {
-						line = truncateRune(line, 60)
+						line = line[:60]
 					}
 					if preamble != "" {
 						preamble += "; "
@@ -4826,7 +3922,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 				value += " [after: " + preamble + "]"
 			}
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -4842,11 +3938,11 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 			if strings.Contains(text, "panic(") {
 				raiseText := strings.TrimSpace(text)
 				if len(raiseText) > 100 {
-					raiseText = truncateRune(raiseText, 100)
+					raiseText = raiseText[:100]
 				}
 				value := fmt.Sprintf("WHEN %s: %s", condText, raiseText)
 				if len(value) > 200 {
-					value = truncateRune(value, 197) + "..."
+					value = value[:197] + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -4878,7 +3974,7 @@ func _findRaisesInBlock(block *sitter.Node, condText string, src []byte, result 
 			if etype != "" {
 				value := fmt.Sprintf("WHEN %s: raise %s", condText, etype)
 				if len(value) > 200 {
-					value = truncateRune(value, 197) + "..."
+					value = value[:197] + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -4916,7 +4012,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 		text = strings.TrimSuffix(text, "{")
 		text = strings.TrimSpace(text)
 		if len(text) > 200 {
-			text = truncateRune(text, 197) + "..."
+			text = text[:197] + "..."
 		}
 		if text != "" {
 			// Classify handler action from body children
@@ -4932,7 +4028,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 				} else if ct == "return_statement" {
 					retText := strings.TrimSpace(child.Content(src))
 					if len(retText) > 40 {
-						retText = truncateRune(retText, 40)
+						retText = retText[:40]
 					}
 					action = "returns: " + retText
 				} else if ct == "block" {
@@ -4949,7 +4045,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 						if bct == "return_statement" {
 							retText := strings.TrimSpace(bc.Content(src))
 							if len(retText) > 40 {
-								retText = truncateRune(retText, 40)
+								retText = retText[:40]
 							}
 							action = "returns: " + retText
 							break
@@ -4965,7 +4061,7 @@ func _walkExceptionHandlers(node *sitter.Node, src []byte, result *ParseResult, 
 			}
 			handlerValue := text + " -> " + action
 			if len(handlerValue) > 200 {
-				handlerValue = truncateRune(handlerValue, 197) + "..."
+				handlerValue = handlerValue[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -5006,7 +4102,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 
 	callList := strings.Join(callNames, ",")
 	if len(callList) > 150 {
-		callList = truncateRune(callList, 147) + "..."
+		callList = callList[:147] + "..."
 	}
 
 	// Extract return type annotation from function node
@@ -5015,7 +4111,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 	if rtNode != nil {
 		retType = strings.TrimSpace(rtNode.Content(src))
 		if len(retType) > 60 {
-			retType = truncateRune(retType, 60)
+			retType = retType[:60]
 		}
 	}
 
@@ -5024,7 +4120,7 @@ func extractFunctionFingerprint(funcNode *sitter.Node, bodyNode *sitter.Node, sr
 		value += "|returns:" + retType
 	}
 	if len(value) > 200 {
-		value = truncateRune(value, 197) + "..."
+		value = value[:197] + "..."
 	}
 
 	result.Properties = append(result.Properties, PropertyRef{
@@ -5199,7 +4295,7 @@ func _walkFieldReads(node *sitter.Node, src []byte, result *ParseResult, nodeIdx
 					value += " [" + ctx + "]"
 				}
 				if len(value) > 200 {
-					value = truncateRune(value, 197) + "..."
+					value = value[:197] + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -5239,7 +4335,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 		nodeType == "comparison_expression" {
 		text := strings.TrimSpace(node.Content(src))
 		if len(text) > 150 {
-			text = truncateRune(text, 150)
+			text = text[:150]
 		}
 
 		category := ""
@@ -5281,7 +4377,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 								consequence = consequence[:nlIdx]
 							}
 							if len(consequence) > 60 {
-								consequence = truncateRune(consequence, 60)
+								consequence = consequence[:60]
 							}
 						}
 					}
@@ -5294,7 +4390,7 @@ func _walkBoundaryConditions(node *sitter.Node, src []byte, result *ParseResult,
 				value += " => " + consequence
 			}
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -5369,7 +4465,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 				if it == "assignment" || it == "augmented_assignment" {
 					text := strings.TrimSpace(inner.Content(src))
 					if len(text) > 200 {
-						text = truncateRune(text, 197) + "..."
+						text = text[:197] + "..."
 					}
 					if text != "" {
 						result.Properties = append(result.Properties, PropertyRef{
@@ -5389,7 +4485,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 		if ct == "type" {
 			text := strings.TrimSpace(child.Content(src))
 			if len(text) > 200 {
-				text = truncateRune(text, 197) + "..."
+				text = text[:197] + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -5408,7 +4504,7 @@ func extractClassFields(classBodyNode *sitter.Node, src []byte, result *ParseRes
 			ct == "field_definition" {
 			text := strings.TrimSpace(child.Content(src))
 			if len(text) > 200 {
-				text = truncateRune(text, 197) + "..."
+				text = text[:197] + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -5439,7 +4535,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 			if child.Type() == "decorator" {
 				text := strings.TrimSpace(child.Content(src))
 				if len(text) > 200 {
-					text = truncateRune(text, 197) + "..."
+					text = text[:197] + "..."
 				}
 				if text != "" {
 					result.Properties = append(result.Properties, PropertyRef{
@@ -5460,7 +4556,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 	for prev != nil && prev.Type() == "decorator" {
 		text := strings.TrimSpace(prev.Content(src))
 		if len(text) > 200 {
-			text = truncateRune(text, 197) + "..."
+			text = text[:197] + "..."
 		}
 		if text != "" {
 			result.Properties = append(result.Properties, PropertyRef{
@@ -5481,7 +4577,7 @@ func extractClassDecorators(classNode *sitter.Node, src []byte, result *ParseRes
 		if pt == "marker_annotation" || pt == "annotation" {
 			text := strings.TrimSpace(prev.Content(src))
 			if len(text) > 200 {
-				text = truncateRune(text, 197) + "..."
+				text = text[:197] + "..."
 			}
 			if text != "" {
 				result.Properties = append(result.Properties, PropertyRef{
@@ -5528,7 +4624,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 		if isAssertion {
 			text := strings.TrimSpace(node.Content(src))
 			if len(text) > 200 {
-				text = truncateRune(text, 200)
+				text = text[:200]
 			}
 
 			// Try to extract expected value from arguments
@@ -5552,7 +4648,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 					if argCount == 2 {
 						expected = strings.TrimSpace(child.Content(src))
 						if len(expected) > 80 {
-							expected = truncateRune(expected, 80)
+							expected = expected[:80]
 						}
 						break
 					}
@@ -5574,7 +4670,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 	if nodeType == "assert_statement" || nodeType == "assert" {
 		text := strings.TrimSpace(node.Content(src))
 		if len(text) > 200 {
-			text = truncateRune(text, 200)
+			text = text[:200]
 		}
 		result.Assertions = append(result.Assertions, AssertionRef{
 			TestNodeIdx: testNodeIdx,
@@ -5591,7 +4687,7 @@ func findAssertions(node *sitter.Node, sf walker.SourceFile, src []byte, result 
 		if strings.HasPrefix(text, "assert") {
 			trimmed := strings.TrimSpace(text)
 			if len(trimmed) > 200 {
-				trimmed = truncateRune(trimmed, 200)
+				trimmed = trimmed[:200]
 			}
 			kind := "assert"
 			if strings.HasPrefix(trimmed, "assert_eq!") {
@@ -6173,11 +5269,11 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 			}
 			lockLine := strings.TrimSpace(bodyText[lineStart : idx+lineEnd])
 			if len(lockLine) > 120 {
-				lockLine = truncateRune(lockLine, 120)
+				lockLine = lockLine[:120]
 			}
 			value := "lock: " + lockLine
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -6195,7 +5291,7 @@ func extractConcurrencyPatterns(bodyNode *sitter.Node, src []byte, result *Parse
 			seen["shared_state:"+kw] = true
 			value := "shared_state: " + kw
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -6244,7 +5340,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 		}
 		key := rest[qIdx+1 : qIdx+1+endQ]
 		if len(key) > 80 {
-			key = truncateRune(key, 80)
+			key = key[:80]
 		}
 		return key
 	}
@@ -6307,7 +5403,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 						if endIdx > 0 {
 							dflt = strings.TrimSpace(dfltPart[:endIdx])
 							if len(dflt) > 40 {
-								dflt = truncateRune(dflt, 40)
+								dflt = dflt[:40]
 							}
 						}
 					}
@@ -6317,7 +5413,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 					value += " (default=" + dflt + ")"
 				}
 				if len(value) > 200 {
-					value = truncateRune(value, 197) + "..."
+					value = value[:197] + "..."
 				}
 				result.Properties = append(result.Properties, PropertyRef{
 					NodeIdx:    nodeIdx,
@@ -6349,7 +5445,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 			seen["env:"+key] = true
 			value := "env: " + key
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -6379,7 +5475,7 @@ func extractConfigReads(bodyNode *sitter.Node, src []byte, result *ParseResult, 
 			seen["config:"+key] = true
 			value := "config: " + key
 			if len(value) > 200 {
-				value = truncateRune(value, 197) + "..."
+				value = value[:197] + "..."
 			}
 			result.Properties = append(result.Properties, PropertyRef{
 				NodeIdx:    nodeIdx,
@@ -6452,7 +5548,7 @@ func extractCallOrdering(bodyNode *sitter.Node, src []byte, result *ParseResult,
 			value += " [" + ctx + "]"
 		}
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 		line := int(bodyNode.StartPoint().Row) + 1
 		if l, ok := receiverLine[receiver]; ok && l > 0 {
@@ -6599,7 +5695,7 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = truncateRune(resText, 150)
+			resText = resText[:150]
 		}
 		// Try to find the "as" alias (Python: with expr as name)
 		asName := ""
@@ -6624,7 +5720,7 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			value += " as " + asName
 		}
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6647,11 +5743,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 		text := strings.TrimSpace(node.Content(src))
 		text = strings.TrimPrefix(text, "defer ")
 		if len(text) > 150 {
-			text = truncateRune(text, 150)
+			text = text[:150]
 		}
 		value := "defer: " + text
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6686,11 +5782,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = truncateRune(resText, 150)
+			resText = resText[:150]
 		}
 		value := "using: " + resText
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,
@@ -6716,11 +5812,11 @@ func _walkResourcePatterns(node *sitter.Node, src []byte, result *ParseResult, n
 			resText = text
 		}
 		if len(resText) > 150 {
-			resText = truncateRune(resText, 150)
+			resText = resText[:150]
 		}
 		value := "context_manager: " + resText
 		if len(value) > 200 {
-			value = truncateRune(value, 197) + "..."
+			value = value[:197] + "..."
 		}
 		result.Properties = append(result.Properties, PropertyRef{
 			NodeIdx:    nodeIdx,

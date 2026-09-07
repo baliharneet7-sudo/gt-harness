@@ -178,11 +178,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 						if idx := strings.Index(base, "["); idx > 0 {
 							base = base[:idx]
 						}
-						// RS9: abstain on a cross-file AMBIGUOUS base name (>1 same-named class in
-						// other files) rather than wiring inheritance to an arbitrary global
-						// first-match — a wrong parent contaminates CHA (lookupMethodWithInheritance)
-						// for every method call on the subclass.
-						baseID := resolveClassNodeSameFileOrUnique(base, sf.Path, classIndex)
+						baseID := resolveClassNode(base, sf.Path, classIndex)
 						if baseID != 0 && childID != 0 {
 							addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 						}
@@ -224,8 +220,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNode(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -277,10 +272,29 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					}
 				}
 
-				// P4: Re-exports — RETIRED. RE_EXPORTS edges are now emitted by
-				// resolver.ResolveReExports from the parser's ReExportRef AST (all 5
-				// languages), replacing this JS/TS-only line-regex that resolved to ~0
-				// on real repos and double-emitted on the cases it did match.
+				// P4: Re-exports
+				if m := namedReExportRe.FindStringSubmatch(line); m != nil {
+					sourceModule := m[1]
+					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
+					if targetFile != "" {
+						sourceID := fileNodeMap[sf.Path]
+						targetID := fileNodeMap[targetFile]
+						if sourceID != 0 && targetID != 0 {
+							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
+						}
+					}
+				}
+				if m := starReExportRe.FindStringSubmatch(line); m != nil {
+					sourceModule := m[1]
+					targetFile := resolveModuleToFile(sourceModule, sf.Path, files)
+					if targetFile != "" {
+						sourceID := fileNodeMap[sf.Path]
+						targetID := fileNodeMap[targetFile]
+						if sourceID != 0 && targetID != 0 {
+							addEdge(sourceID, targetID, "RE_EXPORTS", sf.Path, lineNum, "re_export", 1.0)
+						}
+					}
+				}
 
 			case "java", "kotlin":
 				// P0: Java/Kotlin extends
@@ -288,8 +302,7 @@ func ResolveRelationships(db *store.DB, files []walker.SourceFile, root string) 
 					childName := m[1]
 					baseName := m[2]
 					childID := resolveClassNode(childName, sf.Path, classIndex)
-					// RS9: abstain on a cross-file ambiguous base (see Python EXTENDS above).
-					baseID := resolveClassNodeSameFileOrUnique(baseName, sf.Path, classIndex)
+					baseID := resolveClassNode(baseName, sf.Path, classIndex)
 					if childID != 0 && baseID != 0 {
 						addEdge(childID, baseID, "EXTENDS", sf.Path, lineNum, "inheritance", 1.0)
 					}
@@ -949,9 +962,7 @@ func resolveClassNodeSameFileOrUnique(name, currentFile string, classIndex map[s
 	return 0 // cross-file AND ambiguous — abstain (fail closed)
 }
 
-// resolveInterfaceNode finds an Interface node by name, SAME-FILE-FIRST and abstaining
-// on a cross-file AMBIGUOUS name (RS9: an IMPLEMENTS/impl-trait edge to an arbitrary
-// same-named interface in another file contaminates CHA the same way a wrong base does).
+// resolveInterfaceNode finds an Interface node by name.
 func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]classNodeEntry) int64 {
 	entries := interfaceIndex[name]
 	if len(entries) == 0 {
@@ -959,49 +970,55 @@ func resolveInterfaceNode(name, currentFile string, interfaceIndex map[string][]
 	}
 	for _, e := range entries {
 		if e.FilePath == currentFile {
-			return e.ID // same-file is unambiguous by construction
+			return e.ID
 		}
 	}
-	if len(entries) == 1 {
-		return entries[0].ID // cross-file but globally unique — safe
-	}
-	return 0 // cross-file AND ambiguous — abstain (fail closed)
+	return entries[0].ID
 }
 
-// resolveInterfaceOrClassNode tries interface first, then class. Both legs abstain on a
-// cross-file ambiguous name (RS9): an IMPLEMENTS/impl-trait target is inheritance provenance
-// and must never be an arbitrary global first-match.
+// resolveInterfaceOrClassNode tries interface first, then class.
 func resolveInterfaceOrClassNode(name, currentFile string, interfaceIndex, classIndex map[string][]classNodeEntry) int64 {
 	if id := resolveInterfaceNode(name, currentFile, interfaceIndex); id != 0 {
 		return id
 	}
-	return resolveClassNodeSameFileOrUnique(name, currentFile, classIndex)
+	return resolveClassNode(name, currentFile, classIndex)
 }
 
-// resolveClassOrFuncNode tries class index first, then function.
+// resolveClassOrFuncNode resolves a JSX component name across the union of
+// class and function declarations. A same-file declaration wins only when it
+// is the sole same-file target across both declaration kinds. Otherwise a
+// cross-file target must be globally unique across both kinds. Syntax alone
+// cannot justify preferring a class over a function (or vice versa), so every
+// mixed-kind ambiguity fails closed.
 func resolveClassOrFuncNode(name, currentFile string, classIndex map[string][]classNodeEntry, funcFileIndex map[string]map[string]int64) int64 {
-	if id := resolveClassNode(name, currentFile, classIndex); id != 0 {
+	sameFile := make(map[int64]struct{})
+	all := make(map[int64]struct{})
+	for _, entry := range classIndex[name] {
+		all[entry.ID] = struct{}{}
+		if entry.FilePath == currentFile {
+			sameFile[entry.ID] = struct{}{}
+		}
+	}
+	for file, funcs := range funcFileIndex {
+		id, ok := funcs[name]
+		if !ok {
+			continue
+		}
+		all[id] = struct{}{}
+		if file == currentFile {
+			sameFile[id] = struct{}{}
+		}
+	}
+	if len(sameFile) == 1 {
+		for id := range sameFile {
+			return id
+		}
+	}
+	if len(sameFile) > 1 || len(all) != 1 {
+		return 0
+	}
+	for id := range all {
 		return id
-	}
-	// DETERMINISM (B0) + correctness: prefer the CURRENT file, then search the remaining
-	// files in SORTED key order. The old `range funcFileIndex` returned the first same-
-	// named function from a RANDOMIZED map iteration, so the COMPOSES edge target flipped
-	// run-to-run when the name existed in >1 file (the P1-5 nondeterminism class; mirrors
-	// resolveByName content-order + the findEnclosingFunc same-scope preference below).
-	if funcs, ok := funcFileIndex[currentFile]; ok {
-		if id, ok := funcs[name]; ok {
-			return id
-		}
-	}
-	files := make([]string, 0, len(funcFileIndex))
-	for f := range funcFileIndex {
-		files = append(files, f)
-	}
-	sort.Strings(files)
-	for _, f := range files {
-		if id, ok := funcFileIndex[f][name]; ok {
-			return id
-		}
 	}
 	return 0
 }

@@ -2,6 +2,8 @@ package resolver
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,11 +16,205 @@ import (
 
 // RouteDefinition represents a detected HTTP route handler.
 type RouteDefinition struct {
-	Path   string // normalized URL path, e.g. "/api/users"
-	Method string // HTTP method (GET, POST, etc.) or "" if unknown
-	File   string // relative file path where the route is defined
-	Line   int    // line number
-	NodeID int64  // DB node ID of the file (or nearest function)
+	Path      string // normalized URL path, e.g. "/api/users"
+	Method    string // HTTP method (GET, POST, etc.) or "" if unknown
+	File      string // relative file path where the route is defined
+	Line      int    // line number
+	NodeID    int64  // DB node ID of the file (or nearest function)
+	Language  string // language owning the framework adapter
+	Framework string // framework identity, when detected
+	Mechanism string // route/DI/AOP mechanism
+}
+
+// FrameworkManifest is the coordinator-minted HAR-70 boundary.  Keep this
+// list closed: adding a language requires a new released construction record.
+var FrameworkManifest = []struct {
+	Language   string
+	Framework  string
+	Mechanisms []string
+}{
+	{Language: "Python", Framework: "FastAPI/Flask/Django", Mechanisms: []string{"route_decorator", "route_registration", "Depends"}},
+	{Language: "TypeScript", Framework: "Next.js/NestJS/Express", Mechanisms: []string{"app_router_handler", "decorator_di", "route_registration"}},
+	{Language: "JavaScript", Framework: "Express/React", Mechanisms: []string{"route_registration", "component_props"}},
+	{Language: "Go", Framework: "gin/echo/wire", Mechanisms: []string{"route_registration", "wire_di"}},
+	{Language: "Java", Framework: "Spring", Mechanisms: []string{"component_scan", "request_mapping"}},
+}
+
+// FrameworkFact is a normalized producer-owned fact for framework constructs
+// that do not always mint an API route.  Route facts are also returned by
+// ExtractFrameworkRoutes; dependency and component facts are retained for the
+// certified framework-resolution receipt without being promoted to API_CALLs.
+type FrameworkFact struct {
+	Language  string
+	Framework string
+	Mechanism string
+	Kind      string // route, dependency, or component
+	Symbol    string
+	Path      string
+	Method    string
+}
+
+// FrameworkValidationRow is the deterministic, provider-free evidence row
+// consumed by the HAR-70 validation receipt.  The before count is deliberately
+// the framework-specific baseline (no overlay facts), while after counts are
+// produced by the same extractor used by ResolveAPIEdges.
+type FrameworkValidationRow struct {
+	Language               string   `json:"language"`
+	Framework              string   `json:"framework"`
+	CertifiedPairsBefore   int      `json:"certified_pairs_before"`
+	CertifiedPairsAfter    int      `json:"certified_pairs_after"`
+	REDWitness             string   `json:"red_witness"`
+	ObservedFactMechanisms []string `json:"observed_fact_mechanisms"`
+}
+
+type frameworkValidationFixture struct {
+	language, framework, line, witness string
+}
+
+var har70FrameworkFixtures = []frameworkValidationFixture{
+	{language: "Python", framework: "FastAPI/Flask/Django", line: `@router.get("/api/users")`, witness: "TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism/python-django"},
+	{language: "TypeScript", framework: "Next.js/NestJS/Express", line: `@Get("/api/users")`, witness: "TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism/typescript-nest"},
+	{language: "JavaScript", framework: "Express/React", line: `app.get("/api/users", handler)`, witness: "TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism/javascript-express"},
+	{language: "Go", framework: "gin/echo/wire", line: `wire.Build(NewServer, NewStore)`, witness: "TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism/go-wire"},
+	{language: "Java", framework: "Spring", line: `@Service class UserService {}`, witness: "TestHAR70FrameworkOverlayCoversEveryManifestLanguageAndMechanism/java-component"},
+}
+
+// FrameworkRoute is the producer-owned normalized route fact used by the
+// existing API edge path.  It carries mechanism identity so framework edges
+// remain distinguishable from heuristic name matches.
+type FrameworkRoute struct {
+	Language  string
+	Framework string
+	Mechanism string
+	Path      string
+	Method    string
+}
+
+var frameworkRoutePatterns = []struct {
+	re        *regexp.Regexp
+	language  string
+	framework string
+	mechanism string
+}{
+	{regexp.MustCompile(`^\s*@(?:app|router)\.(?:get|post|put|delete|patch|route)\s*\(\s*["']([^"']+)["']`), "Python", "FastAPI/Flask", "route_decorator"},
+	{regexp.MustCompile(`\b(?:path|re_path)\s*\(\s*["']([^"']+)["']`), "Python", "Django", "route_registration"},
+	{regexp.MustCompile(`^\s*@(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*["']([^"']+)["']`), "TypeScript", "Express", "route_registration"},
+	{regexp.MustCompile(`^\s*@(Get|Post|Put|Patch|Delete|Options|Head)\s*\(\s*["']([^"']+)["']`), "TypeScript", "NestJS", "route_registration"},
+	{regexp.MustCompile(`^\s*export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b`), "TypeScript", "Next.js", "app_router_handler"},
+	{regexp.MustCompile(`^\s*(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']`), "JavaScript", "Express", "route_registration"},
+	{regexp.MustCompile(`^\s*@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*\(\s*["']([^"']+)["']`), "Java", "Spring", "request_mapping"},
+	{regexp.MustCompile(`^\s*[\w.]+\.(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["']([^"']+)["']`), "Go", "gin/echo", "route_registration"},
+}
+
+var frameworkFactPatterns = []struct {
+	re        *regexp.Regexp
+	language  string
+	framework string
+	mechanism string
+	kind      string
+}{
+	{regexp.MustCompile(`\bDepends\s*\(\s*([A-Za-z_]\w*)`), "Python", "FastAPI/Flask/Django", "Depends", "dependency"},
+	{regexp.MustCompile(`^\s*function\s+[A-Za-z_]\w*\s*\(\s*\{[^}]*\b(?:on[A-Z]\w*|children)\b[^}]*\}`), "JavaScript", "React", "component_props", "component"},
+	{regexp.MustCompile(`\bwire\.Build\s*\(([^)]*)\)`), "Go", "wire", "wire_di", "dependency"},
+	{regexp.MustCompile(`^\s*@(Component|Service|Repository|Controller)\b`), "Java", "Spring", "component_scan", "component"},
+}
+
+// ExtractFrameworkRoutes returns only route-bearing framework facts.  DI and
+// component-props mechanisms are represented in the manifest but do not mint
+// an API_CALL without a concrete route path.
+func ExtractFrameworkRoutes(line string) []FrameworkRoute {
+	var routes []FrameworkRoute
+	for _, pattern := range frameworkRoutePatterns {
+		matches := pattern.re.FindStringSubmatch(line)
+		if len(matches) == 0 {
+			continue
+		}
+		method, path := "", ""
+		if pattern.mechanism == "app_router_handler" {
+			method = extractMethod(matches[1])
+			path = "/"
+		} else if pattern.mechanism == "request_mapping" {
+			path = matches[len(matches)-1]
+		} else if len(matches) == 2 {
+			path = matches[1]
+		} else {
+			method = extractMethod(matches[1])
+			path = matches[2]
+		}
+		path = normalizePath(path)
+		if !isAPIPath(path) && pattern.mechanism != "app_router_handler" {
+			continue
+		}
+		routes = append(routes, FrameworkRoute{Language: pattern.language, Framework: pattern.framework, Mechanism: pattern.mechanism, Path: path, Method: method})
+	}
+	return routes
+}
+
+// ExtractFrameworkFacts returns all certified framework facts represented by
+// one source line.  It deliberately keeps non-route constructs separate from
+// route resolution: callers may count or display them, but only concrete route
+// facts enter ResolveAPIEdges.
+func ExtractFrameworkFacts(line string) []FrameworkFact {
+	facts := make([]FrameworkFact, 0)
+	for _, route := range ExtractFrameworkRoutes(line) {
+		facts = append(facts, FrameworkFact{
+			Language: route.Language, Framework: route.Framework, Mechanism: route.Mechanism,
+			Kind: "route", Symbol: route.Path, Path: route.Path, Method: route.Method,
+		})
+	}
+	for _, pattern := range frameworkFactPatterns {
+		matches := pattern.re.FindStringSubmatch(line)
+		if len(matches) == 0 {
+			continue
+		}
+		symbol := strings.TrimSpace(matches[len(matches)-1])
+		if pattern.mechanism == "component_props" {
+			symbol = "props"
+		}
+		facts = append(facts, FrameworkFact{
+			Language: pattern.language, Framework: pattern.framework,
+			Mechanism: pattern.mechanism, Kind: pattern.kind, Symbol: symbol,
+		})
+	}
+	return facts
+}
+
+// FrameworkValidationReport runs the frozen RED fixtures through the
+// production extractor and returns one count-increase row per coordinator
+// language.  It is intentionally pure so the CLI and tests share identical
+// evidence rather than maintaining a second validation implementation.
+func FrameworkValidationReport() []FrameworkValidationRow {
+	rows := make([]FrameworkValidationRow, 0, len(har70FrameworkFixtures))
+	for _, fixture := range har70FrameworkFixtures {
+		facts := ExtractFrameworkFacts(fixture.line)
+		mechanisms := make([]string, 0)
+		for _, fact := range facts {
+			if fact.Language == fixture.language {
+				mechanisms = append(mechanisms, fact.Mechanism)
+			}
+		}
+		rows = append(rows, FrameworkValidationRow{
+			Language: fixture.language, Framework: fixture.framework,
+			CertifiedPairsBefore: 0, CertifiedPairsAfter: len(mechanisms),
+			REDWitness: fixture.witness, ObservedFactMechanisms: mechanisms,
+		})
+	}
+	return rows
+}
+
+// FrameworkValidationDigest binds the manifest and observed rows into a
+// stable producer-owned evidence digest for the harness receipt issuer.
+func FrameworkValidationDigest(rows []FrameworkValidationRow) string {
+	payload, _ := json.Marshal(struct {
+		Manifest []struct {
+			Language   string
+			Framework  string
+			Mechanisms []string
+		}
+		Rows []FrameworkValidationRow
+	}{Manifest: FrameworkManifest, Rows: rows})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 // ClientCall represents a detected HTTP client invocation.
@@ -183,6 +379,20 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 			lineNum++
 			line := scanner.Text()
 
+			// Framework adapters run beside the legacy route patterns.  They are
+			// producer-owned facts and carry language/framework/mechanism identity.
+			for _, frameworkRoute := range ExtractFrameworkRoutes(line) {
+				if frameworkRoute.Path == "/" && frameworkRoute.Mechanism != "app_router_handler" {
+					continue
+				}
+				routes = append(routes, RouteDefinition{
+					Path: frameworkRoute.Path, Method: frameworkRoute.Method,
+					File: sf.Path, Line: lineNum, NodeID: fileNodeMap[sf.Path],
+					Language: frameworkRoute.Language, Framework: frameworkRoute.Framework,
+					Mechanism: frameworkRoute.Mechanism,
+				})
+			}
+
 			// Check route patterns
 			for _, re := range routePatterns {
 				matches := re.FindStringSubmatch(line)
@@ -241,6 +451,22 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 
 	// Match routes to clients by normalized path.
 	// Build index: normalized path -> []RouteDefinition
+	// Adapters and legacy patterns can recognize the same source line; collapse
+	// those duplicates while preferring the framework-labelled fact.
+	dedupedRoutes := make([]RouteDefinition, 0, len(routes))
+	routeSeen := make(map[string]int)
+	for _, route := range routes {
+		key := fmt.Sprintf("%s|%s|%d|%s", route.File, route.Path, route.Line, route.Method)
+		if index, ok := routeSeen[key]; ok {
+			if dedupedRoutes[index].Framework == "" && route.Framework != "" {
+				dedupedRoutes[index] = route
+			}
+			continue
+		}
+		routeSeen[key] = len(dedupedRoutes)
+		dedupedRoutes = append(dedupedRoutes, route)
+	}
+	routes = dedupedRoutes
 	routeIndex := make(map[string][]RouteDefinition)
 	for _, r := range routes {
 		routeIndex[r.Path] = append(routeIndex[r.Path], r)
@@ -269,8 +495,9 @@ func ResolveAPIEdges(db *store.DB, files []walker.SourceFile, root string) (int,
 			seen[key] = true
 
 			metadata, _ := json.Marshal(map[string]string{
-				"route":  c.Path,
-				"method": c.Method,
+				"route": c.Path, "method": c.Method,
+				"framework": r.Framework, "language": r.Language,
+				"mechanism": r.Mechanism,
 			})
 
 			// #2: API_CALL edges previously left trust_tier/evidence_type/

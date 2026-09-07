@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -35,6 +37,17 @@ type Node struct {
 	IsTest        bool
 	Language      string
 	ParentID      int64
+	// FileHash, ByteStart and ByteEnd are the symbol's content address: the
+	// sha256 of the file bytes this symbol was extracted from, and the
+	// tree-sitter byte range of its declaration within them. Storing the
+	// address rather than a copy of the source keeps the store from growing by
+	// the size of the repository, and turns staleness into a hash mismatch a
+	// reader can name instead of stale bytes nobody notices. An empty FileHash
+	// means UNADDRESSED and is stored as NULL -- 0 is a legal byte offset, so a
+	// zero address would be indistinguishable from a symbol at the top of a file.
+	FileHash  string
+	ByteStart uint64
+	ByteEnd   uint64
 }
 
 func nullableParentID(parentID int64) any {
@@ -42,6 +55,16 @@ func nullableParentID(parentID int64) any {
 		return nil
 	}
 	return parentID
+}
+
+// contentAddress returns the three address bind values for a node, all NULL
+// when the node carries no address. They are returned together because a
+// partial address is unverifiable and must never reach the database.
+func contentAddress(n *Node) (any, any, any) {
+	if n.FileHash == "" {
+		return nil, nil, nil
+	}
+	return n.FileHash, int64(n.ByteStart), int64(n.ByteEnd)
 }
 
 // Edge represents a relationship between nodes.
@@ -61,6 +84,466 @@ type Edge struct {
 	VerificationStatus string // unverified, verified, rejected
 }
 
+// ResolutionCandidate preserves one resolver-produced viable target. The
+// legacy edges table remains backward-readable, while this additive surface
+// prevents ambiguity from collapsing into a scalar count.
+type ResolutionCandidate struct {
+	CallsiteID          string
+	TargetID            int64
+	TargetStableID      string
+	TargetNativeID      string
+	Ordinal             int
+	Mechanism           string
+	DeclaredScope       string
+	ReceiverType        string
+	ReceiverOrigin      string
+	ReceiverShape       string
+	ReceiverChain       string
+	ImportChain         string
+	FlowSourceStableIDs []string
+	FlowEdgeStableIDs   []string
+	FlowSourceFacts     []ResolutionFlowFact
+	FlowEdgeFacts       []ResolutionFlowFact
+	DynamicDispatch     bool
+	ExportStatus        string
+	ParserComplete      *bool
+	VerificationStatus  string
+	Selected            bool
+}
+
+// ResolutionFlowFact is a typed, candidate-bound VTA source or propagation
+// fact. StableID is the immutable identity referenced by a derivation fact;
+// the remaining fields make the reference auditable at the graph boundary.
+type ResolutionFlowFact struct {
+	StableID       string
+	Kind           string
+	CallsiteID     string
+	TargetStableID string
+	Payload        string
+}
+
+type ResolutionCallsite struct {
+	CallsiteID             string
+	CallsiteOrdinal        int
+	RepositoryRevision     string
+	SourceStableID         string
+	SourceNativeID         string
+	SourceID               int64
+	SourceLine             int
+	SourceFile             string
+	Callee                 string
+	Language               string
+	DispatchState          string
+	CandidateCount         int
+	SelectedTargetStableID *string
+	SelectedTargetNativeID *string
+	Mechanism              string
+	VerificationStatus     string
+	RepoID                 string
+	FileNodeID             int64
+	FileIdentity           string
+	CallerSymbolID         string
+	ASTPath                string
+	ByteStart              uint64
+	ByteEnd                uint64
+	ColumnStart            uint32
+	DispatchForm           string
+	ArgumentArity          *uint16
+	ParseState             string
+	PassCoverage           []ResolutionPassCoverage
+	// AbstentionReason lets the producer publish a boundary the derivation
+	// mapping cannot infer from mechanism and dispatch state alone -- an
+	// analysis that was stopped by a budget rather than by the shape of the
+	// code. It overrides the derived reason and must come from the closed
+	// callsiteAbstentionVocabulary.
+	AbstentionReason string
+}
+
+// AttachedResolution is the graph-native representation of a resolver callsite.
+// The Callsite node and its HAS_CALLSITE/CANDIDATE edges live in the primary
+// nodes/edges graph; the resolution_* tables are only a compatibility projection
+// for older consumers and are never the authority for graph queries.
+type AttachedResolution struct {
+	Callsite   *ResolutionCallsite
+	Source     *Node
+	Candidates []*ResolutionCandidate
+}
+
+// AttachedCandidate is returned by the normal graph query path. It intentionally
+// reads nodes/edges rather than the compatibility sidecar so callers cannot forget
+// to consume the attached evidence.
+type AttachedCandidate struct {
+	CallsiteID          string
+	SourceID            int64
+	CallsiteNodeID      int64
+	TargetID            int64
+	TargetStableID      string
+	HasCandidate        bool
+	CandidateCount      int
+	SourceFile          string
+	SourceLine          int
+	Callee              string
+	DispatchState       string
+	CandidateOrdinal    int
+	Mechanism           string
+	Revision            string
+	StructuralAuthority string
+	TargetAuthority     string
+	DerivationKind      string
+	EvidenceSet         string
+	SiblingCount        int
+	AbstentionReason    string
+	DeclaredScope       string
+	ReceiverType        string
+	ReceiverOrigin      string
+	ReceiverShape       string
+	ReceiverChain       string
+	ImportChain         string
+	FlowSourceStableIDs []string
+	FlowEdgeStableIDs   []string
+	FlowSourceFacts     []ResolutionFlowFact
+	FlowEdgeFacts       []ResolutionFlowFact
+	ExportStatus        string
+	ParserComplete      *bool
+	PolicyID            string
+	PolicyVersion       string
+	PolicyVersionID     string
+	PolicyRank          int
+	PolicySelected      bool
+	PolicyReason        string
+	MatchedRuleIDs      []string
+	FactIDsRead         []string
+	DerivationFactIDs   []string
+	CompletenessStates  map[string]string
+	DerivedScore        *string
+	PolicyHash          string
+	PassCoverage        []ResolutionPassCoverage
+	ProvenanceSteps     []ResolutionDerivationStep
+}
+
+const GraphCompletionSchema = "gt-index.graph-completion.v1"
+const ResolutionDerivationContract = "gt-index.call-resolution.derivation.v2"
+const CallResolutionSchemaVersion = 2
+
+var dispatchFormsV2 = map[string]struct{}{
+	"static": {}, "special": {}, "virtual": {}, "interface": {}, "function_value": {},
+	"dynamic_name": {}, "reflection": {}, "di_lookup": {}, "ffi": {}, "unknown": {},
+}
+
+var derivationPassKindsV2 = map[string]struct{}{
+	"direct_binding": {}, "cha": {}, "rta": {}, "vta": {},
+	"points_to_field_insensitive": {}, "points_to_field_sensitive": {}, "on_the_fly_refinement": {},
+	"import_binding": {}, "scope_binding": {}, "return_shape": {}, "unique_name_fallback": {},
+	"framework_route": {}, "di_binding": {}, "reflection_model": {}, "higher_order_flow": {},
+	"ffi_contract": {}, "generated_mapping": {}, "legacy_unknown": {}, "lsp_definition": {},
+}
+
+func canonicalResolutionID(fields ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func StableCallsiteV2ID(repoID, revision, fileIdentity, astPath string, byteStart, byteEnd uint64, dispatchForm, calleeLexeme string) (string, error) {
+	if repoID == "" || revision == "" || fileIdentity == "" || astPath == "" || byteStart >= byteEnd {
+		return "", fmt.Errorf("incomplete v2 callsite identity")
+	}
+	if _, ok := dispatchFormsV2[dispatchForm]; !ok {
+		return "", fmt.Errorf("unknown dispatch form %q", dispatchForm)
+	}
+	return canonicalResolutionID(repoID, revision, fileIdentity, astPath, strconv.FormatUint(byteStart, 10), strconv.FormatUint(byteEnd, 10), dispatchForm, calleeLexeme), nil
+}
+
+func stableCandidateV2ID(callsiteID, targetStableID string) string {
+	return canonicalResolutionID(callsiteID, targetStableID)
+}
+
+type CandidateQueryPolicy struct {
+	ID      string
+	Version string
+}
+
+func (p CandidateQueryPolicy) VersionID() string {
+	return canonicalResolutionID(p.CanonicalJSON())
+}
+
+func (p CandidateQueryPolicy) CanonicalJSON() string {
+	rules := `[{"action":"include","predicate":{"candidate_count":1,"completeness":"closed","target_authority":"source_supported"},"priority":10,"rule_id":"select_closed_source_supported"}]`
+	if p == InspectAllCandidatePolicy {
+		rules = `[{"action":"abstain","predicate":{"always":true},"priority":10,"rule_id":"inspect_without_selection"}]`
+	}
+	return fmt.Sprintf(`{"explanation_template_version":"1","fact_schema_max":2,"fact_schema_min":2,"policy_name":%q,"rules":%s,"semantic_version":%q,"tie_breakers":["target_symbol_id"]}`, p.ID, rules, p.Version)
+}
+
+func (p CandidateQueryPolicy) SelectionRuleID() string {
+	if p == ConservativeCandidatePolicy {
+		return "select_closed_source_supported"
+	}
+	return "inspect_without_selection"
+}
+
+type ResolutionPassCoverage struct {
+	FactID                  string   `json:"fact_id,omitempty"`
+	PassKind                string   `json:"pass_kind"`
+	Version                 string   `json:"version"`
+	Status                  string   `json:"status"`
+	Reason                  string   `json:"reason,omitempty"`
+	CandidateStableIDs      []string `json:"candidate_stable_ids,omitempty"`
+	FlowTypeStableIDs       []string `json:"flow_type_stable_ids,omitempty"`
+	AllocationTypeStableIDs []string `json:"allocation_type_stable_ids,omitempty"`
+	ReachableStableIDs      []string `json:"reachable_stable_ids,omitempty"`
+	RootStableIDs           []string `json:"root_stable_ids,omitempty"`
+	RootPolicy              string   `json:"root_policy,omitempty"`
+	RootPolicyVersion       string   `json:"root_policy_version,omitempty"`
+	RootCompleteness        string   `json:"root_completeness,omitempty"`
+	RootBoundary            string   `json:"root_boundary,omitempty"`
+}
+
+type ResolutionDerivationStep struct {
+	StepID string `json:"step_id"`
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
+}
+
+var ConservativeCandidatePolicy = CandidateQueryPolicy{ID: "gt-index.candidate.conservative", Version: "1"}
+var InspectAllCandidatePolicy = CandidateQueryPolicy{ID: "gt-index.candidate.inspect-all", Version: "1"}
+
+func (p CandidateQueryPolicy) validate() error {
+	if p != ConservativeCandidatePolicy && p != InspectAllCandidatePolicy {
+		return fmt.Errorf("unknown candidate query policy %q/%q", p.ID, p.Version)
+	}
+	return nil
+}
+
+func resolutionDerivation(mechanism, dispatchState string, candidateCount int) (kind, evidenceSet, abstentionReason string, err error) {
+	if dispatchState == "dynamic" {
+		return "dynamic_dispatch", "partial", "dynamic_target_not_statically_proven", nil
+	}
+	if dispatchState == "parser_incomplete" {
+		return "syntax_incomplete", "partial", "parser_incomplete", nil
+	}
+	if dispatchState == "zero" || dispatchState == "external_unresolved" {
+		return "unresolved", "partial", dispatchState, nil
+	}
+	switch mechanism {
+	case "same_file":
+		return "lexical_binding", "closed", "", nil
+	case "inherited":
+		return "declared_type", "closed", "", nil
+	case "import":
+		return "import_binding", "closed", "", nil
+	case "import_type", "type_flow", "return_type":
+		return "declared_type", "closed", "", nil
+	case "vta":
+		return "variable_type_flow", "open", "candidate_only_flow_evidence", nil
+	case "impl_method":
+		if candidateCount == 1 {
+			return "single_implementation", "closed", "", nil
+		}
+		return "interface_implementors", "closed", "", nil
+	// unique_method is name-uniqueness, not receiver-proof: the resolver runs it
+	// under the global_name pass, caps it at CANDIDATE (0.6), and its emit site
+	// states outright that treating it as a type-derived fact is wrong. It belongs
+	// with the other name-derived mechanisms, never with single_implementation.
+	case "verified_unique", "name_match", "unique_method", "unknown_legacy", "external", "":
+		return "global_name", "partial", "", nil
+	default:
+		return "", "", "", fmt.Errorf("unknown resolution derivation mechanism %q", mechanism)
+	}
+}
+
+func resolutionCoverage(c *ResolutionCallsite) ([]ResolutionPassCoverage, []ResolutionDerivationStep) {
+	coverage := append([]ResolutionPassCoverage(nil), c.PassCoverage...)
+	if len(coverage) == 0 {
+		// Compatibility callers construct rows without invoking the resolver.
+		// Absence of a trace is not evidence that any static pass ran.
+		for _, pass := range ResolutionPassOrder {
+			entry := ResolutionPassCoverage{PassKind: pass, Version: "1", Status: "not_run", Reason: "execution_trace_unavailable"}
+			if pass == "dynamic_framework" && c.DispatchState == "dynamic" {
+				entry.Status, entry.Reason = "unavailable", "static_target_not_proven"
+			}
+			coverage = append(coverage, entry)
+		}
+	}
+	winner := ""
+	for i := range coverage {
+		if coverage[i].Version == "" {
+			coverage[i].Version = "1"
+		}
+		if coverage[i].Status == "completed_match" {
+			winner = coverage[i].PassKind
+		}
+	}
+	steps := []ResolutionDerivationStep{
+		{StepID: "01:callsite", Kind: "callsite_fact", Value: c.DispatchState},
+		{StepID: "02:pass", Kind: "resolution_pass", Value: winner},
+		{StepID: "03:outcome", Kind: "candidate_set", Value: c.Mechanism},
+	}
+	return coverage, steps
+}
+
+func candidateProvenance(base []ResolutionDerivationStep, candidate *ResolutionCandidate) []ResolutionDerivationStep {
+	steps := append([]ResolutionDerivationStep(nil), base...)
+	facts := []struct{ kind, value string }{
+		{"receiver_type", candidate.ReceiverType}, {"receiver_origin", candidate.ReceiverOrigin},
+		{"receiver_shape", candidate.ReceiverShape}, {"declared_scope", candidate.DeclaredScope},
+		{"receiver_chain", candidate.ReceiverChain}, {"import_chain", candidate.ImportChain},
+		{"flow_source_stable_ids", mustJSON(candidate.FlowSourceStableIDs)}, {"flow_edge_stable_ids", mustJSON(candidate.FlowEdgeStableIDs)},
+		{"flow_source_facts", mustJSON(candidate.FlowSourceFacts)}, {"flow_edge_facts", mustJSON(candidate.FlowEdgeFacts)},
+		{"target_stable_id", candidate.TargetStableID}, {"verification_outcome", candidate.VerificationStatus},
+	}
+	for _, fact := range facts {
+		if fact.value == "" || fact.value == "[]" || fact.value == "null" {
+			continue
+		}
+		steps = append(steps, ResolutionDerivationStep{StepID: fmt.Sprintf("%02d:%s", len(steps)+1, fact.kind), Kind: fact.kind, Value: fact.value})
+	}
+	return steps
+}
+
+func validateCandidateDerivation(kind string, candidate *ResolutionCandidate) error {
+	// Name the field that is actually missing. This aborts the entire atomic
+	// graph publication, so "one of these three is empty" forces whoever reads
+	// it to reproduce the whole index to learn which -- and the index is the
+	// expensive part. The distinction is also diagnostic: an absent mechanism
+	// means a derivation path published candidates without claiming how it
+	// derived them, while absent identities mean the symbol table is at fault.
+	// An empty mechanism is legal and already accounted for. resolutionDerivation
+	// maps it, alongside verified_unique/name_match/unknown_legacy/external, onto
+	// the global_name derivation at "partial" completeness -- and it has already
+	// done so by the time this runs, since `kind` is its output. Rejecting the
+	// same value here contradicted that mapping and aborted the whole atomic graph
+	// publication for a state the producer defines as supported.
+	//
+	// The target identities are a different matter: nothing downstream can derive
+	// a candidate it cannot name, so those stay required.
+	var missing []string
+	if candidate.TargetStableID == "" {
+		missing = append(missing, "target_stable_id")
+	}
+	if candidate.TargetNativeID == "" {
+		missing = append(missing, "target_native_id")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("candidate derivation requires stable target identities; missing %s (target_id=%d, derivation_kind=%s)",
+			strings.Join(missing, ", "), candidate.TargetID, kind)
+	}
+	switch kind {
+	case "declared_type":
+		if candidate.ReceiverType == "" || candidate.ReceiverOrigin == "" {
+			return fmt.Errorf("declared_type requires receiver type and origin")
+		}
+	case "import_binding":
+		if candidate.ImportChain == "" || candidate.ImportChain == "[]" {
+			return fmt.Errorf("import_binding requires an import chain")
+		}
+	case "single_implementation", "interface_implementors":
+		if candidate.DeclaredScope == "" {
+			return fmt.Errorf("%s requires implementation scope", kind)
+		}
+	case "variable_type_flow":
+		if len(candidate.FlowSourceStableIDs) == 0 && len(candidate.FlowEdgeStableIDs) == 0 {
+			return fmt.Errorf("variable_type_flow requires typed source or propagation facts")
+		}
+		for _, id := range candidate.FlowSourceStableIDs {
+			if err := validateVTAFactID(id, "vta_source_"); err != nil {
+				return err
+			}
+		}
+		for _, id := range candidate.FlowEdgeStableIDs {
+			if err := validateVTAFactID(id, "vta_edge_"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateVTAFactID(id, prefix string) error {
+	if !strings.HasPrefix(id, prefix) || len(id) <= len(prefix) {
+		return fmt.Errorf("variable_type_flow contains unbound fact ID %q", id)
+	}
+	return nil
+}
+
+var receiverOriginVocabulary = map[string]struct{}{
+	"": {}, "import": {}, "field_annotation": {}, "param_annotation": {},
+	"assignment": {}, "return_type": {}, "call_syntax": {}, "type_qualifier": {},
+}
+
+// callsiteAbstentionVocabulary is the closed set of reasons a callsite may
+// publish for not claiming a target. Every entry is already produced by
+// resolutionDerivation or by resolver.VTAAbstentionReason; a producer-supplied
+// reason outside it is rejected, because a reason nobody can enumerate cannot
+// be queried and a typo would publish a graph that reads as degraded for a
+// boundary that does not exist.
+var callsiteAbstentionVocabulary = map[string]struct{}{
+	"budget_exhausted": {}, "candidate_only_flow_evidence": {},
+	"dynamic_target_not_statically_proven": {}, "parser_incomplete": {},
+	"zero": {}, "external_unresolved": {},
+}
+
+type GraphCompletionIdentity struct {
+	Schema                    string `json:"schema"`
+	RepositoryRevision        string `json:"repository_revision"`
+	BuildInfoSchema           string `json:"build_info_schema"`
+	BuildID                   string `json:"build_id"`
+	GitCommit                 string `json:"git_commit"`
+	BuildTimeUTC              string `json:"build_time_utc"`
+	SourceFingerprint         string `json:"source_fingerprint"`
+	ExecutableSHA256          string `json:"executable_sha256"`
+	GoToolchain               string `json:"go_toolchain"`
+	BuildTags                 string `json:"build_tags"`
+	GraphSchemaVersion        string `json:"graph_schema_version"`
+	ResolutionContract        string `json:"resolution_contract"`
+	ResolutionAuthoritySchema string `json:"resolution_authority_schema"`
+	Complete                  bool   `json:"complete"`
+}
+
+func (g GraphCompletionIdentity) receipt() (string, string, error) {
+	if g.Schema != GraphCompletionSchema || !g.Complete || g.RepositoryRevision == "" ||
+		g.BuildInfoSchema == "" || g.BuildID == "" || g.GitCommit == "" ||
+		g.BuildTimeUTC == "" || g.SourceFingerprint == "" || g.ExecutableSHA256 == "" ||
+		g.GoToolchain == "" || g.BuildTags == "" || g.GraphSchemaVersion == "" ||
+		g.ResolutionContract == "" || g.ResolutionAuthoritySchema == "" {
+		return "", "", fmt.Errorf("incomplete graph completion identity")
+	}
+	payload, err := json.Marshal(g)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(payload)
+	return string(payload), hex.EncodeToString(sum[:]), nil
+}
+
+func BindGraphCompletionTx(tx *sql.Tx, identity GraphCompletionIdentity) error {
+	payload, receiptSHA, err := identity.receipt()
+	if err != nil {
+		return err
+	}
+	values := map[string]string{
+		"graph_resolution_schema_version":   strconv.Itoa(CallResolutionSchemaVersion),
+		"graph_resolution_revision":         identity.RepositoryRevision,
+		"graph_resolution_complete":         "1",
+		"graph_completion_schema":           identity.Schema,
+		"graph_completion_receipt":          payload,
+		"graph_completion_receipt_sha256":   receiptSHA,
+		"graph_producer_build_id":           identity.BuildID,
+		"graph_producer_source_fingerprint": identity.SourceFingerprint,
+		"graph_producer_executable_sha256":  identity.ExecutableSHA256,
+		"graph_producer_git_commit":         identity.GitCommit,
+		"graph_producer_build_time_utc":     identity.BuildTimeUTC,
+		"graph_producer_go_toolchain":       identity.GoToolchain,
+		"graph_producer_build_tags":         identity.BuildTags,
+		"graph_resolution_authority_schema": identity.ResolutionAuthoritySchema,
+	}
+	for key, value := range values {
+		if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			return fmt.Errorf("bind graph completion %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
 // Closure is one row of the transitive-reachability sidecar (C7 / RF-4).
 // SourceID transitively reaches TargetID in Depth hops; MinConfidence is the
 // weakest edge confidence along that path (the path is built over VERIFIED
@@ -73,12 +556,6 @@ type Closure struct {
 }
 
 // Property represents a structural fact about a code node (guard clause, return shape, etc.)
-//
-// B-22 provenance fields (PropertyID … SourceRevision) carry per-fact identity, span, and
-// authority so a property fact can be receipted/invalidated downstream exactly like an edge.
-// They are DEFAULTED deterministically by fillProvenance() at write time when a caller
-// leaves them zero, so the parser/main path can keep populating only the original five
-// fields (NodeID, Kind, Value, Line, Confidence) and still get full provenance.
 type Property struct {
 	ID         int64
 	NodeID     int64
@@ -86,56 +563,6 @@ type Property struct {
 	Value      string
 	Line       int
 	Confidence float64
-	// B-22 provenance (defaulted at write time when unset):
-	PropertyID         string // stable content-hash fact id (hex sha256 of node_id|kind|value|line)
-	StartLine          int    // span start (defaults to Line)
-	EndLine            int    // span end (defaults to Line)
-	Extractor          string // which extractor produced it (default "treesitter")
-	EvidenceMethod     string // how it was derived (default "ast")
-	TrustTier          string // CERTIFIED/CANDIDATE/SPECULATIVE (default tierForConfidence(Confidence))
-	VerificationStatus string // default "unverified"
-	SourceRevision     string // composite graph revision the fact was mined under (back-filled post-hash)
-}
-
-// propertyFactID is the stable, id-INDEPENDENT-of-AUTOINCREMENT content id of a property
-// fact: hex SHA-256 of the length-framed (node_id, kind, value, line) tuple. Deterministic,
-// collision-safe framing (revEncodeRecord). Distinct facts get distinct ids; the same fact
-// re-extracted gets the same id, so a consumer can dedup/receipt it.
-func propertyFactID(nodeID int64, kind, value string, line int) string {
-	sum := sha256.Sum256(revEncodeRecord(
-		strconv.FormatInt(nodeID, 10), kind, value, strconv.Itoa(line),
-	))
-	return hex.EncodeToString(sum[:])
-}
-
-// fillProvenance defaults any unset B-22 provenance field deterministically. Idempotent:
-// a caller that already set a field keeps it. Trust tier mirrors edges' tierFor thresholds
-// (tierForConfidence) so a property carries the same correct-or-quiet authority as an edge.
-func (p *Property) fillProvenance() {
-	if p.StartLine == 0 {
-		p.StartLine = p.Line
-	}
-	if p.EndLine == 0 {
-		p.EndLine = p.Line
-	}
-	if p.EndLine < p.StartLine {
-		p.EndLine = p.StartLine
-	}
-	if p.Extractor == "" {
-		p.Extractor = "treesitter"
-	}
-	if p.EvidenceMethod == "" {
-		p.EvidenceMethod = "ast"
-	}
-	if p.TrustTier == "" {
-		p.TrustTier = tierForConfidence(p.Confidence)
-	}
-	if p.VerificationStatus == "" {
-		p.VerificationStatus = "unverified"
-	}
-	if p.PropertyID == "" {
-		p.PropertyID = propertyFactID(p.NodeID, p.Kind, p.Value, p.Line)
-	}
 }
 
 // Assertion represents an assertion extracted from a test function.
@@ -157,7 +584,7 @@ type Assertion struct {
 // Commit, while still avoiding the per-transaction fsync of FULL. OFF was
 // silently corrupting the WAL when the indexer was killed mid-write.
 func Open(path string) (*DB, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_cache_size=-524288")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -198,9 +625,19 @@ func (d *DB) ValidateForeignKeys() error {
 // RC-04: failure here is non-fatal (logged) — the data has been Commit'd, the
 // checkpoint is purely a hygiene step.
 func (d *DB) CheckpointWAL() {
-	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+	if err := d.CheckpointWALRequired(); err != nil {
 		log.Printf("WARNING: wal_checkpoint(TRUNCATE) failed: %v", err)
 	}
+}
+
+// CheckpointWALRequired is the publication-boundary variant. A full staged
+// graph must not be made authoritative unless every committed frame is folded
+// into the single content artifact that will be atomically renamed.
+func (d *DB) CheckpointWALRequired() error {
+	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func createSchema(db *sql.DB) error {
@@ -219,13 +656,72 @@ func createSchema(db *sql.DB) error {
 		is_test BOOLEAN DEFAULT 0,
 		language TEXT NOT NULL,
 		parent_id INTEGER REFERENCES nodes(id),
-		-- SM-9a MULTI-REPO: nullable repo partition key. NULL on single-root indexes
-		-- (byte-identical to pre-multi-repo binaries — the column is added at the END,
-		-- existing INSERTs omit it, so it stays NULL and no pre-existing query is
-		-- perturbed). Populated only on the multi-root path (repos.id). file_path alone
-		-- is NOT a global locator once >1 repo is indexed (two repos' identical relative
-		-- paths collide); (repo_id, file_path) is.
-		repo_id INTEGER REFERENCES repos(id)
+		stable_id TEXT,
+		node_type TEXT,
+		schema_version INTEGER,
+		repo_id TEXT,
+		source_revision TEXT,
+		producer_build_id TEXT,
+		file_node_id INTEGER,
+		caller_symbol_id TEXT,
+		ast_path TEXT,
+		byte_start INTEGER,
+		byte_end INTEGER,
+		file_hash TEXT,
+		line_start INTEGER,
+		column_start INTEGER,
+		dispatch_form TEXT,
+		callee_lexeme TEXT,
+		declared_receiver_type_id TEXT,
+		receiver_value_id TEXT,
+		argument_arity INTEGER,
+		parse_state TEXT,
+		candidate_state TEXT,
+		selected_target_id TEXT,
+		candidate_count_v2 INTEGER,
+		derivation_set_id TEXT,
+		completeness_set_id TEXT,
+		callsite_id TEXT,
+		target_symbol_id TEXT,
+		pass_kind TEXT,
+		pass_version TEXT,
+		step_ordinal INTEGER,
+		operation TEXT,
+		input_fact_ids TEXT,
+		declared_type_id TEXT,
+		allocated_type_id TEXT,
+		field_id TEXT,
+		allocation_site_id TEXT,
+		scope_id TEXT,
+		import_id TEXT,
+		configuration_artifact_id TEXT,
+		boundary_kind TEXT,
+		boundary_id TEXT,
+		fact_status TEXT,
+		covered_units INTEGER,
+		known_units INTEGER,
+		reason_code TEXT,
+		blocking_pass_kinds TEXT,
+		candidate_stable_ids TEXT,
+		flow_type_stable_ids TEXT,
+		allocation_type_stable_ids TEXT,
+		reachable_stable_ids TEXT,
+		root_stable_ids TEXT,
+		root_policy TEXT,
+		root_policy_version TEXT,
+		root_completeness TEXT,
+		root_boundary TEXT,
+		policy_name TEXT,
+		semantic_version TEXT,
+		policy_json TEXT,
+		policy_hash TEXT,
+		created_at TEXT,
+		created_by TEXT,
+		fact_schema_min INTEGER,
+		fact_schema_max INTEGER,
+		explanation_template_version TEXT,
+		active_from TEXT,
+		supersedes_id TEXT
 	);
 
 	CREATE TABLE IF NOT EXISTS edges (
@@ -242,22 +738,95 @@ func createSchema(db *sql.DB) error {
 		candidate_count INTEGER DEFAULT 1,
 		evidence_type TEXT,
 		verification_status TEXT DEFAULT 'unverified',
-		-- SM-9a MULTI-REPO: nullable repo of the edge's SOURCE (the calling/importing
-		-- repo). A cross-repo edge is one whose source repo != target's repo; carry the
-		-- source repo here and the target's provenance in metadata. NULL on single-root.
-		repo_id INTEGER REFERENCES repos(id)
+		derivation_contract TEXT,
+		derivation_kind TEXT,
+		evidence_set TEXT,
+		analysis_boundary TEXT,
+		pass_kind TEXT,
+		pass_version TEXT,
+		pass_status TEXT,
+		abstention_reason TEXT,
+		sibling_count INTEGER,
+		producer_build_id TEXT,
+		producer_source_fingerprint TEXT,
+		pass_coverage TEXT,
+		provenance_steps TEXT,
+		declared_scope TEXT,
+		receiver_type TEXT,
+		receiver_origin TEXT,
+		receiver_shape TEXT,
+		receiver_chain TEXT,
+		import_chain TEXT,
+		export_status TEXT,
+		parser_complete BOOLEAN,
+		stable_id TEXT,
+		schema_version INTEGER,
+		callsite_stable_id TEXT,
+		target_symbol_id TEXT,
+		ordinal INTEGER,
+		viability TEXT,
+		derivation_fact_ids TEXT,
+		exclusion_fact_ids TEXT,
+		selection_rule_id TEXT,
+		resolution_reason TEXT,
+		resolution_step INTEGER
 	);
 
-	-- SM-9a MULTI-REPO: one row per indexed repository root. id is the partition key
-	-- stamped onto nodes/edges/properties/assertions/closure/content_passages.repo_id.
-	-- root = the repo's on-disk root; "commit" = its VCS HEAD (best-effort, "" when
-	-- unavailable). Empty on a single-root index (that path never writes a repos row),
-	-- so existing single-repo consumers see an empty table and are unaffected.
-	CREATE TABLE IF NOT EXISTS repos (
-		id INTEGER PRIMARY KEY,
-		root TEXT,
-		"commit" TEXT
+	CREATE TABLE IF NOT EXISTS resolution_symbols (
+		stable_id TEXT PRIMARY KEY,
+		native_id TEXT NOT NULL UNIQUE,
+		native_kind TEXT NOT NULL,
+		normalized_kind TEXT NOT NULL,
+		language TEXT NOT NULL,
+		path TEXT NOT NULL,
+		qualified_name TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		export_status TEXT NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS resolution_callsites (
+		callsite_id TEXT PRIMARY KEY,
+		callsite_ordinal INTEGER NOT NULL UNIQUE,
+		repository_revision TEXT NOT NULL,
+		source_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		source_native_id TEXT NOT NULL,
+		source_id INTEGER,
+		source_line INTEGER,
+		source_file TEXT NOT NULL,
+		callee TEXT NOT NULL,
+		language TEXT NOT NULL,
+		dispatch_state TEXT NOT NULL,
+		candidate_count INTEGER NOT NULL DEFAULT 0,
+		selected_target_stable_id TEXT,
+		selected_target_native_id TEXT,
+		mechanism TEXT NOT NULL,
+		verification_status TEXT NOT NULL DEFAULT 'unverified'
+	);
+
+	CREATE TABLE IF NOT EXISTS resolution_candidates (
+		callsite_id TEXT NOT NULL REFERENCES resolution_callsites(callsite_id) ON DELETE CASCADE,
+		target_id INTEGER NOT NULL REFERENCES nodes(id),
+		target_stable_id TEXT NOT NULL REFERENCES resolution_symbols(stable_id),
+		target_native_id TEXT NOT NULL,
+		ordinal INTEGER NOT NULL,
+		mechanism TEXT NOT NULL,
+		declared_scope TEXT NOT NULL DEFAULT '',
+		receiver_type TEXT NOT NULL DEFAULT '',
+		receiver_origin TEXT NOT NULL DEFAULT '',
+		receiver_shape TEXT NOT NULL DEFAULT '',
+		receiver_chain TEXT NOT NULL DEFAULT '[]',
+		import_chain TEXT NOT NULL DEFAULT '[]',
+		dynamic_dispatch BOOLEAN NOT NULL DEFAULT 0,
+		export_status TEXT NOT NULL DEFAULT 'unknown',
+		parser_complete BOOLEAN,
+		verification_status TEXT NOT NULL,
+		selected BOOLEAN NOT NULL DEFAULT 0,
+		PRIMARY KEY(callsite_id, ordinal),
+		UNIQUE(callsite_id, target_stable_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_resolution_callsites_source ON resolution_callsites(source_id);
+	CREATE INDEX IF NOT EXISTS idx_resolution_candidates_target ON resolution_candidates(target_id);
 
 	CREATE TABLE IF NOT EXISTS file_hashes (
 		file_path TEXT PRIMARY KEY,
@@ -294,18 +863,7 @@ func createSchema(db *sql.DB) error {
 		kind TEXT NOT NULL,
 		value TEXT NOT NULL,
 		line INTEGER,
-		confidence REAL DEFAULT 1.0,
-		-- B-22 per-fact provenance (added to fresh dbs here; migrateSchema ALTERs old dbs):
-		property_id TEXT,
-		start_line INTEGER,
-		end_line INTEGER,
-		extractor TEXT,
-		evidence_method TEXT,
-		trust_tier TEXT,
-		verification_status TEXT DEFAULT 'unverified',
-		source_revision TEXT,
-		-- SM-9a MULTI-REPO: nullable repo of the owning node (back-filled from node_id).
-		repo_id INTEGER REFERENCES repos(id)
+		confidence REAL DEFAULT 1.0
 	);
 
 	CREATE TABLE IF NOT EXISTS assertions (
@@ -316,9 +874,7 @@ func createSchema(db *sql.DB) error {
 		kind TEXT NOT NULL,
 		expression TEXT NOT NULL,
 		expected TEXT,
-		line INTEGER,
-		-- SM-9a MULTI-REPO: nullable repo of the test node (back-filled from test_node_id).
-		repo_id INTEGER REFERENCES repos(id)
+		line INTEGER
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_properties_node ON properties(node_id);
@@ -331,24 +887,14 @@ func createSchema(db *sql.DB) error {
 		file_a TEXT NOT NULL,
 		file_b TEXT NOT NULL,
 		count INTEGER NOT NULL DEFAULT 1,
+		commits_a INTEGER NOT NULL DEFAULT 0,
+		commits_b INTEGER NOT NULL DEFAULT 0,
+		confidence_a_to_b REAL NOT NULL DEFAULT 0.0,
+		confidence_b_to_a REAL NOT NULL DEFAULT 0.0,
 		PRIMARY KEY(file_a, file_b)
 	);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_a ON cochanges(file_a);
 	CREATE INDEX IF NOT EXISTS idx_cochanges_b ON cochanges(file_b);
-
-	-- DCC (Dynamic Concern Consensus) set-form co-change. SEPARATE from the legacy
-	-- pair table cochanges above (which stays bit-for-bit): stores, for each
-	-- base-ancestor commit touching <=50 files, the SET of member paths plus the
-	-- commit-hash witness. No scores / decay / caps -- pure set membership. The
-	-- Python DCC producer reads the git-provenance axis from here; absence (an old
-	-- graph) simply leaves that axis empty (correct-or-quiet).
-	CREATE TABLE IF NOT EXISTS cochange_sets (
-		commit_hash TEXT NOT NULL,
-		file_path TEXT NOT NULL,
-		PRIMARY KEY(commit_hash, file_path)
-	);
-	CREATE INDEX IF NOT EXISTS idx_cochange_sets_file ON cochange_sets(file_path);
-	CREATE INDEX IF NOT EXISTS idx_cochange_sets_commit ON cochange_sets(commit_hash);
 
 	-- C7 (RF-4): transitive-closure sidecar over VERIFIED edges only.
 	-- A row (source_id, target_id, depth, min_confidence) means source_id
@@ -362,56 +908,173 @@ func createSchema(db *sql.DB) error {
 		target_id INTEGER,
 		depth INTEGER,
 		min_confidence REAL,
-		-- SM-9a MULTI-REPO: nullable repo of the closure SOURCE (back-filled from source_id).
-		repo_id INTEGER REFERENCES repos(id),
 		PRIMARY KEY(source_id, target_id, depth)
 	);
 	CREATE INDEX IF NOT EXISTS idx_closure_source ON closure(source_id);
 	CREATE INDEX IF NOT EXISTS idx_closure_target ON closure(target_id);
-
-	CREATE INDEX IF NOT EXISTS idx_properties_property_id ON properties(property_id);
-
-	-- B-24: normalized, schema-versioned edge metadata. edges.metadata is a polymorphic
-	-- string (route JSON on API edges vs semicolon-separated key=value on promoted CALLS),
-	-- so consumers regex/LIKE it. This DERIVED sub-table (populated by PopulateEdgeMetadata
-	-- via the ONE canonical ParseEdgeMetadata parser) exposes each field as an individually
-	-- queryable row: SELECT value FROM edge_metadata WHERE edge_id=? AND key='receiver_type'.
-	-- edges.metadata stays byte-identical (the receiver-provenance + incremental-restore
-	-- invariants are untouched); this is an additive index over it. Absent on an old graph.db
-	-- -> consumers fall back to parsing the string (correct-or-quiet).
-	CREATE TABLE IF NOT EXISTS edge_metadata (
-		edge_id INTEGER NOT NULL,
-		key TEXT NOT NULL,
-		value TEXT NOT NULL,
-		schema_version INTEGER NOT NULL DEFAULT 1,
-		PRIMARY KEY(edge_id, key)
-	);
-	CREATE INDEX IF NOT EXISTS idx_edge_metadata_key ON edge_metadata(key);
-
-	-- B-23: passage-level content identity. symbol_content_fts keys a whole body by node
-	-- rowid, so a body-concept match can only cite the node start_line. content_passages
-	-- stores each non-blank body line as an addressable span (node_id, start_line, end_line,
-	-- content, content_hash); content_passages_fts (created in the FTS block, FTS5-gated)
-	-- indexes it so a match resolves to the EXACT matching line, not the node start_line.
-	CREATE TABLE IF NOT EXISTS content_passages (
-		passage_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		node_id INTEGER NOT NULL,
-		start_line INTEGER NOT NULL,
-		end_line INTEGER NOT NULL,
-		content TEXT NOT NULL,
-		content_hash TEXT NOT NULL,
-		-- SM-9a MULTI-REPO: nullable repo of the owning node (back-filled from node_id).
-		repo_id INTEGER REFERENCES repos(id)
-	);
-	CREATE INDEX IF NOT EXISTS idx_content_passages_node ON content_passages(node_id);
 
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
 		return err
 	}
-	if err := migrateSchema(db); err != nil {
-		return fmt.Errorf("migrate schema: %w", err)
+	// Existing graphs may predate typed call-candidate facts. Incremental opens
+	// must add the nullable columns before they can fail closed and invalidate the
+	// old resolution overlay. Full builds create the columns above directly.
+	typedColumns := []struct{ name, addSQL string }{
+		{"derivation_contract", `ALTER TABLE edges ADD COLUMN derivation_contract TEXT`},
+		{"derivation_kind", `ALTER TABLE edges ADD COLUMN derivation_kind TEXT`},
+		{"evidence_set", `ALTER TABLE edges ADD COLUMN evidence_set TEXT`},
+		{"analysis_boundary", `ALTER TABLE edges ADD COLUMN analysis_boundary TEXT`},
+		{"pass_kind", `ALTER TABLE edges ADD COLUMN pass_kind TEXT`},
+		{"pass_version", `ALTER TABLE edges ADD COLUMN pass_version TEXT`},
+		{"pass_status", `ALTER TABLE edges ADD COLUMN pass_status TEXT`},
+		{"abstention_reason", `ALTER TABLE edges ADD COLUMN abstention_reason TEXT`},
+		{"sibling_count", `ALTER TABLE edges ADD COLUMN sibling_count INTEGER`},
+		{"producer_build_id", `ALTER TABLE edges ADD COLUMN producer_build_id TEXT`},
+		{"producer_source_fingerprint", `ALTER TABLE edges ADD COLUMN producer_source_fingerprint TEXT`},
+		{"pass_coverage", `ALTER TABLE edges ADD COLUMN pass_coverage TEXT`},
+		{"provenance_steps", `ALTER TABLE edges ADD COLUMN provenance_steps TEXT`},
+		{"declared_scope", `ALTER TABLE edges ADD COLUMN declared_scope TEXT`},
+		{"receiver_type", `ALTER TABLE edges ADD COLUMN receiver_type TEXT`},
+		{"receiver_origin", `ALTER TABLE edges ADD COLUMN receiver_origin TEXT`},
+		{"receiver_shape", `ALTER TABLE edges ADD COLUMN receiver_shape TEXT`},
+		{"receiver_chain", `ALTER TABLE edges ADD COLUMN receiver_chain TEXT`},
+		{"import_chain", `ALTER TABLE edges ADD COLUMN import_chain TEXT`},
+		{"export_status", `ALTER TABLE edges ADD COLUMN export_status TEXT`},
+		{"parser_complete", `ALTER TABLE edges ADD COLUMN parser_complete BOOLEAN`},
+		{"stable_id", `ALTER TABLE edges ADD COLUMN stable_id TEXT`},
+		{"schema_version", `ALTER TABLE edges ADD COLUMN schema_version INTEGER`},
+		{"callsite_stable_id", `ALTER TABLE edges ADD COLUMN callsite_stable_id TEXT`},
+		{"target_symbol_id", `ALTER TABLE edges ADD COLUMN target_symbol_id TEXT`},
+		{"ordinal", `ALTER TABLE edges ADD COLUMN ordinal INTEGER`},
+		{"viability", `ALTER TABLE edges ADD COLUMN viability TEXT`},
+		{"derivation_fact_ids", `ALTER TABLE edges ADD COLUMN derivation_fact_ids TEXT`},
+		{"exclusion_fact_ids", `ALTER TABLE edges ADD COLUMN exclusion_fact_ids TEXT`},
+		{"selection_rule_id", `ALTER TABLE edges ADD COLUMN selection_rule_id TEXT`},
+	}
+	for _, column := range typedColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('edges') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect edges.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(column.addSQL); err != nil {
+				return fmt.Errorf("add edges.%s: %w", column.name, err)
+			}
+		}
+	}
+	// Rendered projections are nullable: an existing graph opens, and a row
+	// with no projection reads as "not projected", never as a reason of "".
+	resolutionColumns := []struct{ name, addSQL string }{
+		{"resolution_reason", `ALTER TABLE edges ADD COLUMN resolution_reason TEXT`},
+		{"resolution_step", `ALTER TABLE edges ADD COLUMN resolution_step INTEGER`},
+	}
+	for _, column := range resolutionColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('edges') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect edges.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(column.addSQL); err != nil {
+				return fmt.Errorf("add edges.%s: %w", column.name, err)
+			}
+		}
+	}
+	cochangeColumns := []struct{ name, addSQL string }{
+		{"commits_a", `ALTER TABLE cochanges ADD COLUMN commits_a INTEGER`},
+		{"commits_b", `ALTER TABLE cochanges ADD COLUMN commits_b INTEGER`},
+		{"confidence_a_to_b", `ALTER TABLE cochanges ADD COLUMN confidence_a_to_b REAL`},
+		{"confidence_b_to_a", `ALTER TABLE cochanges ADD COLUMN confidence_b_to_a REAL`},
+	}
+	for _, column := range cochangeColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('cochanges') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect cochanges.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(column.addSQL); err != nil {
+				return fmt.Errorf("add cochanges.%s: %w", column.name, err)
+			}
+		}
+	}
+	nodeColumns := []struct{ name, definition string }{
+		{"stable_id", "TEXT"}, {"node_type", "TEXT"}, {"schema_version", "INTEGER"},
+		{"repo_id", "TEXT"}, {"source_revision", "TEXT"}, {"producer_build_id", "TEXT"},
+		{"file_node_id", "INTEGER"}, {"caller_symbol_id", "TEXT"}, {"ast_path", "TEXT"},
+		{"byte_start", "INTEGER"}, {"byte_end", "INTEGER"}, {"file_hash", "TEXT"},
+		{"line_start", "INTEGER"},
+		{"column_start", "INTEGER"}, {"dispatch_form", "TEXT"}, {"callee_lexeme", "TEXT"},
+		{"declared_receiver_type_id", "TEXT"}, {"receiver_value_id", "TEXT"}, {"argument_arity", "INTEGER"},
+		{"parse_state", "TEXT"}, {"candidate_state", "TEXT"}, {"selected_target_id", "TEXT"},
+		{"candidate_count_v2", "INTEGER"}, {"derivation_set_id", "TEXT"}, {"completeness_set_id", "TEXT"},
+		{"callsite_id", "TEXT"}, {"target_symbol_id", "TEXT"}, {"pass_kind", "TEXT"},
+		{"pass_version", "TEXT"}, {"step_ordinal", "INTEGER"}, {"operation", "TEXT"},
+		{"input_fact_ids", "TEXT"}, {"declared_type_id", "TEXT"}, {"allocated_type_id", "TEXT"},
+		{"field_id", "TEXT"}, {"allocation_site_id", "TEXT"}, {"scope_id", "TEXT"},
+		{"import_id", "TEXT"}, {"configuration_artifact_id", "TEXT"},
+		{"boundary_kind", "TEXT"}, {"boundary_id", "TEXT"},
+		{"fact_status", "TEXT"}, {"covered_units", "INTEGER"}, {"known_units", "INTEGER"},
+		{"reason_code", "TEXT"}, {"blocking_pass_kinds", "TEXT"}, {"policy_name", "TEXT"},
+		{"candidate_stable_ids", "TEXT"}, {"flow_type_stable_ids", "TEXT"}, {"allocation_type_stable_ids", "TEXT"},
+		{"reachable_stable_ids", "TEXT"},
+		{"root_stable_ids", "TEXT"},
+		{"root_policy", "TEXT"},
+		{"root_policy_version", "TEXT"}, {"root_completeness", "TEXT"}, {"root_boundary", "TEXT"},
+		{"semantic_version", "TEXT"}, {"policy_json", "TEXT"}, {"policy_hash", "TEXT"},
+		{"created_at", "TEXT"}, {"created_by", "TEXT"}, {"fact_schema_min", "INTEGER"},
+		{"fact_schema_max", "INTEGER"}, {"explanation_template_version", "TEXT"},
+		{"active_from", "TEXT"}, {"supersedes_id", "TEXT"},
+	}
+	for _, column := range nodeColumns {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('nodes') WHERE name=?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect nodes.%s: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(`ALTER TABLE nodes ADD COLUMN ` + column.name + ` ` + column.definition); err != nil {
+				return fmt.Errorf("add nodes.%s: %w", column.name, err)
+			}
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_edges_candidate_policy ON edges(type, derivation_kind, evidence_set, candidate_count, target_id)`); err != nil {
+		return fmt.Errorf("create candidate policy index: %w", err)
+	}
+	// Old v2 producers could publish a second generic CALLS row for the same
+	// source/target endpoint. Coalesce those rows and install the invariant in
+	// one transaction so a failed migration leaves the prior database intact.
+	migration, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin CALLS uniqueness migration: %w", err)
+	}
+	if _, err := migration.Exec(`DELETE FROM edges WHERE type='CALLS' AND id NOT IN
+		(SELECT MIN(id) FROM edges WHERE type='CALLS' GROUP BY source_id,target_id,type)`); err != nil {
+		_ = migration.Rollback()
+		return fmt.Errorf("coalesce duplicate CALLS endpoints: %w", err)
+	}
+	if _, err := migration.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_unique_endpoint
+		ON edges(source_id,target_id,type) WHERE type='CALLS'`); err != nil {
+		_ = migration.Rollback()
+		return fmt.Errorf("create CALLS endpoint invariant: %w", err)
+	}
+	if err := migration.Commit(); err != nil {
+		return fmt.Errorf("commit CALLS uniqueness migration: %w", err)
+	}
+	indexStatements := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_stable_id ON nodes(stable_id) WHERE stable_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_callsite_location_v2 ON nodes(repo_id,source_revision,file_node_id,byte_start) WHERE node_type='callsite'`,
+		`CREATE INDEX IF NOT EXISTS idx_callsite_caller_state_v2 ON nodes(caller_symbol_id,candidate_state) WHERE node_type='callsite'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_stable_id_v2 ON edges(stable_id) WHERE stable_id IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_candidate_callsite_v2 ON edges(callsite_stable_id,viability,target_symbol_id) WHERE type='CANDIDATE_TARGET'`,
+		`CREATE INDEX IF NOT EXISTS idx_candidate_reverse_v2 ON edges(target_symbol_id,callsite_stable_id) WHERE type='CANDIDATE_TARGET'`,
+		`CREATE INDEX IF NOT EXISTS idx_derivation_fact_v2 ON nodes(callsite_id,target_symbol_id,pass_kind,step_ordinal) WHERE node_type='derivation_fact'`,
+		`CREATE INDEX IF NOT EXISTS idx_completeness_fact_v2 ON nodes(callsite_id,pass_kind,fact_status) WHERE node_type='completeness_fact'`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_version_v2 ON nodes(policy_name,semantic_version) WHERE node_type='query_policy_version'`,
+	}
+	for _, statement := range indexStatements {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("create v2 resolution index: %w", err)
+		}
 	}
 
 	// FTS5 virtual table: SEPARATE from main schema because some SQLite builds
@@ -426,84 +1089,10 @@ func createSchema(db *sql.DB) error {
 	if ftsErr != nil {
 		log.Printf("[WARN] FTS5 not available (non-fatal): %v", ftsErr)
 	}
-	// B-23: FTS5 over per-body-line passages. rowid == content_passages.passage_id so a
-	// body-concept MATCH resolves to the exact matching line's span. Same tokenizer as
-	// symbol_content_fts (unicode61 tokenchars '_') so BM25 semantics are consistent across
-	// the two content surfaces. Regular (self-content) fts5 — DELETE+reinsert rebuild, the
-	// proven symbol_content_fts pattern. FTS5-gated + non-fatal, exactly like nodes_fts:
-	// absent when the binary lacks the sqlite_fts5 tag (passage citation then degrades to
-	// the node start_line — correct-or-quiet).
-	_, pftsErr := db.Exec(
-		`CREATE VIRTUAL TABLE IF NOT EXISTS content_passages_fts USING fts5(content, tokenize="unicode61 tokenchars '_'")`,
-	)
-	if pftsErr != nil {
-		log.Printf("[WARN] content_passages_fts not available (non-fatal): %v", pftsErr)
-	}
-	return nil
-}
-
-// migrateSchema brings an existing (older) graph.db up to the current column set WITHOUT a
-// destructive rebuild: `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already
-// exists, so new columns on a pre-existing table must be added by ALTER. Idempotent —
-// addColumnIfMissing checks PRAGMA table_info first, so re-running on a current db does
-// nothing. Back-compat: an old reader never sees these columns; a new reader COALESCEs them.
-func migrateSchema(db *sql.DB) error {
-	// B-22: property provenance columns on a properties table created by an old binary.
-	propCols := []struct{ name, ddl string }{
-		{"property_id", "TEXT"},
-		{"start_line", "INTEGER"},
-		{"end_line", "INTEGER"},
-		{"extractor", "TEXT"},
-		{"evidence_method", "TEXT"},
-		{"trust_tier", "TEXT"},
-		{"verification_status", "TEXT DEFAULT 'unverified'"},
-		{"source_revision", "TEXT"},
-	}
-	for _, c := range propCols {
-		if err := addColumnIfMissing(db, "properties", c.name, c.ddl); err != nil {
-			return err
-		}
-	}
-	// SM-9a MULTI-REPO: add the nullable repo_id partition key to a fact table created by
-	// an older binary. Additive + idempotent (addColumnIfMissing checks PRAGMA table_info
-	// first): a single-root db written by an old binary reopens with repo_id present-and-NULL,
-	// so every existing query that omits repo_id is unchanged. The repos table itself is
-	// created by createSchema's `CREATE TABLE IF NOT EXISTS repos` above (a no-op when present).
-	for _, t := range []string{"nodes", "edges", "properties", "assertions", "closure", "content_passages"} {
-		if err := addColumnIfMissing(db, t, "repo_id", "INTEGER"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// addColumnIfMissing ALTERs `table` to add `col` (with `ddl` type/default) only when it is
-// absent. Deterministic and safe to call on every Open.
-func addColumnIfMissing(db *sql.DB, table, col, ddl string) error {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil {
-		return fmt.Errorf("table_info(%s): %w", table, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			cid, notnull, pk int
-			name, ctype      string
-			dfltValue        sql.NullString
-		)
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
-			return fmt.Errorf("scan table_info(%s): %w", table, err)
-		}
-		if name == col {
-			return nil // already present
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, ddl)); err != nil {
-		return fmt.Errorf("add column %s.%s: %w", table, col, err)
-	}
+	// Companion index over `properties`. nodes_fts answers "what is this
+	// called"; properties_fts answers "what does this do", which is the only
+	// surface a behavioural query can land on. See properties_fts.go.
+	createPropertiesFTS5(db)
 	return nil
 }
 
@@ -521,21 +1110,11 @@ func (d *DB) PopulateFTS5() error {
 		log.Printf("[WARN] nodes_fts table not found (FTS5 unavailable); skipping FTS5 population")
 		return nil
 	}
-	// LEAK INVARIANT (Fable S1/L2, reproduced on the live artifact): nodes_fts is the
-	// localizer's stage-1 retrieval surface. Test symbols (Go `TestX`, Mocha `it: …`
-	// descriptions) indexed here become FTS5_SEEDs/BFS roots and render agent-visibly as
-	// `fts5 match: …` — surfacing test NAMES, the FAIL_TO_PASS surface. Exclude is_test at
-	// INSERT (parity with symbol_content_fts's PopulateContentFTS, which already filters).
 	insertSQL := `INSERT INTO nodes_fts(rowid, name, qualified_name, signature, file_path)
 		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
-		 FROM nodes WHERE COALESCE(is_test, 0) = 0`
-	// Clear existing content (idempotent rebuild), then re-insert. Use the FTS5
-	// content-INDEPENDENT 'delete-all' command, NOT `DELETE FROM nodes_fts` (Fable S5):
-	// on this EXTERNAL-content table, a plain DELETE re-reads the (already-mutated by the
-	// reindex/LSP pass) `nodes` content to locate rows and raises "database disk image is
-	// malformed", forcing the O(all-nodes) DROP+recreate self-heal on EVERY -file reindex.
-	// 'delete-all' clears the index directly, so the primary path stays incremental.
-	_, delErr := d.db.Exec("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')")
+		 FROM nodes`
+	// Clear any existing content (idempotent rebuild), then re-insert.
+	_, delErr := d.db.Exec("DELETE FROM nodes_fts")
 	if delErr == nil {
 		if _, err := d.db.Exec(insertSQL); err == nil {
 			return nil
@@ -548,34 +1127,17 @@ func (d *DB) PopulateFTS5() error {
 	// `docker cp`'d away from its -wal between containers, stranding the index. DELETE
 	// then fails. DROP the vtable and recreate it fresh from the current nodes table.
 	log.Printf("[WARN] nodes_fts clear/insert failed (%v) — DROP+recreate to self-heal the FTS5 index", delErr)
-	// R#5: the DROP+recreate+populate must be ATOMIC. Run as three autocommit Execs,
-	// a failure AFTER the DROP (recreate or populate errors — disk full, malformed
-	// content row, interrupted reindex) leaves nodes_fts DROPPED/empty, so every later
-	// localizer query silently degrades to the name-match fallback with no error to the
-	// caller. Wrap it in ONE transaction: any failure rolls back to the pre-heal state
-	// (the original — still corrupt — index) and surfaces the error, rather than
-	// shipping a half-applied, empty FTS5 surface.
-	tx, err := d.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin nodes_fts self-heal tx: %w", err)
-	}
-	if _, err := tx.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
-		tx.Rollback()
+	if _, err := d.db.Exec("DROP TABLE IF EXISTS nodes_fts"); err != nil {
 		return fmt.Errorf("drop corrupt nodes_fts: %w", err)
 	}
-	if _, err := tx.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
+	if _, err := d.db.Exec(`CREATE VIRTUAL TABLE nodes_fts USING fts5(
 		name, qualified_name, signature, file_path,
 		content='nodes', content_rowid='id'
 	)`); err != nil {
-		tx.Rollback()
 		return fmt.Errorf("recreate nodes_fts: %w", err)
 	}
-	if _, err := tx.Exec(insertSQL); err != nil {
-		tx.Rollback()
+	if _, err := d.db.Exec(insertSQL); err != nil {
 		return fmt.Errorf("populate nodes_fts after recreate: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit nodes_fts self-heal: %w", err)
 	}
 	return nil
 }
@@ -623,9 +1185,9 @@ func (d *DB) InsertEdge(e *Edge) error {
 
 // InsertFileHash records a file's content hash for incremental reindexing.
 //
-// RC-17 (F-004): the `indexed_at` column is wall-clock by default, which
-// makes `graph.db` non-byte-deterministic across two builds. When
-// `GT_INDEX_FIXED_TS` is set in the environment we use that literal
+// RC-17 (F-004): the “indexed_at“ column is wall-clock by default, which
+// makes “graph.db“ non-byte-deterministic across two builds. When
+// “GT_INDEX_FIXED_TS“ is set in the environment we use that literal
 // value instead — enables the deterministic-build CI test (build twice,
 // assert byte equality on every column except whatever the test
 // explicitly excludes). Format expectation: RFC3339 UTC (caller's
@@ -667,8 +1229,9 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 	}
 	stmt, err := tx.Prepare(
 		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
-		 signature, return_type, is_exported, is_test, language, parent_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 signature, return_type, is_exported, is_test, language, parent_id,
+		 file_hash, byte_start, byte_end)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -678,9 +1241,11 @@ func (d *DB) BatchInsertNodes(nodes []*Node) ([]int64, error) {
 
 	ids := make([]int64, len(nodes))
 	for i, n := range nodes {
+		fileHash, byteStart, byteEnd := contentAddress(n)
 		res, err := stmt.Exec(
 			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
 			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language, nullableParentID(n.ParentID),
+			fileHash, byteStart, byteEnd,
 		)
 		if err != nil {
 			tx.Rollback()
@@ -733,6 +1298,433 @@ func (d *DB) BatchInsertEdges(edges []*Edge) error {
 	return tx.Commit()
 }
 
+func (d *DB) BatchInsertResolutionSymbols(symbols []*ResolutionSymbol) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := BatchInsertResolutionSymbolsTx(tx, symbols); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionCallsites(callsites []*ResolutionCallsite) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := BatchInsertResolutionCallsitesTx(tx, callsites); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) BatchInsertResolutionCandidates(candidates []*ResolutionCandidate) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	if err := BatchInsertResolutionCandidatesTx(tx, candidates); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// AttachResolutionGraphTx publishes resolver evidence as first-class graph
+// objects. Each callsite is a Callsite node linked from its source symbol by a
+// HAS_CALLSITE edge; each viable target is linked from that node by the
+// canonical CANDIDATE_TARGET edge. The complete set is written in the caller's transaction so a graph
+// reader observes either all attached evidence or none of it.
+// attachProgressInterval is how often the publication reports progress. Small
+// enough to catch a stall inside a long repository, large enough that an
+// ordinary repository prints nothing at all.
+const attachProgressInterval = 2000
+
+func AttachResolutionGraphTx(tx *sql.Tx, identity GraphCompletionIdentity, rows []AttachedResolution) error {
+	if tx == nil {
+		return fmt.Errorf("nil graph transaction")
+	}
+	if _, _, err := identity.receipt(); err != nil {
+		return fmt.Errorf("attach graph with incomplete producer identity: %w", err)
+	}
+	if err := insertResolutionPolicyV2Tx(tx, ConservativeCandidatePolicy, identity); err != nil {
+		return fmt.Errorf("insert conservative query policy: %w", err)
+	}
+	if err := insertResolutionPolicyV2Tx(tx, InspectAllCandidatePolicy, identity); err != nil {
+		return fmt.Errorf("insert inspection query policy: %w", err)
+	}
+	// Every insert below runs once per callsite, per candidate or per
+	// completeness fact. Preparing them once turns a per-statement parse into a
+	// per-transaction one; the SQL text and bound arguments are unchanged.
+	stmts, err := prepareResolutionStmts(tx)
+	if err != nil {
+		return err
+	}
+	defer stmts.Close()
+	revision := identity.RepositoryRevision
+	// Publication is one atomic transaction with no output until it commits, so
+	// a repository that takes an hour and one that is stuck look identical from
+	// outside. Report progress against a known denominator: a linear rate says
+	// "slow, and here is the wall clock"; a rate that collapses says "stuck,
+	// and here is the callsite it stopped on". Silent on anything smaller than
+	// one interval, which is every repository that already publishes quickly.
+	attachStart := time.Now()
+	for index, row := range rows {
+		if index > 0 && index%attachProgressInterval == 0 {
+			elapsed := time.Since(attachStart)
+			fmt.Fprintf(os.Stderr, "  attach: %d/%d callsites in %s (%.0f/s)\n",
+				index, len(rows), elapsed.Round(time.Second), float64(index)/elapsed.Seconds())
+		}
+		if row.Callsite == nil || row.Source == nil {
+			return fmt.Errorf("graph resolution row missing callsite or source")
+		}
+		c := row.Callsite
+		if c.CandidateCount != len(row.Candidates) {
+			return fmt.Errorf("callsite %s candidate count %d != retained rows %d", c.CallsiteID, c.CandidateCount, len(row.Candidates))
+		}
+		seenOrd := make(map[int]struct{}, len(row.Candidates))
+		seenTarget := make(map[int64]struct{}, len(row.Candidates))
+		selected := 0
+		selectedTarget := ""
+		for _, candidate := range row.Candidates {
+			if candidate == nil || candidate.TargetID <= 0 {
+				return fmt.Errorf("callsite %s has invalid candidate", c.CallsiteID)
+			}
+			if _, ok := seenOrd[candidate.Ordinal]; ok || candidate.Ordinal != len(seenOrd) {
+				return fmt.Errorf("callsite %s candidate ordinals are not dense", c.CallsiteID)
+			}
+			seenOrd[candidate.Ordinal] = struct{}{}
+			if _, ok := seenTarget[candidate.TargetID]; ok {
+				return fmt.Errorf("callsite %s retains duplicate candidate target %d", c.CallsiteID, candidate.TargetID)
+			}
+			seenTarget[candidate.TargetID] = struct{}{}
+			if _, ok := receiverOriginVocabulary[candidate.ReceiverOrigin]; !ok && !strings.HasPrefix(candidate.ReceiverOrigin, "vta_flow_stable_ids=") {
+				return fmt.Errorf("callsite %s has unknown receiver origin %q", c.CallsiteID, candidate.ReceiverOrigin)
+			}
+			if candidate.Selected {
+				selected++
+				selectedTarget = candidate.TargetStableID
+			}
+		}
+		if c.DispatchState == "ambiguous" && selected != 0 {
+			return fmt.Errorf("ambiguous callsite %s has selected candidate", c.CallsiteID)
+		}
+		if c.SelectedTargetStableID != nil {
+			if selected != 1 || selectedTarget != *c.SelectedTargetStableID {
+				return fmt.Errorf("callsite %s selected target is not exactly one retained candidate", c.CallsiteID)
+			}
+		} else if selected != 0 {
+			return fmt.Errorf("callsite %s has selected row without selected target", c.CallsiteID)
+		}
+		switch c.DispatchState {
+		case "unique":
+			if len(row.Candidates) != 1 || selected != 1 {
+				return fmt.Errorf("unique callsite %s must retain exactly one selected candidate", c.CallsiteID)
+			}
+		case "ambiguous":
+			if len(row.Candidates) < 2 || selected != 0 {
+				return fmt.Errorf("ambiguous callsite %s must retain multiple unselected candidates", c.CallsiteID)
+			}
+		case "candidate_only":
+			if len(row.Candidates) < 1 || selected != 0 {
+				return fmt.Errorf("candidate-only callsite %s must retain unselected candidates", c.CallsiteID)
+			}
+		case "dynamic":
+			if len(row.Candidates) != 0 || selected != 0 {
+				return fmt.Errorf("dynamic callsite %s must explicitly abstain with zero candidates", c.CallsiteID)
+			}
+		case "zero", "external_unresolved", "parser_incomplete":
+			if len(row.Candidates) != 0 || selected != 0 {
+				return fmt.Errorf("unresolved callsite %s cannot retain candidate authority", c.CallsiteID)
+			}
+		default:
+			return fmt.Errorf("callsite %s has unknown dispatch state %q", c.CallsiteID, c.DispatchState)
+		}
+
+		derivationKind, evidenceSet, abstentionReason, err := resolutionDerivation(c.Mechanism, c.DispatchState, c.CandidateCount)
+		if err != nil {
+			return fmt.Errorf("callsite %s: %w", c.CallsiteID, err)
+		}
+		// A boundary the producer observed and the derivation mapping cannot
+		// see -- a budget that stopped the analysis -- overrides the derived
+		// reason. It reaches both surfaces a reader consults: the
+		// HAS_CALLSITE edge column below and the Callsite node's signature
+		// JSON assembled from this same variable.
+		if c.AbstentionReason != "" {
+			if _, known := callsiteAbstentionVocabulary[c.AbstentionReason]; !known {
+				return fmt.Errorf("callsite %s has unknown abstention reason %q", c.CallsiteID, c.AbstentionReason)
+			}
+			abstentionReason = c.AbstentionReason
+		}
+		coverage, steps := resolutionCoverage(c)
+		passKind, passStatus := derivationKind, "completed"
+		for _, pass := range coverage {
+			if pass.Status == "completed_match" || (c.DispatchState == "dynamic" && pass.PassKind == "dynamic_framework") {
+				passKind, passStatus = pass.PassKind, pass.Status
+				break
+			}
+		}
+		coverageJSON, _ := json.Marshal(coverage)
+		stepsJSON, _ := json.Marshal(steps)
+		v2, err := prepareResolutionV2(identity, c, row.Candidates)
+		if err != nil {
+			return fmt.Errorf("prepare callsite %s v2: %w", c.CallsiteID, err)
+		}
+		for _, candidate := range row.Candidates {
+			if err := validateCandidateDerivation(derivationKind, candidate); err != nil {
+				return fmt.Errorf("callsite %s candidate %d: %w", c.CallsiteID, candidate.Ordinal, err)
+			}
+		}
+		callsiteMeta, _ := json.Marshal(map[string]any{
+			"callsite_id": c.CallsiteID, "dispatch_state": c.DispatchState,
+			"mechanism": c.Mechanism, "repository_revision": revision,
+			"verification_status":  c.VerificationStatus,
+			"candidate_count":      c.CandidateCount,
+			"sibling_count":        c.CandidateCount,
+			"derivation_kind":      derivationKind,
+			"evidence_set":         evidenceSet,
+			"abstention_reason":    abstentionReason,
+			"derivation_contract":  ResolutionDerivationContract,
+			"structural_authority": "source_syntax", "target_authority": c.VerificationStatus,
+		})
+		res, err := stmts.callsiteNode.Exec(
+			c.Callee, v2.CallsiteID, c.SourceFile, c.SourceLine, c.SourceLine, string(callsiteMeta), c.Language,
+			v2.CallsiteID, v2.RepoID, identity.RepositoryRevision, identity.BuildID, v2.FileNodeID, c.CallerSymbolID,
+			v2.ASTPath, v2.ByteStart, v2.ByteEnd, c.SourceLine, c.ColumnStart, v2.DispatchForm, c.Callee, c.ArgumentArity,
+			v2.ParseState, v2.CandidateState, nullableString(v2.SelectedTargetID), len(v2.Candidates), v2.DerivationSetID, v2.CompletenessSetID)
+		if err != nil {
+			return fmt.Errorf("insert callsite node %s: %w", c.CallsiteID, err)
+		}
+		callsiteNodeID, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("callsite node id %s: %w", c.CallsiteID, err)
+		}
+		if err := insertResolutionV2FactsTx(stmts, identity, c, callsiteNodeID, v2); err != nil {
+			return err
+		}
+		linkMeta, _ := json.Marshal(map[string]any{
+			"callsite_id": c.CallsiteID, "repository_revision": revision,
+			"dispatch_state": c.DispatchState, "structural_authority": "source_syntax",
+			"target_authority": c.VerificationStatus,
+		})
+		if _, err := stmts.hasCallsiteEdge.Exec(
+			c.SourceID, callsiteNodeID, "HAS_CALLSITE", c.SourceLine, c.SourceFile,
+			"graph_native", nil, string(linkMeta), "STRUCTURAL", c.CandidateCount,
+			"resolver_callsite", "structural_only", canonicalResolutionID(c.CallerSymbolID, "HAS_CALLSITE", v2.CallsiteID), CallResolutionSchemaVersion, v2.CallsiteID,
+			ResolutionDerivationContract, derivationKind, evidenceSet,
+			revision, passKind, "1", passStatus, abstentionReason, c.CandidateCount,
+			identity.BuildID, identity.SourceFingerprint, string(coverageJSON), string(stepsJSON)); err != nil {
+			return fmt.Errorf("link callsite %s: %w", c.CallsiteID, err)
+		}
+	}
+	return nil
+}
+
+// AttachResolutionGraph is the full-index wrapper for the transactional graph
+// attachment API.
+func (d *DB) AttachResolutionGraph(identity GraphCompletionIdentity, rows []AttachedResolution) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin graph resolution tx: %w", err)
+	}
+	if err := AttachResolutionGraphTx(tx, identity, rows); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := BindGraphCompletionTx(tx, identity); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit graph resolution tx: %w", err)
+	}
+	return nil
+}
+
+// QueryAttachedCandidates is the normal producer graph query for resolver
+// evidence. It reads only primary nodes/edges, so graph consumers automatically
+// observe retained candidates without joining the compatibility sidecar.
+func (d *DB) QueryAttachedCandidates(callee string) ([]AttachedCandidate, error) {
+	return d.QueryAttachedCandidatesWithPolicy(callee, ConservativeCandidatePolicy)
+}
+
+// QueryAttachedCandidatesWithPolicy applies an immutable query-time policy to
+// typed graph facts. Policy output is never written back to the graph.
+func (d *DB) QueryAttachedCandidatesWithPolicy(callee string, policy CandidateQueryPolicy) ([]AttachedCandidate, error) {
+	return d.queryAttachedCandidates(callee, "", policy, "")
+}
+
+// ResolveCandidates is the canonical v2 query boundary. It rejects stale graph
+// revisions and unknown policy versions before loading primary-graph facts.
+func (d *DB) ResolveCandidates(callsiteID, policyVersionID, graphRevision string) ([]AttachedCandidate, error) {
+	var policy CandidateQueryPolicy
+	switch policyVersionID {
+	case ConservativeCandidatePolicy.VersionID():
+		policy = ConservativeCandidatePolicy
+	case InspectAllCandidatePolicy.VersionID():
+		policy = InspectAllCandidatePolicy
+	default:
+		return nil, fmt.Errorf("unknown query policy version %q", policyVersionID)
+	}
+	return d.queryAttachedCandidates("", callsiteID, policy, graphRevision)
+}
+
+func (d *DB) queryAttachedCandidates(callee, callsiteID string, policy CandidateQueryPolicy, requiredRevision string) ([]AttachedCandidate, error) {
+	if err := policy.validate(); err != nil {
+		return nil, err
+	}
+	var complete, revision string
+	if err := d.db.QueryRow(`SELECT COALESCE(value,'') FROM project_meta WHERE key='graph_resolution_complete'`).Scan(&complete); err != nil {
+		// A two-phase publication can commit the core graph and roll the
+		// analysis back, so this row's absence is a state the producer publishes
+		// on purpose, not a fault. Report it by name off analysis_state instead
+		// of surfacing the storage miss, which reads as a corrupt graph.
+		if absent := analysisAbsenceError(d.db, err); absent != nil {
+			return nil, absent
+		}
+		return nil, fmt.Errorf("graph-native resolution unavailable: %w", err)
+	}
+	if complete != "1" {
+		return nil, fmt.Errorf("graph-native resolution is incomplete (state=%q)", complete)
+	}
+	if err := d.db.QueryRow(`SELECT COALESCE(value,'') FROM project_meta WHERE key='graph_resolution_revision'`).Scan(&revision); err != nil {
+		return nil, fmt.Errorf("graph-native resolution revision unavailable: %w", err)
+	}
+	if revision == "" || revision == "stale" {
+		return nil, fmt.Errorf("graph-native resolution has no current revision (revision=%q)", revision)
+	}
+	if requiredRevision != "" && requiredRevision != revision {
+		return nil, fmt.Errorf("stale graph revision: requested %q current %q", requiredRevision, revision)
+	}
+	var receipt, receiptSHA string
+	if err := d.db.QueryRow(`SELECT
+		COALESCE((SELECT value FROM project_meta WHERE key='graph_completion_receipt'),''),
+		COALESCE((SELECT value FROM project_meta WHERE key='graph_completion_receipt_sha256'),'')`).Scan(&receipt, &receiptSHA); err != nil {
+		return nil, fmt.Errorf("graph completion receipt unavailable: %w", err)
+	}
+	sum := sha256.Sum256([]byte(receipt))
+	if receipt == "" {
+		// An empty receipt beside a resolution-complete claim is the same
+		// core-only graph seen from the other side: name the analysis state
+		// rather than accusing the graph of a hash mismatch it never had.
+		return nil, analysisAbsenceError(d.db, sql.ErrNoRows)
+	}
+	if receiptSHA != hex.EncodeToString(sum[:]) {
+		return nil, fmt.Errorf("graph completion receipt hash mismatch")
+	}
+	var identity GraphCompletionIdentity
+	if err := json.Unmarshal([]byte(receipt), &identity); err != nil {
+		return nil, fmt.Errorf("decode graph completion receipt: %w", err)
+	}
+	if _, _, err := identity.receipt(); err != nil || identity.RepositoryRevision != revision {
+		return nil, fmt.Errorf("graph completion identity does not bind revision %q", revision)
+	}
+	selector, selectorValue := "c.name=?", callee
+	if callsiteID != "" {
+		selector, selectorValue = "c.stable_id=?", callsiteID
+	}
+	query := `SELECT hc.source_id, c.id, COALESCE(ce.target_id,0), COALESCE(ce.target_symbol_id,''),
+		c.qualified_name, c.file_path, c.start_line, c.name,
+		COALESCE(c.candidate_state,''),
+		COALESCE(ce.ordinal,-1),
+		COALESCE(ce.resolution_method,''),
+		COALESCE(hc.analysis_boundary,''),
+		COALESCE(c.candidate_count_v2,0),
+		CASE WHEN ce.id IS NULL THEN 0 ELSE 1 END,
+		COALESCE(json_extract(hc.metadata,'$.structural_authority'),''),
+		CASE WHEN c.candidate_state='selected' THEN 'source_supported' ELSE c.candidate_state END,
+		COALESCE(ce.derivation_kind,hc.derivation_kind,''),
+		COALESCE(ce.evidence_set,hc.evidence_set,''),
+		COALESCE(ce.sibling_count,hc.sibling_count,0),
+		CASE WHEN c.candidate_state='selected' THEN '' ELSE COALESCE((SELECT u.reason_code FROM nodes u WHERE u.node_type='unresolved_fact' AND u.callsite_id=c.stable_id LIMIT 1),'') END,
+		'[]', '[]', COALESCE(ce.derivation_fact_ids,'[]'),
+		COALESCE(ce.declared_scope,''), COALESCE(ce.receiver_type,''), COALESCE(ce.receiver_origin,''),
+		COALESCE(ce.receiver_shape,''), COALESCE(ce.receiver_chain,'[]'), COALESCE(ce.import_chain,'[]'),
+		COALESCE(ce.export_status,''), ce.parser_complete
+		FROM nodes c
+		JOIN edges hc ON hc.target_id=c.id AND hc.type='HAS_CALLSITE'
+		LEFT JOIN edges ce ON ce.source_id=c.id AND ce.type='CANDIDATE_TARGET' AND ce.viability='viable'
+		 AND ce.analysis_boundary=?
+		WHERE c.label='Callsite' AND ` + selector + `
+		  AND hc.analysis_boundary=?
+		ORDER BY c.id, COALESCE(ce.ordinal,-1), ce.target_symbol_id`
+	rows, err := d.db.Query(query, revision, selectorValue, revision)
+	if err != nil {
+		return nil, fmt.Errorf("query attached candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []AttachedCandidate
+	for rows.Next() {
+		var c AttachedCandidate
+		var coverageJSON, stepsJSON, derivationFactIDsJSON string
+		var parserComplete sql.NullBool
+		if err := rows.Scan(&c.SourceID, &c.CallsiteNodeID, &c.TargetID, &c.TargetStableID, &c.CallsiteID,
+			&c.SourceFile, &c.SourceLine, &c.Callee, &c.DispatchState,
+			&c.CandidateOrdinal, &c.Mechanism, &c.Revision,
+			&c.CandidateCount, &c.HasCandidate, &c.StructuralAuthority, &c.TargetAuthority,
+			&c.DerivationKind, &c.EvidenceSet, &c.SiblingCount, &c.AbstentionReason,
+			&coverageJSON, &stepsJSON, &derivationFactIDsJSON, &c.DeclaredScope, &c.ReceiverType, &c.ReceiverOrigin,
+			&c.ReceiverShape, &c.ReceiverChain, &c.ImportChain, &c.ExportStatus, &parserComplete); err != nil {
+			return nil, err
+		}
+		if parserComplete.Valid {
+			value := parserComplete.Bool
+			c.ParserComplete = &value
+		}
+		if err := json.Unmarshal([]byte(coverageJSON), &c.PassCoverage); err != nil {
+			return nil, fmt.Errorf("decode pass coverage for %s: %w", c.CallsiteID, err)
+		}
+		if err := json.Unmarshal([]byte(stepsJSON), &c.ProvenanceSteps); err != nil {
+			return nil, fmt.Errorf("decode provenance for %s: %w", c.CallsiteID, err)
+		}
+		if err := json.Unmarshal([]byte(derivationFactIDsJSON), &c.DerivationFactIDs); err != nil {
+			return nil, fmt.Errorf("decode derivation fact IDs for %s: %w", c.CallsiteID, err)
+		}
+		c.PolicyID, c.PolicyVersion, c.PolicyVersionID = policy.ID, policy.Version, policy.VersionID()
+		c.PolicyHash = c.PolicyVersionID
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := d.loadResolutionV2Evidence(out); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CallsiteNodeID != out[j].CallsiteNodeID {
+			return out[i].CallsiteNodeID < out[j].CallsiteNodeID
+		}
+		if out[i].CandidateOrdinal != out[j].CandidateOrdinal {
+			return out[i].CandidateOrdinal < out[j].CandidateOrdinal
+		}
+		return out[i].TargetID < out[j].TargetID
+	})
+	rankByCallsite := make(map[int64]int)
+	for i := range out {
+		out[i].PolicyRank = rankByCallsite[out[i].CallsiteNodeID]
+		rankByCallsite[out[i].CallsiteNodeID]++
+		closedForDerivation := out[i].CompletenessStates[out[i].DerivationKind] == "closed"
+		if policy == ConservativeCandidatePolicy && out[i].HasCandidate && out[i].CandidateCount == 1 && out[i].TargetAuthority == "source_supported" && closedForDerivation {
+			out[i].PolicySelected = true
+			out[i].PolicyReason = "unique_source_supported_candidate"
+			out[i].MatchedRuleIDs = []string{policy.SelectionRuleID()}
+		} else if policy == InspectAllCandidatePolicy {
+			out[i].PolicyReason = "inspection_policy_never_selects"
+			out[i].MatchedRuleIDs = []string{policy.SelectionRuleID()}
+		} else {
+			out[i].PolicyReason = "policy_abstained"
+		}
+	}
+	return out, nil
+}
+
 // GetAllEdges returns every edge whose confidence is >= minConf, in stable id
 // order. Used by the C7 closure pass to build its adjacency list. The closure
 // package applies an additional verified-resolution-method override on top of
@@ -746,7 +1738,11 @@ func (d *DB) GetAllEdges(minConf float64) ([]*Edge, error) {
 		        COALESCE(resolution_method, ''), COALESCE(confidence, 0.0)
 		   FROM edges
 		  WHERE COALESCE(confidence, 0.0) >= ?
-		  ORDER BY id`,
+		    AND type NOT IN ('CANDIDATE','CANDIDATE_TARGET')
+		    AND NOT (
+				 type IN ('HAS_CALLSITE', 'CANDIDATE_TARGET')
+				 AND COALESCE((SELECT value FROM project_meta WHERE key='graph_resolution_complete'), '0') <> '1'
+			)`,
 		minConf,
 	)
 	if err != nil {
@@ -864,20 +1860,20 @@ func (d *DB) AssertionCount() int {
 	return count
 }
 
-// InsertProperty inserts a property for a node. Provenance columns (B-22) are defaulted
-// deterministically by fillProvenance() when the caller leaves them zero.
+// InsertProperty inserts a property for a node.
 func (d *DB) InsertProperty(p *Property) error {
-	p.fillProvenance()
 	_, err := d.db.Exec(
-		`INSERT INTO properties (node_id, kind, value, line, confidence,
-		   property_id, start_line, end_line, extractor, evidence_method,
-		   trust_tier, verification_status, source_revision)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
 		p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
-		p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
-		p.TrustTier, p.VerificationStatus, p.SourceRevision,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Keep properties_fts covering the row that was just written. This is a
+	// whole-index rebuild for one row, which is only acceptable because this
+	// entry point has no bulk callers — every production write path goes
+	// through BatchInsertProperties or BatchInsertPropertiesTx.
+	return d.PopulatePropertiesFTS5()
 }
 
 // InsertAssertion inserts an assertion from a test function.
@@ -902,10 +1898,7 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	stmt, err := tx.Prepare(
-		`INSERT INTO properties (node_id, kind, value, line, confidence,
-		   property_id, start_line, end_line, extractor, evidence_method,
-		   trust_tier, verification_status, source_revision)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO properties (node_id, kind, value, line, confidence) VALUES (?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -914,14 +1907,17 @@ func (d *DB) BatchInsertProperties(props []*Property) error {
 	defer stmt.Close()
 
 	for i, p := range props {
-		p.fillProvenance()
-		_, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence,
-			p.PropertyID, p.StartLine, p.EndLine, p.Extractor, p.EvidenceMethod,
-			p.TrustTier, p.VerificationStatus, p.SourceRevision)
+		_, err := stmt.Exec(p.NodeID, p.Kind, p.Value, p.Line, p.Confidence)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("insert property %d: %w", i, err)
 		}
+	}
+	// Same transaction that writes the rows maintains the index over them, so
+	// a published graph can never carry facts properties_fts has not heard of.
+	if err := PopulatePropertiesFTS5Tx(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("index properties: %w", err)
 	}
 	return tx.Commit()
 }
@@ -970,184 +1966,11 @@ func (d *DB) BatchInsertCochanges(pairs map[[2]string]int) error {
 		return err
 	}
 	defer stmt.Close()
-	// DETERMINISM (Fable S3): iterate pairs in SORTED order, never Go map-range order —
-	// SQLite assigns rowids in insertion order, so a randomized map range makes two
-	// indexings of the SAME repo produce byte-DIFFERENT graph.db files. This function
-	// violated the exact invariant its sibling BatchInsertCochangeSets documents+enforces.
-	keys := make([][2]string, 0, len(pairs))
-	for pair := range pairs {
-		keys = append(keys, pair)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i][0] != keys[j][0] {
-			return keys[i][0] < keys[j][0]
-		}
-		return keys[i][1] < keys[j][1]
-	})
-	for _, pair := range keys {
-		if _, err := stmt.Exec(pair[0], pair[1], pairs[pair]); err != nil {
+	for pair, count := range pairs {
+		if _, err := stmt.Exec(pair[0], pair[1], count); err != nil {
 			tx.Rollback()
 			return err
 		}
 	}
 	return tx.Commit()
-}
-
-// BatchInsertCochangeSets inserts set-form co-change membership in one transaction.
-// sets maps a commit hash to the member file paths that commit touched (set-form,
-// no scores). Rows are (commit_hash, file_path); INSERT OR IGNORE keeps the
-// (commit_hash, file_path) primary key unique. SEPARATE from BatchInsertCochanges
-// — the legacy pair table is never touched.
-func (d *DB) BatchInsertCochangeSets(sets map[string][]string) error {
-	if len(sets) == 0 {
-		return nil
-	}
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-	stmt, err := tx.Prepare("INSERT OR IGNORE INTO cochange_sets (commit_hash, file_path) VALUES (?, ?)")
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-	// DETERMINISM: iterate commits in SORTED order, never Go map-range order. SQLite
-	// assigns rowids in insertion order, so a randomized map range makes two indexings
-	// of the SAME repo produce byte-DIFFERENT graph.db files (invariant: graph.db is
-	// byte-identical across two indexings). Files within a commit keep their given
-	// order (git-log --name-only order, already deterministic per commit).
-	hashes := make([]string, 0, len(sets))
-	for h := range sets {
-		hashes = append(hashes, h)
-	}
-	sort.Strings(hashes)
-	for _, commit := range hashes {
-		for _, f := range sets[commit] {
-			if _, err := stmt.Exec(commit, f); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-	}
-	return tx.Commit()
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// SM-9a MULTI-REPO helpers. All of these operate on the multi-root ingest path
-// ONLY — the single-root path never calls them, so a single-repo index leaves
-// every repo_id NULL and the repos table empty (byte-identical to the pre-multi-
-// repo binary on every pre-existing column). Additive by construction.
-// ────────────────────────────────────────────────────────────────────────────
-
-// CrossRepoNodeRow is the minimal node projection the cross-repo import resolver
-// needs: identity (id), the repo it lives in, its name, its repo-relative file
-// path, and whether it is exported (only exported symbols are legal cross-repo
-// import targets). Label lets the caller drop File anchors.
-type CrossRepoNodeRow struct {
-	ID         int64
-	RepoID     int64
-	Name       string
-	FilePath   string
-	Label      string
-	IsExported bool
-}
-
-// UpsertRepo writes (or replaces) one row in the repos partition table. Called
-// once per indexed root on the multi-repo path with id = the repo's partition key.
-func (d *DB) UpsertRepo(id int64, root, commit string) error {
-	_, err := d.db.Exec(
-		`INSERT OR REPLACE INTO repos (id, root, "commit") VALUES (?, ?, ?)`,
-		id, root, commit,
-	)
-	return err
-}
-
-// RepoCount returns the number of rows in the repos table (0 on a single-root index).
-func (d *DB) RepoCount() int {
-	var n int
-	d.db.QueryRow(`SELECT COUNT(*) FROM repos`).Scan(&n)
-	return n
-}
-
-// StampNodeRepoIDs sets nodes.repo_id = repoID for the given node ids in ONE
-// transaction. Called once per repo on the multi-repo path with the exact id list
-// BatchInsertNodes returned for that repo, so no file_path-collision ambiguity can
-// arise (the stamp is keyed on the global surrogate id, never the colliding path).
-func (d *DB) StampNodeRepoIDs(ids []int64, repoID int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	tx, err := d.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin stamp-node-repo tx: %w", err)
-	}
-	stmt, err := tx.Prepare(`UPDATE nodes SET repo_id = ? WHERE id = ?`)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("prepare stamp-node-repo: %w", err)
-	}
-	defer stmt.Close()
-	for _, id := range ids {
-		if _, err := stmt.Exec(repoID, id); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("stamp node %d repo_id: %w", id, err)
-		}
-	}
-	return tx.Commit()
-}
-
-// StampDerivedRepoIDs back-fills repo_id on every fact surface that references a
-// node, deriving it from that node's already-stamped repo_id. Node ids are GLOBAL
-// (never collide across repos), so these joins are unambiguous even where two repos
-// share a relative file_path:
-//   - edges       ← source_id (the calling/importing repo; a cross-repo edge is one
-//     whose source repo != its target's repo)
-//   - properties  ← node_id
-//   - assertions  ← test_node_id
-//   - closure     ← source_id
-//   - content_passages ← node_id
-//
-// Run AFTER StampNodeRepoIDs for every repo and AFTER all edges (intra- and
-// cross-repo) are inserted. Deterministic (set-based UPDATEs, no ordering).
-func (d *DB) StampDerivedRepoIDs() error {
-	stmts := []string{
-		`UPDATE edges SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = edges.source_id)`,
-		`UPDATE properties SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = properties.node_id)`,
-		`UPDATE assertions SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = assertions.test_node_id)`,
-		`UPDATE closure SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = closure.source_id)`,
-		`UPDATE content_passages SET repo_id = (SELECT n.repo_id FROM nodes n WHERE n.id = content_passages.node_id)`,
-	}
-	for _, s := range stmts {
-		if _, err := d.db.Exec(s); err != nil {
-			return fmt.Errorf("stamp derived repo_id (%q): %w", s, err)
-		}
-	}
-	return nil
-}
-
-// CrossRepoNodeRows returns the repo-stamped node projection the cross-repo import
-// resolver consumes. File-label anchors and test nodes are excluded (an import
-// never binds to a file anchor or a test symbol). Ordered by (repo_id, id) for
-// deterministic downstream iteration.
-func (d *DB) CrossRepoNodeRows() ([]CrossRepoNodeRow, error) {
-	rows, err := d.db.Query(
-		`SELECT id, COALESCE(repo_id, -1), name, file_path, label, COALESCE(is_exported, 0)
-		   FROM nodes
-		  WHERE label != 'File' AND COALESCE(is_test, 0) = 0
-		  ORDER BY COALESCE(repo_id, -1), id`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query cross-repo nodes: %w", err)
-	}
-	defer rows.Close()
-	var out []CrossRepoNodeRow
-	for rows.Next() {
-		var r CrossRepoNodeRow
-		if err := rows.Scan(&r.ID, &r.RepoID, &r.Name, &r.FilePath, &r.Label, &r.IsExported); err != nil {
-			return nil, fmt.Errorf("scan cross-repo node: %w", err)
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
 }
