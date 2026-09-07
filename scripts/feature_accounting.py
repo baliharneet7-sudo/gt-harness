@@ -60,9 +60,24 @@ SCHEMA = "gt.feature_accounting.v1"
 
 
 def account(events: list[dict]) -> dict:
-    delivered: collections.Counter[str] = collections.Counter()
-    refused: collections.Counter[str] = collections.Counter()
-    unattributed: collections.Counter[str] = collections.Counter()
+    """Resolve each DELIVERY once, then count deliveries - never events.
+
+    The two identity-bearing event classes are disjoint and describe the same
+    deliveries from opposite sides: decision_context_unit_prepared / admitted /
+    refused carry supersession_key, while delivery_prepared / receipt /
+    evidence_delivery / context_addition_delivery carry evidence_type. Both
+    carry delivery_identity.
+
+    Attributing per EVENT counts one delivery up to four times and, worse, can
+    place a single delivery in a feature via one row and in the unattributed
+    bucket via another - which is what made 306 context_delta rows look
+    unclaimed while the same deliveries were already attributed to obligations
+    through their supersession key. Resolve identity -> feature first, taking
+    the declared supersession key over the lane kind, then count identities.
+    """
+    identity_feature: dict[str, str] = {}
+    identity_refused: dict[str, bool] = {}
+    identity_kinds: dict[str, str] = {}
     reached: collections.Counter[str] = collections.Counter()
 
     for event in events:
@@ -70,22 +85,45 @@ def account(events: list[dict]) -> dict:
         for boundary, markers in BOUNDARY_EVIDENCE.items():
             if name in markers:
                 reached[boundary] += 1
-        evidence_type = event.get("evidence_type")
-        if not evidence_type:
+
+        supersession = str(event.get("supersession_key") or "")
+        evidence_type = str(event.get("evidence_type") or "")
+        if not supersession and not evidence_type:
             continue
-        feature = feature_for_evidence(evidence_type)
-        if not feature:
-            # Total by construction. 312 of this run's 534 evidence items - 58%
-            # - carried a type nobody had classified, and that silence made
-            # obligations read NOT_TRIGGERED on a run that shipped the task
-            # contract 309 times. An unclassified type is now a visible row
-            # with a count, so it cannot shrink a feature to zero unnoticed.
-            unattributed[str(evidence_type)] += 1
+        # A row without a delivery_identity is not a delivery. `receipt` rows
+        # carry an evidence_type but no identity - they are receipts FOR
+        # deliveries - and giving each one a synthetic unit inflated every
+        # count by the number of receipts. The unit is the delivery or nothing.
+        unit = str(event.get("delivery_identity") or "")
+        if not unit:
             continue
-        if name in REFUSAL_EVENTS:
-            refused[feature] += 1
+
+        # The producer's declared identity beats the envelope. supersession_key
+        # says what a delivery IS ("obligations:task"); evidence_type on those
+        # same deliveries is the prompt-lane KIND (context_contract for the
+        # first contract delivery, context_delta for every one after,
+        # gt_session.py:582), which says only how its bytes are budgeted.
+        feature = None
+        if supersession:
+            feature = feature_for_evidence(supersession) or feature_for_evidence(
+                supersession.split(":", 1)[0]
+            )
+        if not feature and evidence_type:
+            feature = feature_for_evidence(evidence_type)
+        if feature:
+            identity_feature[unit] = feature
         else:
-            delivered[feature] += 1
+            identity_kinds.setdefault(unit, supersession or evidence_type)
+        if name in REFUSAL_EVENTS:
+            identity_refused[unit] = True
+
+    delivered: collections.Counter[str] = collections.Counter()
+    refused: collections.Counter[str] = collections.Counter()
+    for unit, feature in identity_feature.items():
+        (refused if identity_refused.get(unit) else delivered)[feature] += 1
+    unattributed = collections.Counter(
+        kind for unit, kind in identity_kinds.items() if unit not in identity_feature
+    )
 
     rows = []
     for feature in sorted(DIRECT_FEATURES):
@@ -127,15 +165,16 @@ def account(events: list[dict]) -> dict:
         "schema": SCHEMA,
         "journal_rows": len(events),
         "direct_features": len(rows),
+        "deliveries_resolved": len(identity_feature),
         "delivered": sum(1 for row in rows if row["state"] == "DELIVERED"),
         "refused": sum(1 for row in rows if row["state"] == "REFUSED"),
         "silent": sum(1 for row in rows if row["state"] == "SILENT"),
         "not_reached": sum(1 for row in rows if row["state"] == "NOT_REACHED"),
         "boundary_unknown": sum(1 for row in rows if row["state"] == "BOUNDARY_UNKNOWN"),
         "boundaries_reached": dict(sorted(reached.items())),
+        "capability_aliases": dict(sorted(CAPABILITY_OWNERS.items())),
         "unattributed_evidence": dict(unattributed.most_common()),
         "unattributed_total": sum(unattributed.values()),
-        "capability_aliases": dict(sorted(CAPABILITY_OWNERS.items())),
         "rows": rows,
     }
 
