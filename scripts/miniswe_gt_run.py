@@ -82,8 +82,21 @@ _SENSITIVE_SHELL_ENV = {
     "OPENAI_API_KEY",
 }
 
-def _history_reference_marker(digest: str, size: int, tool_call_id: str) -> str:
-    reference = {"sha256": digest, "utf8_bytes": size, "tool_call_id": tool_call_id}
+def _history_reference_marker(digest: str, size: int) -> str:
+    """The provider-visible reference, which must not name its anchor.
+
+    The anchor is the newest full copy of an identical result, so it MOVES
+    every time another duplicate arrives. Naming it in the wire text made
+    every older marker change with it, rewriting messages the provider had
+    already seen and discarding their cached prefix: on the 2026-09-07
+    codespace run one such move at message 35 invalidated fifteen
+    byte-identical messages behind it, re-sending 26,645 bytes uncached to
+    change 533. The digest identifies the payload and does not move, so the
+    marker is stable for the life of the history. The anchor is still
+    recorded under ``extra``, which is audit state and never sent.
+    """
+
+    reference = {"sha256": digest, "utf8_bytes": size}
     return "[GT_HISTORY_REF " + json.dumps(reference, sort_keys=True, separators=(",", ":")) + "]"
 
 
@@ -136,7 +149,7 @@ def _compact_miniswe_history(messages: list[dict]) -> None:
                 previous.get("sha256") != digest
                 or previous.get("utf8_bytes") != len(encoded)
                 or not isinstance(previous.get("tool_call_id"), str)
-                or row["content"] != _history_reference_marker(digest, len(encoded), previous["tool_call_id"])
+                or row["content"] != _history_reference_marker(digest, len(encoded))
             ):
                 raise ValueError("history_reference_digest_mismatch")
             row["content"] = content
@@ -162,7 +175,7 @@ def _compact_miniswe_history(messages: list[dict]) -> None:
         anchor = anchors.setdefault(identity, tool_call_id)
         if index >= last_assistant_index or anchor == tool_call_id:
             continue
-        marker = _history_reference_marker(digest, len(encoded), anchor)
+        marker = _history_reference_marker(digest, len(encoded))
         if len(marker.encode("utf-8")) >= len(encoded):
             continue
         row.setdefault("extra", {})["gt_history_reference"] = {

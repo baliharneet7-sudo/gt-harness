@@ -1019,12 +1019,34 @@ def _prune_superseded_revisions(live: Path) -> None:
         shutil.rmtree(condemned, ignore_errors=True)
 
 
+def _revision_identity(reuse_key: IndexReuseKey) -> str:
+    """Directory identity for a published graph.
+
+    The reuse key answers one question: was this built from the same source by
+    the same producer. Certification asks a second one it does not cover -- that
+    the execution identity sealed into the artifact is the identity now asking
+    for it. A directory keyed on the reuse key alone therefore has a state no
+    run can leave: the artifact fails certification, and being immutable cannot
+    be rebuilt over, so every later run under a different identity refuses with
+    a graph sitting right there. Keying the directory on exactly what
+    certification enforces removes the state rather than handling it -- a
+    different identity is a different artifact, so it gets a different path,
+    and immutability holds without ever blocking a rebuild.
+    """
+
+    return hashlib.sha256(_canonical_json({
+        "index_reuse_key_sha256": reuse_key.digest,
+        "task_id": os.environ.get("GT_TASK_ID", ""),
+        "product_source_sha": os.environ.get("GT_PRODUCT_SOURCE_SHA", ""),
+    })).hexdigest()
+
+
 def _graph_state_dir(root: str | Path, state_dir: str | Path | None,
                      layout: RuntimeLayout | None = None,
                      reuse_key: IndexReuseKey | None = None) -> Path:
     if layout is not None:
         key = reuse_key or compute_index_reuse_key(root, excluded_roots=layout.excluded_roots)
-        return layout.graph_root / "revisions" / key.digest
+        return layout.graph_root / "revisions" / _revision_identity(key)
     external = str(state_dir or os.environ.get("GT_STATE_DIR") or "").strip()
     if external:
         root_key = hashlib.sha256(
@@ -1048,7 +1070,8 @@ def _read_sealed_json(path: Path, digest_field: str) -> dict[str, object] | None
 
 def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                            excluded_roots: tuple[Path, ...] = (),
-                           layout: RuntimeLayout | None = None) -> str | None:
+                           layout: RuntimeLayout | None = None,
+                           diagnostics: list[str] | None = None) -> str | None:
     """Ensure a fresh graph.db exists for ``root``; return its path or None.
 
     When ``GT_STATE_DIR`` is set, the db lives in a root-identity subdirectory
@@ -1099,10 +1122,12 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                     manifest.get("index_reuse_key") == reuse_key.as_dict()
                     and manifest.get("index_reuse_key_sha256") == reuse_key.digest
                 ):
-                    valid, _reason = _certify_published_graph(
+                    valid, reason = _certify_published_graph(
                         db, existing_manifest, expected_root=Path(logical_root),
                         expected_binary_sha256=reuse_key.producer_binary_sha256,
                     )
+                    if not valid and diagnostics is not None:
+                        diagnostics.append(f"published_graph_uncertifiable:{reason}")
                     if valid:
                         (gt_dir / "graph.failure.json").unlink(missing_ok=True)
                         (gt_dir / "index-failure-resource.json").unlink(missing_ok=True)
@@ -1307,7 +1332,9 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
             "promotion_sha256",
         )
         return str(db)
-    except Exception:  # noqa: BLE001 - indexing failure means GT dormant, never a crash
+    except Exception as exc:  # noqa: BLE001 - indexing failure means GT dormant, never a crash
+        if diagnostics is not None:
+            diagnostics.append(f"{type(exc).__name__}: {exc}")
         return None
 
 
@@ -1338,6 +1365,9 @@ def ensure_index(root: str, *, state_dir: str | None = None,
     """
 
     graph: str | None = None
+    # A refusal that cannot name its cause is how one poisoned revision
+    # directory cost a run and read as an environment problem.
+    diagnostics: list[str] = []
     if layout is not None:
         excluded_roots = tuple(dict.fromkeys((*excluded_roots, *layout.excluded_roots)))
     # Whether there was source to index at all. A task that starts empty has
@@ -1352,10 +1382,11 @@ def ensure_index(root: str, *, state_dir: str | None = None,
             gt_dir.mkdir(parents=True, exist_ok=True)
             lock_root = layout.graph_root if layout is not None else gt_dir
             with _graph_publication_lock(lock_root / ".graph.lock"):
-                graph = _ensure_index_unlocked(root, state_dir=state_dir, **(
+                graph = _ensure_index_unlocked(root, state_dir=state_dir, diagnostics=diagnostics, **(
                     {"excluded_roots": excluded_roots} if excluded_roots else {}
                 ), **({"layout": layout} if layout is not None else {}))
-    except Exception:  # noqa: BLE001 - indexing remains correct-or-quiet
+    except Exception as exc:  # noqa: BLE001 - indexing remains correct-or-quiet
+        diagnostics.append(f"{type(exc).__name__}: {exc}")
         graph = None
     if (
         graph is None
@@ -1365,6 +1396,7 @@ def ensure_index(root: str, *, state_dir: str | None = None,
         raise BenchmarkGraphRequired(
             "benchmark run has no graph; refusing to measure a treatment that "
             "cannot use the mechanism under test"
+            + (f" ({'; '.join(diagnostics)})" if diagnostics else "")
         )
     return graph
 

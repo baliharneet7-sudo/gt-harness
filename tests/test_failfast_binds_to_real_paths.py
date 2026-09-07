@@ -30,7 +30,7 @@ def test_create_bridge_propagates_instead_of_going_dormant(
 
     (tmp_path / "main.go").write_text("package main\n", encoding="utf-8")
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
-    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None: None)
+    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
     with pytest.raises(BenchmarkGraphRequired):
         gt_engine.create_bridge(str(tmp_path))
@@ -40,7 +40,7 @@ def test_create_bridge_still_goes_dormant_for_local_work(monkeypatch, tmp_path: 
     monkeypatch.delenv("GT_TASK_ID", raising=False)
     monkeypatch.delenv("GT_PRODUCT_SOURCE_SHA", raising=False)
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
-    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None: None)
+    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
     # A dormant bridge, not an exception: unchanged behaviour outside a benchmark.
     assert gt_engine.create_bridge(str(tmp_path)) is not None

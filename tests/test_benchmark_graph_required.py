@@ -31,7 +31,7 @@ def test_a_benchmark_run_refuses_to_proceed_without_its_graph(
     """The product is the graph: a run without one measures nothing, at full cost."""
 
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
-    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None: None)
+    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
     with pytest.raises(BenchmarkGraphRequired):
         ensure_index(str(_repo(tmp_path)))
@@ -40,7 +40,7 @@ def test_a_benchmark_run_refuses_to_proceed_without_its_graph(
 def test_an_index_that_raises_is_still_a_refusal_not_a_silent_none(
     benchmark_run, monkeypatch, tmp_path: Path
 ):
-    def explode(root, state_dir=None):
+    def explode(root, state_dir=None, **_):
         raise RuntimeError("gt-index exited 1")
 
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
@@ -53,7 +53,7 @@ def test_an_index_that_raises_is_still_a_refusal_not_a_silent_none(
 def test_a_benchmark_run_with_a_graph_proceeds(benchmark_run, monkeypatch, tmp_path: Path):
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
     monkeypatch.setattr(
-        indexer, "_ensure_index_unlocked", lambda root, state_dir=None: "/g/graph.db"
+        indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: "/g/graph.db"
     )
 
     assert ensure_index(str(_repo(tmp_path))) == "/g/graph.db"
@@ -73,7 +73,7 @@ def test_local_work_keeps_its_degraded_mode(local_run, monkeypatch, tmp_path: Pa
     """Outside a benchmark a missing graph is deliberate, not a defect."""
 
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
-    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None: None)
+    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
     assert ensure_index(str(_repo(tmp_path))) is None
 
@@ -86,6 +86,6 @@ def test_an_incomplete_benchmark_identity_does_not_trigger_the_refusal(
     monkeypatch.setenv("GT_TASK_ID", "some-task")
     monkeypatch.delenv("GT_PRODUCT_SOURCE_SHA", raising=False)
     monkeypatch.setattr(indexer, "is_code_repo", lambda root: True)
-    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None: None)
+    monkeypatch.setattr(indexer, "_ensure_index_unlocked", lambda root, state_dir=None, **_: None)
 
     assert ensure_index(str(_repo(tmp_path))) is None
