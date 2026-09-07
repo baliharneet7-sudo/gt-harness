@@ -21,6 +21,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -481,6 +483,210 @@ func (d *DB) FileExists(filePath string) bool {
 
 // BatchInsertNodesTx inserts nodes inside the given tx. Returns the
 // auto-generated IDs in input order.
+// AmendFileEdgesTx removes exactly what this reparse invalidates and nothing
+// else: the file's own outgoing edges, which the resolver is about to re-emit,
+// and every edge on either side of a symbol that genuinely disappeared.
+//
+// What it deliberately does NOT touch is the incoming edges to symbols that
+// survived. DeleteFileEdgesAndNodesTx removed those too -- it had to, because
+// their targets were about to be deleted and re-created under new ids -- and
+// everything downstream then existed to put them back: a snapshot before the
+// delete, a name-and-qualified-name re-match after the insert, and an
+// "incoming_unresolved" counter for the ones that could not be recovered. With
+// ids held stable by ReconcileFileNodesTx none of that is needed, because the
+// edges were never broken.
+func AmendFileEdgesTx(tx *sql.Tx, filePath string, removed []int64) (int64, error) {
+	// Only the edges the resolver is about to re-emit. NOT the attached overlay
+	// (HAS_CALLSITE / CANDIDATE* / *_FACT, and CALLS rows carrying a
+	// callsite_stable_id): those describe resolution proven at an earlier
+	// revision and deleting them would discard work this reparse does not
+	// redo. They stay, carrying the revision they were proven at.
+	res, err := tx.Exec(
+		`DELETE FROM edges WHERE source_file = ?
+		   AND type IN ('CALLS', 'IMPORTS')
+		   AND callsite_stable_id IS NULL
+		   AND (resolution_method IS NULL OR resolution_method NOT LIKE 'promote_%')`,
+		filePath,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete outgoing edges for %s: %w", filePath, err)
+	}
+	deleted, _ := res.RowsAffected()
+	if len(removed) == 0 {
+		return deleted, nil
+	}
+	// A symbol that is gone takes its edges, properties, assertions and closure
+	// rows with it -- by id, so nothing belonging to a surviving symbol is
+	// caught. Ids come from the reconcile, not from a path predicate, which is
+	// what keeps this narrow.
+	for _, id := range removed {
+		for _, stmt := range []string{
+			`DELETE FROM edges WHERE source_id = ? OR target_id = ?`,
+			`DELETE FROM properties WHERE node_id = ?`,
+			`DELETE FROM assertions WHERE test_node_id = ?`,
+			`DELETE FROM closure WHERE source_id = ? OR target_id = ?`,
+		} {
+			var execErr error
+			if strings.Count(stmt, "?") == 2 {
+				var res sql.Result
+				res, execErr = tx.Exec(stmt, id, id)
+				if execErr == nil {
+					n, _ := res.RowsAffected()
+					deleted += n
+				}
+			} else {
+				_, execErr = tx.Exec(stmt, id)
+			}
+			if execErr != nil {
+				return deleted, fmt.Errorf("remove references to node %d: %w", id, execErr)
+			}
+		}
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM nodes WHERE id IN (SELECT value FROM json_each(?))`,
+		removedJSON(removed),
+	); err != nil {
+		return deleted, fmt.Errorf("delete removed nodes for %s: %w", filePath, err)
+	}
+	return deleted, nil
+}
+
+func removedJSON(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// nodeIdentity is a symbol's identity WITHIN its file: what makes the `save`
+// method on class `Base` the same symbol across two parses of the same file,
+// independent of where it moved to or what its body became.
+type nodeIdentity struct {
+	label         string
+	qualifiedName string
+	name          string
+}
+
+// ReconcileFileNodesTx AMENDS this file's nodes instead of replacing them.
+//
+// The replace-and-reinsert it supersedes is the origin of nearly every problem
+// on the incremental path. Deleting a file's nodes and re-inserting them gives
+// every symbol a fresh AUTOINCREMENT id even when the symbol did not change, so
+// every edge pointing at an untouched function breaks; incoming edges must be
+// snapshotted and re-pointed by name; the attached resolution overlay has to be
+// discarded because its source ids are gone; and `graph_resolution_complete`
+// must drop to 0, which makes the caller and candidate queries refuse. None of
+// that follows from editing a file. All of it follows from replacing rather
+// than modifying, for a file where most symbols are usually identical.
+//
+// So symbols are matched by identity and the row is updated in place, keeping
+// its id. Only a symbol that genuinely disappeared is removed, and its id is
+// returned so the caller can clean up exactly what referenced it. A graph is a
+// backbone that gets amended; it is not rebuilt because one file moved.
+//
+// Duplicate identities within one file (overloads, re-declarations) are matched
+// in declaration order, first-in-first-matched, which is stable across parses
+// of the same file and never silently binds a symbol to a different overload.
+func ReconcileFileNodesTx(tx *sql.Tx, filePath string, nodes []*Node) (
+	ids []int64, inserted int, updated int, removed []int64, err error,
+) {
+	// Parser-produced SYMBOLS only. The attached overlay (callsites and the
+	// derivation/completeness/unresolved facts) also carries this file_path, but
+	// the parser never emits those, so including them here would leave every one
+	// unmatched and mark it removed -- deleting 684 proven facts on the arktype
+	// graph while the code above claims to delete nothing. Derived facts are not
+	// the parser's to retire; they age, and their revision says so.
+	rows, err := tx.Query(
+		`SELECT id, label, name, COALESCE(qualified_name, '')
+		   FROM nodes
+		  WHERE file_path = ?
+		    AND label != 'Callsite'
+		    AND (node_type IS NULL OR node_type NOT IN
+		         ('callsite','derivation_fact','completeness_fact','unresolved_fact'))
+		  ORDER BY id`, filePath)
+	if err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("read existing nodes for %s: %w", filePath, err)
+	}
+	available := make(map[nodeIdentity][]int64)
+	var present []int64
+	for rows.Next() {
+		var id int64
+		var key nodeIdentity
+		if err := rows.Scan(&id, &key.label, &key.name, &key.qualifiedName); err != nil {
+			rows.Close()
+			return nil, 0, 0, nil, fmt.Errorf("scan existing node: %w", err)
+		}
+		available[key] = append(available[key], id)
+		present = append(present, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("iterate existing nodes for %s: %w", filePath, err)
+	}
+
+	update, err := tx.Prepare(
+		`UPDATE nodes SET start_line = ?, end_line = ?, signature = ?, return_type = ?,
+		 is_exported = ?, is_test = ?, language = ?, parent_id = ?,
+		 file_hash = ?, byte_start = ?, byte_end = ? WHERE id = ?`)
+	if err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("prepare node update: %w", err)
+	}
+	defer update.Close()
+	insert, err := tx.Prepare(
+		`INSERT INTO nodes (label, name, qualified_name, file_path, start_line, end_line,
+		 signature, return_type, is_exported, is_test, language, parent_id,
+		 file_hash, byte_start, byte_end)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return nil, 0, 0, nil, fmt.Errorf("prepare node insert: %w", err)
+	}
+	defer insert.Close()
+
+	retained := make(map[int64]bool, len(present))
+	ids = make([]int64, len(nodes))
+	for i, n := range nodes {
+		key := nodeIdentity{label: n.Label, qualifiedName: n.QualifiedName, name: n.Name}
+		fileHash, byteStart, byteEnd := contentAddress(n)
+		if queue := available[key]; len(queue) > 0 {
+			id := queue[0]
+			available[key] = queue[1:]
+			if _, err := update.Exec(
+				n.StartLine, n.EndLine, n.Signature, n.ReturnType, n.IsExported,
+				n.IsTest, n.Language, nullableParentID(n.ParentID),
+				fileHash, byteStart, byteEnd, id,
+			); err != nil {
+				return nil, 0, 0, nil, fmt.Errorf("update node %d: %w", i, err)
+			}
+			ids[i] = id
+			retained[id] = true
+			updated++
+			continue
+		}
+		res, err := insert.Exec(
+			n.Label, n.Name, n.QualifiedName, n.FilePath, n.StartLine, n.EndLine,
+			n.Signature, n.ReturnType, n.IsExported, n.IsTest, n.Language,
+			nullableParentID(n.ParentID), fileHash, byteStart, byteEnd,
+		)
+		if err != nil {
+			return nil, 0, 0, nil, fmt.Errorf("insert node %d: %w", i, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, 0, 0, nil, fmt.Errorf("last insert id %d: %w", i, err)
+		}
+		ids[i] = id
+		retained[id] = true
+		inserted++
+	}
+	for _, id := range present {
+		if !retained[id] {
+			removed = append(removed, id)
+		}
+	}
+	return ids, inserted, updated, removed, nil
+}
+
 func BatchInsertNodesTx(tx *sql.Tx, nodes []*Node) ([]int64, error) {
 	if len(nodes) == 0 {
 		return nil, nil

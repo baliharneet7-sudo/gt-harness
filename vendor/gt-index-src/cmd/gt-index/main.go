@@ -1324,6 +1324,11 @@ func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) str
 //  9. INSERT OR REPLACE INTO file_hashes.
 //  10. COMMIT.
 //  11. Print one JSON line to stdout.
+// Amendment counts, surfaced on the result line: a reindex reporting only
+// nodes_replaced cannot tell an amendment from a replacement, and that is
+// the distinction this path turns on.
+var incrNodesInserted, incrNodesUpdated, incrNodesRemoved int
+
 func runIncremental(root, relpath, dbPath string) error {
 	startWall := time.Now()
 
@@ -1467,69 +1472,30 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Measured downstream on run 34144284449: caller_coverage unavailable on 189
 	// of 255 reads (74%) and caller_contract_view delivered 3 times in 280 steps.
 	//
-	// An edit to F can only change resolution for a callsite that is IN F, that
-	// resolves INTO F, or that lives in a file importing F. A file that neither
-	// references nor imports F cannot bind to it, so its overlay is still valid
-	// and deleting it discards proven work. Scope the purge to that blast radius.
-	// The newly-resolvable case -- an unresolved callsite that F now satisfies --
-	// is handled after insertion below, where F's NEW symbols are visible.
-	if _, err := tx.Exec(`CREATE TEMP TABLE IF NOT EXISTS gt_incr_affected(path TEXT PRIMARY KEY)`); err != nil {
-		return fmt.Errorf("stage incremental blast radius: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM gt_incr_affected`); err != nil {
-		return fmt.Errorf("reset incremental blast radius: %w", err)
-	}
-	if _, err := tx.Exec(`
-		INSERT OR IGNORE INTO gt_incr_affected(path)
-		  SELECT ?1
-		  UNION
-		  SELECT n.file_path FROM nodes n JOIN edges e ON e.source_id = n.id
-		   WHERE e.target_id IN (SELECT id FROM nodes WHERE file_path = ?1)
-		     AND n.file_path IS NOT NULL AND n.file_path <> ''
-		  UNION
-		  SELECT e.source_file FROM edges e
-		   WHERE e.type = 'IMPORTS'
-		     AND e.target_id IN (SELECT id FROM nodes WHERE file_path = ?1)
-		     AND e.source_file IS NOT NULL AND e.source_file <> ''`, relSlash); err != nil {
-		return fmt.Errorf("derive incremental blast radius: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM edges
-		 WHERE (type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT')
-		        OR (type='CALLS' AND callsite_stable_id IS NOT NULL))
-		   AND (source_file IN (SELECT path FROM gt_incr_affected)
-		     OR source_id IN (SELECT id FROM nodes
-		                       WHERE file_path IN (SELECT path FROM gt_incr_affected)
-		                         AND (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'))
-		     OR target_id IN (SELECT id FROM nodes
-		                       WHERE file_path IN (SELECT path FROM gt_incr_affected)
-		                         AND (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite')))`); err != nil {
-		return fmt.Errorf("remove stale attached resolution edges: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM nodes
-		 WHERE (node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite')
-		   AND file_path IN (SELECT path FROM gt_incr_affected)`); err != nil {
-		return fmt.Errorf("remove stale attached resolution nodes: %w", err)
-	}
+	// NOTHING is purged here, and that is the point.
+	//
+	// This block used to delete the attached resolution overlay -- first
+	// repository-wide (177,390 of 181,200 nodes on the arktype graph), then
+	// scoped to a blast radius, then to this file alone. Every one of those was
+	// a smaller version of the same mistake. The overlay is proven work; an edit
+	// to one file does not make it false, it makes part of it older. The graph
+	// is the backbone and it gets amended, not rebuilt.
+	//
+	// What made deletion look necessary was replacing the file's nodes and
+	// giving every symbol a new id. ReconcileFileNodesTx below holds ids stable,
+	// so overlay rows keep pointing at the symbols they were proven against, and
+	// each row already records the revision it was proven at (ResolutionCallsite
+	// .RepositoryRevision, AttachedCandidate.Revision). Staleness is therefore
+	// something a reader can SEE rather than something the writer has to destroy.
 
-	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
-	// stripped by the upcoming target_id-based DELETE; without this snapshot
-	// they'd be lost permanently because re-parsing this file does NOT
-	// re-emit the calls that originate in other files. Self-edges (within
-	// this same file) are excluded from the snapshot — they'll be re-emitted
-	// naturally when the parser re-runs over this file's body.
-	incomingSnap, err := store.SnapshotIncomingEdgesTx(tx, relSlash, 0)
-	if err != nil {
-		return err
-	}
-
-	// Steps 5+6 — delete edges (both directions), then nodes, for this file.
-	edgesDeleted, nodesDeleted, err := store.DeleteFileEdgesAndNodesTx(tx, relSlash)
-	if err != nil {
-		return err
-	}
-	_ = nodesDeleted // captured for diagnostics; not surfaced beyond this scope
-
-	// Step 8 — insert this file's new nodes, then resolve+insert its outgoing edges.
+	// Steps 5+6+8 — AMEND this file rather than replace it.
+	//
+	// The snapshot-then-delete-then-reinsert this replaces existed only because
+	// the file's nodes were about to get new ids: incoming edges had to be
+	// captured and re-matched by name afterwards, and anything that could not
+	// be re-matched was counted as "incoming_unresolved" and lost. Holding ids
+	// stable removes the need for all of it -- an edge pointing at a function
+	// that did not change was never broken, so it never has to be restored.
 	newNodePtrs := make([]*store.Node, len(pr.Nodes))
 	parentLocal := make([]int64, len(pr.Nodes))
 	for i := range pr.Nodes {
@@ -1538,10 +1504,16 @@ func runIncremental(root, relpath, dbPath string) error {
 		n.ParentID = 0
 		newNodePtrs[i] = n
 	}
-	newDBIDs, err := store.BatchInsertNodesTx(tx, newNodePtrs)
+	newDBIDs, nodesInserted, nodesUpdated, nodesRemoved, err := store.ReconcileFileNodesTx(tx, relSlash, newNodePtrs)
 	if err != nil {
-		return fmt.Errorf("insert new nodes: %w", err)
+		return fmt.Errorf("reconcile file nodes: %w", err)
 	}
+	edgesDeleted, err := store.AmendFileEdgesTx(tx, relSlash, nodesRemoved)
+	if err != nil {
+		return err
+	}
+	incrNodesInserted, incrNodesUpdated, incrNodesRemoved = nodesInserted, nodesUpdated, len(nodesRemoved)
+
 	for i, plocal := range parentLocal {
 		if plocal > 0 {
 			pidx := int(plocal) - 1
@@ -1553,17 +1525,14 @@ func runIncremental(root, relpath, dbPath string) error {
 		}
 	}
 
-	// The one case the blast radius above cannot see: a callsite elsewhere that
-	// was UNRESOLVED and that F now satisfies. F's new symbols only exist after
-	// the insert, so the match runs here rather than beside the scoped purge.
-	if _, err := tx.Exec(`DELETE FROM nodes
-		 WHERE node_type = 'unresolved_fact'
-		   AND name IN (SELECT name FROM nodes WHERE file_path = ?1)`, relSlash); err != nil {
-		return fmt.Errorf("remove newly-resolvable unresolved facts: %w", err)
-	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS gt_incr_affected`); err != nil {
-		return fmt.Errorf("release incremental blast radius: %w", err)
-	}
+	// An "unresolved" fact recorded elsewhere is NOT retired here, and the
+	// attempt to do so is worth recording. Matching those rows by bare NAME
+	// against this file's symbols deleted 18,972 of them graph-wide on the
+	// arktype graph for a twenty-symbol test file, because ordinary helper names
+	// collide across a repository. It was also the wrong idea even when narrow:
+	// "X was unresolved at revision R1" stays true at R1. If X becomes
+	// resolvable, the next resolution proves that -- it is not established by
+	// deleting the record that it once was not.
 
 	// Re-resolve outgoing calls. The pre-fetched allNodes/allIDs include the
 	// just-deleted file's old IDs; filter them out so calls don't resolve to
@@ -1809,10 +1778,11 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 8.5 — re-resolve the incoming-edge snapshot against the freshly
 	// inserted nodes. Edges whose target name no longer exists in this file
 	// (rename/removal) are dropped silently and counted in `incomingUnres`.
-	incomingRest, incomingUnres, err := store.ResolveIncomingEdgesTx(tx, incomingSnap, relSlash)
-	if err != nil {
-		return fmt.Errorf("re-resolve incoming edges: %w", err)
-	}
+	// No incoming edge was broken, so none needs re-resolving: the reconcile
+	// above kept every surviving symbol's id. Reported as zero restored and
+	// zero unresolved because zero were disturbed, which is a different fact
+	// from "none could be recovered" and the counters keep them apart.
+	incomingRest, incomingUnres := 0, 0
 
 	// Step 9 — record new content hash inside the same tx.
 	if err := store.InsertFileHashTx(tx, relSlash, newHash, spec.Name); err != nil {
@@ -1870,8 +1840,8 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
-		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
+		`{"file":%q,"nodes_replaced":%d,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
+		relSlash, len(newDBIDs), incrNodesInserted, incrNodesUpdated, incrNodesRemoved, replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
 	)
 	return nil
 }
