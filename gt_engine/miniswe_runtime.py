@@ -916,6 +916,13 @@ def install_runtime_hooks(
                 max_tokens=256,
                 num_retries=0,
             )
+            # The call is spent and already counted at the transport the moment
+            # native_query returns. Counting it after bind_provider_response and
+            # accept_select_catalog made the count a proxy for "the bootstrap
+            # succeeded" rather than "the bootstrap called the provider", so any
+            # failure below silently lost one call and the receipt failed closed
+            # with provider_call_count_mismatch against terminal_requests.
+            adapter.note_select_catalog_bootstrap()
             extra = dict(message.get("extra") or {})
             if captured["arguments"] is None:
                 captured["arguments"] = extra.get("select_catalog_args")
@@ -925,7 +932,6 @@ def install_runtime_hooks(
             adapter.bind_provider_response(
                 response, usage=usage, model=model_id, next_actions=()
             )
-            adapter.note_select_catalog_bootstrap()
             session.accept_select_catalog(captured["arguments"])
         except Exception as exc:  # noqa: BLE001 - selection is advisory
             adapter.bind_provider_failure(exc)

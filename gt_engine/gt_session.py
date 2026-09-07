@@ -357,6 +357,20 @@ class GTSession:
         lifecycle = self._select_catalog_lifecycle
         if lifecycle is None:
             return
+        # The admission hook can run more than once for one offer -- a transport
+        # retry re-enters it with _gt_select_catalog still set. The ladder is
+        # per-OFFER, not per-attempt, so re-admitting the identical certified
+        # request is not a violation. In run 34064560259 it was treated as one:
+        # the second admission hit "CERTIFIED requires CANDIDATE; found
+        # DELIVERED", the bootstrap was abandoned after its provider call had
+        # already been made and counted, and the receipt failed closed with
+        # provider_call_count_mismatch on an otherwise graded run.
+        # Identity is the certified request bytes; provider_request_id embeds
+        # the iteration and so differs between attempts at the same offer.
+        if lifecycle.stage in {SelectCatalogStage.CERTIFIED, SelectCatalogStage.DELIVERED}:
+            if lifecycle.request_sha256 == hashlib.sha256(request_bytes).hexdigest():
+                self._record_select_catalog("provider_request_readmitted")
+                return
         lifecycle.certify_offer(
             request_bytes=request_bytes,
             tool_schema_bytes=tool_schema_bytes,
