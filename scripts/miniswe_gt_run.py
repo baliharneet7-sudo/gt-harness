@@ -673,7 +673,7 @@ def build_agent(
             # reads the same variable, so it leaked out of the run and into
             # everything sharing the interpreter. The gate caught that as five
             # failures in test_hybrid_retrieval that pass in isolation.
-            contract_store_path=layout.task_root / "contract-embeddings.sqlite",
+            contract_store_path=layout.contract_store_path,
             embedding_budget_seconds=(
                 # The INITIAL build must be allowed to finish, not merely be
                 # bounded. Run 34077224456 proved why: at min(300s, 10%) the

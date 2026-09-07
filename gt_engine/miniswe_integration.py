@@ -989,6 +989,15 @@ class MiniSweAdapter(GroundtruthController):
                     return GraphBuildArtifact(False, "", "", "unsafe_source_path")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
+            # No contract_store_path here on purpose. The layout carries it and
+            # ensure_index_with_receipt derives it, so this call cannot reach
+            # the graph-keyed store whether or not anyone remembers to pass it -
+            # which is the whole point, since forgetting is exactly what
+            # happened. Passing it as well would add a second mechanism that
+            # must agree with the first, and would break every existing test
+            # double for this function: three of them monkeypatch a lambda whose
+            # signature does not accept the argument, and stub signatures
+            # lagging a new parameter has already cost two red commits here.
             receipt = ensure_index_with_receipt(
                 root, layout=self.engine_state.layout,
                 source_revision=request.source_revision,
@@ -1963,7 +1972,7 @@ class MiniSweAdapter(GroundtruthController):
                 # its own store.
                 store_path=(
                     os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
-                    or str(self.engine_state.layout.task_root / "contract-embeddings.sqlite")
+                    or str(self.engine_state.layout.contract_store_path)
                 ),
             )
             dense = next(

@@ -1970,7 +1970,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                               source_revision: str = "",
                               excluded_roots: tuple[Path, ...] = (),
                               embedding_budget_seconds: float | None = None,
-                              contract_store_path: "Path | None" = None,
+                              contract_store_path: Path | None = None,
                               layout: RuntimeLayout | None = None) -> IndexBuildReceipt:
     root_path = Path(root)
     if layout is not None:
@@ -2178,8 +2178,22 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 onnx_token_lengths,
             )
 
+            # The layout decides when the caller does not, because a caller
+            # that forgets is not hypothetical: three call sites needed this
+            # path, two passed it and the rebuild in GraphBuildCoordinator
+            # simply omitted it. It fell through to default_store_path, which
+            # is keyed on the graph and therefore empty at exactly the moment
+            # the store matters - after a republication. Run 34095557374
+            # re-planned the whole corpus sixteen times
+            # (`planned=3809..3822, estimated=913s, budget=60s`) and never
+            # refreshed dense retrieval once in 78 minutes.
+            #
+            # An explicit argument still wins, so an override stays possible;
+            # what is no longer possible is a caller holding a layout and
+            # silently getting the graph-keyed store.
             store_path = (
                 contract_store_path
+                or (layout.contract_store_path if layout is not None else None)
                 or os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
                 or default_store_path(graph_path)
             )

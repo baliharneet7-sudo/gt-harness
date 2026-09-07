@@ -57,6 +57,25 @@ class RuntimeLayout:
                    Path(export_path).resolve() if export_path else None)
 
     @property
+    def contract_store_path(self) -> Path:
+        """The contract embedding store, pinned to the TASK, not to a graph.
+
+        Three callers needed this path and each retyped the expression: the
+        initial build in miniswe_gt_run, the retrieval reader, and the rebuild
+        in GraphBuildCoordinator. Two matched and the third was simply omitted,
+        so the rebuild fell through to the graph-keyed default, found an empty
+        store, and re-planned the entire corpus on every republication:
+        `planned=3809 ... 3822, estimated=913s, budget=60s, budget_insufficient`
+        sixteen times in run 34095557374, with dense retrieval never refreshed
+        for the whole 78-minute run.
+
+        The store is task-scoped because a graph-keyed store is discarded at
+        every republication, which is precisely when its contents are worth
+        keeping. Deriving it once is what stops a fourth caller diverging.
+        """
+        return self.task_root / "contract-embeddings.sqlite"
+
+    @property
     def excluded_roots(self) -> tuple[Path, ...]:
         # A configured state namespace may share a workspace or its ancestor.
         # In that case reserve only the concrete internal namespaces, never
