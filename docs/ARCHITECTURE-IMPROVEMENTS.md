@@ -232,6 +232,63 @@ calls, which defect 1 explains.
 
 ---
 
+## Blocker ledger — what closed, what did not
+
+Eight blockers were tracked into this session. Six closed, one is accepted,
+and two remain open with their cause identified rather than guessed.
+
+| # | blocker | state | commit |
+|---|---|---|---|
+| 1 | incremental indexing destroyed 98% of the graph | **closed** | `043e14c6` |
+| 2 | `nodes_fts` cleared with a statement its table type forbids | **closed** | `043e14c6` |
+| 3 | graph identity no run could satisfy (`BenchmarkGraphRequired`) | **closed** | `1920a127` |
+| 4 | history marker moved and destroyed the prompt cache | **closed** | `1920a127` |
+| 5 | producer committed non-executable; refusals named nothing | **closed** | `da43ebcd` |
+| 6 | `provider_manifest_count_mismatch` on every retried call | **closed** | `3f53b55c` |
+| 7 | grep inflation / obligation ledger resets | **open** — downstream of 8 | |
+| 8 | graph cannot keep pace at an edit boundary | **open** — cause identified | |
+
+### Why 7 and 8 are one blocker, and what closing it requires
+
+The live path -- `MiniSweAdapter` -> `GTSession` -> `GraphBuildCoordinator` ->
+`_build_frozen_graph` -> `ensure_index_with_receipt` -- performs a **FULL**
+index on every invalidation. `-file` appears nowhere in `gt_engine/` or
+`scripts/`; it exists only inside the installed `groundtruth` wheel and one
+offline script. So fixing the producer's incremental mode made incremental
+*safe* without making anything *use* it, and blocker 8 is untouched by it.
+
+Two things must both be true before the live path can adopt it:
+
+- **Speed.** `PromotePropertyEdges` runs whole-graph on every single-file
+  reindex; the producer's own comment names a file-scoped variant as the
+  pending optimization. Clean measurement is 12.0s (a 77s reading was taken
+  while a 300-step run saturated the same box and should not be quoted).
+- **Authority.** `queryAttachedCandidates` refuses when
+  `graph_resolution_complete != "1"`, and `runIncremental` sets it to 0 --
+  deliberately, pinned by `inheritance_incremental_test.go`: *"the new
+  graph-native authority is explicitly incomplete and hidden from the generic
+  edge query until a full rebuild restores a single revision."* Setting that
+  flag without re-deriving the overlay would assert repository-wide candidate
+  parity that was never computed. Earning it means running the equivalent of
+  `publishAnalysisPhase` scoped to the blast radius.
+
+The scoped purge in blocker 1 is what makes that argument available at all:
+before it, nothing outside the edited file survived, so fail-closed was the
+only honest marker. It is now a bounded piece of resolver work rather than an
+impossibility.
+
+### Not product defects
+
+- The codespace launcher never passed `--product-source-sha`, so
+  `issue_runtime_receipts` raised `product_source_sha_invalid` and every run
+  reported ERROR at the finish line regardless of outcome. CI supplies it via
+  pier's `--ak product_source_sha=`; the harness script did not. A launcher
+  bug, fixed in the launcher.
+- Sustained `BadGatewayError` retries against `{"only":["relace"],
+  "allow_fallbacks":false}`. The pinned route was probed directly and returned
+  HTTP 200 with `provider: Relace`, so this is intermittent gateway failure on
+  ~120k-token requests, not our code and not an outage.
+
 ## Known defect, measured but not fixed: pointers nobody follows
 
 `SEALED_DELIVERY_BYTE_LIMIT` is 1_400. A sealed delivery above it is not
