@@ -232,6 +232,41 @@ calls, which defect 1 explains.
 
 ---
 
+## Known defect, measured but not fixed: pointers nobody follows
+
+`SEALED_DELIVERY_BYTE_LIMIT` is 1_400. A sealed delivery above it is not
+truncated -- it is replaced by a `GT_CONTEXT_UNIT_REFERENCE` carrying a
+`gt-evidence read ...` retrieval command for the model to run itself.
+
+On run 34144284449 the model issued that command **zero times in 280
+commands**, so every one of the 56 references delivered nothing:
+
+```
+delivery blobs                     175
+  shipped as a pointer              56   (32%)
+  dereferenced by the model          0
+payload sizes            1,090-1,854 bytes, median 1,413
+content withheld              75,420 bytes
+pointers shipped              36,502 bytes
+net saving                    38,918 bytes  = 0.1% of a 34,074,940-token run
+```
+
+The ceiling cuts through the middle of the payload distribution, so the
+deliveries it converts to pointers are the ones barely over it. Measured on
+the delivery-attribution instrument, `context_delta` -- 52% of everything GT
+said on that run -- was acted on 2% of the time.
+
+**Why the obvious fix was reverted.** Raising the ceiling to 1_900 (clearing
+the observed maximum while staying under the `context_contract` ceiling of
+2_000, which a sealed delivery must not borrow) is a one-line change and the
+suite says it is not a local one: it moves which deliveries take the reference
+path, and that ripples into receipt census, budget conservation and the
+compaction assertions. Three tests were realigned and a fourth kept surfacing.
+A budget constant that reprices four contracts is load-bearing, and changing
+it belongs with the delivery-contract work rather than beside a producer fix.
+
+Recorded here rather than half-applied. The measurement is the durable part.
+
 ## What this does not fix
 
 - **`provider_manifest_count_mismatch`** — the harness receipt check that made
