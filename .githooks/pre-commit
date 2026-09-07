@@ -42,4 +42,16 @@ if not os.access(os.path.join(expected_path, "pre-commit"), os.X_OK):
     print("construction gate refused: common pre-commit hook is not executable", file=sys.stderr)
     raise SystemExit(1)
 
-raise SystemExit(main([".", "--manifest", ".githooks/failure-gate.json", "--commit", "HEAD"]))
+_failure_gate = main([".", "--manifest", ".githooks/failure-gate.json", "--commit", "HEAD"])
+if _failure_gate:
+    raise SystemExit(_failure_gate)
+
+# Prove the staged change did not break what depends on it. Three defects in
+# three consecutive commits shared one shape - the change's effect was wider
+# than the function edited - and the rate rose while moving faster toward a
+# dispatch. A rule addressed to oneself fails exactly when attention is
+# elsewhere; this runs regardless.
+raise SystemExit(
+    subprocess.call([sys.executable, "scripts/check_change_blast_radius.py"],
+                    cwd=str(_REPOSITORY_ROOT))
+)
