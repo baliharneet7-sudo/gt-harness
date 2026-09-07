@@ -795,7 +795,7 @@ def test_a_superseded_enrichment_does_not_override_the_final_one(tmp_path):
     ], {digest: {"verified": 1, "corrected": 1, "deleted": 0, "language_receipts": {"python": {"selection_complete": True}}}})
 
     assert rows["lsp_promotion"] == (
-        "WORKING", "terminal_succeeded:published:2_edges:last_of_2"
+        "WORKING", "terminal_succeeded:published:2_edges:1_of_2_obsolete:last_of_2"
     )
 
 
@@ -911,7 +911,7 @@ def test_agreeing_terminals_do_not_raise_a_count_alarm(tmp_path):
     ], {digest: {"verified": 4, "corrected": 0, "deleted": 0, "language_receipts": {"python": {"selection_complete": True}}}})
 
     assert rows["lsp_promotion"] == (
-        "WORKING", "terminal_succeeded:published:4_edges"
+        "WORKING", "terminal_succeeded:published:4_edges:1_of_2_obsolete"
     )
 
 

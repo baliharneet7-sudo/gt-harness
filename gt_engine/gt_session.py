@@ -1482,7 +1482,11 @@ class GTSession:
                     1 for row in terminals
                     if str(row.get("disposition") or "") == "obsolete"
                 )
-                if obsolete:
+                # Only when there is more than one terminal. With a single
+                # terminal the disposition already in this string says it, and
+                # "obsolete:1_of_1_obsolete" is noise that trains a reader to
+                # skip the field.
+                if obsolete and len(terminals) > 1:
                     lsp_evidence += f":{obsolete}_of_{len(terminals)}_obsolete"
                 if len({str(row.get("status") or "") for row in terminals}) > 1:
                     # Only when the terminals DISAGREE. Every published graph
