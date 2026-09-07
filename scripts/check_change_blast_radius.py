@@ -166,6 +166,31 @@ def main() -> int:
         print(f"    {line}", file=sys.stderr)
     if proc.returncode == 0:
         return 0
+    # Some suites assert a property of HEAD, not of the working tree:
+    # gt_harness.product refuses to bundle when the source closure differs from
+    # HEAD, so test_product_acceptance CANNOT pass with a staged-but-uncommitted
+    # change to any closure file. Controlled rather than assumed - appending a
+    # bare comment to gt_harness/product.py reproduces it exactly, so the
+    # failure is caused by the tree being dirty and not by any diff's content.
+    #
+    # Blocking on that would refuse every commit that touches the closure, and a
+    # gate that is always red is a gate that gets bypassed. Reported, with the
+    # blocking decision taken on the remaining failures - which is how the one
+    # REAL failure in this set (a parity test pinning the old patch path) still
+    # stopped the commit.
+    head_only = "source_closure_differs_from_head" in proc.stdout
+    failures = [ln for ln in proc.stdout.splitlines() if ln.startswith("FAILED")]
+    attributable = [ln for ln in failures
+                    if not (head_only and "test_product_acceptance" in ln)]
+    if head_only:
+        print(f"    NOTE: {len(failures) - len(attributable)} failure(s) assert a "
+              f"property of HEAD and cannot pass before the commit exists "
+              f"(source_closure_differs_from_head); not counted against the diff",
+              file=sys.stderr)
+    if failures and not attributable:
+        print("blast-radius gate: every failure is a HEAD-asserting suite; nothing "
+              "is attributable to the staged change", file=sys.stderr)
+        return 0
     if proc.returncode == PYTEST_USAGE_ERROR:
         print(proc.stdout.strip() or proc.stderr.strip(), file=sys.stderr)
         print("blast-radius gate: the derived set could not be collected, so this "

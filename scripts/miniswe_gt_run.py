@@ -1046,6 +1046,22 @@ def main() -> int:
             report["patch_export_error"] = f"{type(exc).__name__}: {exc}"
             if exception is None:
                 exception = exc
+    # Whether the benchmark will see anything at all. task.toml collects
+    # `git diff BASE HEAD`, so a run whose agent never committed grades against
+    # a pristine base no matter what it built - grader.py says so in as many
+    # words. instruction.md assigns the commit to the agent, and the container
+    # ships with no git identity, so the model must notice that failure and fix
+    # it; the frozen baseline's model spent two actions doing exactly that.
+    #
+    # Recording it changes nothing the benchmark sees and makes the failure
+    # attributable: a completing run that scores zero because no commit exists
+    # becomes distinguishable from one whose work was wrong. Across runs it
+    # measures the thing worth knowing - how often the step count costs the
+    # commit.
+    if patch_baseline:
+        head = _repository_head(Path(args.cwd))
+        report["collected_patch_will_be_empty"] = bool(head) and head == patch_baseline
+        report["repository_head_moved"] = bool(head) and head != patch_baseline
     # Treatment identity is the requested mode, not effective engine health.
     # A kill switch may preserve native execution but cannot relabel ON as OFF.
     gt_active = not args.gt_off and args.gt_mode != "off"

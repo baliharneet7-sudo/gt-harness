@@ -68,7 +68,10 @@ def test_workflow_max_iterations_reaches_the_installed_runner(tmp_path):
     assert "--time-budget-seconds 3600" in command
     assert "--product-receipt /logs/agent/gt-run.json" in command
     assert "--adapter-receipt /logs/agent/benchmark-adapter.json" in command
-    assert "--patch-output /logs/artifacts/model.patch" in command
+    # /logs/artifacts/model.patch belongs to the benchmark - task.toml's
+    # [[verifier.collect]] regenerates it from `git diff BASE HEAD` - so the
+    # working-tree export writes beside it instead of over it.
+    assert "--patch-output /logs/agent/gt-worktree.patch" in command
     # The installed runner must be what executes, with nothing wrapping it. The
     # only permitted prefix is the staged language-server PATH, which changes
     # lookup for the promotion servers and not the interpreter.

@@ -421,7 +421,18 @@ class MiniSweAgent(BaseInstalledAgent):
             f"--metrics /logs/agent/miniswe_report.json "
             f"--product-receipt /logs/agent/gt-run.json "
             f"--adapter-receipt /logs/agent/benchmark-adapter.json "
-            f"--patch-output /logs/artifacts/model.patch "
+            # NOT /logs/artifacts/model.patch. That path belongs to the
+            # benchmark: task.toml's [[verifier.collect]] regenerates it with
+            # `git diff --binary BASE HEAD` - commits only - so on any run that
+            # reaches the verifier our working-tree export is overwritten, and on
+            # any run that does not, the verifier stage never executes. There is
+            # no path on which this file is graded, in either arm, ever.
+            #
+            # What writing it there DID do was make a 43,605-byte export in run
+            # 34095557374 look like the gradeable object, and it was reasoned
+            # about as one for an hour. Same bytes, honest name, and the
+            # two-producers-one-path race disappears.
+            f"--patch-output /logs/agent/gt-worktree.patch "
             f"{self.build_cli_flags()} "
             f"{extra_args}"
             "</dev/null 2>&1"
