@@ -1297,6 +1297,10 @@ class IndexBuildReceipt:
     analysis_failure_reason: str = ""
     embedding_state: str = "not_requested"
     embedding_failure_reason: str = ""
+    # What the refresh actually achieved, when it ran. Kept apart from
+    # embedding_failure_reason because a name that outlives its meaning is this
+    # ticket's most repeated defect, and "the rate we measured" is not a failure.
+    embedding_measurement: str = ""
 
     @property
     def success(self) -> bool:
@@ -1318,6 +1322,7 @@ class IndexBuildReceipt:
             "analysis_failure_reason": self.analysis_failure_reason,
             "embedding_state": self.embedding_state,
             "embedding_failure_reason": self.embedding_failure_reason,
+            "embedding_measurement": self.embedding_measurement,
         }
 
 
@@ -2061,10 +2066,12 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
     # is a cache the retrieval side can degrade from with a named reason.
     embedding_state = "unconfigured"
     embedding_failure = ""
+    embedding_measurement = ""
     model_dir = os.environ.get("GT_DENSE_MODEL_DIR", "").strip()
     if model_dir and status in (IndexBuildStatus.BUILT, IndexBuildStatus.BUILT_CORE_ONLY):
         try:
             from gt_engine.contract_embeddings import (
+                DEFAULT_BATCH_SIZE,
                 ContractEmbeddingStore,
                 EmbeddingBudgetExhausted,
                 EmbeddingBudgetInsufficient,
@@ -2085,13 +2092,32 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 if embedding_budget_seconds and float(embedding_budget_seconds) > 0
                 else None
             )
+            started = time.monotonic()
             try:
-                store.refresh(
+                receipt = store.refresh(
                     graph_path, embed_fn=onnx_embedder(model_dir), deadline=deadline,
                 )
             finally:
                 store.close()
+            # Report the rate the run actually achieved. The a priori estimate
+            # is one constant derived from two runs; without the run stating its
+            # own numbers, a constant that is too HIGH silently skips plans that
+            # would have fitted and nothing ever contradicts it. With them,
+            # estimate and outcome are comparable in the receipt and the
+            # accumulated figures are the argument for building this store at
+            # bundle time instead of inside the timed window.
+            elapsed = time.monotonic() - started
+            embedded = (
+                int(receipt.get("embedded") or 0) if isinstance(receipt, dict) else 0
+            )
+            batches = -(-embedded // DEFAULT_BATCH_SIZE) if embedded else 0
             embedding_state = "refreshed"
+            embedding_measurement = (
+                f"embedded={embedded}:batches={batches}:elapsed={elapsed:.0f}s:"
+                f"observed_seconds_per_batch={elapsed / batches:.2f}"
+                if batches
+                else f"embedded=0:elapsed={elapsed:.0f}s"
+            )
         except EmbeddingBudgetInsufficient as exc:
             # One honest state, nothing spent. The numbers are the case for
             # building this store at bundle time instead.
@@ -2112,6 +2138,7 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                              analysis_state=analysis_state,
                              embedding_state=embedding_state,
                              embedding_failure_reason=embedding_failure,
+                             embedding_measurement=embedding_measurement,
                              analysis_failure_reason=str(phase["analysis_failure_reason"]))
 
 

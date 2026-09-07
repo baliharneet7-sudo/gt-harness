@@ -1408,6 +1408,16 @@ class GTSession:
                             lsp_evidence += (
                                 f":selection_bounded:{limitation or 'unnamed'}"
                             )
+                        elif complete is None:
+                            # A receipt written before the field existed did not
+                            # measure coverage. That is "we could not tell",
+                            # which this reporter exists to keep distinct from
+                            # "it worked" - the optimistic-on-unknown reading is
+                            # the mistake this ticket made five times. Kept as a
+                            # SEPARATE evidence string so an old receipt still
+                            # does not read like a measured-incomplete one.
+                            lsp_state = CapabilityState.DEGRADED
+                            lsp_evidence += ":selection_unknown"
                 elif status == "succeeded":
                     # Promotion worked and the enriched graph never became the
                     # published one - obsolete, obsolete_after_certification or
