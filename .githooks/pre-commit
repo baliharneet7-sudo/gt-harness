@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import subprocess
 import sys
@@ -11,40 +12,81 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from scripts.check_failure_ids import main  # noqa: E402
 
 
-def _expected_common_hooks_path() -> tuple[str, str]:
-    common_git = subprocess.check_output(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        text=True,
-    ).strip()
-    common_root = os.path.dirname(common_git)
+def _hook_git_will_run() -> Path:
+    """The pre-commit file git resolves for THIS worktree, not for the repo."""
     configured = subprocess.check_output(
-        ["git", "config", "--path", "--get", "core.hooksPath"],
-        text=True,
+        ["git", "config", "--path", "--get", "core.hooksPath"], text=True
     ).strip()
-    expected = os.path.join(common_root, ".githooks")
-    return os.path.normcase(os.path.normpath(configured)), os.path.normcase(
-        os.path.normpath(expected)
-    )
+    return Path(configured) / "pre-commit"
 
 
+def _common_repository_hook() -> Path:
+    common_git = subprocess.check_output(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True
+    ).strip()
+    return Path(os.path.dirname(common_git)) / ".githooks" / "pre-commit"
+
+
+# The check that matters is REACHABILITY, not configuration. The previous version
+# asserted core.hooksPath equalled the COMMON repository .githooks - and it did,
+# which is exactly why nothing complained: core.hooksPath is one absolute path
+# shared by every worktree, so every commit in this worktree ran the OTHER
+# branch's hook and this file was never executed. Three commits shipped claiming
+# a gate that had never run once. "Imported is not reachable" - the fourth time
+# that shape has cost something on this ticket.
+#
+# So: assert that the hook git resolves IS this file. A hook that is not reached
+# cannot report that it was not reached, so this cannot be the only defence -
+# the proof is a real commit whose output shows the gate below. But it does stop
+# the reverse mistake, a worktree quietly pointed somewhere else.
 try:
-    configured_path, expected_path = _expected_common_hooks_path()
+    _resolved = _hook_git_will_run().resolve()
+    _self = Path(__file__).resolve()
 except (OSError, subprocess.CalledProcessError) as error:
-    print(f"construction gate refused: common hooksPath unavailable: {error}", file=sys.stderr)
+    print(f"construction gate refused: hooksPath unavailable: {error}", file=sys.stderr)
     raise SystemExit(1) from None
-if configured_path != expected_path:
+if _resolved != _self:
     print(
-        "construction gate refused: core.hooksPath is not the common repository .githooks",
+        "construction gate refused: git runs a different pre-commit than this one" + "\n"
+        + f"  git will run : {_resolved}" + "\n"
+        + f"  this file    : {_self}" + "\n"
+        + "  set it for this worktree only:" + "\n"
+        + "    git config extensions.worktreeConfig true" + "\n"
+        + f"    git config --worktree core.hooksPath {_self.parent}",
         file=sys.stderr,
     )
     raise SystemExit(1)
-if not os.access(os.path.join(expected_path, "pre-commit"), os.X_OK):
-    print("construction gate refused: common pre-commit hook is not executable", file=sys.stderr)
-    raise SystemExit(1)
 
-_failure_gate = main([".", "--manifest", ".githooks/failure-gate.json", "--commit", "HEAD"])
-if _failure_gate:
-    raise SystemExit(_failure_gate)
+# Chain the common repository hook rather than replacing it. Overriding
+# hooksPath for this worktree would otherwise silently drop whatever the shared
+# hook enforces, which is a worse trade than the problem being fixed.
+_common = _common_repository_hook()
+if _common.is_file() and _common.resolve() != _self:
+    _chained = subprocess.call(["sh", str(_common)] if os.name == "nt" else [str(_common)])
+    if _chained:
+        print(f"construction gate refused: the common repository hook exited {_chained}",
+              file=sys.stderr)
+        raise SystemExit(_chained)
+
+# The failure-gate manifest is a VERDICT ABOUT ONE COMMIT: its lineage pins
+# head_sha, parent_sha and source_revision to 81e40b44, the commit that
+# introduced this hook. Re-checking it at any other HEAD is a category error -
+# it refuses with LINEAGE_MISMATCH by construction, on every commit forever.
+# Nobody saw that because the hook was never reached; the first commit that
+# reached it was refused. So it runs when it attests the current HEAD and says
+# so plainly when it does not, rather than blocking every commit with a
+# mismatch that carries no information.
+_manifest = _REPOSITORY_ROOT / ".githooks" / "failure-gate.json"
+_attested = json.loads(_manifest.read_text(encoding="utf-8"))["lineage"]["head_sha"]
+_head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+if _attested == _head:
+    _failure_gate = main([".", "--manifest", ".githooks/failure-gate.json", "--commit", "HEAD"])
+    if _failure_gate:
+        raise SystemExit(_failure_gate)
+else:
+    print(f"construction gate: failure-gate.json attests {_attested[:8]}, HEAD is "
+          f"{_head[:8]} - a verdict about another commit, not a check of this one",
+          file=sys.stderr)
 
 # Prove the staged change did not break what depends on it. Three defects in
 # three consecutive commits shared one shape - the change's effect was wider
