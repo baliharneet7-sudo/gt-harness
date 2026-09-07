@@ -528,6 +528,43 @@ class MiniSweAdapter(GroundtruthController):
             if status is PredicateStatus.RED
         }
         affected.update(active_red)
+        # Record WHICH obligations this edit discarded, and which survived it.
+        # This is the most consequential state transition in a run and it was
+        # journaled only by its consequence: run 34095557374 shows `unmet`
+        # falling to 3 of 18 at iteration 90 and returning to 18, sixteen times,
+        # with no row anywhere saying what was invalidated or why. The
+        # trajectory had to be reconstructed by pairing `state` rows against
+        # `edit_transaction` rows on sequence adjacency - which got it wrong on
+        # the first attempt, in the direction of a more dramatic finding.
+        #
+        # `red_invalidated_by_edit` below covers only RED predicates and was
+        # correctly silent here, because none were RED. Nothing covered the
+        # GREEN ones, which are the ones whose loss costs the run its steps.
+        #
+        # It also decides a question the artifact currently cannot: whether the
+        # scope test is narrow and every obligation genuinely depends on the
+        # edited tree, or whether it matches everything regardless. Those imply
+        # different owners - a product choice about what a ledger is for, versus
+        # a defect in _affected_predicate_ids - and one journal row separates
+        # them.
+        proven_before = {
+            predicate_id
+            for predicate_id, status in self._status.items()
+            if status is PredicateStatus.GREEN
+        }
+        try:
+            self.store.append(
+                "obligation_invalidation",
+                paths=list(normalized_paths),
+                epoch=self.workspace_epoch,
+                invalidated=sorted(affected),
+                proven_before=sorted(proven_before),
+                proven_discarded=sorted(proven_before & affected),
+                proven_surviving=sorted(proven_before - affected),
+                predicate_total=len(self._status),
+            )
+        except Exception:  # noqa: BLE001 - reporting never fails an edit
+            pass
         super().note_edit(normalized_paths, invalidate=affected)
         if self._pending_recovery is not None:
             self.store.append("recovery_invalidated", epoch=self.workspace_epoch)
