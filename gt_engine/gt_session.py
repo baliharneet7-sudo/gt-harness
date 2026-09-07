@@ -1209,8 +1209,10 @@ class GTSession:
         store = getattr(self._engine, "store", None)
         journal = getattr(store, "path", None)
 
-        def _promotion_yield(row: dict[str, object]) -> tuple[int, int] | None:
-            """(edges promoted, edges tombstoned), or None if it cannot be told.
+        def _promotion_yield(
+            row: dict[str, object],
+        ) -> tuple[int, int, bool | None, str] | None:
+            """(promoted, tombstoned, selection_complete, limitation), or None.
 
             The journal row carries only status and disposition; the counts
             that say whether the tier was populated live in the terminal
@@ -1251,7 +1253,20 @@ class GTSession:
             promoted = sum(
                 int(receipt.get(key) or 0) for key in ("verified", "corrected")
             )
-            return promoted, int(receipt.get("deleted") or 0)
+            # selection_complete says whether the ambiguous-edge SELECTION saw
+            # the whole tier. The producer records it and, until now, nothing
+            # read it: both callers of _get_ambiguous_edges leave `limit` at its
+            # default 500 against 6,621 ambiguous callsites on the gate task, so
+            # a positive promoted count can describe a 92.5%-unattempted tier.
+            # None means the receipt predates the field, which is unknown, not
+            # complete.
+            complete = receipt.get("selection_complete")
+            return (
+                promoted,
+                int(receipt.get("deleted") or 0),
+                None if complete is None else bool(complete),
+                str(receipt.get("selection_limitation") or ""),
+            )
 
         dense_state = CapabilityState.FAILED
         dense_evidence = "dense_index_receipt_absent"
@@ -1376,7 +1391,7 @@ class GTSession:
                         lsp_state = CapabilityState.DEGRADED
                         lsp_evidence += ":yield_unknown"
                     else:
-                        promoted, tombstoned = yielded
+                        promoted, tombstoned, complete, limitation = yielded
                         lsp_state = (
                             CapabilityState.WORKING if promoted > 0
                             else CapabilityState.DEGRADED
@@ -1384,6 +1399,15 @@ class GTSession:
                         lsp_evidence += f":{promoted}_edges"
                         if tombstoned:
                             lsp_evidence += f":{tombstoned}_tombstoned"
+                        # A positive edge count says the tier is NON-EMPTY. It
+                        # does not say the tier was ATTEMPTED. Reporting WORKING
+                        # off the count alone is the proxy this whole reporter
+                        # exists to stop, one level further in.
+                        if complete is False:
+                            lsp_state = CapabilityState.DEGRADED
+                            lsp_evidence += (
+                                f":selection_bounded:{limitation or 'unnamed'}"
+                            )
                 elif status == "succeeded":
                     # Promotion worked and the enriched graph never became the
                     # published one - obsolete, obsolete_after_certification or
