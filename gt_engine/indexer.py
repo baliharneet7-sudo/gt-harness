@@ -1113,6 +1113,8 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                 error_code=refusal.error_code, staged_evidence=staged_evidence,
                 identity=identity,
             )
+            if diagnostics is not None:
+                diagnostics.append(refusal.error_code)
             return None
         existing_manifest = db.with_suffix(".manifest.json")
         if db.is_file() and existing_manifest.is_file():
@@ -1177,6 +1179,8 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                 staged_evidence=evidence_path,
                 identity=identity,
             )
+            if diagnostics is not None:
+                diagnostics.append(process_result.error_code)
             candidate.unlink(missing_ok=True)
             return None
         if not candidate.is_file():
@@ -1222,6 +1226,8 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                 staged_evidence=evidence_path,
                 identity=identity,
             )
+            if diagnostics is not None:
+                diagnostics.append("GT_INDEX_OUTPUT_INVALID")
             candidate.unlink(missing_ok=True)
             return None
         if quick_check.lower() != "ok":
@@ -1241,6 +1247,8 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                 staged_evidence=evidence_path,
                 identity=identity,
             )
+            if diagnostics is not None:
+                diagnostics.append("GT_INDEX_OUTPUT_INVALID")
             candidate.unlink(missing_ok=True)
             return None
         if compute_index_reuse_key(root, excluded_roots=excluded_roots) != reuse_key:
