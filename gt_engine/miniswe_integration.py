@@ -13,7 +13,7 @@ import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .delivery_budget import (
@@ -848,7 +848,8 @@ class MiniSweAdapter(GroundtruthController):
             disposition = self._graph_coordinator.schedule(request)
         except Exception as exc:  # noqa: BLE001 - freshness is fail-open
             self.store.append(
-                "graph_refresh_failed", error_type=type(exc).__name__
+                "graph_refresh_failed", error_type=type(exc).__name__,
+                error_detail=str(exc)[:200],
             )
             self._record_graph_refresh_failure(type(exc).__name__, phase=phase)
             return False
@@ -860,13 +861,64 @@ class MiniSweAdapter(GroundtruthController):
         )
         return False
 
+    @staticmethod
+    def _symlink_alias_target(item: Any) -> str | None:
+        """Where a snapshot symlink points, as a workspace-relative path.
+
+        ``captured`` for a symlink holds the *link target string*, not file
+        bytes (``runtime_observation``, where the entry is built). Returns None
+        when the link is uncaptured, absolute, or escapes the workspace -- all
+        cases where this side cannot say what the target's bytes are.
+        """
+        raw = getattr(item, "captured", None)
+        if raw is None:
+            return None
+        try:
+            target = bytes(raw).decode("utf-8", "surrogatepass")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not target or PurePosixPath(target).is_absolute() or target.startswith("\\\\"):
+            return None
+        parts: list[str] = []
+        for part in (*PurePosixPath(str(item.path)).parent.parts, *PurePosixPath(target).parts):
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not parts:
+                    return None  # escapes the workspace root
+                parts.pop()
+                continue
+            parts.append(part)
+        return "/".join(parts) if parts else None
+
     def _frozen_graph_input(self, snapshot: Any) -> FrozenBuildInput:
         from .indexer import is_producer_input
 
         files: list[tuple[str, bytes]] = []
         missing: list[str] = []
+        captured_paths = {
+            str(item.path) for item in snapshot.files
+            if item.kind == "file" and item.captured is not None
+        }
         for item in snapshot.files:
             if not is_producer_input(item.path):
+                continue
+            if item.kind == "symlink":
+                # A symlink is a path alias, not absent source, and treating it
+                # as either extreme is wrong. Its captured bytes are the link
+                # TARGET STRING, so feeding it to the producer would index the
+                # alias's name as the file's content; calling it incomplete
+                # aborts every rebuild for the life of the run. On arktype two
+                # producer-input symlinks (README.md, ark/README.md) did exactly
+                # that in run 34064560259: 600 graph_refresh_failed, zero
+                # refreshes, the graph frozen at task start across 105 edits.
+                # If the target is inside the snapshot its bytes are already
+                # present under the real path, so the alias carries no source
+                # the producer lacks. If it is not, the content genuinely is
+                # unknown here and the rebuild must still refuse.
+                target = self._symlink_alias_target(item)
+                if target is None or target not in captured_paths:
+                    missing.append(str(item.path))
                 continue
             if item.kind != "file" or item.captured is None:
                 missing.append(str(item.path))
@@ -883,7 +935,13 @@ class MiniSweAdapter(GroundtruthController):
                 # relationship to source completeness is explicitly known.
                 source_omissions.append(str(omission))
         if missing or source_omissions:
-            raise ValueError("frozen_source_incomplete")
+            # Named, because the journal records only the exception. Six hundred
+            # bare "ValueError" rows cost a whole paid run's worth of diagnosis.
+            detail = ",".join(sorted(missing)[:5]) or ",".join(sorted(source_omissions)[:5])
+            raise ValueError(
+                f"frozen_source_incomplete:missing={len(missing)}:"
+                f"omissions={len(source_omissions)}:{detail}"
+            )
         return FrozenBuildInput(
             str(snapshot.revision),
             self.engine_state.query_snapshot().masked_paths,
