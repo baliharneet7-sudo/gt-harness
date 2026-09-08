@@ -3,7 +3,7 @@ name: "SWE-bench Live Lite: Dispatch full run"
 on:
   workflow_dispatch:
     inputs:
-      model: {description: "LLM model", required: true, default: "minimax/minimax-m3:free"}
+      model: {description: "OpenRouter model id. No default: choose the exact model when dispatching.", required: true}
       shard: {description: "Full-run shard, for example 1/2", required: true}
       baseline: {description: "Run GT-off baseline", required: true, type: boolean, default: true}
 
@@ -18,6 +18,7 @@ jobs:
     uses: ./.github/workflows/swebench_live_lite_full.yml
     with:
       model: ${{ inputs.model }}
+      image_owner: harneet2512
       mode: full
       instance_ids: ""
       max_parallel: "20"

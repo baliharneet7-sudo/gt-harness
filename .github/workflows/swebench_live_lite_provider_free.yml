@@ -1,0 +1,70 @@
+name: "SWE-bench Live Lite: provider-free readiness"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - baseline-swe-live-lite-v4flash0731
+    paths:
+      - ".github/workflows/swebench_live_lite_*.yml"
+      - "artifact_deepswe/gt_integration/deepswe_gt_pier*.yaml"
+      - "benchmarks/live_lite_300_ids.json"
+      - "scripts/swebench/live_lite_*.py"
+      - "scripts/swebench/task_language.py"
+      - "scripts/verify/workflow_lint.py"
+      - "tests/test_live_lite_readiness.py"
+      - "tests/test_openrouter_benchmark_routes.py"
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+      OPENAI_API_KEY: ""
+      OPENROUTER_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      TOKENROUTER_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install provider-free validation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Validate workflow shell safety
+        run: |
+          python scripts/verify/workflow_lint.py \
+            .github/workflows/swebench_live_lite_full.yml \
+            .github/workflows/swebench_live_lite_dispatch.yml
+
+      - name: Validate Live Lite manifest and OpenRouter route
+        run: python scripts/swebench/live_lite_readiness.py | tee live-lite-readiness.json
+
+      - name: Run benchmark-scoped regression tests
+        run: |
+          python -m pytest -q \
+            tests/test_live_lite_readiness.py \
+            tests/test_openrouter_benchmark_routes.py \
+            tests/test_benchmark_github_workflow.py \
+            tests/test_benchmark_reports.py \
+            tests/test_build_benchmark_manifest.py \
+            tests/test_gt_language_resolution.py \
+            tests/test_live_retrieval_profile.py \
+            tests/test_provider_evidence.py
+
+      - name: Upload provider-free readiness receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-lite-provider-free-${{ github.run_id }}
+          path: live-lite-readiness.json
+          if-no-files-found: error

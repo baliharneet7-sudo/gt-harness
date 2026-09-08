@@ -702,19 +702,9 @@ jobs:
           set -e
           echo "=== INFRA PREFLIGHT (fail-fast) ==="
           INPUT_MODEL="${{ inputs.model }}"
-          # Model-aware API key check: only require the key for the provider we're using
-          if echo "$INPUT_MODEL" | grep -qiE "^openrouter/"; then
-            [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
-            echo "  OPENROUTER_API_KEY present (${#OPENROUTER_API_KEY} chars)"
-          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
-            echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
-          elif echo "$INPUT_MODEL" | grep -qiE "tokenrouter"; then
-            [ "${#TOKENROUTER_API_KEY}" -gt 10 ] || { echo "::error::TOKENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
-            echo "  TOKENROUTER_API_KEY present (${#TOKENROUTER_API_KEY} chars)"
-          else
-            echo "  model=$INPUT_MODEL — no specific API key check (will use litellm auto-detection)"
-          fi
+          [ -n "$INPUT_MODEL" ] || { echo "::error::OpenRouter model id is required"; exit 1; }
+          [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_API_KEY missing (model=$INPUT_MODEL)"; exit 1; }
+          echo "  OpenRouter route configured for model=$INPUT_MODEL"
           docker --version 2>/dev/null || true
           echo "  Docker CLI pre-check done"
           FREE_GB=$(df --output=avail / | tail -1 | awk '{printf "%.0f", $1/1048576}')
@@ -1457,27 +1447,15 @@ jobs:
           set +e
           set -o pipefail
           INPUT_MODEL="$INPUT_MODEL"
-          if echo "$INPUT_MODEL" | grep -qiE "tokenrouter"; then
-            export OPENAI_API_KEY="${TOKENROUTER_API_KEY}"
-            export OPENAI_API_BASE="${TOKENROUTER_API_BASE}"
-            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
-              INPUT_MODEL="openai/${INPUT_MODEL}"
-            fi
-            echo "=== Model routed via TokenRouter: $INPUT_MODEL ==="
-          elif echo "$INPUT_MODEL" | grep -qiE "^openrouter/|minimax"; then
-            export OPENAI_API_KEY="$OPENROUTER_API_KEY"
-            export OPENAI_API_BASE="https://openrouter.ai/api/v1"
-            if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
-              INPUT_MODEL="openai/${INPUT_MODEL#openrouter/}"
-            fi
-            export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
-            GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
-            echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
-          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            export DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
-            GT_AE_ARGS+=(--ae "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}")
-            echo "=== Model routed via DeepSeek native: $INPUT_MODEL ==="
+          export OPENAI_API_KEY="$OPENROUTER_API_KEY"
+          export OPENAI_API_BASE="https://openrouter.ai/api/v1"
+          INPUT_MODEL="${INPUT_MODEL#openrouter/}"
+          if ! echo "$INPUT_MODEL" | grep -q "^openai/"; then
+            INPUT_MODEL="openai/${INPUT_MODEL}"
           fi
+          export OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
+          GT_AE_ARGS+=(--ae "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}")
+          echo "=== Model routed via OpenRouter: $INPUT_MODEL ==="
 
           # Live Lite image: sweb.eval.x86_64.{repo}_1776_{rest}:latest
           # Try GHCR first (cached by live_lite_cache_images.yml), fallback to dockerhub starryzhang/
@@ -1622,12 +1600,7 @@ jobs:
           printf '%s\n' "$ISSUE_TEXT" > "${HOST_GT_OUT}/issue.txt"
 
           # Model-specific env vars for inside the container
-          MODEL_ENV=""
-          if echo "$INPUT_MODEL" | grep -qiE "^openai/minimax/|^openrouter/|minimax"; then
-            MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENAI_BASE_URL=https://openrouter.ai/api/v1 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
-          elif echo "$INPUT_MODEL" | grep -qiE "deepseek"; then
-            MODEL_ENV="-e DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY"
-          fi
+          MODEL_ENV="-e OPENAI_API_KEY=$OPENROUTER_API_KEY -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENAI_BASE_URL=https://openrouter.ai/api/v1 -e OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
 
           # Run the agent directly in the pre-pulled GHCR task image
           _GT_AGENT_STARTED_EPOCH=$(date +%s)
@@ -1759,10 +1732,11 @@ jobs:
 
               # Write mini-swe-agent config AND set env vars to skip interactive wizard
               mkdir -p /root/.config/mini-swe-agent
-              printf "model='"$INPUT_MODEL"'\nDEEPSEEK_API_KEY=%s\nOPENROUTER_API_KEY=%s\n" "${DEEPSEEK_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
+              umask 077
+              printf "model='"$INPUT_MODEL"'\nOPENAI_API_KEY=%s\nOPENROUTER_API_KEY=%s\nOPENAI_API_BASE=https://openrouter.ai/api/v1\n" "${OPENROUTER_API_KEY:-}" "${OPENROUTER_API_KEY:-}" > /root/.config/mini-swe-agent/.env
               # Also use mini-extra to set model non-interactively
               mini-extra config set model "'"$INPUT_MODEL"'" 2>/dev/null || true
-              mini-extra config set DEEPSEEK_API_KEY "${DEEPSEEK_API_KEY:-}" 2>/dev/null || true
+              mini-extra config set OPENAI_API_KEY "${OPENROUTER_API_KEY:-}" 2>/dev/null || true
               echo "[GT] mini-swe-agent config written"
 
               # ── #46 fix: ACTIVATE the GT Super-Mode RL profile INSIDE the container ──────
@@ -2959,6 +2933,7 @@ jobs:
           GT_EXPECTED_MATRIX: ${{ needs.prepare.outputs.matrix }}
           GT_EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           GT_RUN_ID: ${{ github.run_id }}
+          GT_MODEL: ${{ inputs.model }}
           GT_TRIAL_RESULT: ${{ needs.trial.result }}
           GT_LIVE_COHORT_MDE: ${{ github.event.inputs.live_cohort_mde }}
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/src:${{ github.workspace }}/scripts/swebench:${{ github.workspace }}/scripts/metrics
@@ -3184,8 +3159,8 @@ jobs:
               "pre_specified": True,
           }), encoding="utf-8")
           (d / "system_identity.json").write_text(json.dumps({
-              "model": "deepseek-chat",
-              "provider": "deepseek",
+              "model": os.environ["GT_MODEL"],
+              "provider": "openrouter",
               "scaffold": "mini-swe-agent",
               "tools": "fixed tool contract",
               "gt_profile": "2",
