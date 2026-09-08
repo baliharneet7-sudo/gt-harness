@@ -454,6 +454,87 @@ def test_amend_is_refused_when_the_parent_cannot_be_certified(tmp_path, monkeypa
     )
 
 
+def test_reader_created_wal_sidecars_do_not_refuse_the_amend(tmp_path, monkeypatch):
+    """A published graph is left in WAL mode, so readers create these files.
+
+    Refusing on their PRESENCE refused every amend a real run would attempt.
+    The 2026-09-08 smoke reported it on its first edit -- `mode=full
+    reason=parent_graph_has_wal_sidecar` at a cost of 104.6s -- with a 0-byte
+    log and a 32 KiB shm, both created by readers, holding nothing.
+    """
+    adapter = _adapter(tmp_path)
+    root = Path(adapter.repo_root)
+    (root / "app.py").write_text("def one(): pass\n", encoding="utf-8")
+    layout = adapter.engine_state.layout
+    parent = _publish_parent(root, layout, monkeypatch)
+
+    # Exactly what a reader leaves behind: an empty log and a shm.
+    parent.with_name(parent.name + "-wal").write_bytes(b"")
+    parent.with_name(parent.name + "-shm").write_bytes(b"\x00" * 32768)
+
+    (root / "app.py").write_text("def one(): pass\ndef two(): pass\n", encoding="utf-8")
+    amend = tmp_path / "fake-amend-wal.py"
+    amend.write_text(
+        "import sqlite3, sys, json\n"
+        "output = sys.argv[sys.argv.index('-output') + 1]\n"
+        "relpath = sys.argv[sys.argv.index('-file') + 1]\n"
+        "with sqlite3.connect(output) as c:\n"
+        "    c.execute('insert into nodes values (2, ?)', (relpath,))\n"
+        "print(json.dumps({'file': relpath, 'inserted': 1, 'updated': 0,\n"
+        "                  'removed': 0, 'symbols_reminted': 1,\n"
+        "                  'short_circuited': False}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(indexer, "_producer_supports_incremental_amend", lambda: True)
+    monkeypatch.setattr(
+        indexer, "_incremental_index_command",
+        lambda binary, r, output, relpath: [
+            binary, str(amend), "-root", r, "-output", output, "-file", relpath,
+        ],
+    )
+
+    receipt = indexer.refresh_index_files(
+        root, parent, ("app.py",), layout=layout, source_revision="rev-2",
+    )
+
+    assert receipt.build_mode == "incremental", receipt.build_mode_reason
+    assert receipt.success, receipt.error_type
+
+
+def test_a_log_holding_frames_is_carried_onto_the_copy(tmp_path, monkeypatch):
+    """A non-empty log is copied so no committed frame is lost.
+
+    The parent is still never written to, so its certificate stands.
+    """
+    parent = tmp_path / "graph.db"
+    with sqlite3.connect(parent) as connection:
+        connection.execute("create table t (x integer)")
+        connection.execute("insert into t values (1)")
+    log = parent.with_name(parent.name + "-wal")
+    log.write_bytes(b"frames-not-yet-folded-in")
+    parent_bytes = parent.read_bytes()
+
+    candidate = tmp_path / "candidate.db"
+    indexer._copy_graph_for_amend(parent, candidate)
+
+    assert candidate.read_bytes() == parent_bytes
+    assert candidate.with_name(candidate.name + "-wal").read_bytes() == log.read_bytes()
+    # Untouched, as the immutability contract requires.
+    assert parent.read_bytes() == parent_bytes
+
+
+def test_an_empty_log_is_not_copied(tmp_path):
+    parent = tmp_path / "graph.db"
+    parent.write_bytes(b"database")
+    parent.with_name(parent.name + "-wal").write_bytes(b"")
+
+    candidate = tmp_path / "candidate.db"
+    indexer._copy_graph_for_amend(parent, candidate)
+
+    assert candidate.read_bytes() == b"database"
+    assert not candidate.with_name(candidate.name + "-wal").exists()
+
+
 # ------------------------------------------------------------- real producer
 
 

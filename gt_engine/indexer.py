@@ -1565,6 +1565,37 @@ def _amendable_paths(root: Path, changed_paths: tuple[str, ...]) -> tuple[tuple[
     return ordered, ""
 
 
+def _copy_graph_for_amend(parent: Path, candidate: Path) -> None:
+    """Copy a published graph so the copy holds everything the parent commits.
+
+    A published graph is left in WAL mode, so readers opening it create a
+    ``-wal`` and a ``-shm`` beside it. Their mere PRESENCE says nothing: on the
+    live run the ``-wal`` was 0 bytes and the ``-shm`` 32 KiB, both created by
+    readers, with no unflushed frame anywhere. Refusing on their existence
+    refused every amend a real run would ever attempt -- the first edit of the
+    2026-09-08 smoke reported exactly that, `mode=full
+    reason=parent_graph_has_wal_sidecar`, at a cost of 104.6s.
+
+    What actually matters is whether the log holds committed frames the main
+    file does not. If it does, it is copied beside the candidate under the
+    candidate's own name, and SQLite recovers it when the producer opens the
+    copy. The parent is still never written to, so its certificate stands.
+
+    A plain file copy is used rather than the backup API on purpose: the graph
+    is ~900 MB and the amend it serves takes ~11s, so a page-by-page copy
+    through Python would cost more than the operation it exists to accelerate.
+    """
+
+    shutil.copyfile(parent, candidate)
+    log = parent.with_name(parent.name + "-wal")
+    try:
+        pending = log.stat().st_size
+    except OSError:
+        pending = 0
+    if pending:
+        shutil.copyfile(log, candidate.with_name(candidate.name + "-wal"))
+
+
 def _ensure_index_incremental_unlocked(
     root: str, *, layout: RuntimeLayout, parent_graph: Path,
     changed_paths: tuple[str, ...], excluded_roots: tuple[Path, ...] = (),
@@ -1589,11 +1620,6 @@ def _ensure_index_incremental_unlocked(
         return None, "producer_lacks_amend_capability", results
     if not parent_graph.is_file():
         return None, "parent_graph_missing", results
-    for sidecar in ("-wal", "-shm"):
-        if parent_graph.with_name(parent_graph.name + sidecar).exists():
-            # Copying the main file alone would silently drop whatever the
-            # write-ahead log has not folded in yet.
-            return None, "parent_graph_has_wal_sidecar", results
     parent_manifest = parent_graph.with_suffix(".manifest.json")
     if not parent_manifest.is_file():
         return None, "parent_manifest_missing", results
@@ -1651,7 +1677,7 @@ def _ensure_index_incremental_unlocked(
     process_result: IndexProcessResult | None = None
     total_elapsed_ms = 0
     try:
-        shutil.copyfile(parent_graph, candidate)
+        _copy_graph_for_amend(parent_graph, candidate)
         for ordinal, relative in enumerate(amendable, start=1):
             def build_argv(binary: str, argv_root: str, output: str,
                            _relative: str = relative) -> list[str]:
