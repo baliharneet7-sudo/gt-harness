@@ -2046,3 +2046,68 @@ def test_runtime_hook_select_catalog_uses_admitted_transport_and_matching_action
     assert sum(row.get("event") == "provider_response" for row in rows) == 2
     assert adapter._usage["prompt_tokens"] == 6
     assert adapter._usage["completion_tokens"] == 2
+
+
+def test_edit_turn_hands_the_producers_the_pre_edit_graph(monkeypatch, tmp_path):
+    """The edit producers were handed no graph on the only turn they can fire.
+
+    signature_delta needs the before/after text AND callers from the graph.
+    On an edit turn the text exists but the edit has just invalidated the
+    graph, so gateway_state passed graph_db=None and the producer returned
+    before reading a signature; on a non-edit turn there is no edit to
+    analyse. Measured on the 2026-09-08 run: eligible on 15 signature
+    entries across 19 edit transactions, delivered nothing, ever.
+
+    The pre-edit graph is the right graph: the callers of a function you
+    just changed are the ones that existed before you changed it, which is
+    already the contract compile_transaction_artifacts uses for the same
+    boundary.
+    """
+    from gt_engine import miniswe_runtime as rt
+
+    adapter = MiniSweAdapter(
+        task_id="sigdelta", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Add a parser."))
+    adapter.start_task()
+    seen = {}
+
+    def gateway(state, event, **kwargs):
+        seen["graph_db"] = state.graph_db
+        seen["episode"] = state.episode
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", gateway)
+    live_episode = adapter.gateway_state().episode
+    assert adapter.gateway_state().graph_db is None, "fixture: graph must be absent"
+
+    rt._run_evidence(
+        adapter, "edit", "", 0, 1, ("mod.py",), {"mod.py": ("before", "after")},
+        pre_edit_graph="/graphs/pre-edit.db",
+    )
+
+    assert seen["graph_db"] == "/graphs/pre-edit.db"
+    # Same episode object: the ledger and delivered-key dedup chains are
+    # single-owner, so the per-call override must not fork them.
+    assert seen["episode"] is live_episode
+    # And the override is per call, never cached onto the adapter.
+    assert adapter.gateway_state().graph_db is None
+
+
+def test_no_pre_edit_graph_leaves_the_producers_as_they_were(monkeypatch, tmp_path):
+    """Absent a current pre-edit graph, nothing changes."""
+    from gt_engine import miniswe_runtime as rt
+
+    adapter = MiniSweAdapter(
+        task_id="sigdelta", state_dir=tmp_path, predicates=[],
+        contract=extract_task_contract("Add a parser."))
+    adapter.start_task()
+    seen = {}
+
+    def gateway(state, event, **kwargs):
+        seen["graph_db"] = state.graph_db
+        return EvidenceResult(rendered="", sealed=False)
+
+    monkeypatch.setattr(rt, "run_evidence_pipeline", gateway)
+    rt._run_evidence(adapter, "edit", "", 0, 1, ("mod.py",), {})
+
+    assert seen["graph_db"] is None

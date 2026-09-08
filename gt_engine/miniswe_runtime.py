@@ -442,8 +442,27 @@ def _run_evidence(
     decision_session: GTSession | None = None,
     additional_candidates: tuple[GTDecisionCandidate, ...] = (),
     output_artifact: dict | None = None,
+    pre_edit_graph: str = "",
 ) -> str:
-    """Collect eligible producers for the session-owned decision packet."""
+    """Collect eligible producers for the session-owned decision packet.
+
+    ``pre_edit_graph`` is the graph as it stood BEFORE the edit being reported,
+    when that graph was current. It exists because the edit producers need two
+    things at once -- the before/after text, and callers from the graph -- and
+    those were mutually exclusive by construction: an edit turn carries the
+    text but has just invalidated the graph, so ``gateway_state`` handed the
+    producer ``graph_db=None`` and it returned before reading a signature; a
+    non-edit turn may have a fresh graph but no edit to analyse. Measured on the
+    2026-09-08 run: signature_delta eligible on 15 signature entries across 19
+    edit transactions, delivered nothing, ever.
+
+    Passing the pre-edit graph is not a loosening. The callers of a function you
+    have just changed are by definition the callers that existed BEFORE you
+    changed it, which is what makes the evidence actionable, and it is already
+    the established contract for this boundary: compile_transaction_artifacts
+    hands the same pre-edit snapshot to the caller query and records those rows
+    as pre-edit facts.
+    """
     session = decision_session or _coerce_session(adapter)
     if adapter.contract is None:
         if decision_session is not None:
@@ -525,8 +544,16 @@ def _run_evidence(
     from .request_history import store_history_evidence
 
     evidence_store = EvidenceStore(adapter.engine_state.layout.evidence_root)
+    gateway_state = adapter.gateway_state()
+    if pre_edit_graph and not gateway_state.graph_db:
+        # Per call, never cached: dataclasses.replace copies the facade but
+        # keeps the SAME episode object, so the ledger and delivered-key dedup
+        # chains stay single-owner exactly as GatewayState documents.
+        from dataclasses import replace as _replace
+
+        gateway_state = _replace(gateway_state, graph_db=pre_edit_graph)
     result = run_evidence_pipeline(
-        adapter.gateway_state(),
+        gateway_state,
         event,
         dedup_chain=proposed_dedup,
         chain_head=proposed_head,
@@ -1251,6 +1278,10 @@ def install_runtime_hooks(
             try:
                 changed_files, edit_before_after = _capture_edit_after(adapter, preimage)
                 created_files: tuple[str, ...] = ()
+                # Bound here, not inside the branch below: the evidence call is
+                # past several dedents and would raise NameError on any action
+                # that captured no pre-action snapshot.
+                pre_graph_snapshot = None
                 if pre_snapshot is not None:
                     post_snapshot = capture_workspace(
                         adapter.repo_root,
@@ -1373,6 +1404,12 @@ def install_runtime_hooks(
                         decision_session=session,
                         additional_candidates=tuple(execution_candidates),
                         output_artifact=output_artifact,
+                        pre_edit_graph=(
+                            pre_graph_snapshot.graph_path
+                            if pre_graph_snapshot is not None
+                            and pre_graph_snapshot.graph_current
+                            else ""
+                        ),
                     )
                 else:
                     session.queue_decision_candidates(execution_candidates)
