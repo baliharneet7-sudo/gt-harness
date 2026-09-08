@@ -157,6 +157,81 @@ A skip now emits a row naming itself (`no_candidates`, `verify_execute_off`)
 rather than returning in silence, which is what let zero rows read as "nothing
 needed re-proving" for the life of the project.
 
+### What the first live amend run actually showed (2026-09-08)
+
+Two runs. The first was stopped after one edit: the amend refused with
+`parent_graph_has_wal_sidecar` because a published graph is left in WAL mode and
+readers create the sidecar, so the guard would have refused every edit of the
+run. The reason field is what made that a one-line diagnosis instead of a silent
+four-hour fallback.
+
+The second run, on the fix, at 88 provider calls and 14 edits:
+
+```
+caller queries answered   9 of 14 (64%)      baseline 16 of 62 (26%)
+publications              10 of 14 invals    baseline 19 of 62
+obligation_reverified     14 passes, 92 proofs preserved   baseline 0 rows, ever
+build mode                8 amend / 11 full
+```
+
+The baseline had gone dark by this point and stayed dark for forty consecutive
+reads; this one had not. `obligation_reverified` had produced zero rows in every
+run ever recorded before this one.
+
+**Four defects the run found that the suite did not**, all fixed in `bb551a48`
+and the deletion commit after it:
+
+1. Coalescing rebuilt the merged request POSITIONALLY and so dropped the parent
+   graph. A build with no parent is not a refusal, it is simply not an amend, so
+   it fell back and reported nothing. Two of eleven builds.
+2. A full rebuild could report an empty reason -- the exact silent fallback the
+   row exists to prevent.
+3. The amend wiped 23,746 co-change pairs. Co-change is computed from `git log`
+   and never reads the working tree, so an uncommitted edit cannot falsify one.
+4. `closure_count` read 510 beside an empty closure table.
+
+**Deletions were the largest single cause of full rebuilds** -- five of eleven,
+because the agent kept creating scratch test files and removing them. The
+producer now treats a missing file as a deletion and reconciles its node set to
+empty. This also repairs renames, which arrive as a delete beside a create and
+so were half-refusing. With that and (1), seven of those eleven rebuilds become
+amends.
+
+### The cost model, measured rather than assumed
+
+```
+full rebuild        ~78s
+one-file amend      ~30s
+fixed cost, both    ~20-31s   git history freeze + re-materialising every
+                              producer-input file, paid on EVERY build
+```
+
+The amend's advantage is a fixed ~48s saving, not a per-file one.
+`INCREMENTAL_MAX_DIRTY_PATHS` is 3 for that reason, down from a first guess of 8
+taken from an isolated producer measurement. **Removing the fixed cost from the
+amend path is now the highest-value remaining work**: it would take the amend
+from ~30s to ~10s and move the crossover to roughly 8 files. The producer's
+`-file` mode barely needs the history -- it shells out only for `rev-parse HEAD`
+to seal a receipt.
+
+### Run duration is provider tail latency, not the harness
+
+Do not chase harness overhead; it is 5% of wall clock and falling.
+
+```
+                     run 2      baseline
+model call            92%          58%
+harness post-action    5%          34%     <- the 7c fix, 8.3 min -> 1.8 min
+```
+
+The model call is the run. The slowest 10% of calls hold 38% of all model time,
+every one of them a 60-74k token prompt, and the worst spent 204s producing 220
+tokens. It is not decode: a fresh probe of the pinned route returns 278 tok/s.
+It is not GT injecting context: GT delivered 24 units against the baseline's 39,
+and its uncached prompt share is 58% lower. It is queueing on large prompts. The
+levers are prompt size and a per-call timeout with retry, not routing --
+throughput-sorted routing was measured six times worse.
+
 ### 7b, precisely
 
 `graph_resolution_complete = 1` asserts candidates derived from whole-repository

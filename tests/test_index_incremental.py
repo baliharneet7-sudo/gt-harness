@@ -182,7 +182,6 @@ def test_missing_binary_refuses_without_probing(monkeypatch):
 @pytest.mark.parametrize(
     ("changed", "expected_reason"),
     [
-        pytest.param(("pkg/gone.py",), "path_removed:pkg/gone.py", id="deleted-or-renamed"),
         pytest.param(("tsconfig.json",), "config_input_changed:tsconfig.json", id="config-input"),
         pytest.param(("notes.txt",), "no_amendable_paths", id="nothing-the-producer-parses"),
         pytest.param(tuple(f"pkg/f{n}.py" for n in range(9)),
@@ -192,11 +191,10 @@ def test_missing_binary_refuses_without_probing(monkeypatch):
 def test_paths_the_amend_must_refuse(tmp_path, changed, expected_reason):
     """Each refusal is a correctness answer, not a failure.
 
-    A deleted path refuses because the producer reads the file before it opens
-    the database; a rename presents the same way. A producer config file
-    refuses because it changes how every OTHER file resolves. A file the
-    producer cannot parse is skipped, not refused: it contributes no nodes, so
-    it cannot have made the graph stale.
+    A producer config file refuses because it changes how every OTHER file
+    resolves. A file the producer cannot parse is skipped, not refused: it
+    contributes no nodes, so it cannot have made the graph stale. A DELETED
+    path is neither -- see the deletion test below.
     """
     for ordinal in range(9):
         target = tmp_path / "pkg" / f"f{ordinal}.py"
@@ -209,6 +207,34 @@ def test_paths_the_amend_must_refuse(tmp_path, changed, expected_reason):
 
     assert amendable == ()
     assert reason == expected_reason
+
+
+def test_a_deleted_path_is_amendable_not_refused(tmp_path):
+    """Deletions were the single largest cause of full rebuilds.
+
+    Five of eleven on the 2026-09-08 run, because the agent kept creating
+    scratch test files and removing them. The producer reconciles a missing
+    file's node set to empty rather than erroring, so the engine passes the
+    path through.
+    """
+    (tmp_path / "kept.py").write_text("x = 1\n", encoding="utf-8")
+
+    amendable, reason = indexer._amendable_paths(
+        tmp_path, ("kept.py", "pkg/gone.py"))
+
+    assert reason == ""
+    assert amendable == ("kept.py", "pkg/gone.py")
+
+
+def test_a_rename_is_amendable_as_both_halves(tmp_path):
+    """A rename arrives as a deletion beside a creation, in one dirty set."""
+    (tmp_path / "new_name.py").write_text("x = 1\n", encoding="utf-8")
+
+    amendable, reason = indexer._amendable_paths(
+        tmp_path, ("old_name.py", "new_name.py"))
+
+    assert reason == ""
+    assert amendable == ("new_name.py", "old_name.py")
 
 
 def test_unparseable_paths_are_skipped_not_refused(tmp_path):

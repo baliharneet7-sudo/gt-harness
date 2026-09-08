@@ -1551,14 +1551,19 @@ def _parse_incremental_result(stdout_tail: str) -> dict[str, object]:
 def _amendable_paths(root: Path, changed_paths: tuple[str, ...]) -> tuple[tuple[str, ...], str]:
     """Split the changed set into paths to amend, or name why none can be.
 
-    Three outcomes, kept apart on purpose. A path the producer has no parser
-    for is SKIPPED: it contributes no nodes, so it cannot have made the graph
-    stale. A path that no longer exists on disk REFUSES the whole amend -- the
-    producer reads the file before it opens the database and errors if it is
-    missing, and neither a deletion nor a rename can be expressed as an amend
-    at all. A producer config file refuses for a different reason: it changes
-    how every other file resolves, so re-deriving one file would leave the rest
-    of the graph describing the old configuration.
+    Two outcomes, kept apart on purpose. A path the producer has no parser for
+    is SKIPPED: it contributes no nodes, so it cannot have made the graph stale.
+    A producer config file REFUSES the whole amend: it changes how every other
+    file resolves, so re-deriving one file would leave the rest of the graph
+    describing the old configuration.
+
+    A path that no longer exists on disk is passed through, not refused. The
+    producer treats a missing file as a deletion and reconciles its node set to
+    empty. Refusing here cost more than anything else the amend declined: on the
+    2026-09-08 run, deletions were five of eleven full rebuilds, because the
+    agent repeatedly created scratch test files and removed them. A rename
+    arrives as a deletion of the old path beside a creation of the new one, so
+    both halves are now amendable in the same pass.
     """
 
     amendable: list[str] = []
@@ -1570,8 +1575,6 @@ def _amendable_paths(root: Path, changed_paths: tuple[str, ...]) -> tuple[tuple[
             return (), f"config_input_changed:{Path(relative).name}"
         if Path(relative).suffix.lower() not in INCREMENTAL_AMENDABLE_EXTS:
             continue
-        if not (root / relative).is_file():
-            return (), f"path_removed:{relative}"
         amendable.append(relative)
     ordered = tuple(sorted(dict.fromkeys(amendable)))
     if not ordered:

@@ -16,8 +16,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -1363,6 +1365,16 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 2 — sha256 of file contents.
 	contents, err := os.ReadFile(absPath)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The file is gone. That is an edit like any other and the graph
+			// has to follow it; erroring here forced the caller into a full
+			// rebuild, and on the 2026-09-08 run deletions were FIVE of eleven
+			// rebuilds -- the single largest cause, ahead of everything else.
+			// A rename presents the same way (delete of the old path, create of
+			// the new), so both paths arrive in the same dirty set and this
+			// handles the half that used to refuse.
+			return runIncrementalDelete(db, relSlash, startWall)
+		}
 		return fmt.Errorf("read file %s: %w", absPath, err)
 	}
 	sum := sha256.Sum256(contents)
@@ -1883,6 +1895,111 @@ func runIncremental(root, relpath, dbPath string) error {
 	fmt.Printf(
 		`{"file":%q,"nodes_replaced":%d,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"symbols_reminted":%d,"symbols_removed":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
 		relSlash, len(newDBIDs), incrNodesInserted, incrNodesUpdated, incrNodesRemoved, replacedEdges, incrSymbolsReminted, incrSymbolsRemoved, incomingRest, incomingUnres, dur.Milliseconds(),
+	)
+	return nil
+}
+
+// runIncrementalDelete removes a deleted file from the graph, in place.
+//
+// Same contract as the amend it sits beside: the rest of the graph is left
+// alone, ids of surviving symbols do not move, and the repository-wide analysis
+// products a single-file change cannot re-prove are invalidated with a named
+// reason. What differs is that there is nothing to parse, so the file's node
+// set reconciles to empty and its file_hashes row goes with it -- leaving a
+// stale row would make the next full index believe the file was still indexed
+// at that content.
+func runIncrementalDelete(db *store.DB, relSlash string, startWall time.Time) error {
+	repositoryRevision := "unversioned"
+	producerIdentity, err := currentBuildIdentity()
+	if err != nil {
+		return fmt.Errorf("compute producer identity for deletion receipt: %w", err)
+	}
+	const incrementalAnalysisReason = "incremental_reindex_requires_full_analysis"
+	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
+		Schema:             store.AnalysisPhaseReceiptSchema,
+		State:              store.AnalysisStateNotRun,
+		RepositoryRevision: repositoryRevision,
+		BuildID:            producerIdentity.BuildID,
+		FailureReason:      incrementalAnalysisReason,
+		RolledBack: []string{
+			"resolution", "closure", "cochange", "community", "process",
+		},
+	}.Seal()
+	if err != nil {
+		return fmt.Errorf("seal deletion analysis receipt: %w", err)
+	}
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		return fmt.Errorf("begin deletion tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	if err := store.InvalidateAnalysisForIncrementalTx(
+		tx, analysisPayload, analysisSHA, incrementalAnalysisReason,
+	); err != nil {
+		return err
+	}
+	for _, stmt := range []string{
+		`INSERT INTO project_meta(key,value) VALUES('resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`,
+		`INSERT INTO project_meta(key,value) VALUES('resolution_repository_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`,
+		`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`,
+		`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("invalidate resolution metadata on delete: %w", err)
+		}
+	}
+
+	// Reconcile to an EMPTY node set: every symbol the file declared is removed,
+	// and nothing else is touched.
+	_, inserted, updated, removed, err := store.ReconcileFileNodesTx(tx, relSlash, nil)
+	if err != nil {
+		return fmt.Errorf("reconcile deleted file nodes: %w", err)
+	}
+	edgesDeleted, err := store.AmendFileEdgesTx(tx, relSlash, removed)
+	if err != nil {
+		return err
+	}
+	deletedSymbols, err := tx.Exec(`DELETE FROM resolution_symbols WHERE path = ?`, relSlash)
+	if err != nil {
+		return fmt.Errorf("clear deleted file resolution symbols: %w", err)
+	}
+	symbolsRemoved, err := deletedSymbols.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count cleared resolution symbols on delete: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM file_hashes WHERE file_path = ?`, relSlash); err != nil {
+		return fmt.Errorf("drop file hash for deleted file: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit deletion: %w", err)
+	}
+	committed = true
+
+	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
+		log.Printf("WARNING: property->edge promotion after deletion: %v", promErr)
+	}
+	if err := setRequiredMetadata(db, map[string]string{
+		"schema_version": schemaVersion, "indexer_version": "v16-multilang",
+		"git_commit": commitSHA, "build_time_utc": buildTimeUTC, "go_toolchain": goToolchain,
+	}); err != nil {
+		return err
+	}
+	if err := db.PopulateFTS5(); err != nil {
+		log.Printf("[WARN] FTS5 refresh after deletion: %v", err)
+	}
+	db.CheckpointWAL()
+
+	dur := time.Since(startWall)
+	fmt.Printf(
+		`{"file":%q,"nodes_replaced":0,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"symbols_reminted":0,"symbols_removed":%d,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":false,"deleted":true}`+"\n",
+		relSlash, inserted, updated, len(removed), edgesDeleted, symbolsRemoved, dur.Milliseconds(),
 	)
 	return nil
 }
