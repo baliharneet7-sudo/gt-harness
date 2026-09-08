@@ -119,6 +119,65 @@ Codespace `ominous-memory-6px974ppp9crw6x`, container `gtlive`, script `/logs/ru
 
 ---
 
+## The codespace — how to reach it and what is staged there
+
+```
+codespace   ominous-memory-6px974ppp9crw6x
+container   gtlive              (gh codespace ssh -c <name> -- 'docker exec gtlive ...')
+workspace   /work               product checkout, currently 25a37a5f
+task repo   /app                arktype
+logs/state  /logs               run.sh, run.log, gt-state/, report.json ...
+journal     /logs/gt-state/arktype-json-schema-refs-dependencies/events.jsonl
+producer    /opt/gtcand/gt-index-linux-amd64  (+ .build-info.json)
+```
+
+`/opt/gtcand` holds the **candidate** producer carrying the amend-in-place fix,
+built from `25a37a5f` with identity ldflags (`complete: true`). `run.sh` points
+`GT_INDEX_BINARY` at it. The vendored binary in the repo is deliberately the
+older certified `c3b9f16e` — see "Running a codespace smoke" above.
+
+Launch, stop and watch:
+
+```bash
+CS=ominous-memory-6px974ppp9crw6x
+# stop cleanly: kill, poll to ZERO, only then touch state
+gh codespace ssh -c $CS -- 'docker exec gtlive sh -lc "pkill -9 -f \"[m]iniswe\"; sleep 3; ps -eo cmd|grep -c \"[m]iniswe\""'
+# launch
+gh codespace cp -e -c $CS ./run.sh "remote:/tmp/run.sh"
+gh codespace ssh -c $CS -- 'docker cp /tmp/run.sh gtlive:/logs/run.sh; docker exec gtlive chmod 755 /logs/run.sh; docker exec -d gtlive sh /logs/run.sh'
+# read progress from the journal, never from report.json until session_closed
+```
+
+Disk runs ~75% of 32G. Each graph revision is ~900MB and retention keeps
+live + 1. Delete reproduction copies under `/tmp` when done — four of them
+filled the disk to 100% mid-run on 2026-09-07.
+
+## Where the 2026-09-07 smoke got to
+
+Run at `25a37a5f`, step limit 300, candidate producer. It did NOT terminate
+before the session ended; the journal is the record.
+
+```
+resp 126 · edits 32 · publications 14 · invalidations 32
+caller_coverage  recorded 14 / unavailable 18   (56% blind, climbing)
+cache 92.1%  ·  in 6,317,402  cached  out 59,160
+```
+
+Read it as a **negative** result for graph cadence and a positive one for cache:
+
+- Publications froze at 14 once the agent began editing continuously; every edit
+  after that read blind. Blindness went 29% → 56% during one nine-minute burst.
+  This is the full-rebuild path failing under load, exactly as 7c predicts, and
+  it is NOT evidence against the amend fix — the amend code never ran, because
+  nothing calls `-file`.
+- Cache held 84-92% against the graded run's 85.0%, and rises with history
+  length, which is the signature of the marker fix in `1920a127`. That one does
+  not depend on the graph path, so it is the only change in this run whose effect
+  is attributable.
+
+Do not read `report.json` / `gt-run.json` / `gt-worktree.patch` for this run.
+They survive across runs; check mtimes first.
+
 ## Standing constraints
 
 - **Never run GT-off.** Not in a plan either. Baselines are frozen locally and on
