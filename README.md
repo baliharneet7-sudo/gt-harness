@@ -22,6 +22,14 @@ Across the reported comparisons, the average improvement in operating efficiency
 
 The evidence layer provides caller patterns, import paths, test assertions, git precedent, blast radius, type contracts, and sibling conventions. GT Harness delivers that evidence through a controlled execution path instead of asking the model to rediscover the repository from scratch.
 
+## Cloud Agent harness
+
+The Cloud Agent harness is the live workspace built around that evidence layer. It connects a repository’s real files and directories to an interactive agent session: districts represent repository areas, buildings represent files, and aerial GT Surveyors follow the agents as they read, edit, verify, and move between files. The inspector, activity trail, terminal output, replay controls, worker sessions, and receipts update from the same event stream, so the visual workspace stays synchronized with the underlying run.
+
+![GT Harness Cloud Agent workspace](cloud-agent-live-10s.gif)
+
+The recording above shows the complete workspace with repository districts, active Surveyors, agent activity, and synchronized terminal output. It is a visual demonstration of the Cloud Agent interface; benchmark acceptance and live deployment remain governed by the provider-free product checks described below.
+
 GT Harness is a reproducible benchmark product, not a general-purpose local agent CLI. Its
 shipping path is:
 
