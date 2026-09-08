@@ -1,5 +1,37 @@
 # GT Harness
 
+<p align="center">
+  <img src="cloud-agent-live-10s.gif" alt="GT Harness Cloud Agent workspace" width="1200">
+</p>
+
+## The evolution of GroundTruth into a complete agent harness
+
+GroundTruth began as an MCP server for giving AI coding agents verified structural evidence about the repositories they edit. AI agents often work from partial context: they see a few files, guess the rest, and produce plausible code that silently breaks callers, misuses APIs, or invents imports that do not exist.
+
+GroundTruth addresses this by pre-computing repository structure and delivering verified evidence at the moment it matters: before generation and after edits. It uses deterministic facts from the codebase rather than additional model calls or embeddings.
+
+GT Harness extends that foundation into a complete, host-owned agent system with repository-aware planning, hybrid retrieval, bounded evidence delivery, worker coordination, verification, replayable receipts, and benchmark integrations.
+
+## GroundTruth evidence results
+
+The original GroundTruth evidence layer was evaluated on SWE-bench Verified using the same model, harness, and compute within each comparison:
+
+| Model | Without GT | With GT | Delta |
+|---|---:|---:|---:|
+| GPT-5 Mini | 277/500 (55.4%) | **289/500 (57.8%)** | **+12 tasks (+2.4pp)** |
+| Gemini 2.5 Flash | ~343/500 | **~357/500** | **+14 tasks (+2.8pp)** |
+| Gemini 3 Flash | 379/500 (75.80%) | **382/500 (76.4%)** | **+3 tasks (+0.6pp)** |
+
+Across the reported comparisons, the average improvement in operating efficiency was **19.5%**. These are benchmark observations, not a universal guarantee for every model or repository.
+
+The evidence layer provides caller patterns, import paths, test assertions, git precedent, blast radius, type contracts, and sibling conventions. GT Harness delivers that evidence through a controlled execution path instead of asking the model to rediscover the repository from scratch.
+
+## Cloud Agent harness
+
+The Cloud Agent harness is the live workspace built around that evidence layer. It connects a repository’s real files and directories to an interactive agent session: districts represent repository areas, buildings represent files, and aerial GT Surveyors follow the agents as they read, edit, verify, and move between files. The inspector, activity trail, terminal output, replay controls, worker sessions, and receipts update from the same event stream, so the visual workspace stays synchronized with the underlying run.
+
+The recording above shows the complete workspace with repository districts, active Surveyors, agent activity, and synchronized terminal output. It is a visual demonstration of the Cloud Agent interface; benchmark acceptance and live deployment remain governed by the provider-free product checks described below.
+
 GT Harness is a reproducible benchmark product, not a general-purpose local agent CLI. Its
 shipping path is:
 
@@ -43,7 +75,7 @@ The current fixture is provider-disabled; it does not yet exercise an OpenAI-com
 transport or the Harbor container boundary. Both omissions are emitted as release blockers rather
 than being inferred from the local fixture.
 
-It makes zero provider calls, zero benchmark requests, and incurs zero provider cost. Its closeout
+It makes zero provider calls and zero benchmark requests. Its closeout
 records container proof as not executed unless a separate container acceptance layer actually ran;
 the receipt does not manufacture that claim.
 
@@ -58,7 +90,7 @@ encoding. It defines:
 - `gt.install_attestation.v1`: reserved for the exact installed environment proof. A source-run or
   missing container cannot issue it as verified.
 - `gt.benchmark_plan.v1`: immutable task identity, arm, zero-call ceiling for fake-provider runs,
-  cost estimate, expected artifacts, and parity identity.
+  expected artifacts, and parity identity.
 - `gt.benchmark_task_result.v1`: exit, stop reason, completeness, grader outcome, usage, evidence,
   and artifact digests.
 - `gt.benchmark_summary.v1`: every planned task exactly once; missing, malformed, timed-out, OOM,
