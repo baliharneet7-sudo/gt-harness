@@ -14,6 +14,34 @@ was still in the image digest gate. No task job had started, so nothing was paid
 
 | time (UTC) | event |
 |---|---|
+| 19:52 | giving up on 19:42 adopting in-flight run 34270553336 instead of dispatching gate-one
+34270553336: six consecutive poll failures |
+| 19:57 | done: readiness / provider-free-=success, readiness_binding=skipped, image_digest_gate=success, provider_gate=success, task (1, aiomonitor-task-s=cancelled |
+| 19:57 | run 34270553336 COMPLETE - conclusion=cancelled |
+| 20:01 | readiness 34271691678 completed success - binding it |
+| 20:01 | DISPATCHED all-20 = run 34272342544 - https://github.com/harneet2512/gt-harness/actions/runs/34272342544 |
+| 20:01 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate@Verify all exact task-image manifests  |
+| 20:04 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:20] // on: Pull and verify the exact task image x20 |
+| 20:06 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:20] // on: Stage the pinned language servers for  x13; Run DeepSWE through the released gt-ha x7 |
+| 20:09 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:20] // on: Run DeepSWE through the released gt-ha x20 |
+| 20:24 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:19, success:1] // on: Run DeepSWE through the released gt-ha x19 |
+| 20:27 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:19, success:1] // on: Run DeepSWE through the released gt-ha x18; Upload DeepSWE verifier and GT Harness x1 |
+| 20:29 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:17, success:3] // on: Run DeepSWE through the released gt-ha x17 |
+| 20:32 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:16, success:4] // on: Run DeepSWE through the released gt-ha x16 |
+| 20:39 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:15, success:5] // on: Run DeepSWE through the released gt-ha x15 |
+| 20:42 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:13, success:7] // on: Run DeepSWE through the released gt-ha x13 |
+| 20:44 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:12, success:8] // on: Run DeepSWE through the released gt-ha x12 |
+| 20:50 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:11, success:9] // on: Run DeepSWE through the released gt-ha x10; Upload DeepSWE verifier and GT Harness x1 |
+| 20:52 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:8, success:12] // on: Run DeepSWE through the released gt-ha x7; Upload DeepSWE verifier and GT Harness x1 |
+| 20:55 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:5, success:15] // on: Run DeepSWE through the released gt-ha x5 |
+| 21:02 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:4, success:16] // on: Run DeepSWE through the released gt-ha x4 |
+| 21:07 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:3, success:17] // on: Run DeepSWE through the released gt-ha x3 |
+| 21:10 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:1, success:19] // on: Run DeepSWE through the released gt-ha x1 |
+| 21:20 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // tasks[in_progress:1, success:19] // on: Upload DeepSWE verifier and GT Harness x1 |
+| 21:23 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // attest@Download all task artifacts // tasks[success:20] |
+| 21:25 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // attest@Reject dark triggers, telemetry faults // tasks[success:20] |
+| 21:30 | plan=success // readiness_binding=success // readiness=skipped // image_digest_gate=success // provider_gate=success // attest=failure // tasks[success:20] |
+| 21:30 | RUN 34272342544 COMPLETE - conclusion=failure |
 
 ---
 
