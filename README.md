@@ -1,5 +1,9 @@
 # GT Harness
 
+<p align="center">
+  <img src="cloud-agent-live-10s.gif" alt="GT Harness Cloud Agent workspace" width="1200">
+</p>
+
 ## The evolution of GroundTruth into a complete agent harness
 
 GroundTruth began as an MCP server for giving AI coding agents verified structural evidence about the repositories they edit. AI agents often work from partial context: they see a few files, guess the rest, and produce plausible code that silently breaks callers, misuses APIs, or invents imports that do not exist.
@@ -25,8 +29,6 @@ The evidence layer provides caller patterns, import paths, test assertions, git 
 ## Cloud Agent harness
 
 The Cloud Agent harness is the live workspace built around that evidence layer. It connects a repository’s real files and directories to an interactive agent session: districts represent repository areas, buildings represent files, and aerial GT Surveyors follow the agents as they read, edit, verify, and move between files. The inspector, activity trail, terminal output, replay controls, worker sessions, and receipts update from the same event stream, so the visual workspace stays synchronized with the underlying run.
-
-![GT Harness Cloud Agent workspace](cloud-agent-live-10s.gif)
 
 The recording above shows the complete workspace with repository districts, active Surveyors, agent activity, and synchronized terminal output. It is a visual demonstration of the Cloud Agent interface; benchmark acceptance and live deployment remain governed by the provider-free product checks described below.
 
