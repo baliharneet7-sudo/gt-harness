@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -1207,11 +1207,22 @@ class MiniSweAdapter(GroundtruthController):
                     embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
                 )
             else:
+                # Name it. `mode=full` with an empty reason is the silent
+                # fallback this row exists to prevent, and it is exactly what
+                # the coalescing defect produced: two unexplained full rebuilds
+                # that read as ordinary until the parent revision was found
+                # empty.
+                fallback_reason = (
+                    "no_parent_graph" if not request.parent_graph_path
+                    else "no_dirty_paths"
+                )
                 receipt = ensure_index_with_receipt(
                     root, layout=self.engine_state.layout,
                     source_revision=request.source_revision,
                     embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
                 )
+                receipt = replace(receipt, build_mode="full",
+                                  build_mode_reason=fallback_reason)
             elapsed_ms = int((time.monotonic() - started) * 1000)
         # Say what the bound above actually did. The 60s allowance rests on an
         # assumption I have not measured - that a rebuild's plan is small

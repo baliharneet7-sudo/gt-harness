@@ -149,9 +149,19 @@ class GraphBuildCoordinator:
                 if self._pending is not None:
                     unresolved.update(self._pending.dirty_paths)
                 unresolved.update(request.dirty_paths)
+                # Carry the parent graph across the merge. Building this by
+                # position dropped the two parent fields the moment they were
+                # added, so every coalesced build lost its parent and fell back
+                # to a full rebuild -- silently, because a request with no
+                # parent is not a refusal, it is simply not an amend. Two of
+                # the first eleven builds of the 2026-09-08 run went that way.
                 self._pending = FrozenBuildInput(
-                    request.source_revision, tuple(sorted(unresolved)), request.files,
-                    request.history,
+                    source_revision=request.source_revision,
+                    dirty_paths=tuple(sorted(unresolved)),
+                    files=request.files,
+                    history=request.history,
+                    parent_graph_path=request.parent_graph_path,
+                    parent_graph_revision=request.parent_graph_revision,
                 )
                 disposition = "coalesced"
         if obsolete is not None:

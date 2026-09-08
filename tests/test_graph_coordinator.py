@@ -36,6 +36,46 @@ def test_schedule_is_nonblocking_and_coalesces_to_latest_request():
         coordinator.close()
 
 
+def test_coalescing_carries_the_parent_graph_forward():
+    """A merged request must keep the graph an amend would start from.
+
+    The merge built its replacement request by POSITION, so the two parent
+    fields silently defaulted to empty the moment they were added. Every
+    coalesced build then had no parent, and a build with no parent is not a
+    refusal -- it is simply not an amend, so it fell back to a full rebuild
+    and reported no reason at all. Two of the first eleven builds of the
+    2026-09-08 run went that way before the blank parent revision gave it
+    away.
+    """
+    state = EngineState(graph_path="base.db", graph_revision="g0", source_revision="r0")
+    gate = threading.Event()
+
+    def build(item):
+        if item.source_revision == "r1":
+            gate.wait(2)
+        return GraphBuildArtifact(True, f"{item.source_revision}.db", item.source_revision)
+
+    def parented(revision, paths):
+        return FrozenBuildInput(
+            revision,
+            tuple(sorted(paths)),
+            (("x.py", b"x = 1"),),
+            parent_graph_path="/graphs/parent.db",
+            parent_graph_revision="g-parent",
+        )
+
+    coordinator = GraphBuildCoordinator(state, build)
+    try:
+        assert coordinator.schedule(parented("r1", ("x.py",))) == "scheduled"
+        assert coordinator.schedule(parented("r2", ("a.py",))) == "coalesced"
+        pending = coordinator.pending_request
+        assert pending.dirty_paths == ("a.py", "x.py")
+        assert pending.parent_graph_path == "/graphs/parent.db"
+        assert pending.parent_graph_revision == "g-parent"
+    finally:
+        gate.set()
+        coordinator.close()
+
 def test_only_owner_poll_publishes_current_matching_result():
     state = EngineState(graph_path="base.db", graph_revision="g0", source_revision="r1")
     coordinator = GraphBuildCoordinator(

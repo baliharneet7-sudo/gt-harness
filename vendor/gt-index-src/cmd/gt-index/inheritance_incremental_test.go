@@ -110,6 +110,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	// calls with inheritanceMap == nil, so the self.save() edge demoted to name_match
 	// (or dropped). Post-fix the reconstructed whole-graph inheritance map keeps it
 	// resolved through the chain.
+	cochangeBefore := countRows(t, dbPath, "cochanges")
 	incr := exec.Command(bin, "-root", repo, "-output", dbPath, "-file", childRel)
 	if out, err := incr.CombinedOutput(); err != nil {
 		t.Fatalf("incremental reindex: %v\n%s", err, out)
@@ -124,6 +125,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	}
 	assertGraphResolutionIncomplete(t, dbPath)
 	assertIncrementalAnalysisInvalidated(t, dbPath)
+	assertCochangeSurvivesIncremental(t, dbPath, cochangeBefore)
 
 	// The incremental transaction must not leave old sidecar authority beside the
 	// changed graph. The legacy CALLS edge above remains available, while the new
@@ -295,7 +297,7 @@ func assertIncrementalAnalysisInvalidated(t *testing.T, dbPath string) {
 		receipt.FailureReason != "incremental_reindex_requires_full_analysis" {
 		t.Fatalf("incremental analysis receipt retained stale authority: %#v", receipt)
 	}
-	for _, table := range []string{"cochanges", "communities", "community_members", "processes", "process_steps"} {
+	for _, table := range []string{"communities", "community_members", "processes", "process_steps"} {
 		var exists int
 		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
 			t.Fatal(err)
@@ -310,6 +312,71 @@ func assertIncrementalAnalysisInvalidated(t *testing.T, dbPath string) {
 		if count != 0 {
 			t.Fatalf("stale derived table %s retained %d rows", table, count)
 		}
+	}
+}
+
+func countRows(t *testing.T, dbPath, table string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// assertCochangeSurvivesIncremental pins that an amend does NOT discard
+// co-change.
+//
+// Co-change is computed from git log over a commit window and never reads the
+// working tree, so an uncommitted edit cannot make a pair false. The previous
+// rule deleted the table anyway: 23,746 proven pairs destroyed for a one-symbol
+// edit on the arktype graph, leaving the cochange_prior surface empty until the
+// next full rebuild. Communities and processes ARE derived from the call graph
+// the edit changes, so those stay asserted empty by the caller.
+func assertCochangeSurvivesIncremental(t *testing.T, dbPath string, before int) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var after int
+	if err := db.QueryRow("SELECT count(*) FROM cochanges").Scan(&after); err != nil {
+		t.Fatalf("cochanges after incremental: %v", err)
+	}
+	if after != before {
+		t.Fatalf("incremental amend changed cochanges from %d to %d; an edit that "+
+			"adds no commit cannot invalidate a single pair", before, after)
+	}
+	var state, pairs string
+	if err := db.QueryRow(
+		"SELECT value FROM project_meta WHERE key='derived_cochange_state'").Scan(&state); err != nil {
+		t.Fatalf("derived_cochange_state: %v", err)
+	}
+	if err := db.QueryRow(
+		"SELECT value FROM project_meta WHERE key='derived_cochange_pairs'").Scan(&pairs); err != nil {
+		t.Fatalf("derived_cochange_pairs: %v", err)
+	}
+	if state == "not_run" {
+		t.Fatalf("co-change survived but its state row claims not_run")
+	}
+	// And the closure count must not outlive the closure rows.
+	var closureRows int
+	var closureCount string
+	if err := db.QueryRow("SELECT count(*) FROM closure").Scan(&closureRows); err != nil {
+		t.Fatalf("closure rows: %v", err)
+	}
+	if err := db.QueryRow(
+		"SELECT value FROM project_meta WHERE key='closure_count'").Scan(&closureCount); err != nil {
+		t.Fatalf("closure_count: %v", err)
+	}
+	if closureRows == 0 && closureCount != "0" {
+		t.Fatalf("closure table is empty but closure_count claims %q", closureCount)
 	}
 }
 

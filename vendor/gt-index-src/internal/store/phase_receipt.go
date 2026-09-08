@@ -179,6 +179,15 @@ func (d *DB) AnalysisState() (state, reason string) {
 // analysis product that a single-file refresh cannot re-prove and replaces the
 // old complete receipt with a sealed, named not-run receipt.
 //
+// cochanges is deliberately NOT in this list either. Co-change is computed by
+// walking git log over a commit window (internal/cochange) and never reads the
+// working tree, so an uncommitted edit cannot make a single pair false. Wiping
+// it destroyed 23,746 proven pairs for a one-symbol edit on the arktype graph
+// and left cochange_prior -- 16 deliveries in the 2026-09-07 run -- with nothing
+// to serve until the next full rebuild. The derived_cochange_* metadata is left
+// intact for the same reason: those rows describe the window that was walked,
+// which the edit did not change.
+//
 // resolution_symbols is deliberately NOT in this list. A symbol's identity
 // (gt.symbol.identity.v1 -- language, path, qualified name, kind, span) is
 // derived from the file that declares it, so it is not a repository-wide claim
@@ -210,7 +219,6 @@ func InvalidateAnalysisForIncrementalTx(
 		{"communities", `DELETE FROM communities`},
 		{"process_steps", `DELETE FROM process_steps`},
 		{"processes", `DELETE FROM processes`},
-		{"cochanges", `DELETE FROM cochanges`},
 	} {
 		var exists int
 		if err := tx.QueryRow(
@@ -230,15 +238,14 @@ func InvalidateAnalysisForIncrementalTx(
 		AnalysisFailureReasonKey:                 reason,
 		AnalysisPhaseReceiptKey:                  receiptPayload,
 		AnalysisPhaseReceiptSHA256Key:            receiptSHA256,
+		// closure is emptied above and is genuinely invalidated -- it is
+		// derived from CALLS edges, which the edit changes. The COUNT has to
+		// fall with it: an amended graph was reporting closure_count 510
+		// beside an empty closure table, which is a graph misstating its own
+		// contents.
+		"closure_count":                          "0",
 		"derived_layers_state":                   AnalysisStateNotRun,
 		"derived_layers_degraded":                reason,
-		"derived_cochange_state":                 AnalysisStateNotRun,
-		"derived_cochange_pairs":                 "0",
-		"derived_cochange_commits_scanned":       "0",
-		"derived_cochange_commits_skipped":       "0",
-		"derived_cochange_shallow":               "0",
-		"derived_cochange_window_start":          "",
-		"derived_cochange_window_end":            "",
 		"derived_community_state":                AnalysisStateNotRun,
 		"derived_community_count":                "0",
 		"derived_community_members":              "0",

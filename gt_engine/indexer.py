@@ -483,11 +483,27 @@ INCREMENTAL_AMENDABLE_EXTS = frozenset({
 })
 
 # How many changed files an amend will absorb before a full rebuild is the
-# cheaper answer. A clean single-file amend measures 12.0s on the arktype graph
-# against ~115s for a full index, so the crossover sits near eight files. The
-# bound matters because the failure it prevents is not slowness: a rebuild that
-# outlives the edit interval leaves graph_current false for the rest of the run.
-INCREMENTAL_MAX_DIRTY_PATHS = 8
+# cheaper answer.
+#
+# First set to 8 from an isolated producer measurement (12.0s per file against a
+# ~115s full index). The live run corrected both numbers. Measured end to end on
+# arktype, 2026-09-08, whole builds rather than the producer alone:
+#
+#     full rebuild          ~78s   (five samples, 75.6-81.6s)
+#     one-file amend        ~30s   (four samples after the cold first, 7.0-32.6s)
+#     of which fixed cost   ~20-31s  (git history freeze plus re-materialising
+#                                     every producer-input file, paid by BOTH
+#                                     modes on every build)
+#
+# So the amend's advantage is a fixed ~48s saving, not a per-file one, and each
+# additional file spends against it. Three files is the point where a rebuild
+# wins on time -- and a rebuild also restores the co-change, closure and
+# candidate layers an amend cannot re-prove, so above the crossover it is better
+# on both axes, not merely faster.
+#
+# This bound will move again when the fixed cost is removed from the amend path;
+# it is calibration, not contract.
+INCREMENTAL_MAX_DIRTY_PATHS = 3
 
 
 def _index_command(binary: str, root: str, output: str) -> list[str]:
