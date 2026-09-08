@@ -33,14 +33,7 @@ func declaredBuildIdentity() buildIdentity {
 	if toolchain == "" || toolchain == "unknown" {
 		toolchain = runtime.Version()
 	}
-	// incremental_amend_in_place is the engine's gate for calling -file at all.
-	// It says this binary AMENDS a file's nodes in place (stable ids, retained
-	// overlay) and re-mints that file's resolution_symbols. A binary without it
-	// may still ACCEPT -file and destroy the graph doing so: the certified
-	// c3b9f16e does exactly that, and every other capability string it declares
-	// is identical to this build's. Absent this name the engine rebuilds in
-	// full rather than trusting the flag's mere presence.
-	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_amend_in_place", "incremental_stale_suppression", "parse_failure_accounting", "parser_inspection_v1", "retained_call_candidates", "versioned_query_policy"}
+	capabilities := []string{"atomic_graph_publication", "call_resolution_v2", "framework_surface_resolution_v1", "incremental_stale_suppression", "parse_failure_accounting", "parser_inspection_v1", "retained_call_candidates", "versioned_query_policy"}
 	sort.Strings(capabilities)
 	identityMaterial := strings.Join([]string{commitSHA, buildTimeUTC, sourceFingerprint, toolchain, compiledBuildTags, schemaVersion, strings.Join(capabilities, ",")}, "\x00")
 	buildSum := sha256.Sum256([]byte(identityMaterial))

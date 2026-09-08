@@ -16,10 +16,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -27,7 +25,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1327,17 +1324,6 @@ func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) str
 //  9. INSERT OR REPLACE INTO file_hashes.
 //  10. COMMIT.
 //  11. Print one JSON line to stdout.
-// Amendment counts, surfaced on the result line: a reindex reporting only
-// nodes_replaced cannot tell an amendment from a replacement, and that is
-// the distinction this path turns on.
-var incrNodesInserted, incrNodesUpdated, incrNodesRemoved int
-
-// Symbols re-minted into resolution_symbols for the amended file. Reported on
-// the result line for the same reason as the node counts: a delete whose size
-// is not stated cannot be told apart from a delete that took the repository
-// with it, which is exactly how a wholesale purge went unnoticed.
-var incrSymbolsReminted, incrSymbolsRemoved int
-
 func runIncremental(root, relpath, dbPath string) error {
 	startWall := time.Now()
 
@@ -1365,16 +1351,6 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 2 — sha256 of file contents.
 	contents, err := os.ReadFile(absPath)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			// The file is gone. That is an edit like any other and the graph
-			// has to follow it; erroring here forced the caller into a full
-			// rebuild, and on the 2026-09-08 run deletions were FIVE of eleven
-			// rebuilds -- the single largest cause, ahead of everything else.
-			// A rename presents the same way (delete of the old path, create of
-			// the new), so both paths arrive in the same dirty set and this
-			// handles the half that used to refuse.
-			return runIncrementalDelete(db, relSlash, startWall)
-		}
 		return fmt.Errorf("read file %s: %w", absPath, err)
 	}
 	sum := sha256.Sum256(contents)
@@ -1480,41 +1456,37 @@ func runIncremental(root, relpath, dbPath string) error {
 	if _, err := tx.Exec(`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`); err != nil {
 		return fmt.Errorf("bind stale graph resolution revision: %w", err)
 	}
-	// A single-file refresh cannot prove repository-wide candidate parity, so the
-	// attached resolution overlay must be invalidated where this edit can reach.
-	// It used to be invalidated EVERYWHERE, and that unconditional purge is what
-	// made incremental indexing unusable: on the arktype graph it deleted 177,390
-	// of 181,200 nodes (97.9%) and 459,523 of 466,421 edges (98.5%) for a
-	// twenty-node file, because the overlay IS the graph. One -file reindex left
-	// nothing that could answer a caller query, so every consumer fell back to a
-	// full rebuild -- ~115s against a ~50s edit interval, which never converges.
-	// Measured downstream on run 34144284449: caller_coverage unavailable on 189
-	// of 255 reads (74%) and caller_contract_view delivered 3 times in 280 steps.
-	//
-	// NOTHING is purged here, and that is the point.
-	//
-	// This block used to delete the attached resolution overlay -- first
-	// repository-wide (177,390 of 181,200 nodes on the arktype graph), then
-	// scoped to a blast radius, then to this file alone. Every one of those was
-	// a smaller version of the same mistake. The overlay is proven work; an edit
-	// to one file does not make it false, it makes part of it older. The graph
-	// is the backbone and it gets amended, not rebuilt.
-	//
-	// What made deletion look necessary was replacing the file's nodes and
-	// giving every symbol a new id. ReconcileFileNodesTx below holds ids stable,
-	// so overlay rows keep pointing at the symbols they were proven against, and
-	// each row already records the revision it was proven at (ResolutionCallsite
-	// .RepositoryRevision, AttachedCandidate.Revision). Staleness is therefore
-	// something a reader can SEE rather than something the writer has to destroy.
+	// A single-file refresh cannot prove repository-wide candidate parity because
+	// callers in other files may depend on the changed identities. Remove the
+	// entire attached resolution overlay in this same transaction. Metadata-only
+	// invalidation is insufficient: direct SQL and generic graph readers do not
+	// necessarily consult project_meta before traversing nodes and edges.
+	if _, err := tx.Exec(`DELETE FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE','CANDIDATE_TARGET','HAS_DERIVATION_FACT','HAS_COMPLETENESS_FACT','HAS_UNRESOLVED_FACT') OR (type='CALLS' AND callsite_stable_id IS NOT NULL)`); err != nil {
+		return fmt.Errorf("remove stale attached resolution edges: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes WHERE node_type IN ('callsite','derivation_fact','completeness_fact','unresolved_fact') OR label='Callsite'`); err != nil {
+		return fmt.Errorf("remove stale attached resolution nodes: %w", err)
+	}
 
-	// Steps 5+6+8 — AMEND this file rather than replace it.
-	//
-	// The snapshot-then-delete-then-reinsert this replaces existed only because
-	// the file's nodes were about to get new ids: incoming edges had to be
-	// captured and re-matched by name afterwards, and anything that could not
-	// be re-matched was counted as "incoming_unresolved" and lost. Holding ids
-	// stable removes the need for all of it -- an edge pointing at a function
-	// that did not change was never broken, so it never has to be restored.
+	// Step 4.5 — snapshot incoming cross-file edges BEFORE delete. These get
+	// stripped by the upcoming target_id-based DELETE; without this snapshot
+	// they'd be lost permanently because re-parsing this file does NOT
+	// re-emit the calls that originate in other files. Self-edges (within
+	// this same file) are excluded from the snapshot — they'll be re-emitted
+	// naturally when the parser re-runs over this file's body.
+	incomingSnap, err := store.SnapshotIncomingEdgesTx(tx, relSlash, 0)
+	if err != nil {
+		return err
+	}
+
+	// Steps 5+6 — delete edges (both directions), then nodes, for this file.
+	edgesDeleted, nodesDeleted, err := store.DeleteFileEdgesAndNodesTx(tx, relSlash)
+	if err != nil {
+		return err
+	}
+	_ = nodesDeleted // captured for diagnostics; not surfaced beyond this scope
+
+	// Step 8 — insert this file's new nodes, then resolve+insert its outgoing edges.
 	newNodePtrs := make([]*store.Node, len(pr.Nodes))
 	parentLocal := make([]int64, len(pr.Nodes))
 	for i := range pr.Nodes {
@@ -1523,16 +1495,10 @@ func runIncremental(root, relpath, dbPath string) error {
 		n.ParentID = 0
 		newNodePtrs[i] = n
 	}
-	newDBIDs, nodesInserted, nodesUpdated, nodesRemoved, err := store.ReconcileFileNodesTx(tx, relSlash, newNodePtrs)
+	newDBIDs, err := store.BatchInsertNodesTx(tx, newNodePtrs)
 	if err != nil {
-		return fmt.Errorf("reconcile file nodes: %w", err)
+		return fmt.Errorf("insert new nodes: %w", err)
 	}
-	edgesDeleted, err := store.AmendFileEdgesTx(tx, relSlash, nodesRemoved)
-	if err != nil {
-		return err
-	}
-	incrNodesInserted, incrNodesUpdated, incrNodesRemoved = nodesInserted, nodesUpdated, len(nodesRemoved)
-
 	for i, plocal := range parentLocal {
 		if plocal > 0 {
 			pidx := int(plocal) - 1
@@ -1543,49 +1509,6 @@ func runIncremental(root, relpath, dbPath string) error {
 			}
 		}
 	}
-
-	// Re-mint this file's resolution_symbols rows.
-	//
-	// InvalidateAnalysisForIncrementalTx clears the repository-wide analysis
-	// products; symbol identity is not one of them. gt.symbol.identity.v1 is
-	// derived from (language, path, qualified name, kind, span), so every row
-	// for this file is re-provable from the reparsed nodes and no row for any
-	// other file is affected by the edit.
-	//
-	// Deleting by path rather than upserting is required, not stylistic:
-	// native_id is UNIQUE and stable_id is the primary key, so a symbol that
-	// merely MOVED (same node id, new span) mints a new stable_id and an upsert
-	// would collide on the old row's native_id.
-	deletedSymbols, err := tx.Exec(`DELETE FROM resolution_symbols WHERE path = ?`, relSlash)
-	if err != nil {
-		return fmt.Errorf("clear amended file resolution symbols: %w", err)
-	}
-	symbolsRemoved, err := deletedSymbols.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count cleared resolution symbols: %w", err)
-	}
-	remintedSymbols := make([]*store.ResolutionSymbol, 0, len(pr.Nodes))
-	for i := range pr.Nodes {
-		if i >= len(newDBIDs) || newDBIDs[i] == 0 {
-			continue
-		}
-		symbol := store.BuildResolutionSymbol(strconv.FormatInt(newDBIDs[i], 10), pr.Nodes[i])
-		remintedSymbols = append(remintedSymbols, &symbol)
-	}
-	if err := store.BatchInsertResolutionSymbolsTx(tx, remintedSymbols); err != nil {
-		return fmt.Errorf("re-mint amended file resolution symbols: %w", err)
-	}
-	incrSymbolsReminted = len(remintedSymbols)
-	incrSymbolsRemoved = int(symbolsRemoved)
-
-	// An "unresolved" fact recorded elsewhere is NOT retired here, and the
-	// attempt to do so is worth recording. Matching those rows by bare NAME
-	// against this file's symbols deleted 18,972 of them graph-wide on the
-	// arktype graph for a twenty-symbol test file, because ordinary helper names
-	// collide across a repository. It was also the wrong idea even when narrow:
-	// "X was unresolved at revision R1" stays true at R1. If X becomes
-	// resolvable, the next resolution proves that -- it is not established by
-	// deleting the record that it once was not.
 
 	// Re-resolve outgoing calls. The pre-fetched allNodes/allIDs include the
 	// just-deleted file's old IDs; filter them out so calls don't resolve to
@@ -1831,11 +1754,10 @@ func runIncremental(root, relpath, dbPath string) error {
 	// Step 8.5 — re-resolve the incoming-edge snapshot against the freshly
 	// inserted nodes. Edges whose target name no longer exists in this file
 	// (rename/removal) are dropped silently and counted in `incomingUnres`.
-	// No incoming edge was broken, so none needs re-resolving: the reconcile
-	// above kept every surviving symbol's id. Reported as zero restored and
-	// zero unresolved because zero were disturbed, which is a different fact
-	// from "none could be recovered" and the counters keep them apart.
-	incomingRest, incomingUnres := 0, 0
+	incomingRest, incomingUnres, err := store.ResolveIncomingEdgesTx(tx, incomingSnap, relSlash)
+	if err != nil {
+		return fmt.Errorf("re-resolve incoming edges: %w", err)
+	}
 
 	// Step 9 — record new content hash inside the same tx.
 	if err := store.InsertFileHashTx(tx, relSlash, newHash, spec.Name); err != nil {
@@ -1893,113 +1815,8 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"nodes_replaced":%d,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"symbols_reminted":%d,"symbols_removed":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
-		relSlash, len(newDBIDs), incrNodesInserted, incrNodesUpdated, incrNodesRemoved, replacedEdges, incrSymbolsReminted, incrSymbolsRemoved, incomingRest, incomingUnres, dur.Milliseconds(),
-	)
-	return nil
-}
-
-// runIncrementalDelete removes a deleted file from the graph, in place.
-//
-// Same contract as the amend it sits beside: the rest of the graph is left
-// alone, ids of surviving symbols do not move, and the repository-wide analysis
-// products a single-file change cannot re-prove are invalidated with a named
-// reason. What differs is that there is nothing to parse, so the file's node
-// set reconciles to empty and its file_hashes row goes with it -- leaving a
-// stale row would make the next full index believe the file was still indexed
-// at that content.
-func runIncrementalDelete(db *store.DB, relSlash string, startWall time.Time) error {
-	repositoryRevision := "unversioned"
-	producerIdentity, err := currentBuildIdentity()
-	if err != nil {
-		return fmt.Errorf("compute producer identity for deletion receipt: %w", err)
-	}
-	const incrementalAnalysisReason = "incremental_reindex_requires_full_analysis"
-	analysisPayload, analysisSHA, err := store.AnalysisPhaseReceipt{
-		Schema:             store.AnalysisPhaseReceiptSchema,
-		State:              store.AnalysisStateNotRun,
-		RepositoryRevision: repositoryRevision,
-		BuildID:            producerIdentity.BuildID,
-		FailureReason:      incrementalAnalysisReason,
-		RolledBack: []string{
-			"resolution", "closure", "cochange", "community", "process",
-		},
-	}.Seal()
-	if err != nil {
-		return fmt.Errorf("seal deletion analysis receipt: %w", err)
-	}
-
-	tx, err := db.BeginTx()
-	if err != nil {
-		return fmt.Errorf("begin deletion tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			tx.Rollback()
-		}
-	}()
-
-	if err := store.InvalidateAnalysisForIncrementalTx(
-		tx, analysisPayload, analysisSHA, incrementalAnalysisReason,
-	); err != nil {
-		return err
-	}
-	for _, stmt := range []string{
-		`INSERT INTO project_meta(key,value) VALUES('resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`,
-		`INSERT INTO project_meta(key,value) VALUES('resolution_repository_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`,
-		`INSERT INTO project_meta(key,value) VALUES('graph_resolution_complete','0') ON CONFLICT(key) DO UPDATE SET value='0'`,
-		`INSERT INTO project_meta(key,value) VALUES('graph_resolution_revision','stale') ON CONFLICT(key) DO UPDATE SET value='stale'`,
-	} {
-		if _, err := tx.Exec(stmt); err != nil {
-			return fmt.Errorf("invalidate resolution metadata on delete: %w", err)
-		}
-	}
-
-	// Reconcile to an EMPTY node set: every symbol the file declared is removed,
-	// and nothing else is touched.
-	_, inserted, updated, removed, err := store.ReconcileFileNodesTx(tx, relSlash, nil)
-	if err != nil {
-		return fmt.Errorf("reconcile deleted file nodes: %w", err)
-	}
-	edgesDeleted, err := store.AmendFileEdgesTx(tx, relSlash, removed)
-	if err != nil {
-		return err
-	}
-	deletedSymbols, err := tx.Exec(`DELETE FROM resolution_symbols WHERE path = ?`, relSlash)
-	if err != nil {
-		return fmt.Errorf("clear deleted file resolution symbols: %w", err)
-	}
-	symbolsRemoved, err := deletedSymbols.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("count cleared resolution symbols on delete: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM file_hashes WHERE file_path = ?`, relSlash); err != nil {
-		return fmt.Errorf("drop file hash for deleted file: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit deletion: %w", err)
-	}
-	committed = true
-
-	if _, promErr := resolver.PromotePropertyEdges(db); promErr != nil {
-		log.Printf("WARNING: property->edge promotion after deletion: %v", promErr)
-	}
-	if err := setRequiredMetadata(db, map[string]string{
-		"schema_version": schemaVersion, "indexer_version": "v16-multilang",
-		"git_commit": commitSHA, "build_time_utc": buildTimeUTC, "go_toolchain": goToolchain,
-	}); err != nil {
-		return err
-	}
-	if err := db.PopulateFTS5(); err != nil {
-		log.Printf("[WARN] FTS5 refresh after deletion: %v", err)
-	}
-	db.CheckpointWAL()
-
-	dur := time.Since(startWall)
-	fmt.Printf(
-		`{"file":%q,"nodes_replaced":0,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"symbols_reminted":0,"symbols_removed":%d,"incoming_restored":0,"incoming_unresolved":0,"duration_ms":%d,"short_circuited":false,"deleted":true}`+"\n",
-		relSlash, inserted, updated, len(removed), edgesDeleted, symbolsRemoved, dur.Milliseconds(),
+		`{"file":%q,"nodes_replaced":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
+		relSlash, len(newDBIDs), replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
 	)
 	return nil
 }

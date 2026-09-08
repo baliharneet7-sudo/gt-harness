@@ -1114,17 +1114,7 @@ func (d *DB) PopulateFTS5() error {
 		 SELECT id, name, COALESCE(qualified_name, ''), COALESCE(signature, ''), file_path
 		 FROM nodes`
 	// Clear any existing content (idempotent rebuild), then re-insert.
-	//
-	// `nodes_fts` is an EXTERNAL-CONTENT table (content='nodes'). A plain
-	// `DELETE FROM nodes_fts` is not how such a table is cleared: FTS5 has to
-	// re-read each content row to work out which terms to un-index, and the
-	// incremental path has already replaced this file's rows in `nodes` by the
-	// time this runs. Index and content disagree, so SQLite raises "database
-	// disk image is malformed" on every single -file reindex and we fall into
-	// the DROP+recreate recovery below -- rebuilding the whole index to clear
-	// it. 'delete-all' is the documented command for an external-content table
-	// and does not consult the content rows at all.
-	_, delErr := d.db.Exec("INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all')")
+	_, delErr := d.db.Exec("DELETE FROM nodes_fts")
 	if delErr == nil {
 		if _, err := d.db.Exec(insertSQL); err == nil {
 			return nil

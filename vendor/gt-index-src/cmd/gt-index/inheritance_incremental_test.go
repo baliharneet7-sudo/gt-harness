@@ -110,7 +110,6 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	// calls with inheritanceMap == nil, so the self.save() edge demoted to name_match
 	// (or dropped). Post-fix the reconstructed whole-graph inheritance map keeps it
 	// resolved through the chain.
-	cochangeBefore := countRows(t, dbPath, "cochanges")
 	incr := exec.Command(bin, "-root", repo, "-output", dbPath, "-file", childRel)
 	if out, err := incr.CombinedOutput(); err != nil {
 		t.Fatalf("incremental reindex: %v\n%s", err, out)
@@ -125,7 +124,6 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 	}
 	assertGraphResolutionIncomplete(t, dbPath)
 	assertIncrementalAnalysisInvalidated(t, dbPath)
-	assertCochangeSurvivesIncremental(t, dbPath, cochangeBefore)
 
 	// The incremental transaction must not leave old sidecar authority beside the
 	// changed graph. The legacy CALLS edge above remains available, while the new
@@ -136,7 +134,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"resolution_callsites", "resolution_candidates"} {
+	for _, table := range []string{"resolution_symbols", "resolution_callsites", "resolution_candidates"} {
 		var count int
 		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
 			t.Fatalf("%s after incremental: %v", table, err)
@@ -145,10 +143,6 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 			t.Fatalf("stale %s rows survived incremental invalidation: %d", table, count)
 		}
 	}
-	assertResolutionSymbolsReminted(t, dbPath, childRel)
-	// Retained, not purged -- see assertGraphResolutionIncomplete. These counts
-	// are read so a regression that WIPES them is still visible in a failure
-	// message, but a non-zero count is now the expected state.
 	for query, label := range map[string]string{
 		`SELECT count(*) FROM edges WHERE type IN ('HAS_CALLSITE','CANDIDATE')`: "attached resolution edges",
 		`SELECT count(*) FROM nodes WHERE label='Callsite'`:                     "attached callsite nodes",
@@ -156,6 +150,9 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		var count int
 		if err := db.QueryRow(query).Scan(&count); err != nil {
 			t.Fatalf("count %s after incremental: %v", label, err)
+		}
+		if count != 0 {
+			t.Fatalf("stale %s survived incremental invalidation: %d", label, count)
 		}
 	}
 	graph, err := store.Open(dbPath)
@@ -174,80 +171,6 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		if edge.Type == "HAS_CALLSITE" || edge.Type == "CANDIDATE" {
 			t.Fatalf("generic graph query exposed incomplete attached edge: %+v", edge)
 		}
-	}
-}
-
-// assertResolutionSymbolsReminted pins that a -file amend RE-MINTS the amended
-// file's resolution_symbols rows rather than clearing the table.
-//
-// This assertion used to require all three resolution_* tables to be empty. The
-// reasoning behind the zero-row pin was that replace-and-reinsert gave every
-// symbol a new node id, so a surviving row's native_id could point at a deleted
-// node. ReconcileFileNodesTx holds ids stable, so that hazard is gone and the
-// pin protected nothing -- while costing every consumer of symbol identity:
-// gt_engine/contract.py falls back to a locally derived "gtsym1:" id when the
-// table is missing a symbol, which changes every contract digest in the
-// repository, and the verification planner queries this table by path and finds
-// nothing at all. Symbol identity (gt.symbol.identity.v1) is derived per file,
-// so re-minting one file's rows is not a repository-wide claim. Callsites and
-// candidates ARE repository-wide and are still asserted empty by the caller.
-func assertResolutionSymbolsReminted(t *testing.T, dbPath, amendedRel string) {
-	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	var total int
-	if err := db.QueryRow("SELECT count(*) FROM resolution_symbols").Scan(&total); err != nil {
-		t.Fatalf("resolution_symbols after incremental: %v", err)
-	}
-	if total == 0 {
-		t.Fatal("incremental amend cleared resolution_symbols; symbol identity is per-file and must be re-minted")
-	}
-
-	// Every row must name a node that exists. A dangling native_id is the
-	// failure the old zero-row pin was really guarding against.
-	var dangling int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM resolution_symbols rs
-		  WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE CAST(n.id AS TEXT) = rs.native_id)`,
-	).Scan(&dangling); err != nil {
-		t.Fatalf("dangling resolution_symbols: %v", err)
-	}
-	if dangling != 0 {
-		t.Fatalf("resolution_symbols rows point at %d missing nodes after incremental", dangling)
-	}
-
-	// The amended file's rows must match its surviving core nodes exactly --
-	// same exclusion ReconcileFileNodesTx applies, so overlay rows are not
-	// expected to carry symbol identity.
-	const coreNodes = `SELECT count(*) FROM nodes
-	   WHERE file_path = ?
-	     AND label != 'Callsite'
-	     AND (node_type IS NULL OR node_type NOT IN ('callsite','derivation_fact','completeness_fact','unresolved_fact'))`
-	amended := filepath.ToSlash(amendedRel)
-	var wantRows, gotRows int
-	if err := db.QueryRow(coreNodes, amended).Scan(&wantRows); err != nil {
-		t.Fatalf("count core nodes for %s: %v", amended, err)
-	}
-	if err := db.QueryRow(`SELECT count(*) FROM resolution_symbols WHERE path = ?`, amended).Scan(&gotRows); err != nil {
-		t.Fatalf("count resolution_symbols for %s: %v", amended, err)
-	}
-	if wantRows == 0 || gotRows != wantRows {
-		t.Fatalf("amended file %s has %d core nodes but %d resolution_symbols rows", amended, wantRows, gotRows)
-	}
-
-	// The symbol added by the edit is the one a stale table would miss.
-	var extra int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM resolution_symbols WHERE path = ? AND qualified_name LIKE '%extra%'`, amended,
-	).Scan(&extra); err != nil {
-		t.Fatalf("count re-minted symbol: %v", err)
-	}
-	if extra == 0 {
-		t.Fatalf("the method added by the amend has no resolution_symbols row in %s", amended)
 	}
 }
 
@@ -297,7 +220,7 @@ func assertIncrementalAnalysisInvalidated(t *testing.T, dbPath string) {
 		receipt.FailureReason != "incremental_reindex_requires_full_analysis" {
 		t.Fatalf("incremental analysis receipt retained stale authority: %#v", receipt)
 	}
-	for _, table := range []string{"communities", "community_members", "processes", "process_steps"} {
+	for _, table := range []string{"cochanges", "communities", "community_members", "processes", "process_steps"} {
 		var exists int
 		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
 			t.Fatal(err)
@@ -312,71 +235,6 @@ func assertIncrementalAnalysisInvalidated(t *testing.T, dbPath string) {
 		if count != 0 {
 			t.Fatalf("stale derived table %s retained %d rows", table, count)
 		}
-	}
-}
-
-func countRows(t *testing.T, dbPath, table string) int {
-	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var n int
-	if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
-		t.Fatalf("count %s: %v", table, err)
-	}
-	return n
-}
-
-// assertCochangeSurvivesIncremental pins that an amend does NOT discard
-// co-change.
-//
-// Co-change is computed from git log over a commit window and never reads the
-// working tree, so an uncommitted edit cannot make a pair false. The previous
-// rule deleted the table anyway: 23,746 proven pairs destroyed for a one-symbol
-// edit on the arktype graph, leaving the cochange_prior surface empty until the
-// next full rebuild. Communities and processes ARE derived from the call graph
-// the edit changes, so those stay asserted empty by the caller.
-func assertCochangeSurvivesIncremental(t *testing.T, dbPath string, before int) {
-	t.Helper()
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var after int
-	if err := db.QueryRow("SELECT count(*) FROM cochanges").Scan(&after); err != nil {
-		t.Fatalf("cochanges after incremental: %v", err)
-	}
-	if after != before {
-		t.Fatalf("incremental amend changed cochanges from %d to %d; an edit that "+
-			"adds no commit cannot invalidate a single pair", before, after)
-	}
-	var state, pairs string
-	if err := db.QueryRow(
-		"SELECT value FROM project_meta WHERE key='derived_cochange_state'").Scan(&state); err != nil {
-		t.Fatalf("derived_cochange_state: %v", err)
-	}
-	if err := db.QueryRow(
-		"SELECT value FROM project_meta WHERE key='derived_cochange_pairs'").Scan(&pairs); err != nil {
-		t.Fatalf("derived_cochange_pairs: %v", err)
-	}
-	if state == "not_run" {
-		t.Fatalf("co-change survived but its state row claims not_run")
-	}
-	// And the closure count must not outlive the closure rows.
-	var closureRows int
-	var closureCount string
-	if err := db.QueryRow("SELECT count(*) FROM closure").Scan(&closureRows); err != nil {
-		t.Fatalf("closure rows: %v", err)
-	}
-	if err := db.QueryRow(
-		"SELECT value FROM project_meta WHERE key='closure_count'").Scan(&closureCount); err != nil {
-		t.Fatalf("closure_count: %v", err)
-	}
-	if closureRows == 0 && closureCount != "0" {
-		t.Fatalf("closure table is empty but closure_count claims %q", closureCount)
 	}
 }
 
@@ -397,22 +255,13 @@ func assertGraphResolutionIncomplete(t *testing.T, dbPath string) {
 	if complete != "0" || revision != "stale" {
 		t.Fatalf("incremental graph authority was not fail-closed: complete=%q revision=%q", complete, revision)
 	}
-	// Attachments are RETAINED, deliberately. This used to require them to be
-	// zero, on the reasoning that a generic reader traversing nodes and edges
-	// might not consult project_meta first. The remedy was to delete proven
-	// work: on the arktype graph the same rule discarded 177,390 of 181,200
-	// nodes for a twenty-symbol edit. Fail-closed authority is what protects the
-	// reader -- asserted immediately above, and enforced by
-	// queryAttachedCandidates, which refuses while graph_resolution_complete is
-	// not "1" -- so deletion bought nothing the flag was not already buying.
-	//
-	// What must hold is that retention never becomes exposure. The caller
-	// asserts that directly: QueryAttachedCandidates must still error.
 	var attached int
 	if err := db.QueryRow("SELECT count(*) FROM edges WHERE type='HAS_CALLSITE'").Scan(&attached); err != nil {
 		t.Fatal(err)
 	}
-	_ = attached
+	if attached != 0 {
+		t.Fatalf("incremental update retained stale primary graph callsite attachments: %d", attached)
+	}
 }
 
 // inheritedSaveEdgeMethod returns the resolution_method of the CALLS edge from a
