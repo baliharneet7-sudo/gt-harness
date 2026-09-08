@@ -12,16 +12,34 @@ from typing import Any
 GATE_STAGE = "gate-one"
 REMAINDER_STAGE = "remaining-19"
 STAGES = frozenset({GATE_STAGE, REMAINDER_STAGE})
-GATE_TASK_ID = "arktype-json-schema-refs-dependencies"
-# Gate-one proves the infrastructure, and it can only do that if the task is
-# allowed to finish. The 30-minute cap left the agent 1500s after the 300s
-# supervisor grace, against a task whose own task.toml allows 5400s and a
-# deepseek-v4-flash baseline whose MEAN task duration is 1439s - so the budget
-# sat on the mean and run 34062325608 died at terminal=timeout with
-# receipt_issuance=supervisor:deadline_exceeded, having built its graph and run
-# the model loop correctly for the full 25 minutes. A proof that cannot reach a
-# verdict is not a proof. The cap now matches the task's own allowance, which
-# is the largest value that changes nothing else about the stage.
+# The canary must be a task the product can actually finish, because gate-one's
+# whole job is to answer "does the attested path reach a verdict" before 19 more
+# tasks are paid for.
+#
+# It was arktype, and arktype is the worst possible choice on both axes. It is
+# the cohort's largest workspace (184,370 graph nodes) and it is TypeScript,
+# the one language whose analysis this producer abstains on - measured: all six
+# signature_delta-eligible edits in the arktype codespace run were TypeScript and
+# the producer analyses Python only. So the canary cost the most and proved the
+# least. Run 34257199043 spent 86 minutes, 250 completed model calls and 334
+# executed commands and still hit the deadline with no verdict; the codespace
+# needed 96 minutes for the same task on the same model.
+#
+# aiomonitor is a small Python repository, and Python is the language the
+# producer analyses in full, so the canary now exercises MORE of the product in
+# less time. Nothing else moves: the cohort, its order hash, its 4-per-language
+# balance and every per-task budget are untouched, and arktype still runs - it
+# is simply one of the 19 rather than the gate.
+GATE_TASK_ID = "aiomonitor-task-snapshots-diff"
+# Non-binding by measurement, and kept only as a rail. Every one of the 20 tasks
+# declares [agent] timeout_sec = 5400.0 at benchmark revision
+# 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9, and the plan job resolves the budget
+# with multiplier 1.0, so min(5400, 5400) = 5400 and this cap subtracts nothing.
+# That is the point: gate-one must run at the SAME budget as the remaining 19 and
+# as both frozen GT-off controls, or its result is not comparable to either. Do
+# not raise it to buy a slow task more time - that would make the gate stage a
+# different experiment from the cohort it gates. It exists to refuse a future
+# task.toml that asks for more than the benchmark's own hour and a half.
 GATE_ONE_MAX_TIMEOUT_SECONDS = 90 * 60
 
 

@@ -51,6 +51,29 @@ _PROVIDER_BILLING_FAILURE = re.compile(
 )
 
 
+# ``scripts.miniswe_supervisor.conserve_failure`` maps an exhausted agent budget
+# to terminal="timeout" and exit 3, and gives every other conserved outcome its
+# own code (4 provider_failed, 5 internal_error, 6 setup_error, 137 OOM kill).
+# Exit 3 is therefore an exact, unambiguous statement: "the agent used all of the
+# time the task itself allows".
+#
+# A benchmark timeout is a RESULT, not an infrastructure fault. Both frozen GT-off
+# baselines grade theirs: the Terminal-Bench 2.0 control is 89/89 graded with 4
+# AgentTimeoutError trials counted as non-solves inside its 66/89, and the DeepSWE
+# 10-task control is 10/10 graded with no censoring. Re-raising here instead turns
+# our timeout into a Pier trial exception -- status ERROR, reward null, graded
+# false -- which silently removes a zero from the GT numerator AND denominator
+# while the baseline keeps its zeros. That is a comparison biased in our favour by
+# construction, and it is why run 34257199043 produced no reward after 250
+# completed model calls and 334 executed commands.
+#
+# So: absorb exactly this one code, let ``run`` return, and let the task's own
+# official verifier grade whatever the agent committed. Every other exit code is
+# re-raised untouched -- those are faults where a grade would be a lie about what
+# the agent was able to attempt.
+SUPERVISOR_TIMEOUT_EXIT_CODE = 3
+
+
 class ProviderBillingError(NonZeroAgentExitCodeError):
     """The provider rejected a request because the account cannot fund it."""
 
@@ -98,6 +121,22 @@ class MiniSweAgent(BaseInstalledAgent):
             default=1,
         ),
     ]
+
+    @staticmethod
+    def _agent_exit_code(exc: NonZeroAgentExitCodeError) -> int | None:
+        """Recover the child's exit status from Harbor's formatted message."""
+        match = re.search(r"Command failed \(exit (-?\d+)\)", str(exc))
+        return int(match.group(1)) if match else None
+
+    @classmethod
+    def _absorb_agent_timeout(cls, exc: NonZeroAgentExitCodeError) -> None:
+        """Re-raise unless the agent merely ran out of its own task budget.
+
+        Returning lets Harbor proceed to the task's official verifier, which is
+        what produces the graded reward. See SUPERVISOR_TIMEOUT_EXIT_CODE.
+        """
+        if cls._agent_exit_code(exc) != SUPERVISOR_TIMEOUT_EXIT_CODE:
+            raise exc
 
     def _classify_exec_error(self, command: str, result):
         """Keep monetary rejection distinct from transient rate limiting.
@@ -443,15 +482,20 @@ class MiniSweAgent(BaseInstalledAgent):
         self, instruction: str, environment: BaseEnvironment, context: AgentContext
     ) -> None:
         model, env = self._model_and_env()
-        await self.exec_as_agent(
-            environment,
-            self._run_command(
-                instruction,
-                model,
-                extra_args="--gt-off --state-dir /logs/agent/gt-state ",
-            ),
-            env=env,
-        )
+        try:
+            await self.exec_as_agent(
+                environment,
+                self._run_command(
+                    instruction,
+                    model,
+                    extra_args="--gt-off --state-dir /logs/agent/gt-state ",
+                ),
+                env=env,
+            )
+        except NonZeroAgentExitCodeError as exc:
+            # Both arms must treat an exhausted budget identically, or the
+            # treatment difference is partly a bookkeeping difference.
+            self._absorb_agent_timeout(exc)
 
 
 class MiniSweGtAgent(MiniSweAgent):
@@ -532,8 +576,8 @@ class MiniSweGtAgent(MiniSweAgent):
             # Remove anything the task may have written at the canonical name;
             # only the host adapter is permitted to publish this attestation.
             resource_path.unlink(missing_ok=True)
-            match = re.search(r"Command failed \(exit (-?\d+)\)", str(exc))
-            if match and int(match.group(1)) == 137:
+            exit_code = self._agent_exit_code(exc)
+            if exit_code == 137:
                 try:
                     after = await self._resource_snapshot(environment, task_id, product_source_sha)
                     write_host_interval(
@@ -549,7 +593,7 @@ class MiniSweGtAgent(MiniSweAgent):
                     # Resource finalization cannot replace the exact runner error.
                     resource_path.unlink(missing_ok=True)
                     pass
-            raise
+            self._absorb_agent_timeout(exc)
         except BaseException:
             resource_path.unlink(missing_ok=True)
             raise

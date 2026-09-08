@@ -12,6 +12,18 @@ failure are kept below.
 | time (UTC) | event |
 |---|---|
 | 17:15 | dispatched on `main` at `dba7ac3e`, stage `gate-one` |
+| 17:27 | acceptance concurrency group clear; dispatching gate-one |
+| 17:27 | dispatched run 34257199043 — https://github.com/harneet2512/gt-harness/actions/runs/34257199043 |
+| 17:27 | running: plan |
+| 17:29 | running: readiness / provider-free-product; done: plan=success, readiness_binding=skipped |
+| 17:35 | running: task (1, arktype-json-schema-refs-; done: readiness / provider-fre=success, readiness_binding=skipped, image_digest_gate=success, provider_gate=success |
+| 17:48 | plan=success | readiness / provider-free-prod=success | readiness_binding=skipped | image_digest_gate=success | provider_gate=success | task (1, arktype-json-schema-r:Run DeepSWE through the released gt-harness run boun |
+| 19:08 | plan=success | readiness / provider-free-prod=success | readiness_binding=skipped | image_digest_gate=success | provider_gate=success | task (1, arktype-json-schema-r=failure | attest:Download all task artifacts |
+| 19:09 | running: attest; done: readiness_binding=skipped, image_digest_gate=success, provider_gate=success, task (1, arktype-json-sc=failure |
+| 19:11 | done: image_digest_gate=success, provider_gate=success, task (1, arktype-json-sc=failure, attest=failure |
+| 19:11 | RUN COMPLETE — conclusion=failure |
+| 19:11 | plan=success | readiness / provider-free-prod=success | readiness_binding=skipped | image_digest_gate=success | provider_gate=success | task (1, arktype-json-schema-r=failure | attest=failure |
+| 19:11 | ALL JOBS COMPLETE |
 
 ---
 
@@ -63,6 +75,8 @@ The amend is evidenced separately by the completed arktype codespace run:
 | 16:42 | running: readiness / provider-free-product; done: plan=success, readiness_binding=skipped |
 | 16:48 | running: attest; done: image_digest_gate=success, provider_gate=success, task (1, arktype-json-sche=failure |
 | 16:50 | done: provider_gate=success, task (1, arktype-json-sche=failure, attest=failure |
+| 17:15 | running: attest; done: image_digest_gate=skipped, provider_gate=skipped, task=skipped |
+| 17:17 | done: image_digest_gate=skipped, provider_gate=skipped, task=skipped |
 
 ## Result
 
