@@ -44,10 +44,51 @@ The amend is evidenced separately by the completed arktype codespace run:
 | time (UTC) | event |
 |---|---|
 | 16:42 | dispatched on `main`, stage `gate-one`, in progress |
+| 16:42 | running: readiness / provider-free-product; done: plan=success, readiness_binding=skipped |
+| 16:48 | running: attest; done: image_digest_gate=success, provider_gate=success, task (1, arktype-json-sche=failure |
+| 16:50 | done: provider_gate=success, task (1, arktype-json-sche=failure, attest=failure |
 
 ## Result
 
-_Not yet complete._
+**FAILED at the producer provenance gate — before any paid work ran.**
+
+```
+vendored producer source does not hash to what the binary declares
+source_fingerprint declared : 4f612d4cdf487a22469765fd23f3500429c10ffea0677860785324c3e2e81551
+source_fingerprint computed : 99a2a2390cc3c0e0191e548ab451595cd6e51c6cd47139756e22d7425cead9d4
+```
+
+Step: *Build the checked-in static graph indexer*, in the `task` job, at 16:51 UTC.
+Nothing was spent on the provider: `plan`, `readiness`, `image_digest_gate` and
+`provider_gate` all passed, and the run stopped at the first step of the task
+job.
+
+### Why
+
+The Route-B contract requires the vendored `vendor/gt-index-src` tree to hash to
+the `source_fingerprint` the certified binary declares. This session made four
+commits to that source (co-change retention, symbol re-minting, deletion
+support, the capability declaration), so the tree no longer corresponds to
+`c3b9f16e`. The gate refused, correctly.
+
+This drift predates tonight -- commits `043e14c6` and `25a37a5f` had already
+modified the vendored source after `dfe32533` ("the vendored producer source now
+hashes to what the binary declares") -- but tonight's commits widened it past
+the check.
+
+Note: `scripts/verify_producer_binding --enforce` passes locally and does NOT
+catch this. The fingerprint comparison lives in the workflow step, not in that
+script, which is why the local pre-flight was clean.
+
+### Options
+
+1. Revert `vendor/gt-index-src` on main, keep the producer work on a branch.
+   The attested path works again and measures the engine-side fixes -- which is
+   all this run could exercise anyway, since the amend is gated off by the
+   certified binary not declaring `incremental_amend_in_place`.
+2. Owner re-certifies a producer built from current source (the standing
+   Route-B lineage blocker).
+3. Accept that no attested run can happen while the drift stands.
 
 ---
 
