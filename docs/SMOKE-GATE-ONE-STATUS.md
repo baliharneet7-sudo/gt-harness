@@ -1,5 +1,21 @@
 # Gate-one smoke — live status
 
+## Attempt 2 (current) — run 34255966736
+
+https://github.com/harneet2512/gt-harness/actions/runs/34255966736 — commit `dba7ac3e`
+
+Attempt 1 failed at the producer provenance gate. The vendored source has been
+reverted to the state the certified binary was built from; the fingerprint now
+computes to `4f612d4c...`, matching what build-info declares. Details of that
+failure are kept below.
+
+| time (UTC) | event |
+|---|---|
+| 17:15 | dispatched on `main` at `dba7ac3e`, stage `gate-one` |
+
+---
+
+
 **Purpose.** One DeepSWE task through the attested GitHub Actions path, on the
 merged main commit. This is the run that produces a real graded reward, unlike
 the codespace smokes which have no verifier.
