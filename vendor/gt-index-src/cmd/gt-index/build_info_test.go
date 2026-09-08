@@ -39,6 +39,20 @@ func TestBuildInfoReportsSourceBoundExecutableIdentity(t *testing.T) {
 	if info.Schema != buildInfoSchema || !info.Complete || info.SourceFingerprint != "source-fixture" || info.BuildID == "" {
 		t.Fatalf("incomplete source-bound identity: %+v", info)
 	}
+	// The engine reads this name to decide whether -file is safe to call. A
+	// build that amends in place but does not SAY so is indistinguishable from
+	// the certified binary whose -file mode discards the graph, so the engine
+	// would correctly refuse it and the incremental path would silently never
+	// run again.
+	declared := false
+	for _, capability := range info.Capabilities {
+		if capability == "incremental_amend_in_place" {
+			declared = true
+		}
+	}
+	if !declared {
+		t.Fatalf("build identity does not declare incremental_amend_in_place: %v", info.Capabilities)
+	}
 	bytes, err := os.ReadFile(bin)
 	if err != nil {
 		t.Fatal(err)

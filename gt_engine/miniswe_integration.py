@@ -552,7 +552,30 @@ class MiniSweAdapter(GroundtruthController):
         predicate UNKNOWN, which is exactly today's behaviour. This can only
         preserve a proof, never invent one.
         """
-        if not candidates or os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+        skipped = ""
+        if not candidates:
+            skipped = "no_candidates"
+        elif os.environ.get("GT_VERIFY_EXECUTE", "").strip() != "1":
+            skipped = "verify_execute_off"
+        if skipped:
+            # Say so, rather than returning in silence. This pass produced zero
+            # rows in every run ever recorded, and a silent return is precisely
+            # why that read as "nothing needed re-proving" instead of as a check
+            # that had never once done its work. A skip that names itself is the
+            # difference between quiet and broken.
+            try:
+                self.store.append(
+                    "obligation_reverified",
+                    candidates=sorted(candidates),
+                    distinct_commands=0,
+                    commands_run=0,
+                    preserved=[],
+                    skipped=skipped,
+                    epoch=self.workspace_epoch,
+                    budget_seconds=self.REVERIFY_PASS_BUDGET_SECONDS,
+                )
+            except Exception:  # noqa: BLE001 - reporting never fails an edit
+                pass
             return
         import subprocess
         # Distinct commands only. A command that proved seven predicates is run
@@ -611,6 +634,7 @@ class MiniSweAdapter(GroundtruthController):
                 distinct_commands=len(by_command),
                 commands_run=ran,
                 preserved=sorted(set(preserved)),
+                skipped="",
                 epoch=self.workspace_epoch,
                 budget_seconds=self.REVERIFY_PASS_BUDGET_SECONDS,
             )
@@ -650,30 +674,51 @@ class MiniSweAdapter(GroundtruthController):
             for predicate_id, status in self._status.items()
             if status is PredicateStatus.GREEN
         }
+        # Every proof this edit could discard, WITH the command that proved it,
+        # captured before the controller resets the statuses. After the reset
+        # the receipts are gone, so this is the only moment the pair exists.
+        #
+        # NOT filtered by `affected`. That was the defect: candidacy was decided
+        # by _affected_predicate_ids, which requires the obligation's English
+        # text to literally quote a filename, while the invalidation that
+        # actually runs is footprint-based and matches every edit. The two rules
+        # never intersected, so `obligation_reverified` produced zero rows in
+        # every run ever recorded while proofs were being discarded 33 times.
+        # The applied set below decides candidacy now, so the rule that destroys
+        # a proof is the same rule that offers to re-establish it.
+        proven_commands = {
+            predicate_id: (receipt.command or "")
+            for predicate_id, receipt in self._receipts.items()
+            if self._status.get(predicate_id) is PredicateStatus.GREEN
+        }
+        applied = set(super().note_edit(normalized_paths, invalidate=affected))
+        # Reported AFTER the reset, against what the reset actually did.
+        # Reporting `affected` here was not merely imprecise: with an empty
+        # scope match it claimed every proof survived an edit that had already
+        # wiped them all, which is the opposite of what happened.
+        # `scope_matched` is retained so the narrow-versus-total question this
+        # row was added to settle is still answerable from one row.
         try:
             self.store.append(
                 "obligation_invalidation",
                 paths=list(normalized_paths),
                 epoch=self.workspace_epoch,
-                invalidated=sorted(affected),
+                invalidated=sorted(applied),
+                scope_matched=sorted(affected),
                 proven_before=sorted(proven_before),
-                proven_discarded=sorted(proven_before & affected),
-                proven_surviving=sorted(proven_before - affected),
+                proven_discarded=sorted(proven_before & applied),
+                proven_surviving=sorted(proven_before - applied),
                 predicate_total=len(self._status),
             )
         except Exception:  # noqa: BLE001 - reporting never fails an edit
             pass
-        # Capture what this edit is about to discard, WITH the command that
-        # proved it, before the controller resets the statuses. After the reset
-        # the receipts are gone, so this is the only moment the pair exists.
-        reverify_candidates = {
-            predicate_id: (receipt.command or "")
-            for predicate_id, receipt in self._receipts.items()
-            if predicate_id in affected
-            and self._status.get(predicate_id) is PredicateStatus.GREEN
-        }
-        super().note_edit(normalized_paths, invalidate=affected)
-        self._reverify_after_edit(reverify_candidates)
+        self._reverify_after_edit(
+            {
+                predicate_id: command
+                for predicate_id, command in proven_commands.items()
+                if predicate_id in applied
+            }
+        )
         if self._pending_recovery is not None:
             self.store.append("recovery_invalidated", epoch=self.workspace_epoch)
             self._pending_recovery = None
@@ -1096,11 +1141,17 @@ class MiniSweAdapter(GroundtruthController):
                 f"frozen_source_incomplete:missing={len(missing)}:"
                 f"omissions={len(source_omissions)}:{detail}"
             )
+        # query_snapshot() blanks graph_path for anything short of complete, so
+        # the parent is read from the engine state directly: the graph is stale
+        # by construction here (an edit is what scheduled this build) and it is
+        # exactly that stale-but-certified graph the amend starts from.
         return FrozenBuildInput(
             str(snapshot.revision),
             self.engine_state.query_snapshot().masked_paths,
             tuple(sorted(files)),
             snapshot.history,
+            str(self.engine_state.graph_path or ""),
+            str(self.engine_state.graph_revision or ""),
         )
 
     # A REBUILD's embedding plan is incremental by construction: the agent
@@ -1123,7 +1174,7 @@ class MiniSweAdapter(GroundtruthController):
     REBUILD_EMBEDDING_BUDGET_SECONDS = 60.0
 
     def _build_frozen_graph(self, request: FrozenBuildInput) -> GraphBuildArtifact:
-        from .indexer import _freeze_history, ensure_index_with_receipt
+        from .indexer import _freeze_history, ensure_index_with_receipt, refresh_index_files
 
         with tempfile.TemporaryDirectory(prefix="gt-frozen-source-") as temporary:
             root = Path(temporary)
@@ -1143,11 +1194,25 @@ class MiniSweAdapter(GroundtruthController):
             # double for this function: three of them monkeypatch a lambda whose
             # signature does not accept the argument, and stub signatures
             # lagging a new parameter has already cost two red commits here.
-            receipt = ensure_index_with_receipt(
-                root, layout=self.engine_state.layout,
-                source_revision=request.source_revision,
-                embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
-            )
+            started = time.monotonic()
+            if request.parent_graph_path and request.dirty_paths:
+                # The amend path. Same arguments, same layout, same budget as
+                # the full build below -- refresh_index_files falls back to it
+                # by name whenever the amend refuses, so this branch can only
+                # ever be faster or identical, never a different contract.
+                receipt = refresh_index_files(
+                    root, request.parent_graph_path, request.dirty_paths,
+                    layout=self.engine_state.layout,
+                    source_revision=request.source_revision,
+                    embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
+                )
+            else:
+                receipt = ensure_index_with_receipt(
+                    root, layout=self.engine_state.layout,
+                    source_revision=request.source_revision,
+                    embedding_budget_seconds=self.REBUILD_EMBEDDING_BUDGET_SECONDS,
+                )
+            elapsed_ms = int((time.monotonic() - started) * 1000)
         # Say what the bound above actually did. The 60s allowance rests on an
         # assumption I have not measured - that a rebuild's plan is small
         # because only a few contracts moved - and if a single edit to a widely
@@ -1157,6 +1222,24 @@ class MiniSweAdapter(GroundtruthController):
         # journal carrying "planned 3808, budget 60s, skipped" fifteen times
         # says so plainly, and the run corrects the constant instead of the
         # constant silently deciding the run.
+        # Which path ran, and why. Without this row an amend and a full rebuild
+        # are indistinguishable in the journal, and the last time that mattered
+        # a caller_coverage improvement was credited to producer code that had
+        # never executed. build_mode_reason is what turns a permanent silent
+        # fallback into something the first edit reports.
+        try:
+            self.store.append(
+                "graph_build_mode",
+                mode=receipt.build_mode,
+                reason=receipt.build_mode_reason,
+                parent_graph_revision=request.parent_graph_revision,
+                dirty_path_count=len(request.dirty_paths),
+                amended=[dict(row) for row in receipt.incremental_results],
+                analysis_state=receipt.analysis_state,
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception:  # noqa: BLE001 - reporting never fails a rebuild
+            pass
         try:
             self.store.append(
                 "graph_rebuild_embedding",

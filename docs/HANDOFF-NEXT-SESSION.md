@@ -11,22 +11,21 @@ Start at "The next action".**
 
 ## The next action
 
-**Blocker 7c: make the live path use incremental indexing.** Nothing else moves
-the benchmark number until this lands.
+**Run a codespace smoke on the amend path and compare it to the run below.**
+7c landed; nothing about it is proven on a live run yet.
+
+The pre-fix baseline to beat, final state of the 2026-09-07 run at `25a37a5f`:
 
 ```
-gt_engine/miniswe_integration.py :: _build_frozen_graph
-  → ensure_index_with_receipt(...)   # FULL index, every invalidation
+invalidations 62 · publications 19
+caller_coverage  recorded 16 / unavailable 46   (74% blind)
 ```
 
-`-file` is never called from product code. Confirm in one command:
-
-```bash
-grep -rn '"-file"\|run_incremental_index' --include=*.py gt_engine/ scripts/   # expect: nothing
-```
-
-The producer side is done and lossless (see ledger). What is missing is the
-engine calling it.
+Success is `graph_build_mode` rows carrying `mode=incremental` with a non-empty
+`amended` list, publications tracking invalidations, and the recorded share
+rising. A run whose rows all say `mode=full` with
+`reason=producer_lacks_amend_capability` means `GT_INDEX_BINARY` is not pointing
+at a producer built from this source — that is the gate working, not a defect.
 
 ---
 
@@ -39,7 +38,9 @@ Each line is a fact and the command that proves it. Run them; do not re-derive.
 | producer amends in place, loses nothing | `go test -tags sqlite_fts5 ./internal/store/... ./cmd/...` in `vendor/gt-index-src` |
 | product suite is green | `.venv/Scripts/python.exe -m pytest tests/ -q -p no:randomly` |
 | one failure is PRE-EXISTING, not yours | `test_red_evidence_integration.py::test_repository_producer_inventory_routes_through_canonical_cli` fails at baseline — verify by stashing your changes before blaming them |
-| `-file` unreachable from product code | the grep above |
+| `-file` IS now reached from product code | `grep -rn '"-file"' --include=*.py gt_engine/` -> `indexer.py` |
+| the amend path is gated on a declared capability | `python -m pytest tests/test_index_incremental.py -q` |
+| reverification fires and preserves proofs | `python -m pytest tests/test_obligation_reverify.py -q` |
 | candidate queries gate on completeness | `internal/store/sqlite.go` → `queryAttachedCandidates`: `if complete != "1"` refuses |
 | completeness is a GLOBAL claim | `cmd/gt-index/main.go:~713` `AnalyzeCHAThenRTAWithReachability(allCalls, ...)` — RTA reachability is whole-repo, so it is **not** derivable from a local edit |
 
@@ -56,12 +57,105 @@ Each line is a fact and the command that proves it. Run them; do not re-derive.
 | 5 | producer committed non-executable; refusals named nothing | closed | `da43ebcd` |
 | 6 | `provider_manifest_count_mismatch` on every retried call | closed | `3f53b55c` |
 | 7a | graph rebuilt instead of amended on every edit | closed | `25a37a5f` |
-| 7b | caller queries refuse (authority tier) | **OPEN** | |
-| 7c | live path never calls `-file` | **OPEN — start here** | |
+| 7b | caller queries refuse (authority tier) | **OPEN** — not on the Python path | |
+| 7c | live path never calls `-file` | closed | this session |
+| 8 | `obligation_reverified` never fired | closed | this session |
 
 7a measured, one 20-symbol edit on the arktype graph:
 `nodes 182,258 → 182,258 · overlay 178,421 → 178,421 · dangling 0/0 ·
 inserted 0 / updated 20 / removed 0`. Was `181,200 → 3,810`.
+
+7c measured end to end on the real arktype graph, codespace, 2026-09-08, with a
+producer built from this source (`/opt/gtcand2`, `complete: true`, declaring
+`incremental_amend_in_place`). One symbol appended to
+`ark/json-schema/common.ts`:
+
+```
+full index          85.0s      amend  10.7s          (8x)
+nodes           182,249 -> 182,250      edges  467,716 -> 467,714
+resolution_symbols  3,816 -> 3,817      callsite overlay  19,744 -> 19,744
+  of which common.ts    6 -> 7          every other file  3,810 -> 3,810
+dangling native_id      0
+result line   inserted 1 / updated 6 / removed 0 / symbols_reminted 7 / symbols_removed 6
+graph_resolution_complete = 0, analysis_state = not_run
+  reason incremental_reindex_requires_full_analysis
+```
+
+Read the last line as the design holding, not as a defect: the amend re-derives
+one file and says so, and the producer's own candidate authority stays refused
+until a full rebuild. The Python caller query does not read that flag.
+
+### 7c, what landed
+
+`MiniSweAdapter._build_frozen_graph` now calls `indexer.refresh_index_files`
+whenever the request carries a parent graph and dirty paths. That copies the
+published graph into a NEW revision directory, runs `gt-index -file` once per
+changed path against the copy, and publishes it through the same certification
+the full build uses.
+
+The parent is never written to. A published graph is immutable and its manifest
+pins its exact bytes, so amending in place would invalidate the certificate of
+the graph readers are holding; retention keeps the parent as the one superseded
+revision.
+
+Every refusal falls back to the full rebuild and names itself on the receipt and
+in the new `graph_build_mode` journal row: `producer_lacks_amend_capability`,
+`incremental_parent_uncertifiable:<reason>`, `path_removed:<p>` (a delete or a
+rename, which an amend cannot express), `config_input_changed:<name>`
+(`tsconfig.json` and friends change how every OTHER file resolves),
+`dirty_paths_exceed_limit:<n>` (`INCREMENTAL_MAX_DIRTY_PATHS = 8`, the measured
+12.0s-per-file against ~115s crossover), and `amend_failed:<code>`.
+
+**The capability gate matters more than it looks.** The certified `c3b9f16e`
+accepts `-file` and its amend is the one that discarded 177,390 of 181,200
+nodes, and its declared capability list is otherwise identical to a build that
+amends correctly. So the producer now DECLARES `incremental_amend_in_place` in
+`-build-info`, and the engine probes for that name and fails closed on anything
+it cannot read. Flag presence proves nothing.
+
+Producer change that came with it: `-file` no longer clears `resolution_symbols`
+wholesale. Symbol identity (`gt.symbol.identity.v1`) is derived per file, so the
+amended file's rows are deleted and re-minted and no other file's are touched.
+Clearing the table made `gt_engine/contract.py` fall back to a locally derived
+`gtsym1:` id, changing every contract digest in the repository, and left the
+verification planner with no entities at all.
+
+### Which producer runs where — this decides whether 7c can matter
+
+| path | producer | amend active? |
+|---|---|---|
+| `deepswe_miniswe_central.yml` (the 113-task set) | built from `vendor/gt-index-src` of the evaluated ref, `GT_INDEX_BINARY` exported | **yes**, if the ref carries these changes |
+| `deepswe_gt_harness_product_p0731.yaml` (paid 20-task attestation) | the vendored certified `c3b9f16e` | no — falls back, correctly |
+| codespace smoke | whatever `run.sh` points `GT_INDEX_BINARY` at | yes, with a locally built producer |
+
+The attested path cannot use the amend until the Route-B lineage covers a
+producer that carries it, and that needs review packets that are groundtruth
+commits under an owner directive — not something the harness can issue. The
+benchmark path has no such pin: it builds the binary from source at run time.
+
+### 8, what landed
+
+`obligation_reverified` had produced 0 rows in every run ever recorded. The pass
+was not unreachable — it ran on every edit and returned at its first line.
+Candidacy came from `_affected_predicate_ids`, which needs the obligation's
+English text to literally quote a filename; the invalidation that actually runs
+is footprint-based and matches every edit. The two rules never intersected, so
+proofs were destroyed by a rule whose members were never eligible for the rescue.
+
+`GroundtruthController.note_edit` now returns the set it actually reset, and the
+adapter builds reverification candidates from that. Two consequences:
+
+- the pass runs, and a proof an unrelated edit discarded is re-established by
+  re-running its recorded command instead of costing the model ~10 steps;
+- `obligation_invalidation` reported the OPPOSITE of what happened. Its
+  `proven_discarded`/`proven_surviving` were computed against the empty scope
+  match, so it claimed every proof survived an edit the controller had already
+  wiped. It is now computed against the applied set, with `scope_matched` kept
+  beside it.
+
+A skip now emits a row naming itself (`no_candidates`, `verify_execute_off`)
+rather than returning in silence, which is what let zero rows read as "nothing
+needed re-proving" for the life of the project.
 
 ### 7b, precisely
 
@@ -73,6 +167,13 @@ were proven at (rows already carry `ResolutionCallsite.RepositoryRevision` and
 `AttachedCandidate.Revision`).
 
 **Setting the flag without doing one of those is a false attestation. Do not.**
+
+7b does not block 7c and does not block `caller_coverage`. `graph_resolution_complete`
+has zero readers in Python: the caller query in `runtime_observation.py` reads
+`CALLS` edges from SQLite directly, and coverage reports `unavailable` purely
+because `EngineState.graph_current` is false. What 7b costs is the producer's
+own `queryAttachedCandidates` authority, which refuses after any amend until a
+full rebuild.
 
 ---
 

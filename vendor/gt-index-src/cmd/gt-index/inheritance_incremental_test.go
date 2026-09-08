@@ -134,7 +134,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, table := range []string{"resolution_symbols", "resolution_callsites", "resolution_candidates"} {
+	for _, table := range []string{"resolution_callsites", "resolution_candidates"} {
 		var count int
 		if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
 			t.Fatalf("%s after incremental: %v", table, err)
@@ -143,6 +143,7 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 			t.Fatalf("stale %s rows survived incremental invalidation: %d", table, count)
 		}
 	}
+	assertResolutionSymbolsReminted(t, dbPath, childRel)
 	// Retained, not purged -- see assertGraphResolutionIncomplete. These counts
 	// are read so a regression that WIPES them is still visible in a failure
 	// message, but a non-zero count is now the expected state.
@@ -171,6 +172,80 @@ func TestIncrementalReindexPreservesInheritedMethodResolution(t *testing.T) {
 		if edge.Type == "HAS_CALLSITE" || edge.Type == "CANDIDATE" {
 			t.Fatalf("generic graph query exposed incomplete attached edge: %+v", edge)
 		}
+	}
+}
+
+// assertResolutionSymbolsReminted pins that a -file amend RE-MINTS the amended
+// file's resolution_symbols rows rather than clearing the table.
+//
+// This assertion used to require all three resolution_* tables to be empty. The
+// reasoning behind the zero-row pin was that replace-and-reinsert gave every
+// symbol a new node id, so a surviving row's native_id could point at a deleted
+// node. ReconcileFileNodesTx holds ids stable, so that hazard is gone and the
+// pin protected nothing -- while costing every consumer of symbol identity:
+// gt_engine/contract.py falls back to a locally derived "gtsym1:" id when the
+// table is missing a symbol, which changes every contract digest in the
+// repository, and the verification planner queries this table by path and finds
+// nothing at all. Symbol identity (gt.symbol.identity.v1) is derived per file,
+// so re-minting one file's rows is not a repository-wide claim. Callsites and
+// candidates ARE repository-wide and are still asserted empty by the caller.
+func assertResolutionSymbolsReminted(t *testing.T, dbPath, amendedRel string) {
+	t.Helper()
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var total int
+	if err := db.QueryRow("SELECT count(*) FROM resolution_symbols").Scan(&total); err != nil {
+		t.Fatalf("resolution_symbols after incremental: %v", err)
+	}
+	if total == 0 {
+		t.Fatal("incremental amend cleared resolution_symbols; symbol identity is per-file and must be re-minted")
+	}
+
+	// Every row must name a node that exists. A dangling native_id is the
+	// failure the old zero-row pin was really guarding against.
+	var dangling int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM resolution_symbols rs
+		  WHERE NOT EXISTS (SELECT 1 FROM nodes n WHERE CAST(n.id AS TEXT) = rs.native_id)`,
+	).Scan(&dangling); err != nil {
+		t.Fatalf("dangling resolution_symbols: %v", err)
+	}
+	if dangling != 0 {
+		t.Fatalf("resolution_symbols rows point at %d missing nodes after incremental", dangling)
+	}
+
+	// The amended file's rows must match its surviving core nodes exactly --
+	// same exclusion ReconcileFileNodesTx applies, so overlay rows are not
+	// expected to carry symbol identity.
+	const coreNodes = `SELECT count(*) FROM nodes
+	   WHERE file_path = ?
+	     AND label != 'Callsite'
+	     AND (node_type IS NULL OR node_type NOT IN ('callsite','derivation_fact','completeness_fact','unresolved_fact'))`
+	amended := filepath.ToSlash(amendedRel)
+	var wantRows, gotRows int
+	if err := db.QueryRow(coreNodes, amended).Scan(&wantRows); err != nil {
+		t.Fatalf("count core nodes for %s: %v", amended, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM resolution_symbols WHERE path = ?`, amended).Scan(&gotRows); err != nil {
+		t.Fatalf("count resolution_symbols for %s: %v", amended, err)
+	}
+	if wantRows == 0 || gotRows != wantRows {
+		t.Fatalf("amended file %s has %d core nodes but %d resolution_symbols rows", amended, wantRows, gotRows)
+	}
+
+	// The symbol added by the edit is the one a stale table would miss.
+	var extra int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM resolution_symbols WHERE path = ? AND qualified_name LIKE '%extra%'`, amended,
+	).Scan(&extra); err != nil {
+		t.Fatalf("count re-minted symbol: %v", err)
+	}
+	if extra == 0 {
+		t.Fatalf("the method added by the amend has no resolution_symbols row in %s", amended)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1329,6 +1330,12 @@ func candidateVTAFactID(prefix, sourceID, callsiteID, targetStableID string) str
 // the distinction this path turns on.
 var incrNodesInserted, incrNodesUpdated, incrNodesRemoved int
 
+// Symbols re-minted into resolution_symbols for the amended file. Reported on
+// the result line for the same reason as the node counts: a delete whose size
+// is not stated cannot be told apart from a delete that took the repository
+// with it, which is exactly how a wholesale purge went unnoticed.
+var incrSymbolsReminted, incrSymbolsRemoved int
+
 func runIncremental(root, relpath, dbPath string) error {
 	startWall := time.Now()
 
@@ -1524,6 +1531,40 @@ func runIncremental(root, relpath, dbPath string) error {
 			}
 		}
 	}
+
+	// Re-mint this file's resolution_symbols rows.
+	//
+	// InvalidateAnalysisForIncrementalTx clears the repository-wide analysis
+	// products; symbol identity is not one of them. gt.symbol.identity.v1 is
+	// derived from (language, path, qualified name, kind, span), so every row
+	// for this file is re-provable from the reparsed nodes and no row for any
+	// other file is affected by the edit.
+	//
+	// Deleting by path rather than upserting is required, not stylistic:
+	// native_id is UNIQUE and stable_id is the primary key, so a symbol that
+	// merely MOVED (same node id, new span) mints a new stable_id and an upsert
+	// would collide on the old row's native_id.
+	deletedSymbols, err := tx.Exec(`DELETE FROM resolution_symbols WHERE path = ?`, relSlash)
+	if err != nil {
+		return fmt.Errorf("clear amended file resolution symbols: %w", err)
+	}
+	symbolsRemoved, err := deletedSymbols.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count cleared resolution symbols: %w", err)
+	}
+	remintedSymbols := make([]*store.ResolutionSymbol, 0, len(pr.Nodes))
+	for i := range pr.Nodes {
+		if i >= len(newDBIDs) || newDBIDs[i] == 0 {
+			continue
+		}
+		symbol := store.BuildResolutionSymbol(strconv.FormatInt(newDBIDs[i], 10), pr.Nodes[i])
+		remintedSymbols = append(remintedSymbols, &symbol)
+	}
+	if err := store.BatchInsertResolutionSymbolsTx(tx, remintedSymbols); err != nil {
+		return fmt.Errorf("re-mint amended file resolution symbols: %w", err)
+	}
+	incrSymbolsReminted = len(remintedSymbols)
+	incrSymbolsRemoved = int(symbolsRemoved)
 
 	// An "unresolved" fact recorded elsewhere is NOT retired here, and the
 	// attempt to do so is worth recording. Matching those rows by bare NAME
@@ -1840,8 +1881,8 @@ func runIncremental(root, relpath, dbPath string) error {
 	}
 	dur := time.Since(startWall)
 	fmt.Printf(
-		`{"file":%q,"nodes_replaced":%d,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
-		relSlash, len(newDBIDs), incrNodesInserted, incrNodesUpdated, incrNodesRemoved, replacedEdges, incomingRest, incomingUnres, dur.Milliseconds(),
+		`{"file":%q,"nodes_replaced":%d,"inserted":%d,"updated":%d,"removed":%d,"edges_replaced":%d,"symbols_reminted":%d,"symbols_removed":%d,"incoming_restored":%d,"incoming_unresolved":%d,"duration_ms":%d,"short_circuited":false}`+"\n",
+		relSlash, len(newDBIDs), incrNodesInserted, incrNodesUpdated, incrNodesRemoved, replacedEdges, incrSymbolsReminted, incrSymbolsRemoved, incomingRest, incomingUnres, dur.Milliseconds(),
 	)
 	return nil
 }

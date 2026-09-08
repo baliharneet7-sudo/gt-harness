@@ -26,7 +26,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -95,6 +95,10 @@ _INDEX_STDERR_TAIL_BYTES = 4096
 _INDEX_BUILD_ATTEMPTS = 3
 _OK = "ok"
 _INDEX_TREE_TEARDOWN_SECONDS = 5
+# -build-info reads the binary's own bytes and prints one JSON line. It never
+# touches the repository, so a probe that has not answered in this long is a
+# broken producer, not a slow one.
+_INDEX_BUILD_INFO_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +112,7 @@ class IndexProcessResult:
     elapsed_ms: int = 0
     stdout_bytes: int = 0
     stdout_sha256: str = ""
+    stdout_tail: str = ""
     stderr_bytes: int = 0
     stderr_sha256: str = ""
     stderr_tail: str = ""
@@ -308,6 +313,60 @@ def _binary_certification() -> dict[str, str]:
     }
 
 
+# The capability a producer must DECLARE before the engine will amend with it.
+#
+# The flag's presence proves nothing: the certified c3b9f16e accepts -file and
+# its amend discarded 177,390 of 181,200 nodes for a twenty-symbol edit, while
+# declaring a capability list otherwise identical to a build that amends
+# correctly. Nothing observable at the command line separates them, so the
+# binary has to say which one it is.
+AMEND_CAPABILITY = "incremental_amend_in_place"
+
+# Keyed on (path, content digest): a rebuilt binary at the same path is a
+# different producer and must be re-probed.
+_AMEND_CAPABILITY_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _producer_supports_incremental_amend() -> bool:
+    """Whether the resolved producer declares in-place amend.
+
+    Fails closed. Any probe that cannot be read -- missing binary, non-zero
+    exit, unparseable JSON, timeout -- means a full rebuild, which is slow but
+    correct, rather than an amend by a binary that may destroy the graph.
+    """
+
+    binary = _resolved_binary_path()
+    if not binary:
+        return False
+    certification = _binary_certification()
+    key = (binary, certification.get("binary_sha256", ""))
+    cached = _AMEND_CAPABILITY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        probe = subprocess.run(
+            [binary, "-build-info"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            env=_index_child_environment(_INDEX_RSS_LIMIT_BYTES),
+            timeout=_INDEX_BUILD_INFO_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if probe.returncode == 0:
+            identity = json.loads(probe.stdout.decode("utf-8", "replace"))
+            capabilities = identity.get("capabilities")
+            supported = (
+                isinstance(identity, dict)
+                and isinstance(capabilities, list)
+                and AMEND_CAPABILITY in capabilities
+            )
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError):
+        supported = False
+    _AMEND_CAPABILITY_CACHE[key] = supported
+    return supported
+
+
 def _atomic_write(path: Path, payload: bytes) -> None:
     with tempfile.NamedTemporaryFile(
         mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False
@@ -405,6 +464,32 @@ def _file_identity(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+# Extensions the producer registers a language spec for. `gt-index -file`
+# ERRORS on an extension it cannot parse rather than skipping it, so a path
+# outside this set must never be handed to an amend; it is skipped instead,
+# because such a file produces no nodes and so cannot make the graph stale.
+#
+# Mirrored by hand from vendor/gt-index-src/internal/specs/*.go (the
+# `Extensions:` field of each Register call). tests/test_index_incremental.py
+# parses those files and fails if this set drifts, so the mirror cannot rot
+# into a silent full rebuild on every edit.
+INCREMENTAL_AMENDABLE_EXTS = frozenset({
+    ".bash", ".c", ".cc", ".cjs", ".cpp", ".cs", ".css", ".cue", ".cxx",
+    ".elm", ".ex", ".exs", ".go", ".gradle", ".groovy", ".h", ".hcl",
+    ".hpp", ".htm", ".html", ".hxx", ".java", ".js", ".jsx", ".kt", ".kts",
+    ".lua", ".md", ".mjs", ".ml", ".mli", ".php", ".proto", ".py", ".rake",
+    ".rb", ".rs", ".sc", ".scala", ".sh", ".sql", ".svelte", ".swift",
+    ".tf", ".toml", ".ts", ".yaml", ".yml",
+})
+
+# How many changed files an amend will absorb before a full rebuild is the
+# cheaper answer. A clean single-file amend measures 12.0s on the arktype graph
+# against ~115s for a full index, so the crossover sits near eight files. The
+# bound matters because the failure it prevents is not slowness: a rebuild that
+# outlives the edit interval leaves graph_current false for the rest of the run.
+INCREMENTAL_MAX_DIRTY_PATHS = 8
+
+
 def _index_command(binary: str, root: str, output: str) -> list[str]:
     """State every budget that shapes the graph rather than inheriting defaults."""
 
@@ -416,6 +501,17 @@ def _index_command(binary: str, root: str, output: str) -> list[str]:
         "-workers", str(_INDEX_WORKERS),
         "-closure=true",
     ]
+
+
+def _incremental_index_command(binary: str, root: str, output: str, relpath: str) -> list[str]:
+    """Amend one file into an existing graph.
+
+    No -max-files, -workers or -closure: the producer ignores all three in
+    incremental mode (it never walks the tree and never recomputes the closure
+    sidecar), so passing them would state a bound that is not in force.
+    """
+
+    return [binary, "-root", root, "-output", output, "-file", relpath]
 
 
 def _index_child_environment(memory_limit_bytes: int) -> dict[str, str]:
@@ -576,7 +672,16 @@ def _has_verified_index_process_tree_guard() -> bool:
     return os.name != "nt"
 
 
-def _run_index_bounded(root: str, output: Path, log_dir: Path) -> IndexProcessResult:
+def _run_index_bounded(root: str, output: Path, log_dir: Path, *,
+                       command_factory: Callable[[str, str, str], list[str]] | None = None,
+                       ) -> IndexProcessResult:
+    """Run one bounded producer process.
+
+    ``command_factory`` builds the argv from the resolved binary, so binary
+    resolution, the memory guard, the timeout and the process-tree teardown
+    stay in one place whether the producer is indexing or amending.
+    """
+
     if not _has_verified_index_process_tree_guard():
         return IndexProcessResult(
             False,
@@ -607,8 +712,11 @@ def _run_index_bounded(root: str, output: Path, log_dir: Path) -> IndexProcessRe
         binary = _resolved_binary_path()
         if not binary:
             return IndexProcessResult(False, status, error_code, memory_limit_bytes=memory_limit)
+        # Resolved at call time, never bound as a default, so a test double
+        # for _index_command still intercepts the full-index path.
+        build_argv = command_factory or _index_command
         process = subprocess.Popen(
-            _index_command(binary, root, str(output)),
+            build_argv(binary, root, str(output)),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -689,6 +797,7 @@ def _run_index_bounded(root: str, output: Path, log_dir: Path) -> IndexProcessRe
             elapsed_ms=int((time.monotonic() - started) * 1000),
             stdout_bytes=int(streams.get("stdout_bytes", 0)),
             stdout_sha256=str(streams.get("stdout_sha256", "")),
+            stdout_tail=str(streams.get("stdout_tail", "")),
             stderr_bytes=int(streams.get("stderr_bytes", 0)),
             stderr_sha256=str(streams.get("stderr_sha256", "")),
             stderr_tail=str(streams.get("stderr_tail", "")),
@@ -1068,6 +1177,214 @@ def _read_sealed_json(path: Path, digest_field: str) -> dict[str, object] | None
         return None
 
 
+def _publish_candidate(
+    candidate: Path, *, root: str, logical_root: str, gt_dir: Path, db: Path,
+    reuse_key: IndexReuseKey, identity: dict[str, str],
+    process_result: IndexProcessResult, build_attempts: tuple[str, ...],
+    excluded_roots: tuple[Path, ...] = (), diagnostics: list[str] | None = None,
+    build_mode: str = "full", parent_graph_sha256: str = "",
+    amended_paths: tuple[str, ...] = (),
+) -> str | None:
+    """Certify and publish a staged graph, or record why it could not be.
+
+    Shared by the full index and the incremental amend so both produce the same
+    sealed evidence, the same certification manifest and the same atomic
+    three-file swap. An amend that published through a second, similar path
+    would be a graph whose certification means something slightly different
+    from every other graph's, which is the kind of difference nobody reads
+    until it is load-bearing.
+
+    ``build_mode``, ``parent_graph_sha256`` and ``amended_paths`` are recorded
+    in the manifest so a published graph says how it was made. They are not
+    inputs to certification: certify_graph_artifact checks named keys, so a
+    reader that predates them is unaffected.
+    """
+
+    evidence_path = candidate.with_suffix(".resource.json")
+    _write_index_evidence(
+        evidence_path, root=logical_root, result=process_result,
+        reuse_key=reuse_key, identity=identity, attempts=build_attempts,
+    )
+    evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    failure_manifest = gt_dir / "graph.failure.json"
+    if not process_result.success:
+        _publish_graph_failure(
+            gt_dir,
+            root=logical_root,
+            reuse_key=reuse_key,
+            error_code=process_result.error_code,
+            staged_evidence=evidence_path,
+            identity=identity,
+        )
+        if diagnostics is not None:
+            diagnostics.append(process_result.error_code)
+        candidate.unlink(missing_ok=True)
+        return None
+    if not candidate.is_file():
+        _write_index_evidence(
+            evidence_path, root=logical_root,
+            result=replace(
+                process_result, success=False, status="output_missing",
+                error_code="GT_INDEX_OUTPUT_MISSING",
+            ),
+            reuse_key=reuse_key, identity=identity,
+        )
+        _publish_graph_failure(
+            gt_dir,
+            root=logical_root,
+            reuse_key=reuse_key,
+            error_code="GT_INDEX_OUTPUT_MISSING",
+            staged_evidence=evidence_path,
+            identity=identity,
+        )
+        return None
+    try:
+        con = sqlite3.connect(
+            f"file:{candidate.resolve().as_posix()}?mode=ro", uri=True
+        )
+        try:
+            quick_check = str(con.execute("PRAGMA quick_check").fetchone()[0])
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        _write_index_evidence(
+            evidence_path, root=logical_root,
+            result=replace(
+                process_result, success=False, status="output_invalid",
+                error_code="GT_INDEX_OUTPUT_INVALID",
+            ),
+            reuse_key=reuse_key, identity=identity,
+        )
+        _publish_graph_failure(
+            gt_dir,
+            root=logical_root,
+            reuse_key=reuse_key,
+            error_code="GT_INDEX_OUTPUT_INVALID",
+            staged_evidence=evidence_path,
+            identity=identity,
+        )
+        if diagnostics is not None:
+            diagnostics.append("GT_INDEX_OUTPUT_INVALID")
+        candidate.unlink(missing_ok=True)
+        return None
+    if quick_check.lower() != "ok":
+        _write_index_evidence(
+            evidence_path, root=logical_root,
+            result=replace(
+                process_result, success=False, status="output_invalid",
+                error_code="GT_INDEX_OUTPUT_INVALID",
+            ),
+            reuse_key=reuse_key, identity=identity,
+        )
+        _publish_graph_failure(
+            gt_dir,
+            root=logical_root,
+            reuse_key=reuse_key,
+            error_code="GT_INDEX_OUTPUT_INVALID",
+            staged_evidence=evidence_path,
+            identity=identity,
+        )
+        if diagnostics is not None:
+            diagnostics.append("GT_INDEX_OUTPUT_INVALID")
+        candidate.unlink(missing_ok=True)
+        return None
+    if compute_index_reuse_key(root, excluded_roots=excluded_roots) != reuse_key:
+        candidate.unlink(missing_ok=True)
+        raise ValueError("producer input superseded before publication")
+    graph_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "gt.graph_certification.v1",
+        **identity,
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "index_reuse_key": reuse_key.as_dict(),
+        "index_reuse_key_sha256": reuse_key.digest,
+        "source_manifest_sha256": reuse_key.source_manifest_sha256,
+        "repository_root_sha256": hashlib.sha256(
+            os.path.realpath(logical_root).encode("utf-8", "surrogatepass")
+        ).hexdigest(),
+        "graph_sha256": graph_sha256,
+        "graph_bytes": candidate.stat().st_size,
+        "sqlite_quick_check": "ok",
+        "indexed_file_count": _graph_scale(candidate)[0],
+        "indexed_node_count": _graph_scale(candidate)[1],
+        **_graph_phase_metadata(candidate),
+        "index_resource_sha256": evidence_sha256,
+        **_binary_certification(),
+    }
+    manifest["binary_certified"] = bool(manifest["binary_sha256"])
+    # How this graph was produced. A full index and an amend of the same source
+    # can hold the same rows and are not the same claim: the amend inherits
+    # every row its parent proved and re-derives only the named paths.
+    manifest["build_mode"] = build_mode
+    manifest["parent_graph_sha256"] = parent_graph_sha256
+    manifest["amended_paths"] = list(amended_paths)
+    manifest_bytes = json.dumps(
+        manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    backup = gt_dir / ".graph.previous.db"
+    manifest_path = db.with_suffix(".manifest.json")
+    manifest_backup = gt_dir / ".graph.previous.manifest.json"
+    canonical_evidence = gt_dir / "index-resource.json"
+    evidence_backup = gt_dir / ".index-resource.previous.json"
+    had_previous = db.is_file()
+    had_manifest = manifest_path.is_file()
+    had_evidence = canonical_evidence.is_file()
+    if had_previous:
+        shutil.copyfile(db, backup)
+    if had_manifest:
+        shutil.copyfile(manifest_path, manifest_backup)
+    if had_evidence:
+        shutil.copyfile(canonical_evidence, evidence_backup)
+    try:
+        # All readers enter through ensure_index's lock. Publish the three
+        # staged files as one locked transaction and restore the prior set
+        # if any swap fails.
+        os.replace(candidate, db)
+        os.replace(evidence_path, canonical_evidence)
+        _atomic_write(manifest_path, manifest_bytes)
+    except Exception:
+        if had_previous and backup.is_file():
+            os.replace(backup, db)
+        else:
+            db.unlink(missing_ok=True)
+        if had_evidence and evidence_backup.is_file():
+            os.replace(evidence_backup, canonical_evidence)
+        else:
+            canonical_evidence.unlink(missing_ok=True)
+        if had_manifest and manifest_backup.is_file():
+            os.replace(manifest_backup, manifest_path)
+        else:
+            manifest_path.unlink(missing_ok=True)
+        raise
+    finally:
+        candidate.unlink(missing_ok=True)
+        evidence_path.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
+        evidence_backup.unlink(missing_ok=True)
+        manifest_backup.unlink(missing_ok=True)
+    failure_manifest.unlink(missing_ok=True)
+    (gt_dir / "index-failure-resource.json").unlink(missing_ok=True)
+    _prune_superseded_revisions(gt_dir)
+    # The graph is published and usable from here; promotion only improves it.
+    promotion = start_lsp_promotion(db, root)
+    # Sealed beside the graph: an unrecorded promotion cannot be told apart
+    # from one that never ran, and that is exactly how the highest-precision
+    # edge tier stayed empty without anyone being able to see it.
+    _sealed_json(
+        gt_dir / "lsp-promotion.json",
+        {
+            "schema": "gt.lsp_promotion.v1",
+            **identity,
+            "graph_sha256": graph_sha256,
+            "status": promotion["status"],
+            "servers_detected": promotion["servers"],
+            "server_count": len(promotion["servers"]),
+        },
+        "promotion_sha256",
+    )
+    return str(db)
+
+
 def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
                            excluded_roots: tuple[Path, ...] = (),
                            layout: RuntimeLayout | None = None,
@@ -1163,183 +1480,13 @@ def _ensure_index_unlocked(root: str, *, state_dir: str | None = None,
             process_result, build_attempts = _build_index_with_attempts(
                 str(root), candidate, gt_dir,
             )
-        evidence_path = candidate.with_suffix(".resource.json")
-        _write_index_evidence(
-            evidence_path, root=logical_root, result=process_result,
-            reuse_key=reuse_key, identity=identity, attempts=build_attempts,
+        published = _publish_candidate(
+            candidate, root=root, logical_root=logical_root, gt_dir=gt_dir, db=db,
+            reuse_key=reuse_key, identity=identity, process_result=process_result,
+            build_attempts=build_attempts, excluded_roots=excluded_roots,
+            diagnostics=diagnostics,
         )
-        evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
-        failure_manifest = gt_dir / "graph.failure.json"
-        if not process_result.success:
-            _publish_graph_failure(
-                gt_dir,
-                root=logical_root,
-                reuse_key=reuse_key,
-                error_code=process_result.error_code,
-                staged_evidence=evidence_path,
-                identity=identity,
-            )
-            if diagnostics is not None:
-                diagnostics.append(process_result.error_code)
-            candidate.unlink(missing_ok=True)
-            return None
-        if not candidate.is_file():
-            _write_index_evidence(
-                evidence_path, root=logical_root,
-                result=replace(
-                    process_result, success=False, status="output_missing",
-                    error_code="GT_INDEX_OUTPUT_MISSING",
-                ),
-                reuse_key=reuse_key, identity=identity,
-            )
-            _publish_graph_failure(
-                gt_dir,
-                root=logical_root,
-                reuse_key=reuse_key,
-                error_code="GT_INDEX_OUTPUT_MISSING",
-                staged_evidence=evidence_path,
-                identity=identity,
-            )
-            return None
-        try:
-            con = sqlite3.connect(
-                f"file:{candidate.resolve().as_posix()}?mode=ro", uri=True
-            )
-            try:
-                quick_check = str(con.execute("PRAGMA quick_check").fetchone()[0])
-            finally:
-                con.close()
-        except (sqlite3.Error, OSError):
-            _write_index_evidence(
-                evidence_path, root=logical_root,
-                result=replace(
-                    process_result, success=False, status="output_invalid",
-                    error_code="GT_INDEX_OUTPUT_INVALID",
-                ),
-                reuse_key=reuse_key, identity=identity,
-            )
-            _publish_graph_failure(
-                gt_dir,
-                root=logical_root,
-                reuse_key=reuse_key,
-                error_code="GT_INDEX_OUTPUT_INVALID",
-                staged_evidence=evidence_path,
-                identity=identity,
-            )
-            if diagnostics is not None:
-                diagnostics.append("GT_INDEX_OUTPUT_INVALID")
-            candidate.unlink(missing_ok=True)
-            return None
-        if quick_check.lower() != "ok":
-            _write_index_evidence(
-                evidence_path, root=logical_root,
-                result=replace(
-                    process_result, success=False, status="output_invalid",
-                    error_code="GT_INDEX_OUTPUT_INVALID",
-                ),
-                reuse_key=reuse_key, identity=identity,
-            )
-            _publish_graph_failure(
-                gt_dir,
-                root=logical_root,
-                reuse_key=reuse_key,
-                error_code="GT_INDEX_OUTPUT_INVALID",
-                staged_evidence=evidence_path,
-                identity=identity,
-            )
-            if diagnostics is not None:
-                diagnostics.append("GT_INDEX_OUTPUT_INVALID")
-            candidate.unlink(missing_ok=True)
-            return None
-        if compute_index_reuse_key(root, excluded_roots=excluded_roots) != reuse_key:
-            candidate.unlink(missing_ok=True)
-            raise ValueError("producer input superseded before publication")
-        graph_sha256 = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        manifest = {
-            "schema": "gt.graph_certification.v1",
-            **identity,
-            "graph_schema_version": GRAPH_SCHEMA_VERSION,
-            "index_reuse_key": reuse_key.as_dict(),
-            "index_reuse_key_sha256": reuse_key.digest,
-            "source_manifest_sha256": reuse_key.source_manifest_sha256,
-            "repository_root_sha256": hashlib.sha256(
-                os.path.realpath(logical_root).encode("utf-8", "surrogatepass")
-            ).hexdigest(),
-            "graph_sha256": graph_sha256,
-            "graph_bytes": candidate.stat().st_size,
-            "sqlite_quick_check": "ok",
-            "indexed_file_count": _graph_scale(candidate)[0],
-            "indexed_node_count": _graph_scale(candidate)[1],
-            **_graph_phase_metadata(candidate),
-            "index_resource_sha256": evidence_sha256,
-            **_binary_certification(),
-        }
-        manifest["binary_certified"] = bool(manifest["binary_sha256"])
-        manifest_bytes = json.dumps(
-            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        backup = gt_dir / ".graph.previous.db"
-        manifest_path = db.with_suffix(".manifest.json")
-        manifest_backup = gt_dir / ".graph.previous.manifest.json"
-        canonical_evidence = gt_dir / "index-resource.json"
-        evidence_backup = gt_dir / ".index-resource.previous.json"
-        had_previous = db.is_file()
-        had_manifest = manifest_path.is_file()
-        had_evidence = canonical_evidence.is_file()
-        if had_previous:
-            shutil.copyfile(db, backup)
-        if had_manifest:
-            shutil.copyfile(manifest_path, manifest_backup)
-        if had_evidence:
-            shutil.copyfile(canonical_evidence, evidence_backup)
-        try:
-            # All readers enter through ensure_index's lock. Publish the three
-            # staged files as one locked transaction and restore the prior set
-            # if any swap fails.
-            os.replace(candidate, db)
-            os.replace(evidence_path, canonical_evidence)
-            _atomic_write(manifest_path, manifest_bytes)
-        except Exception:
-            if had_previous and backup.is_file():
-                os.replace(backup, db)
-            else:
-                db.unlink(missing_ok=True)
-            if had_evidence and evidence_backup.is_file():
-                os.replace(evidence_backup, canonical_evidence)
-            else:
-                canonical_evidence.unlink(missing_ok=True)
-            if had_manifest and manifest_backup.is_file():
-                os.replace(manifest_backup, manifest_path)
-            else:
-                manifest_path.unlink(missing_ok=True)
-            raise
-        finally:
-            candidate.unlink(missing_ok=True)
-            evidence_path.unlink(missing_ok=True)
-            backup.unlink(missing_ok=True)
-            evidence_backup.unlink(missing_ok=True)
-            manifest_backup.unlink(missing_ok=True)
-        failure_manifest.unlink(missing_ok=True)
-        (gt_dir / "index-failure-resource.json").unlink(missing_ok=True)
-        _prune_superseded_revisions(gt_dir)
-        # The graph is published and usable from here; promotion only improves it.
-        promotion = start_lsp_promotion(db, root)
-        # Sealed beside the graph: an unrecorded promotion cannot be told apart
-        # from one that never ran, and that is exactly how the highest-precision
-        # edge tier stayed empty without anyone being able to see it.
-        _sealed_json(
-            gt_dir / "lsp-promotion.json",
-            {
-                "schema": "gt.lsp_promotion.v1",
-                **identity,
-                "graph_sha256": graph_sha256,
-                "status": promotion["status"],
-                "servers_detected": promotion["servers"],
-                "server_count": len(promotion["servers"]),
-            },
-            "promotion_sha256",
-        )
-        return str(db)
+        return published
     except Exception as exc:  # noqa: BLE001 - indexing failure means GT dormant, never a crash
         if diagnostics is not None:
             diagnostics.append(f"{type(exc).__name__}: {exc}")
@@ -1361,6 +1508,199 @@ class BenchmarkGraphRequired(RuntimeError):
     costs one container start. Not failing here costs the run and yields a
     number that reads like a measurement of GT.
     """
+
+
+def _parse_incremental_result(stdout_tail: str) -> dict[str, object]:
+    """Read the producer's one-line amend result.
+
+    The counts are the whole point of reading it. A reindex that reports only
+    that it ran cannot be told apart from one that replaced the graph -- which
+    is the state the amend fix exists to leave behind -- so a result line that
+    cannot be parsed is reported as unparsed rather than assumed benign.
+    """
+
+    for line in reversed(stdout_tail.strip().splitlines()):
+        candidate = line.strip()
+        if not candidate.startswith("{") or not candidate.endswith("}"):
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and "file" in parsed:
+            return parsed
+    return {"result_line": "unparsed"}
+
+
+def _amendable_paths(root: Path, changed_paths: tuple[str, ...]) -> tuple[tuple[str, ...], str]:
+    """Split the changed set into paths to amend, or name why none can be.
+
+    Three outcomes, kept apart on purpose. A path the producer has no parser
+    for is SKIPPED: it contributes no nodes, so it cannot have made the graph
+    stale. A path that no longer exists on disk REFUSES the whole amend -- the
+    producer reads the file before it opens the database and errors if it is
+    missing, and neither a deletion nor a rename can be expressed as an amend
+    at all. A producer config file refuses for a different reason: it changes
+    how every other file resolves, so re-deriving one file would leave the rest
+    of the graph describing the old configuration.
+    """
+
+    amendable: list[str] = []
+    for raw in changed_paths:
+        relative = str(raw).replace("\\", "/").strip()
+        if not relative:
+            continue
+        if Path(relative).name in PRODUCER_CONFIG_NAMES:
+            return (), f"config_input_changed:{Path(relative).name}"
+        if Path(relative).suffix.lower() not in INCREMENTAL_AMENDABLE_EXTS:
+            continue
+        if not (root / relative).is_file():
+            return (), f"path_removed:{relative}"
+        amendable.append(relative)
+    ordered = tuple(sorted(dict.fromkeys(amendable)))
+    if not ordered:
+        return (), "no_amendable_paths"
+    if len(ordered) > INCREMENTAL_MAX_DIRTY_PATHS:
+        return (), f"dirty_paths_exceed_limit:{len(ordered)}"
+    return ordered, ""
+
+
+def _ensure_index_incremental_unlocked(
+    root: str, *, layout: RuntimeLayout, parent_graph: Path,
+    changed_paths: tuple[str, ...], excluded_roots: tuple[Path, ...] = (),
+    diagnostics: list[str] | None = None,
+) -> tuple[str | None, str, tuple[dict[str, object], ...]]:
+    """Amend a copy of the published graph and publish it as a new revision.
+
+    Returns ``(graph_path, reason, per_path_results)``. ``reason`` is empty on
+    success and names the refusal otherwise; the caller rebuilds in full on any
+    non-empty reason, so a refusal here is an answer rather than an error.
+
+    The parent graph is never opened for writing. A published graph is
+    immutable and its manifest pins its exact bytes, so amending in place would
+    invalidate the certificate of the graph readers hold right now. The copy is
+    what gets amended, and it is published as its own revision through the same
+    certification the full build uses; the parent stays certifiable, and
+    retention keeps it as the one superseded revision.
+    """
+
+    results: tuple[dict[str, object], ...] = ()
+    if not _producer_supports_incremental_amend():
+        return None, "producer_lacks_amend_capability", results
+    if not parent_graph.is_file():
+        return None, "parent_graph_missing", results
+    for sidecar in ("-wal", "-shm"):
+        if parent_graph.with_name(parent_graph.name + sidecar).exists():
+            # Copying the main file alone would silently drop whatever the
+            # write-ahead log has not folded in yet.
+            return None, "parent_graph_has_wal_sidecar", results
+    parent_manifest = parent_graph.with_suffix(".manifest.json")
+    if not parent_manifest.is_file():
+        return None, "parent_manifest_missing", results
+    certification = _binary_certification()
+    valid, certification_reason = _certify_published_graph(
+        parent_graph, parent_manifest, expected_root=Path(layout.workspace),
+        expected_binary_sha256=certification.get("binary_sha256", ""),
+    )
+    if not valid:
+        # An uncertifiable parent is not a base to build authority on, and it
+        # is the shape a producer swap takes: the binary that would amend is
+        # not the binary the parent was certified against.
+        return None, f"incremental_parent_uncertifiable:{certification_reason}", results
+
+    root_path = Path(root)
+    amendable, refusal = _amendable_paths(root_path, changed_paths)
+    if refusal:
+        return None, refusal, results
+
+    reuse_key = compute_index_reuse_key(root, excluded_roots=excluded_roots)
+    gt_dir = _graph_state_dir(root, None, layout, reuse_key)
+    gt_dir.mkdir(parents=True, exist_ok=True)
+    db = gt_dir / "graph.db"
+    existing_manifest = db.with_suffix(".manifest.json")
+    if db.is_file() and existing_manifest.is_file():
+        try:
+            manifest = json.loads(existing_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        if (
+            manifest.get("index_reuse_key") == reuse_key.as_dict()
+            and manifest.get("index_reuse_key_sha256") == reuse_key.digest
+        ):
+            reusable, _reason = _certify_published_graph(
+                db, existing_manifest, expected_root=Path(layout.workspace),
+                expected_binary_sha256=reuse_key.producer_binary_sha256,
+            )
+            if reusable:
+                return str(db), "", results
+    if db.exists():
+        # Same contract as the full path: a published revision is not rewritten.
+        return None, "immutable_graph_artifact_invalid", results
+
+    identity = _execution_identity()
+    if identity["identity_scope"] == "benchmark_invalid":
+        return None, "GT_INDEX_IDENTITY_INVALID", results
+
+    with tempfile.NamedTemporaryFile(
+        dir=gt_dir, prefix=".graph.", suffix=".db", delete=False
+    ) as handle:
+        candidate = Path(handle.name)
+    parent_sha256 = hashlib.sha256(parent_graph.read_bytes()).hexdigest()
+    collected: list[dict[str, object]] = []
+    attempts: list[str] = []
+    process_result: IndexProcessResult | None = None
+    total_elapsed_ms = 0
+    try:
+        shutil.copyfile(parent_graph, candidate)
+        for ordinal, relative in enumerate(amendable, start=1):
+            def build_argv(binary: str, argv_root: str, output: str,
+                           _relative: str = relative) -> list[str]:
+                return _incremental_index_command(binary, argv_root, output, _relative)
+
+            # No retry. A failed amend leaves the copy in an unknown state, and
+            # the honest recovery is the caller's full rebuild rather than a
+            # second amend onto the same bytes.
+            process_result = _run_index_bounded(
+                root, candidate, gt_dir, command_factory=build_argv,
+            )
+            total_elapsed_ms += process_result.elapsed_ms
+            row = _parse_incremental_result(process_result.stdout_tail)
+            row["path"] = relative
+            row["status"] = process_result.status
+            collected.append(row)
+            attempts.append(
+                f"{ordinal}:{relative}:{process_result.status}:"
+                f"{process_result.error_code or _OK}:"
+                f"inserted={row.get('inserted', '?')},updated={row.get('updated', '?')},"
+                f"removed={row.get('removed', '?')},"
+                f"symbols_reminted={row.get('symbols_reminted', '?')},"
+                f"short_circuited={row.get('short_circuited', '?')}"
+            )
+            if not process_result.success:
+                results = tuple(collected)
+                return None, f"amend_failed:{process_result.error_code or process_result.status}", results
+        results = tuple(collected)
+        assert process_result is not None
+        published = _publish_candidate(
+            candidate,
+            root=root, logical_root=str(layout.workspace), gt_dir=gt_dir, db=db,
+            reuse_key=reuse_key, identity=identity,
+            process_result=replace(process_result, elapsed_ms=total_elapsed_ms),
+            build_attempts=tuple(attempts), excluded_roots=excluded_roots,
+            diagnostics=diagnostics, build_mode="incremental",
+            parent_graph_sha256=parent_sha256, amended_paths=amendable,
+        )
+        if published is None:
+            return None, "incremental_publication_failed", results
+        return published, "", results
+    finally:
+        candidate.unlink(missing_ok=True)
+        # The producer opens the copy in WAL mode and checkpoints before it
+        # exits, so these are empty by now -- but only the main file is
+        # published, and an unswept sidecar accumulates once per amend in a
+        # directory whose disk cost already runs to hundreds of megabytes.
+        for sidecar in ("-wal", "-shm"):
+            candidate.with_name(candidate.name + sidecar).unlink(missing_ok=True)
 
 
 def ensure_index(root: str, *, state_dir: str | None = None,
@@ -1438,6 +1778,17 @@ class IndexBuildReceipt:
     # embedding_failure_reason because a name that outlives its meaning is this
     # ticket's most repeated defect, and "the rate we measured" is not a failure.
     embedding_measurement: str = ""
+    # How the graph behind this receipt was produced, and why.
+    #
+    # A full rebuild and an amend are different claims about the same file set,
+    # and "incremental" with an empty reason reads very differently from
+    # "full" with reason "producer_lacks_amend_capability". Naming the reason
+    # is what turns a silent permanent fallback -- the failure mode that kept
+    # the amend path dead while looking healthy -- into something a journal
+    # shows on the first edit.
+    build_mode: str = "full"
+    build_mode_reason: str = ""
+    incremental_results: tuple[Mapping[str, object], ...] = ()
 
     @property
     def success(self) -> bool:
@@ -1460,6 +1811,9 @@ class IndexBuildReceipt:
             "embedding_state": self.embedding_state,
             "embedding_failure_reason": self.embedding_failure_reason,
             "embedding_measurement": self.embedding_measurement,
+            "build_mode": self.build_mode,
+            "build_mode_reason": self.build_mode_reason,
+            "incremental_results": [dict(row) for row in self.incremental_results],
         }
 
 
@@ -2006,6 +2360,149 @@ def certify_graph_artifact(
     return True, "ok"
 
 
+def _receipt_for_published_graph(
+    graph: str, *, source_revision: str = "",
+    embedding_budget_seconds: float | None = None,
+    contract_store_path: Path | None = None,
+    layout: RuntimeLayout | None = None,
+    build_mode: str = "full", build_mode_reason: str = "",
+    incremental_results: tuple[Mapping[str, object], ...] = (),
+) -> IndexBuildReceipt:
+    """Certify a published graph and describe it as a receipt.
+
+    Split out of ensure_index_with_receipt so an amended graph is certified by
+    the same code that certifies a fully built one. Two certification paths for
+    two build modes is how a graph ends up trusted on terms nobody stated.
+    """
+
+    graph_path = Path(graph)
+    valid, reason = _graph_schema_receipt(graph_path)
+    if not valid:
+        return IndexBuildReceipt(IndexBuildStatus.INVALID_DATABASE, graph_db=graph, build_mode=build_mode,
+                                 build_mode_reason=build_mode_reason,
+                                 source_revision=source_revision, error_type=reason,
+                                 error_diagnostic=reason)
+    manifest = graph_path.with_suffix(".manifest.json")
+    if not manifest.is_file():
+        return IndexBuildReceipt(IndexBuildStatus.INVALID_DATABASE, graph_db=graph, build_mode=build_mode,
+                                 build_mode_reason=build_mode_reason,
+                                 source_revision=source_revision, error_type="manifest_missing",
+                                 error_diagnostic="graph certification manifest missing")
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        graph_revision = str(payload.get("graph_revision", payload.get("graph_sha256", "")))
+    except (OSError, ValueError):
+        graph_revision = ""
+    phase = _graph_phase_metadata(graph_path)
+    analysis_state = str(phase["analysis_state"])
+    status = (
+        IndexBuildStatus.BUILT_CORE_ONLY
+        if analysis_state in {"failed", "not_run"}
+        else IndexBuildStatus.BUILT
+    )
+    # Refresh the contract-embedding sidecar after every successful build.
+    # A failure here is logged but never costs the graph â€” the embedding store
+    # is a cache the retrieval side can degrade from with a named reason.
+    embedding_state = "unconfigured"
+    embedding_failure = ""
+    embedding_measurement = ""
+    model_dir = os.environ.get("GT_DENSE_MODEL_DIR", "").strip()
+    if model_dir and status in (IndexBuildStatus.BUILT, IndexBuildStatus.BUILT_CORE_ONLY):
+        try:
+            from gt_engine.contract_embeddings import (
+                DEFAULT_BATCH_SIZE,
+                ContractEmbeddingStore,
+                EmbeddingBudgetExhausted,
+                EmbeddingBudgetInsufficient,
+                default_store_path,
+                onnx_embedder,
+                onnx_token_lengths,
+            )
+
+            # The layout decides when the caller does not, because a caller
+            # that forgets is not hypothetical: three call sites needed this
+            # path, two passed it and the rebuild in GraphBuildCoordinator
+            # simply omitted it. It fell through to default_store_path, which
+            # is keyed on the graph and therefore empty at exactly the moment
+            # the store matters - after a republication. Run 34095557374
+            # re-planned the whole corpus sixteen times
+            # (`planned=3809..3822, estimated=913s, budget=60s`) and never
+            # refreshed dense retrieval once in 78 minutes.
+            #
+            # An explicit argument still wins, so an override stays possible;
+            # what is no longer possible is a caller holding a layout and
+            # silently getting the graph-keyed store.
+            store_path = (
+                contract_store_path
+                or (layout.contract_store_path if layout is not None else None)
+                or os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
+                or default_store_path(graph_path)
+            )
+            store = ContractEmbeddingStore(store_path)
+            # The refresh is a cache the retrieval side degrades from, but it
+            # is CPU-bound ONNX inference over every moved contract and it runs
+            # inside agent construction, ahead of the session journal and the
+            # first provider call.  Left unbounded it spends the run's whole
+            # wall budget and the run dies with no evidence at all.  The caller
+            # owns the bound; the state below is what the receipt reports.
+            deadline = (
+                time.monotonic() + float(embedding_budget_seconds)
+                if embedding_budget_seconds and float(embedding_budget_seconds) > 0
+                else None
+            )
+            started = time.monotonic()
+            try:
+                receipt = store.refresh(
+                    graph_path, embed_fn=onnx_embedder(model_dir), deadline=deadline,
+                    length_fn=onnx_token_lengths(model_dir),
+                )
+            finally:
+                store.close()
+            # Report the rate the run actually achieved. The a priori estimate
+            # is one constant derived from two runs; without the run stating its
+            # own numbers, a constant that is too HIGH silently skips plans that
+            # would have fitted and nothing ever contradicts it. With them,
+            # estimate and outcome are comparable in the receipt and the
+            # accumulated figures are the argument for building this store at
+            # bundle time instead of inside the timed window.
+            elapsed = time.monotonic() - started
+            embedded = (
+                int(receipt.get("embedded") or 0) if isinstance(receipt, dict) else 0
+            )
+            batches = -(-embedded // DEFAULT_BATCH_SIZE) if embedded else 0
+            embedding_state = "refreshed"
+            embedding_measurement = (
+                f"embedded={embedded}:batches={batches}:elapsed={elapsed:.0f}s:"
+                f"observed_seconds_per_batch={elapsed / batches:.2f}"
+                if batches
+                else f"embedded=0:elapsed={elapsed:.0f}s"
+            )
+        except EmbeddingBudgetInsufficient as exc:
+            # One honest state, nothing spent. The numbers are the case for
+            # building this store at bundle time instead.
+            embedding_state = "budget_insufficient"
+            embedding_failure = (
+                f"planned={exc.planned}:estimated={exc.estimated_seconds:.0f}s:"
+                f"budget={exc.budget_seconds:.0f}s"
+            )
+        except EmbeddingBudgetExhausted as exc:
+            embedding_state = "budget_exhausted"
+            embedding_failure = f"{exc.embedded}/{exc.planned}"
+        except Exception as exc:
+            embedding_state = "failed"
+            embedding_failure = type(exc).__name__
+
+    return IndexBuildReceipt(status, graph_db=graph,
+                             build_mode=build_mode, build_mode_reason=build_mode_reason,
+                             incremental_results=tuple(incremental_results),
+                             source_revision=source_revision, graph_revision=graph_revision,
+                             analysis_state=analysis_state,
+                             embedding_state=embedding_state,
+                             embedding_failure_reason=embedding_failure,
+                             embedding_measurement=embedding_measurement,
+                             analysis_failure_reason=str(phase["analysis_failure_reason"]))
+
+
 def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None = None,
                               source_revision: str = "",
                               excluded_roots: tuple[Path, ...] = (),
@@ -2176,133 +2673,69 @@ def ensure_index_with_receipt(root: str | Path, *, state_dir: str | Path | None 
                 else None
             ),
         )
-    graph_path = Path(graph)
-    valid, reason = _graph_schema_receipt(graph_path)
-    if not valid:
-        return IndexBuildReceipt(IndexBuildStatus.INVALID_DATABASE, graph_db=graph,
-                                 source_revision=source_revision, error_type=reason,
-                                 error_diagnostic=reason)
-    manifest = graph_path.with_suffix(".manifest.json")
-    if not manifest.is_file():
-        return IndexBuildReceipt(IndexBuildStatus.INVALID_DATABASE, graph_db=graph,
-                                 source_revision=source_revision, error_type="manifest_missing",
-                                 error_diagnostic="graph certification manifest missing")
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-        graph_revision = str(payload.get("graph_revision", payload.get("graph_sha256", "")))
-    except (OSError, ValueError):
-        graph_revision = ""
-    phase = _graph_phase_metadata(graph_path)
-    analysis_state = str(phase["analysis_state"])
-    status = (
-        IndexBuildStatus.BUILT_CORE_ONLY
-        if analysis_state in {"failed", "not_run"}
-        else IndexBuildStatus.BUILT
+    return _receipt_for_published_graph(
+        graph, source_revision=source_revision,
+        embedding_budget_seconds=embedding_budget_seconds,
+        contract_store_path=contract_store_path, layout=layout,
     )
-    # Refresh the contract-embedding sidecar after every successful build.
-    # A failure here is logged but never costs the graph â€” the embedding store
-    # is a cache the retrieval side can degrade from with a named reason.
-    embedding_state = "unconfigured"
-    embedding_failure = ""
-    embedding_measurement = ""
-    model_dir = os.environ.get("GT_DENSE_MODEL_DIR", "").strip()
-    if model_dir and status in (IndexBuildStatus.BUILT, IndexBuildStatus.BUILT_CORE_ONLY):
-        try:
-            from gt_engine.contract_embeddings import (
-                DEFAULT_BATCH_SIZE,
-                ContractEmbeddingStore,
-                EmbeddingBudgetExhausted,
-                EmbeddingBudgetInsufficient,
-                default_store_path,
-                onnx_embedder,
-                onnx_token_lengths,
-            )
-
-            # The layout decides when the caller does not, because a caller
-            # that forgets is not hypothetical: three call sites needed this
-            # path, two passed it and the rebuild in GraphBuildCoordinator
-            # simply omitted it. It fell through to default_store_path, which
-            # is keyed on the graph and therefore empty at exactly the moment
-            # the store matters - after a republication. Run 34095557374
-            # re-planned the whole corpus sixteen times
-            # (`planned=3809..3822, estimated=913s, budget=60s`) and never
-            # refreshed dense retrieval once in 78 minutes.
-            #
-            # An explicit argument still wins, so an override stays possible;
-            # what is no longer possible is a caller holding a layout and
-            # silently getting the graph-keyed store.
-            store_path = (
-                contract_store_path
-                or (layout.contract_store_path if layout is not None else None)
-                or os.environ.get("GT_CONTRACT_EMBEDDING_INDEX")
-                or default_store_path(graph_path)
-            )
-            store = ContractEmbeddingStore(store_path)
-            # The refresh is a cache the retrieval side degrades from, but it
-            # is CPU-bound ONNX inference over every moved contract and it runs
-            # inside agent construction, ahead of the session journal and the
-            # first provider call.  Left unbounded it spends the run's whole
-            # wall budget and the run dies with no evidence at all.  The caller
-            # owns the bound; the state below is what the receipt reports.
-            deadline = (
-                time.monotonic() + float(embedding_budget_seconds)
-                if embedding_budget_seconds and float(embedding_budget_seconds) > 0
-                else None
-            )
-            started = time.monotonic()
-            try:
-                receipt = store.refresh(
-                    graph_path, embed_fn=onnx_embedder(model_dir), deadline=deadline,
-                    length_fn=onnx_token_lengths(model_dir),
-                )
-            finally:
-                store.close()
-            # Report the rate the run actually achieved. The a priori estimate
-            # is one constant derived from two runs; without the run stating its
-            # own numbers, a constant that is too HIGH silently skips plans that
-            # would have fitted and nothing ever contradicts it. With them,
-            # estimate and outcome are comparable in the receipt and the
-            # accumulated figures are the argument for building this store at
-            # bundle time instead of inside the timed window.
-            elapsed = time.monotonic() - started
-            embedded = (
-                int(receipt.get("embedded") or 0) if isinstance(receipt, dict) else 0
-            )
-            batches = -(-embedded // DEFAULT_BATCH_SIZE) if embedded else 0
-            embedding_state = "refreshed"
-            embedding_measurement = (
-                f"embedded={embedded}:batches={batches}:elapsed={elapsed:.0f}s:"
-                f"observed_seconds_per_batch={elapsed / batches:.2f}"
-                if batches
-                else f"embedded=0:elapsed={elapsed:.0f}s"
-            )
-        except EmbeddingBudgetInsufficient as exc:
-            # One honest state, nothing spent. The numbers are the case for
-            # building this store at bundle time instead.
-            embedding_state = "budget_insufficient"
-            embedding_failure = (
-                f"planned={exc.planned}:estimated={exc.estimated_seconds:.0f}s:"
-                f"budget={exc.budget_seconds:.0f}s"
-            )
-        except EmbeddingBudgetExhausted as exc:
-            embedding_state = "budget_exhausted"
-            embedding_failure = f"{exc.embedded}/{exc.planned}"
-        except Exception as exc:
-            embedding_state = "failed"
-            embedding_failure = type(exc).__name__
-
-    return IndexBuildReceipt(status, graph_db=graph,
-                             source_revision=source_revision, graph_revision=graph_revision,
-                             analysis_state=analysis_state,
-                             embedding_state=embedding_state,
-                             embedding_failure_reason=embedding_failure,
-                             embedding_measurement=embedding_measurement,
-                             analysis_failure_reason=str(phase["analysis_failure_reason"]))
 
 
 def refresh_index_files(root: str | Path, graph: str | Path, changed_paths: tuple[str, ...], *,
-                        source_revision: str = "") -> IndexBuildReceipt:
-    # The current producer has no incremental command boundary. Rebuild into a
-    # temporary state directory so the previous complete graph remains readable.
-    del graph, changed_paths
-    return ensure_index_with_receipt(root, source_revision=source_revision)
+                        source_revision: str = "",
+                        excluded_roots: tuple[Path, ...] = (),
+                        embedding_budget_seconds: float | None = None,
+                        contract_store_path: Path | None = None,
+                        layout: RuntimeLayout | None = None) -> IndexBuildReceipt:
+    """Amend ``changed_paths`` into a copy of ``graph``, or rebuild in full.
+
+    This is the seam blocker 7c named. The producer has had a per-file amend
+    boundary since 25a37a5f and nothing called it, so every edit paid for a
+    whole re-index: on arktype ~115s against an edit interval near 50s, which
+    never converges. Publications froze at 14 across 40 invalidations while the
+    agent edited continuously, and every read after the first edit reported
+    caller_coverage unavailable.
+
+    A refusal is not an error here. Every reason the amend declines -- an
+    uncertifiable parent, a deleted path, a producer that does not declare the
+    capability -- falls back to the full rebuild that was the only behaviour
+    before, and the reason is carried on the receipt so a permanent silent
+    fallback is visible on the first edit rather than at the end of a run.
+    """
+
+    root_path = Path(root)
+    if layout is not None:
+        excluded_roots = tuple(dict.fromkeys((*excluded_roots, *layout.excluded_roots)))
+
+    reason = "layout_required"
+    results: tuple[Mapping[str, object], ...] = ()
+    published: str | None = None
+    if layout is not None and graph and changed_paths:
+        try:
+            with _graph_publication_lock(layout.graph_root / ".graph.lock"):
+                published, reason, results = _ensure_index_incremental_unlocked(
+                    str(root_path), layout=layout, parent_graph=Path(graph),
+                    changed_paths=tuple(changed_paths), excluded_roots=excluded_roots,
+                )
+        except Exception as exc:  # noqa: BLE001 - a refused amend is a full rebuild
+            published, reason = None, f"{type(exc).__name__}: {exc}"[:200]
+    elif not graph:
+        reason = "no_parent_graph"
+    elif not changed_paths:
+        reason = "no_changed_paths"
+
+    if published:
+        return _receipt_for_published_graph(
+            published, source_revision=source_revision,
+            embedding_budget_seconds=embedding_budget_seconds,
+            contract_store_path=contract_store_path, layout=layout,
+            build_mode="incremental", incremental_results=results,
+        )
+    # Module-level lookup on purpose: the existing test doubles replace this
+    # name, and a fallback they cannot intercept is a fallback nobody notices.
+    receipt = ensure_index_with_receipt(
+        root_path, source_revision=source_revision, excluded_roots=excluded_roots,
+        embedding_budget_seconds=embedding_budget_seconds,
+        contract_store_path=contract_store_path, layout=layout,
+    )
+    return replace(receipt, build_mode="full", build_mode_reason=reason,
+                   incremental_results=results)

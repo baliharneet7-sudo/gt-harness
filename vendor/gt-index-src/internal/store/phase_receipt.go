@@ -178,6 +178,18 @@ func (d *DB) AnalysisState() (state, reason string) {
 // InvalidateAnalysisForIncrementalTx atomically removes every repository-wide
 // analysis product that a single-file refresh cannot re-prove and replaces the
 // old complete receipt with a sealed, named not-run receipt.
+//
+// resolution_symbols is deliberately NOT in this list. A symbol's identity
+// (gt.symbol.identity.v1 -- language, path, qualified name, kind, span) is
+// derived from the file that declares it, so it is not a repository-wide claim
+// and a single-file refresh CAN re-prove it: the caller deletes the amended
+// file's rows and re-mints them from the reparsed nodes. Clearing the table
+// wholesale cost every downstream consumer its identity for one file's sake --
+// gt_engine/contract.py falls back to a locally derived "gtsym1:" id, so every
+// contract digest in the repository changes, and the verification planner
+// (miniswe_integration.py) finds no entities at all. Callsites and candidates
+// stay in the list: those ARE repository-wide, and they hold the foreign keys
+// into resolution_symbols, so this delete order remains correct.
 func InvalidateAnalysisForIncrementalTx(
 	tx *sql.Tx,
 	receiptPayload string,
@@ -193,7 +205,6 @@ func InvalidateAnalysisForIncrementalTx(
 	}{
 		{"resolution_candidates", `DELETE FROM resolution_candidates`},
 		{"resolution_callsites", `DELETE FROM resolution_callsites`},
-		{"resolution_symbols", `DELETE FROM resolution_symbols`},
 		{"closure", `DELETE FROM closure`},
 		{"community_members", `DELETE FROM community_members`},
 		{"communities", `DELETE FROM communities`},

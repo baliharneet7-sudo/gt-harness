@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -746,10 +747,12 @@ def test_graph_full_rebuild_fallback_restores_freshness(monkeypatch, tmp_path):
 
     rebuilt = tmp_path / "rebuilt.db"
     rebuilt.write_bytes(b"new")
+    # **_kwargs on purpose. A stub whose signature lags the real one has
+    # already cost two red commits here, and the builder now reaches this
+    # function through refresh_index_files' fallback as well as directly.
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None,
-            embedding_budget_seconds=None: IndexBuildReceipt(
+        lambda root, **_kwargs: IndexBuildReceipt(
             IndexBuildStatus.BUILT,
             graph_db=str(rebuilt),
             graph_revision="b" * 64,
@@ -762,6 +765,109 @@ def test_graph_full_rebuild_fallback_restores_freshness(monkeypatch, tmp_path):
     assert a.graph_fresh is True
     assert a.graph_db == str(rebuilt)
     assert a.gateway_state().graph_db == str(rebuilt)
+
+
+def _build_mode_rows(adapter) -> list[dict]:
+    lines = Path(adapter.store.path).read_text(encoding="utf-8").splitlines()
+    return [
+        row for line in lines
+        if (row := json.loads(line)).get("event") == "graph_build_mode"
+    ]
+
+
+def _edited_adapter(tmp_path, graph_bytes: bytes = b"old"):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.py").write_text("value = 1\n", encoding="utf-8")
+    graph = tmp_path / "graph.db"
+    graph.write_bytes(graph_bytes)
+    adapter = MiniSweAdapter(
+        task_id="task", state_dir=tmp_path / "state", predicates=[],
+        repo_root=str(repo), graph_db=str(graph),
+    )
+    adapter.start_task()
+    adapter.record_repository_snapshot(capture_workspace(repo), boundary="after_action")
+    adapter.note_edit(["mod.py"])
+    return adapter, repo, graph
+
+
+def test_an_edit_takes_the_amend_path_and_the_journal_says_which(monkeypatch, tmp_path):
+    """The row that proves the incremental path ran.
+
+    Without it an amend and a full rebuild are indistinguishable in the
+    journal, and the last time that mattered a caller_coverage improvement was
+    credited to producer code that had never executed.
+    """
+    adapter, _repo, graph = _edited_adapter(tmp_path)
+    rebuilt = tmp_path / "rebuilt.db"
+    rebuilt.write_bytes(b"new")
+
+    seen: dict[str, object] = {}
+
+    def fake_refresh(root, parent, changed_paths, **kwargs):
+        seen["parent"] = str(parent)
+        seen["changed_paths"] = tuple(changed_paths)
+        return IndexBuildReceipt(
+            IndexBuildStatus.BUILT_CORE_ONLY, graph_db=str(rebuilt),
+            graph_revision="c" * 64, analysis_state="not_run",
+            build_mode="incremental",
+            incremental_results=({"path": "mod.py", "updated": 1,
+                                  "symbols_reminted": 3},),
+        )
+
+    monkeypatch.setattr("gt_engine.indexer.refresh_index_files", fake_refresh)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a full rebuild ran while an amend was available")
+
+    monkeypatch.setattr("gt_engine.indexer.ensure_index_with_receipt", forbidden)
+
+    assert adapter.refresh_graph() is False
+    assert adapter._graph_coordinator.wait_idle(timeout=10)
+    assert adapter.refresh_graph() is True
+
+    # The amend was handed the published graph and the paths the edit dirtied.
+    assert seen["parent"] == str(graph)
+    assert seen["changed_paths"] == ("mod.py",)
+
+    row = _build_mode_rows(adapter)[-1]
+    assert row["mode"] == "incremental"
+    assert row["reason"] == ""
+    assert row["dirty_path_count"] == 1
+    assert row["amended"] == [{"path": "mod.py", "updated": 1, "symbols_reminted": 3}]
+    assert row["analysis_state"] == "not_run"
+    assert isinstance(row["elapsed_ms"], int)
+
+
+def test_a_full_rebuild_names_the_reason_the_amend_was_refused(monkeypatch, tmp_path):
+    """A permanent silent fallback is how the amend path stayed dead.
+
+    The real refresh_index_files runs here, refuses because no producer
+    declares the amend capability, and falls back -- which is the correct
+    behaviour on a certified binary, and must be visible as a reason rather
+    than as an ordinary rebuild.
+    """
+    adapter, _repo, _graph = _edited_adapter(tmp_path)
+    rebuilt = tmp_path / "rebuilt.db"
+    rebuilt.write_bytes(b"new")
+    monkeypatch.setattr(
+        "gt_engine.indexer._producer_supports_incremental_amend", lambda: False)
+    monkeypatch.setattr(
+        "gt_engine.indexer.ensure_index_with_receipt",
+        lambda root, **_kwargs: IndexBuildReceipt(
+            IndexBuildStatus.BUILT, graph_db=str(rebuilt),
+            graph_revision="b" * 64, analysis_state="complete",
+        ),
+    )
+
+    assert adapter.refresh_graph() is False
+    assert adapter._graph_coordinator.wait_idle(timeout=10)
+    assert adapter.refresh_graph() is True
+
+    row = _build_mode_rows(adapter)[-1]
+    assert row["mode"] == "full"
+    assert row["reason"] == "producer_lacks_amend_capability"
+    assert row["amended"] == []
 
 
 class _StubEnrichmentHandle:
@@ -824,8 +930,7 @@ def test_enrichment_is_offered_on_a_rebuilt_current_graph(monkeypatch, tmp_path)
     rebuilt.write_bytes(b"new")
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None,
-            embedding_budget_seconds=None: IndexBuildReceipt(
+        lambda root, **_kwargs: IndexBuildReceipt(
             IndexBuildStatus.BUILT,
             graph_db=str(rebuilt),
             graph_revision="b" * 64,
@@ -875,8 +980,7 @@ def test_a_repeated_boundary_does_not_re_offer_the_same_graph(monkeypatch, tmp_p
     rebuilt.write_bytes(b"new")
     monkeypatch.setattr(
         "gt_engine.indexer.ensure_index_with_receipt",
-        lambda root, state_dir=None, source_revision="", layout=None,
-            embedding_budget_seconds=None: IndexBuildReceipt(
+        lambda root, **_kwargs: IndexBuildReceipt(
             IndexBuildStatus.BUILT, graph_db=str(rebuilt),
             graph_revision="b" * 64, analysis_state="complete",
         ),

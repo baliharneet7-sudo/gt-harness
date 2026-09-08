@@ -20,6 +20,15 @@ class FrozenBuildInput:
     dirty_paths: tuple[str, ...]
     files: tuple[tuple[str, bytes], ...]
     history: RepositoryHistory = RepositoryHistory()
+    # The graph this build starts from, when there is one. Carried on the
+    # request because the builder runs on a worker thread and EngineState is
+    # owner-thread only, so reading the published graph at build time would be
+    # a race; the owner reads it once, here, when the request is frozen.
+    #
+    # Deliberately NOT part of _same_input: two requests over the same bytes
+    # are the same producer input whichever graph they would amend.
+    parent_graph_path: str = ""
+    parent_graph_revision: str = ""
 
 
 @dataclass(frozen=True, slots=True)

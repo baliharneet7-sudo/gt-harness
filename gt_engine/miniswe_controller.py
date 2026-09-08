@@ -157,10 +157,21 @@ class GroundtruthController:
     def begin_submit(self) -> None:
         self._transition("SUBMIT")
 
-    def note_edit(self, paths: Iterable[str], *, invalidate: Iterable[str] | None = None) -> None:
+    def note_edit(self, paths: Iterable[str], *,
+                  invalidate: Iterable[str] | None = None) -> frozenset[str]:
+        """Discard the proofs this edit invalidated; return which ones those were.
+
+        The return value is the set this method ACTUALLY reset, which is not the
+        set the caller asked for: ``invalidate`` is a request, and the receipt
+        footprints below add to it. A caller that assumed its own request was
+        applied would describe the edit wrongly -- and one did, for every run
+        ever recorded. See MiniSweAdapter.note_edit.
+        """
+
         if self._phase != "IMPLEMENT":
             raise LifecycleError(f"edit is illegal in {self._phase}")
         edited_paths = tuple(paths)
+        affected: set[str] = set()
         if edited_paths:
             self.workspace_epoch += 1
             affected = set(invalidate) if invalidate is not None else set(self._status)
@@ -184,6 +195,7 @@ class GroundtruthController:
             # C3: a legitimate re-run of the same command AFTER an edit is new
             # work, not repetition. The repeat budget is per-epoch.
             self._repeats.clear()
+        return frozenset(affected)
 
     def record_receipt(self, predicate_id: str, command: str, exit_code: int,
                        output: str, *, epoch: int,
