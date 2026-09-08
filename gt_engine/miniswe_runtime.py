@@ -55,6 +55,10 @@ from .runtime_observation import (
     diff_workspace,
 )
 
+# The marker that makes the plan block idempotent in the durable task
+# message: appended once, never twice, even if the bootstrap were re-entered.
+PLAN_BLOCK_TAG = "[GT_PERSISTENT_PLAN]"
+
 _SUBMIT_REFUSED_OUTPUT = "submission withheld by the Groundtruth contract gate"
 
 _VIEW_COMMANDS = frozenset({"cat", "sed", "less", "head", "tail", "nl", "bat"})
@@ -686,6 +690,9 @@ def install_runtime_hooks(
         raise TypeError("GTSession requires an integration engine")
     model = getattr(agent, "model", None)
     model._gt_session = session
+    # The plan gate reads the agent's own clock and step count so a refusal
+    # can never be issued too close to the deadline to act on.
+    session._plan_agent = agent
     native_prepare = getattr(model, "_prepare_messages_for_api", None)
     native_query = getattr(model, "query", None)
     native_transport = getattr(model, "_query", None)
@@ -749,6 +756,8 @@ def install_runtime_hooks(
 
     bootstrap_started = False
     bootstrap_preparing = False
+    plan_started = False
+    plan_preparing = False
 
     def prepare_messages(_model: Any, messages: list[dict]) -> list[dict]:
         if session.disabled:
@@ -756,7 +765,7 @@ def install_runtime_hooks(
                 agent.add_messages = native_add_messages
             return native_prepare(messages)
         prepared = prepare(messages)
-        if bootstrap_preparing:
+        if bootstrap_preparing or plan_preparing:
             return prepared
         baseline_prepared = prepared
         try:
@@ -784,6 +793,7 @@ def install_runtime_hooks(
         """Admit only the exact, already-prepared payload sent to transport."""
         provider_tools = kwargs.pop("_gt_provider_tools", None)
         bootstrap_request = bool(kwargs.pop("_gt_select_catalog", False))
+        plan_request = bool(kwargs.pop("_gt_persistent_plan", False))
         if session.disabled:
             adapter.discard_pending_provider_deliveries(
                 reason="gt_disabled_before_transport"
@@ -887,6 +897,7 @@ def install_runtime_hooks(
             **kwargs,
             **({"_gt_provider_tools": tools} if provider_tools is not None else {}),
             **({"_gt_select_catalog": True} if bootstrap_request else {}),
+            **({"_gt_persistent_plan": True} if plan_request else {}),
         )
 
     def bootstrap_select_catalog() -> None:
@@ -968,11 +979,104 @@ def install_runtime_hooks(
             if callable(original_parser):
                 model._parse_actions = original_parser
 
+    def bootstrap_persistent_plan() -> None:
+        """One planning call before the first edit; advisory throughout.
+
+        Sibling of ``bootstrap_select_catalog`` and deliberately identical in
+        shape: it creates no Mini-SWE action, it is counted at the transport the
+        moment the call is spent (a failure below must not lose a call and fail
+        receipt reconciliation), and any exception degrades the plan rather than
+        the run.
+
+        The rendered block is appended ONCE to the durable task message. That
+        message is the only large surface on this path nothing rewrites, so the
+        plan is paid for once and read on every later turn.
+        """
+        nonlocal plan_started, plan_preparing
+        if plan_started:
+            return
+        plan_started = True
+        inputs = getattr(adapter, "plan_inputs", None)
+        if inputs is None:
+            return
+        from .persistent_plan import STATUS_ABSTAINED
+        from .persistent_plan.bootstrap import (
+            build_plan,
+            build_planning_messages,
+            parse_tool_arguments,
+            plan_tool_schema,
+        )
+        from .persistent_plan.render import render_plan_block
+
+        plan = None
+        original_parser = getattr(model, "_parse_actions", None)
+
+        def parse_nothing(_model: Any, _response: Any) -> list[dict]:
+            return []
+
+        try:
+            if callable(original_parser):
+                model._parse_actions = MethodType(parse_nothing, model)
+            plan_preparing = True
+            message = native_query(
+                list(build_planning_messages(inputs, adapter.issue_text)),
+                _gt_provider_tools=[plan_tool_schema(inputs)],
+                _gt_persistent_plan=True,
+                temperature=0.0,
+                max_tokens=4096,
+                num_retries=0,
+            )
+            adapter.note_persistent_plan_bootstrap()
+            extra = dict(message.get("extra") or {})
+            response = extra.get("response")
+            usage = response.get("usage") if isinstance(response, dict) else None
+            model_id = response.get("model", "") if isinstance(response, dict) else ""
+            adapter.bind_provider_response(
+                response, usage=usage, model=model_id, next_actions=()
+            )
+            plan = build_plan(parse_tool_arguments(response), inputs)
+        except Exception as exc:  # noqa: BLE001 - planning is advisory
+            try:
+                adapter.bind_provider_failure(exc)
+            except Exception:  # noqa: BLE001
+                pass
+            adapter.store.append(
+                "persistent_plan_unavailable",
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+            return
+        finally:
+            plan_preparing = False
+            if callable(original_parser):
+                model._parse_actions = original_parser
+
+        try:
+            adapter.persistent_plan = plan
+            adapter.store.append("persistent_plan_built", **plan.counts())
+            if plan.status != STATUS_ABSTAINED:
+                adapter.register_plan_predicates(plan)
+                block = render_plan_block(plan)
+                messages = getattr(agent, "messages", None)
+                if block and isinstance(messages, list) and len(messages) > 1:
+                    task_message = messages[1]
+                    content = task_message.get("content")
+                    if isinstance(content, str) and PLAN_BLOCK_TAG not in content:
+                        task_message["content"] = f"{content}\n\n{block}"
+                        adapter.store.append(
+                            "persistent_plan_delivered",
+                            rendered_bytes=len(block.encode("utf-8")),
+                            plan_rows=len(plan.rows),
+                            process_id=plan.process_id,
+                        )
+        except Exception as exc:  # noqa: BLE001 - delivery is advisory
+            session.degrade("persistent_plan_delivery", exc)
+
     def query(_model: Any, messages: list[dict], **kwargs: Any) -> dict:
         if session.disabled:
             return native_query(messages, **kwargs)
         try:
             bootstrap_select_catalog()
+            bootstrap_persistent_plan()
             message = original_query(messages, **kwargs)
         except Exception as exc:
             if not session.disabled:

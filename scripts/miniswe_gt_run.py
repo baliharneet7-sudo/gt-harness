@@ -627,6 +627,8 @@ def build_agent(
     from gt_engine.miniswe_controller import Predicate
     from gt_engine.miniswe_integration import MiniSweAdapter
     from gt_engine.miniswe_runtime import install_runtime_hooks
+    from gt_engine.persistent_plan import build_plan_inputs, merged_plan_contract
+    from gt_engine.persistent_plan import plan_enabled as persistent_plan_enabled
     from gt_engine.task_contract import extract_task_contract, render_task_contract
     from gt_engine.verification_contract import compile_obligation_predicates
 
@@ -663,6 +665,10 @@ def build_agent(
     # deficiency rather than a deliberate off-switch. setdefault keeps an
     # explicit "0" from the operator winning, exactly as above.
     os.environ.setdefault("GT_VERIFY_EXECUTE", "1")
+    # The persistent plan. Same route as the two flags above and for the same
+    # reason: container env is not a channel the harness trusts, and an explicit
+    # operator "0" still wins because setdefault does not overwrite.
+    os.environ.setdefault("GT_PERSISTENT_PLAN", "1")
     contract = extract_task_contract(task)
     compiled = compile_obligation_predicates(contract)
     predicates = tuple(
@@ -733,6 +739,47 @@ def build_agent(
         raise
     except Exception as exc:  # noqa: BLE001 - indexing is an optional observer
         index_error = exc
+    # PHASE 0 of the persistent plan: everything derivable with no provider
+    # call, while the graph is at full strength. This is deliberately BEFORE
+    # the adapter and before the task_start snapshot below -- the baseline
+    # capture runs the repository's own suite, and a suite that writes a
+    # tracked file would otherwise be snapshotted as the agent's first edit,
+    # bumping the workspace epoch before any work exists to invalidate.
+    #
+    # The ledger-only rows are folded into the predicate set HERE because the
+    # controller freezes its predicates at construction: a requirement written
+    # verbatim in the prompt but merged away by the sentence-level extractor
+    # otherwise reaches submission with nothing tracking it.
+    plan_inputs = None
+    _plan_setup_error = ""
+    if persistent_plan_enabled():
+        try:
+            plan_inputs = build_plan_inputs(
+                task,
+                contract=contract,
+                graph_db=graph_db,
+                repo_root=str(cwd),
+                wall_time_limit_seconds=wall_time_limit_seconds,
+            )
+            # The ledger-only rows are MERGED INTO the contract rather than
+            # appended beside it. evaluate_passing_observation iterates
+            # contract.obligations, so an obligation outside the contract can
+            # never be proven -- it would block the completion predicate
+            # forever while being unprovable, which is worse than not tracking
+            # it at all.
+            merged = merged_plan_contract(contract, plan_inputs.ledger, task)
+            if merged is not contract:
+                contract = merged
+                compiled = compile_obligation_predicates(contract)
+                predicates = tuple(
+                    Predicate(compiled[obligation.obligation_id].predicate_id,
+                              obligation.text)
+                    for obligation in contract.obligations
+                    if obligation.obligation_id in compiled
+                )
+        except Exception as exc:  # noqa: BLE001 - the plan is advisory throughout
+            plan_inputs = None
+            _plan_setup_error = f"{type(exc).__name__}: {exc}"
     adapter = MiniSweAdapter(
         layout=layout,
         task_id=task_id,
@@ -746,6 +793,32 @@ def build_agent(
         resolved_model=model_name,
     )
     from gt_engine.runtime_observation import capture_workspace
+
+    # Attach Phase 0 before the snapshot so the runtime can read it on the very
+    # first provider call. The plan is journaled here, where the store exists,
+    # rather than where it was computed.
+    adapter.plan_inputs = plan_inputs
+    adapter.persistent_plan = None
+    if plan_inputs is not None:
+        try:
+            payload = plan_inputs.as_dict()
+            digest = hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            adapter.store.put_blob(
+                "persistent_plans", digest,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+            adapter.store.append(
+                "persistent_plan_inputs",
+                inputs_blob=f"persistent_plans/{digest}.json",
+                inputs_sha256=digest,
+                **plan_inputs.counts(),
+            )
+        except Exception as exc:  # noqa: BLE001 - journaling the plan is advisory
+            _plan_setup_error = _plan_setup_error or f"{type(exc).__name__}: {exc}"
+    if _plan_setup_error:
+        adapter.store.append("persistent_plan_unavailable", error=_plan_setup_error[:300])
 
     adapter.record_repository_snapshot(
         capture_workspace(layout.workspace, excluded_roots=layout.excluded_roots),

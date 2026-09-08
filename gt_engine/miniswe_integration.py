@@ -253,6 +253,12 @@ class MiniSweAdapter(GroundtruthController):
         # here keeps "api_calls = agent turns" intact while letting receipt
         # reconciliation compare like with like at the transport boundary.
         self._select_catalog_bootstrap_calls = 0
+        # Same accounting as the catalog bootstrap: a GT-internal provider
+        # call the agent's n_calls never sees.
+        self._persistent_plan_bootstrap_calls = 0
+        self.plan_inputs = None
+        self.persistent_plan = None
+        self.plan_row_predicates: dict[str, tuple[str, ...]] = {}
         self._contract_shipped = False
         self._last_delta_signature: tuple[tuple[str, str], ...] = ()
         self._prepared_contract_delta: tuple[str, tuple[tuple[str, str], ...]] | None = None
@@ -2803,6 +2809,123 @@ class MiniSweAdapter(GroundtruthController):
         if predicate.predicate_id in result:
             green.append(predicate.predicate_id)
 
+    def note_persistent_plan_bootstrap(self) -> None:
+        """Record the one planning provider call, at the transport boundary.
+
+        Same accounting rule as the catalog bootstrap: the call is spent the
+        moment the transport returns, so it is counted there and a later
+        failure does not decrement it. Counting successes instead of attempts
+        would make ``terminal_requests`` disagree with the receipt's provider
+        total and fail reconciliation closed.
+        """
+        self._persistent_plan_bootstrap_calls += 1
+
+    def register_plan_predicates(self, plan) -> int:
+        """Give the plan's derived rows the same status machinery as any other.
+
+        A derived row is a behaviour the plan inferred from a requirement
+        crossed with an existing mode. It is a real obligation, so it belongs in
+        the contract: ``evaluate_passing_observation`` walks
+        ``contract.obligations``, and a predicate outside it could never turn
+        GREEN, only block.
+
+        Legal only at epoch zero, before the first edit. Registering later would
+        introduce an obligation that no existing receipt could have covered and
+        retroactively un-verify work that was already proven.
+        """
+        self.plan_row_predicates = getattr(self, "plan_row_predicates", {})
+        if self.contract is None or self.workspace_epoch != 0:
+            return 0
+        from .task_contract import Obligation, TaskContract, _typed_predicates
+
+        derived = tuple(row for row in plan.rows if row.is_derived)
+        known = {item.obligation_id for item in self.contract.obligations}
+        additions = tuple(
+            Obligation(
+                obligation_id=row.row_id,
+                text=row.text,
+                source="persistent_plan_derived",
+                subjects=(),
+            )
+            for row in derived
+            if row.row_id not in known
+        )
+        if additions:
+            obligations = self.contract.obligations + additions
+            self.contract = TaskContract(
+                role=self.contract.role,
+                obligations=obligations,
+                task_mode=self.contract.task_mode,
+                predicates=_typed_predicates(obligations, self.contract.task_mode),
+            )
+            self._compiled_predicates = compile_obligation_predicates(self.contract)
+            self._predicate_by_obligation = {
+                item.obligation_id: item.predicate_id
+                for item in self._compiled_predicates.values()
+            }
+            self._obligation_by_predicate = {
+                value: key for key, value in self._predicate_by_obligation.items()
+            }
+            for obligation in additions:
+                predicate_id = self._predicate_by_obligation.get(
+                    obligation.obligation_id
+                )
+                if predicate_id and predicate_id not in self.predicates:
+                    self.predicates[predicate_id] = Predicate(
+                        predicate_id, obligation.text
+                    )
+                    self._status[predicate_id] = PredicateStatus.UNKNOWN
+
+        # Map every plan row to the predicates that can satisfy it: its own
+        # derived obligation, the merged ledger obligation minted for a line the
+        # sentence extractor dropped, or the obligations that swallowed it.
+        ledger = getattr(plan.inputs, "ledger", None)
+        mapping: dict[str, tuple[str, ...]] = {}
+        for row in plan.rows:
+            candidates: list[str] = [row.row_id]
+            if row.row_id.startswith("req-"):
+                candidates.append("plan-" + row.row_id.removeprefix("req-"))
+                ledger_row = ledger.by_id(row.row_id) if ledger is not None else None
+                if ledger_row is not None:
+                    candidates.extend(ledger_row.obligation_ids)
+            predicate_ids = tuple(
+                dict.fromkeys(
+                    predicate_id
+                    for obligation_id in candidates
+                    if (predicate_id := self._predicate_by_obligation.get(obligation_id))
+                )
+            )
+            if predicate_ids:
+                mapping[row.row_id] = predicate_ids
+        self.plan_row_predicates = mapping
+        self.store.append(
+            "persistent_plan_predicates",
+            registered=len(additions),
+            mapped_rows=len(mapping),
+            unmapped_rows=[
+                row.row_id for row in plan.rows if row.row_id not in mapping
+            ][:20],
+        )
+        return len(additions)
+
+    def unmet_plan_rows(self) -> tuple[str, ...]:
+        """Plan rows that still have no current evidence.
+
+        A row with no predicate mapped to it is NOT counted: it cannot be
+        proven, so blocking on it would be blocking on our own gap.
+        """
+        mapping = getattr(self, "plan_row_predicates", {}) or {}
+        if not mapping:
+            return ()
+        unmet = set(self.unmet_predicates)
+        return tuple(
+            sorted(
+                row_id
+                for row_id, predicate_ids in mapping.items()
+                if any(predicate_id in unmet for predicate_id in predicate_ids)
+            )
+        )
+
     def note_select_catalog_bootstrap(self) -> None:
         """Record one GT-internal bootstrap provider call at the transport boundary.
 
@@ -2829,6 +2952,11 @@ class MiniSweAdapter(GroundtruthController):
                  "delivered_evidence": self._accepted_sealed_delivery_count,
                  "terminal_requests": len(self._terminal_request_ids),
                  "select_catalog_bootstrap_calls": self._select_catalog_bootstrap_calls,
+                 "persistent_plan_bootstrap_calls": self._persistent_plan_bootstrap_calls,
+                 "persistent_plan_status": (
+                     getattr(self.persistent_plan, "status", "") or ""
+                 ),
+                 "unmet_plan_rows": list(self.unmet_plan_rows()),
                  "contract_shipped": self._contract_shipped,
                  "requested_model": self.requested_model,
                  "resolved_model": self.resolved_model,

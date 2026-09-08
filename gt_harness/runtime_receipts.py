@@ -708,7 +708,13 @@ def issue_runtime_receipts(
     bootstrap_calls = int(gt.get("select_catalog_bootstrap_calls") or 0)
     if bootstrap_calls < 0:
         raise ValueError("select_catalog_bootstrap_calls_invalid")
-    provider_calls = agent_turn_calls + bootstrap_calls
+    # The persistent plan spends one more GT-internal call at task start, on
+    # the same boundary and for the same reason. Left out of this sum it would
+    # read as a provider call nobody declared and fail reconciliation closed.
+    plan_calls = int(gt.get("persistent_plan_bootstrap_calls") or 0)
+    if plan_calls < 0:
+        raise ValueError("persistent_plan_bootstrap_calls_invalid")
+    provider_calls = agent_turn_calls + bootstrap_calls + plan_calls
     terminal_requests = gt.get("terminal_requests")
     if terminal_requests is not None and int(terminal_requests) != provider_calls:
         raise ValueError("provider_call_count_mismatch")
@@ -885,6 +891,7 @@ def issue_runtime_receipts(
         "provider_calls": provider_calls,
         "agent_turn_calls": agent_turn_calls,
         "select_catalog_bootstrap_calls": bootstrap_calls,
+        "persistent_plan_bootstrap_calls": plan_calls,
         **provider_usage,
         "research_valid": bool(report.get("research_valid")),
         "treatment_receipt": treatment_receipt,
@@ -1081,7 +1088,9 @@ def verify_runtime_receipt(receipt_path: Path) -> list[str]:
         # parts the receipt itself declares. A receipt with no agent_turn_calls
         # predates the split and keeps the original single comparison.
         reconciled = (
-            agent_turn_calls + int(receipt.get("select_catalog_bootstrap_calls") or 0)
+            agent_turn_calls
+            + int(receipt.get("select_catalog_bootstrap_calls") or 0)
+            + int(receipt.get("persistent_plan_bootstrap_calls") or 0)
             if "agent_turn_calls" in receipt
             else declared
         )

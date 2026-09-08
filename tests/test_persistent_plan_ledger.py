@@ -1,0 +1,204 @@
+"""The requirement ledger keeps every normative prompt line verbatim.
+
+The awilix fixture is the public task prompt only. No test file, no
+fail-to-pass list and no solution patch is read here or anywhere in the
+persistent-plan code: the ledger is derived from what the agent already sees.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from gt_engine.persistent_plan.ledger import (
+    build_requirement_ledger,
+    ledger_only_contract,
+    row_id_for,
+)
+from gt_engine.task_contract import extract_task_contract
+from gt_engine.verification_contract import compile_obligation_predicates
+
+FIXTURE = Path(__file__).parent / "fixtures" / "persistent_plan" / "awilix_instruction.md"
+
+
+def _awilix() -> str:
+    return FIXTURE.read_text(encoding="utf-8")
+
+
+def _texts(ledger) -> list[str]:
+    return [row.text for row in ledger.rows]
+
+
+def test_a_line_the_sentence_extractor_merged_becomes_its_own_row():
+    """Every source line is pointable, whatever the extractor did with it.
+
+    The generic property: no ledger row spans two source lines. This fixture
+    exercises a line ``extract_task_contract`` merged into a run-on obligation
+    beginning with a different assumption, so nothing tracked it on its own.
+    """
+    ledger = build_requirement_ledger(_awilix(), extract_task_contract(_awilix()))
+    line = (
+        "Scoped containers can be initialized independently; parent "
+        "container's singletons are not reinitialized"
+    )
+    assert line in _texts(ledger)
+    row = ledger.by_id(row_id_for(line))
+    assert row is not None and row.section == "assumptions"
+
+
+def test_each_assumption_is_a_separate_row():
+    ledger = build_requirement_ledger(_awilix())
+    assumptions = [row for row in ledger.rows if row.section == "assumptions"]
+    assert len(assumptions) == 5
+    assert assumptions[0].text.startswith("`initialize()` is idempotent")
+    assert assumptions[-1].text.startswith("Works with both `asFunction()`")
+
+
+def test_lines_without_a_directive_verb_survive():
+    """Requirement lines carry no ``must``/``should``; the extractor needs one."""
+    ledger = build_requirement_ledger(_awilix())
+    texts = _texts(ledger)
+    assert "console.log(result.metrics.database.level)" in texts
+    assert "console.log(result.totalDuration)" in texts
+    assert "const result = await container.initialize({ concurrency: 5 })" in texts
+
+
+def test_structural_only_lines_are_skipped_with_a_reason():
+    ledger = build_requirement_ledger(_awilix())
+    assert "})" not in _texts(ledger)
+    assert any(reason == "structural_only" for _line, reason in ledger.skipped)
+
+
+def test_the_commit_instruction_is_a_row():
+    """A run that never commits grades against a pristine base, so this is
+    normative even though it is process rather than behaviour."""
+    ledger = build_requirement_ledger(_awilix())
+    assert any(row.text.startswith("IMPORTANT:") for row in ledger.rows)
+
+
+def test_rows_are_verbatim_text_from_one_line():
+    """A row is a byte-for-byte piece of a single source line, never a rewrite."""
+    text = _awilix()
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    ledger = build_requirement_ledger(text)
+    for row in ledger.rows:
+        home = lines[row.line_no - 1]
+        assert row.text in home, row.text
+        assert row.text == row.text.strip()
+
+
+def test_rows_link_to_the_obligations_that_swallowed_them():
+    contract = extract_task_contract(_awilix())
+    ledger = build_requirement_ledger(_awilix(), contract)
+    linked = [row for row in ledger.rows if row.obligation_ids]
+    assert linked, "no row linked to any extracted obligation"
+    known = {item.obligation_id for item in contract.obligations}
+    for row in linked:
+        assert set(row.obligation_ids) <= known
+
+
+def test_ledger_only_rows_compile_to_predicates():
+    contract = extract_task_contract(_awilix())
+    ledger = build_requirement_ledger(_awilix(), contract)
+    assert ledger.ledger_only, "fixture must exercise the ledger-only path"
+    synthetic = ledger_only_contract(ledger, _awilix())
+    compiled = compile_obligation_predicates(synthetic)
+    assert set(compiled) == {
+        item.obligation_id for item in synthetic.obligations
+    }
+    for obligation_id, predicate in compiled.items():
+        assert predicate.predicate_id
+        assert predicate.obligation_id == obligation_id
+
+
+def test_fenced_examples_and_non_normative_sections_are_excluded():
+    text = (
+        "**Background**\n"
+        "This repository is a container library.\n"
+        "\n"
+        "**Requirements**\n"
+        "The loader must retry twice.\n"
+        "\n"
+        "```js\n"
+        "example.only.in.a.fence()\n"
+        "```\n"
+    )
+    ledger = build_requirement_ledger(text)
+    texts = _texts(ledger)
+    assert "The loader must retry twice." in texts
+    assert "This repository is a container library." not in texts
+    assert "example.only.in.a.fence()" not in texts
+    assert ledger.fenced_lines == 1
+
+
+def test_duplicate_lines_collapse_once():
+    text = "The cache must expire.\nThe cache must expire.\n"
+    ledger = build_requirement_ledger(text)
+    assert len(ledger.rows) == 1
+    assert any(reason == "duplicate" for _line, reason in ledger.skipped)
+
+
+def test_row_ids_are_stable_across_calls():
+    first = build_requirement_ledger(_awilix())
+    second = build_requirement_ledger(_awilix())
+    assert [row.row_id for row in first.rows] == [row.row_id for row in second.rows]
+
+
+def test_empty_prompt_yields_an_empty_ledger():
+    ledger = build_requirement_ledger("")
+    assert len(ledger) == 0
+    assert ledger.counts()["rows"] == 0
+
+
+def test_sentence_split_is_lossless_within_a_line():
+    """Splitting inside a line must rejoin to the line, so nothing is lost.
+
+    This is the invariant that separates a safe split from the cross-line merge
+    that hides a requirement inside a neighbour's sentence.
+    """
+    from gt_engine.persistent_plan.ledger import _split_sentences
+
+    for line in (
+        "First clause here. Second clause follows. Third ends it.",
+        "console.log(result.metrics.database.level)",
+        "`initialize()` is idempotent, calling it twice returns immediately",
+        "Version 1.2 shipped. It works.",
+    ):
+        assert " ".join(_split_sentences(line)) == line
+
+
+def test_a_multi_sentence_line_becomes_several_rows():
+    text = (
+        "If any initializer throws, the container disposes services. "
+        "When a failure occurs, in-flight initializers complete first. "
+        "Errors from disposers do not override the original error.\n"
+    )
+    ledger = build_requirement_ledger(text)
+    assert len(ledger.rows) == 3
+    assert {row.line_no for row in ledger.rows} == {1}
+    assert [row.sentence_index for row in ledger.rows] == [0, 1, 2]
+    assert ledger.rows[1].text.startswith("When a failure occurs")
+
+
+def test_no_row_spans_two_source_lines():
+    """The property that would have made the merge visible."""
+    text = _awilix()
+    ledger = build_requirement_ledger(text)
+    lines = [" ".join(line.split()) for line in text.splitlines()]
+    for row in ledger.rows:
+        assert any(row.text in line for line in lines), row.text
+
+
+def test_linking_preserves_every_row_field():
+    """Relinking rebuilds rows; it must not drop one on the way through."""
+    text = _awilix()
+    unlinked = build_requirement_ledger(text)
+    linked = build_requirement_ledger(text, extract_task_contract(text))
+    assert len(unlinked.rows) == len(linked.rows)
+    for before, after in zip(unlinked.rows, linked.rows, strict=True):
+        assert before.row_id == after.row_id
+        assert before.text == after.text
+        assert before.line_no == after.line_no
+        assert before.sentence_index == after.sentence_index
+        assert before.section == after.section
+        assert before.shape == after.shape
+        assert before.subjects == after.subjects
+        assert before.tokens == after.tokens

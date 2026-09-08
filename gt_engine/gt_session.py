@@ -57,6 +57,7 @@ CONFIGURED_OFF_STAGES = ("off", "global_kill_switch")
 _DEGRADE_STAGES = frozenset({
     "action_identity", "after_action", "before_action", "execution_identity",
     "execution_receipt", "execution_result_identity", "observation_splice",
+    "persistent_plan_delivery",
     "prepare_messages", "provider_failure_receipt", "provider_response_receipt",
     "session_start", "submit_detection", "submit_gate",
     "submitted_result_missing", "suppression_receipt",
@@ -252,6 +253,10 @@ class GTSession:
         self._execution_sequence = 0
         self._open_executions: set[str] = set()
         self._select_catalog_attempted = False
+        self._plan_gate_refusals = 0
+        self._plan_baseline_report = None
+        self._plan_agent = None
+        self._plan_progress_shipped: dict[str, str] = {}
         self._select_catalog_lifecycle: Feature18Lifecycle | None = None
         self._capability_check()
 
@@ -1061,11 +1066,93 @@ class GTSession:
             )
         return batch
 
+    def plan_gate_budget(self) -> tuple[float, int]:
+        """Seconds and steps the agent has left, from the agent itself."""
+        agent = self._plan_agent
+        if agent is None:
+            return 0.0, 0
+        import time
+
+        limit = float(getattr(agent.config, "wall_time_limit_seconds", 0) or 0)
+        started = float(getattr(agent, "_start_time", 0) or 0)
+        remaining_seconds = (
+            max(0.0, limit - (time.time() - started)) if limit and started else 0.0
+        )
+        step_limit = int(getattr(agent.config, "step_limit", 0) or 0)
+        remaining_steps = max(0, step_limit - int(getattr(agent, "n_calls", 0) or 0))
+        return remaining_seconds, remaining_steps
+
+    def _plan_gate(self) -> tuple[bool, GTDecisionBatch] | None:
+        """Refuse a submission the plan says is not finished, once, with room.
+
+        The benchmark runs advisory, where ``can_enforce`` is False and the
+        existing gate is unreachable -- which is why twelve of twenty tasks in
+        the measured run submitted with no evidence at all. This gate works in
+        advisory mode and is deliberately weaker than enforcement: one refusal,
+        a budget escape ahead of it, and an explicit statement to the agent that
+        submitting again will be accepted.
+
+        Returns None when it has nothing to say, so the caller falls through to
+        the existing advisory path unchanged.
+        """
+        plan = getattr(self._engine, "persistent_plan", None)
+        if plan is None or not getattr(plan, "rows", ()):
+            return None
+        from .persistent_plan.gate import decide
+
+        remaining_seconds, remaining_steps = self.plan_gate_budget()
+        try:
+            unmet = self._engine.unmet_plan_rows()
+        except Exception:  # noqa: BLE001 - a gate fault must never block
+            return None
+        regressions, baseline_status = self._plan_baseline_check()
+        decision = decide(
+            plan=plan,
+            unmet_rows=unmet,
+            regressions=regressions,
+            remaining_seconds=remaining_seconds,
+            remaining_steps=remaining_steps,
+            refusals=self._plan_gate_refusals,
+            baseline_status=baseline_status,
+        )
+        self._engine.store.append("plan_gate_decision", **decision.as_row())
+        if decision.accepted:
+            self._engine.advisory_submit_decision()
+            return True, GTDecisionBatch()
+        self._plan_gate_refusals += 1
+        self._engine.pending_directives.append(decision.directive)
+        return False, GTDecisionBatch(policy=["deny"])
+
+    def _plan_baseline_check(self) -> tuple[tuple[str, ...], str]:
+        """Re-run the captured suite once, to name what stopped passing."""
+        inputs = getattr(self._engine, "plan_inputs", None)
+        if inputs is None or not inputs.baseline.captured:
+            return (), getattr(getattr(inputs, "baseline", None), "status", "")
+        if self._plan_baseline_report is not None:
+            report = self._plan_baseline_report
+            return report.newly_failing, report.status
+        from .persistent_plan.baseline import compare_to_baseline
+
+        try:
+            report = compare_to_baseline(
+                inputs.baseline,
+                self.config.repo_root,
+                budget_seconds=max(30.0, inputs.baseline.duration_seconds * 2),
+            )
+        except Exception:  # noqa: BLE001 - a probe fault is never a blocker
+            return (), "probe_failed"
+        self._plan_baseline_report = report
+        self._engine.store.append("plan_baseline_recheck", **report.as_dict())
+        return (report.newly_failing if report.regressed else ()), report.status
+
     def request_submit(self) -> tuple[bool, GTDecisionBatch]:
         """The submit decision. Returns (accepted, decision batch)."""
         if self._engine is None or self.disabled:
             return True, GTDecisionBatch()
         if not self.can_enforce:
+            gated = self._plan_gate()
+            if gated is not None:
+                return gated
             blocking = tuple(getattr(self._engine, "blocking_predicates", ()))
             if blocking:
                 self._engine.store.append(
@@ -1182,7 +1269,7 @@ class GTSession:
 
     def _mandatory_capability_rows(
         self,
-    ) -> list[tuple[str, "CapabilityState", str, bool]]:
+    ) -> list[tuple[str, CapabilityState, str, bool]]:
         """State of the capabilities that must never degrade silently.
 
         Derived from what the run actually recorded, never from configuration.

@@ -1,0 +1,187 @@
+"""Delivery: the plan goes into the prefix once and never moves again.
+
+The plan block is appended to the durable task message. Measured across a live
+run that message was byte-identical in 182 of 184 requests, which is why it is
+the right home for a large artifact: it is paid for once. These tests pin that
+property rather than trusting it.
+"""
+from __future__ import annotations
+
+from gt_engine.persistent_plan import (
+    InteractionCell,
+    PersistentPlan,
+    PlanInputs,
+    PlanRow,
+)
+from gt_engine.persistent_plan.anchors import Anchor, AnchorResult, Caller
+from gt_engine.persistent_plan.baseline import BaselineResult
+from gt_engine.persistent_plan.ledger import build_requirement_ledger
+from gt_engine.persistent_plan.render import (
+    MAX_BLOCK_CHARS,
+    PLAN_TAG,
+    render_plan_block,
+)
+
+PROMPT = (
+    "The loader must retry twice.\n"
+    "The loader must report the final error.\n"
+)
+
+
+def _anchor(node_id: int = 1, name: str = "load") -> Anchor:
+    return Anchor(
+        node_id=node_id, name=name, qualified_name=name, label="Function",
+        file_path="src/loader.py", start_line=12, signature=f"def {name}():",
+        language="python", basis="exact_name",
+    )
+
+
+def _plan(*, captured: bool = True, interactions=(), abstentions=()) -> PersistentPlan:
+    ledger = build_requirement_ledger(PROMPT)
+    rows = ledger.rows
+    anchors = AnchorResult(
+        anchors={rows[0].row_id: (_anchor(),), rows[1].row_id: ()},
+        callers={1: (Caller(2, "boot", "src/app.py", 1),)},
+    )
+    baseline = (
+        BaselineResult(
+            status="captured", command=("pytest",), passed=40, failed=1,
+            failing_names=("tests/test_old.py::test_known",),
+        )
+        if captured
+        else BaselineResult(status="no_test_command")
+    )
+    inputs = PlanInputs(ledger=ledger, anchors=anchors, baseline=baseline)
+    return PersistentPlan(
+        status="READY",
+        inputs=inputs,
+        rows=(
+            PlanRow(
+                row_id=rows[0].row_id, text=rows[0].text, anchors=(1,),
+                verification_kind="existing_test",
+                verification_command="pytest tests/test_loader.py",
+            ),
+            PlanRow(row_id=rows[1].row_id, text=rows[1].text),
+        ),
+        interactions=tuple(interactions),
+        edit_order=(rows[0].row_id, rows[1].row_id),
+        abstentions=tuple(abstentions),
+    )
+
+
+def test_the_block_states_requirements_proofs_and_the_completion_rule():
+    block = render_plan_block(_plan())
+    assert block.startswith(f"[{PLAN_TAG}]")
+    assert "The loader must retry twice." in block
+    assert "prove with: pytest tests/test_loader.py" in block
+    assert "load @ src/loader.py:12" in block
+    assert "COMPLETE when every requirement above has evidence" in block
+
+
+def test_the_block_says_it_is_advisory():
+    """A plan the agent cannot disagree with is a cage, not evidence."""
+    block = render_plan_block(_plan())
+    assert "advisory" in block
+    assert "not a boundary" in block
+
+
+def test_the_block_carries_the_blast_radius():
+    block = render_plan_block(_plan())
+    assert "CALLERS" in block
+    assert "boot @ src/app.py" in block
+
+
+def test_the_block_carries_the_green_baseline_and_its_known_failures():
+    block = render_plan_block(_plan())
+    assert "40 passing" in block
+    assert "Every test passing now must still pass" in block
+    assert "tests/test_old.py::test_known" in block
+
+
+def test_a_missing_baseline_is_stated_not_hidden():
+    block = render_plan_block(_plan(captured=False))
+    assert "not captured" in block
+    assert "no_test_command" in block
+
+
+def test_applying_interactions_are_listed():
+    ledger = build_requirement_ledger(PROMPT)
+    cells = (
+        InteractionCell(ledger.rows[0].row_id, "DebugMode", "ALL", True, "differs"),
+        InteractionCell(ledger.rows[0].row_id, "DebugMode", "OFF", False, "same"),
+    )
+    block = render_plan_block(_plan(interactions=cells))
+    assert "INTERACTIONS that apply" in block
+    assert "DebugMode.ALL" in block
+    assert "DebugMode.OFF" not in block
+
+
+def test_gaps_are_rendered_rather_than_dropped():
+    block = render_plan_block(_plan(abstentions=(("req-x", "no_anchor"),)))
+    assert "GAPS" in block
+    assert "no_anchor" in block
+
+
+def test_an_abstained_plan_renders_nothing():
+    plan = _plan()
+    plan.status = "ABSTAINED"
+    assert render_plan_block(plan) == ""
+
+
+def test_the_block_is_capped_and_says_what_it_dropped():
+    ledger = build_requirement_ledger(
+        "".join(f"Requirement number {index} must hold.\n" for index in range(400))
+    )
+    inputs = PlanInputs(
+        ledger=ledger, anchors=AnchorResult(), baseline=BaselineResult(status="none")
+    )
+    plan = PersistentPlan(
+        status="READY",
+        inputs=inputs,
+        rows=tuple(
+            PlanRow(row_id=row.row_id, text=row.text) for row in ledger.rows
+        ),
+    )
+    block = render_plan_block(plan)
+    assert len(block) <= MAX_BLOCK_CHARS + 200
+    assert "more plan lines omitted" in block
+
+
+def test_progress_rides_the_existing_obligation_delta(tmp_path):
+    """No second progress channel: plan rows move through the contract delta.
+
+    The plan's rows are merged into the contract, so ``next_contract_delta``
+    already reports them. A parallel renderer would be a second way to say the
+    same thing and a second thing to keep correct.
+    """
+    from gt_engine.miniswe_controller import Predicate
+    from gt_engine.miniswe_integration import MiniSweAdapter
+    from gt_engine.persistent_plan import merged_plan_contract
+    from gt_engine.persistent_plan.ledger import build_requirement_ledger
+    from gt_engine.task_contract import extract_task_contract
+    from gt_engine.verification_contract import compile_obligation_predicates
+
+    contract = extract_task_contract(PROMPT)
+    ledger = build_requirement_ledger(PROMPT, contract)
+    merged = merged_plan_contract(contract, ledger, PROMPT)
+    compiled = compile_obligation_predicates(merged)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    adapter = MiniSweAdapter(
+        task_id="delta", state_dir=tmp_path / "state",
+        predicates=[
+            Predicate(compiled[item.obligation_id].predicate_id, item.text)
+            for item in merged.obligations
+            if item.obligation_id in compiled
+        ],
+        contract=merged, repo_root=str(repo),
+    )
+    text = adapter.next_contract_delta(max_chars=4000)
+    assert text, "the contract delta must carry the merged plan rows"
+    assert "retry" in text or "report" in text
+
+
+def test_the_render_module_exposes_no_progress_renderer():
+    import gt_engine.persistent_plan.render as render
+
+    assert not hasattr(render, "render_progress_lines")
