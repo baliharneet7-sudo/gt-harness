@@ -35,11 +35,17 @@ def test_stage_selection_partitions_the_frozen_cohort_exactly_once() -> None:
 
 
 def test_gate_one_ceiling_lets_the_gate_task_finish() -> None:
-    # Was 30 minutes, which left the agent 1500s after the supervisor grace -
-    # below the task's own 5400s allowance and level with the baseline's 1439s
-    # mean duration. Run 34062325608 died at terminal=timeout having indexed
-    # and run correctly for the full budget. The ceiling matches the task's
-    # allowance now, so gate-one can actually reach a verdict.
+    # Measured, not assumed: every one of the 20 tasks declares
+    # [agent] timeout_sec = 5400.0 at benchmark revision 435ee89e, and the plan
+    # job resolves with multiplier 1.0, so min(5400, 5400) means this ceiling
+    # subtracts nothing today. It is a rail against a future task.toml asking
+    # for more than the benchmark's own budget, not a knob for buying a slow
+    # task more time - raising it would make gate-one a different experiment
+    # from the cohort it gates, and from both frozen GT-off controls.
+    #
+    # It was 30 minutes once, which left the agent 1500s after the supervisor
+    # grace and killed run 34062325608 at terminal=timeout mid-loop. That is why
+    # it is pinned rather than merely set.
     assert GATE_ONE_MAX_TIMEOUT_SECONDS == 90 * 60
     assert stage_timeout_cap_seconds("gate-one") == 90 * 60
     assert stage_timeout_cap_seconds("remaining-19") is None
@@ -136,3 +142,39 @@ def test_unverified_required_capability_blocks_remainder(tmp_path: Path) -> None
     _write(path, payload)
     with pytest.raises(ValueError, match="required capability"):
         validate_prior_gate(tmp_path, source_sha="a" * 40, prior_gate_run_id="123")
+
+
+def test_all_20_selects_the_whole_cohort_in_pinned_order():
+    from scripts.smoke_stage import ALL_STAGE
+
+    tasks = _tasks()
+    assert select_stage_tasks(tasks, ALL_STAGE) == tasks
+
+
+def test_all_20_runs_at_the_same_budget_as_the_remainder_stage():
+    # A one-dispatch cohort must not become a different experiment. Both
+    # multi-task stages resolve to each task's own [agent] timeout_sec.
+    from scripts.smoke_stage import ALL_STAGE
+
+    assert stage_timeout_cap_seconds(ALL_STAGE) == stage_timeout_cap_seconds(
+        "remaining-19"
+    )
+
+
+def test_all_20_and_gate_one_partition_the_cohort():
+    # Whichever way the cohort is dispatched, the same 20 tasks run exactly once.
+    from scripts.smoke_stage import ALL_STAGE
+
+    tasks = _tasks()
+    split = select_stage_tasks(tasks, "gate-one") + select_stage_tasks(
+        tasks, "remaining-19"
+    )
+    assert sorted(split) == sorted(select_stage_tasks(tasks, ALL_STAGE))
+
+
+def test_all_20_must_not_claim_a_prior_gate():
+    from scripts.smoke_stage import ALL_STAGE
+
+    validate_stage_inputs(ALL_STAGE, "")
+    with pytest.raises(ValueError):
+        validate_stage_inputs(ALL_STAGE, "34257199043")

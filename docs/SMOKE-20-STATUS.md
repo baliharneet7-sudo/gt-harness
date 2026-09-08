@@ -1,16 +1,22 @@
-# DeepSWE 20-task paid smoke — live status
+# DeepSWE 20-task paid smoke - live status
 
-Updated as the run moves. The table at the top is the log; everything below it
-is fixed context.
+All 20 tasks in ONE dispatch, stage `all-20`.
 
-## Current run
+The two-stage split (gate-one, then remaining-19) still exists and is still the
+safer default. It is not used here by choice: run 34257199043 already showed that
+every gate passes and the agent loop runs all the way to its deadline, so a
+canary now buys an extra hour of serialisation and nothing else. The 20 fan out
+in parallel with `fail-fast: false`, in the identical pinned order and at the
+identical per-task budget.
 
-_dispatch pending — see "What was fixed" below_
+A superseded gate-one dispatch, run 34270553336, was cancelled at 19:44 while it
+was still in the image digest gate. No task job had started, so nothing was paid.
 
 | time (UTC) | event |
 |---|---|
 
 ---
+
 
 ## What was fixed before this run
 

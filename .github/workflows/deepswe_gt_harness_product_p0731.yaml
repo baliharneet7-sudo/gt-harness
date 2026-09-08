@@ -12,7 +12,7 @@ on:
         description: "Paid cohort stage: gate exactly one task, then the remaining 19"
         required: false
         type: choice
-        options: [gate-one, remaining-19]
+        options: [gate-one, remaining-19, all-20]
         default: gate-one
       prior_gate_run_id:
         description: "Required for remaining-19: completed gate-one workflow run ID"

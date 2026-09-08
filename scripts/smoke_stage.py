@@ -11,7 +11,18 @@ from typing import Any
 
 GATE_STAGE = "gate-one"
 REMAINDER_STAGE = "remaining-19"
-STAGES = frozenset({GATE_STAGE, REMAINDER_STAGE})
+# Run the whole cohort in one dispatch. The two-stage split exists to prove the
+# infrastructure on one task before paying for nineteen more, and it is the
+# right default. It is not the only correct shape: once a run has shown that
+# every gate passes and the agent loop reaches a verdict, the canary buys
+# nothing except an extra hour of serialisation, because the 19 fan out in
+# parallel anyway. This stage is that choice, made explicitly.
+#
+# It selects the identical 20 tasks in the identical pinned order, at the
+# identical per-task budget. Nothing about a task changes because it ran
+# alongside the others rather than after them.
+ALL_STAGE = "all-20"
+STAGES = frozenset({GATE_STAGE, REMAINDER_STAGE, ALL_STAGE})
 # The canary must be a task the product can actually finish, because gate-one's
 # whole job is to answer "does the attested path reach a verdict" before 19 more
 # tasks are paid for.
@@ -46,9 +57,14 @@ GATE_ONE_MAX_TIMEOUT_SECONDS = 90 * 60
 def stage_timeout_cap_seconds(stage: str) -> float | None:
     if stage == GATE_STAGE:
         return float(GATE_ONE_MAX_TIMEOUT_SECONDS)
-    if stage == REMAINDER_STAGE:
+    if stage in (REMAINDER_STAGE, ALL_STAGE):
+        # No cap, exactly as the remainder stage has always run. This is not a
+        # relaxation: every task declares 5400 s and the gate cap is also 5400,
+        # so capped and uncapped resolve to the same number. Keeping the
+        # multi-task stages byte-identical to each other is worth more than
+        # applying a rail that subtracts nothing.
         return None
-    raise ValueError("cohort_stage must be gate-one or remaining-19")
+    raise ValueError("cohort_stage must be gate-one, remaining-19 or all-20")
 
 
 def select_stage_tasks(tasks: Sequence[str], stage: str) -> list[str]:
@@ -59,13 +75,17 @@ def select_stage_tasks(tasks: Sequence[str], stage: str) -> list[str]:
         return [GATE_TASK_ID]
     if stage == REMAINDER_STAGE:
         return [task for task in ordered if task != GATE_TASK_ID]
-    raise ValueError("cohort_stage must be gate-one or remaining-19")
+    if stage == ALL_STAGE:
+        # The pinned order, unfiltered. The plan job re-hashes this and compares
+        # it to task_order_sha256, so a reordering here fails the run.
+        return ordered
+    raise ValueError("cohort_stage must be gate-one, remaining-19 or all-20")
 
 
 def validate_stage_inputs(stage: str, prior_gate_run_id: str) -> None:
     run_id = prior_gate_run_id.strip()
-    if stage == GATE_STAGE and run_id:
-        raise ValueError("gate-one must not claim a prior gate run")
+    if stage in (GATE_STAGE, ALL_STAGE) and run_id:
+        raise ValueError(f"{stage} must not claim a prior gate run")
     if stage == REMAINDER_STAGE and not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise ValueError("remaining-19 requires a positive prior_gate_run_id")
     if stage not in STAGES:
@@ -137,6 +157,7 @@ def validate_prior_gate(
 
 
 __all__ = [
+    "ALL_STAGE",
     "GATE_ONE_MAX_TIMEOUT_SECONDS",
     "GATE_STAGE",
     "GATE_TASK_ID",

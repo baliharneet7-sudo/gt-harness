@@ -14,7 +14,13 @@ from gt_engine.feature_matrix import verify_matrix
 from gt_harness.runtime_receipts import verify_runtime_receipt
 from scripts.gt_audit import artifact_corpus_sha256, audit_digest_sha256
 from scripts.provider_preflight import load_route
-from scripts.smoke_stage import GATE_STAGE, GATE_TASK_ID, REMAINDER_STAGE, select_stage_tasks
+from scripts.smoke_stage import (
+    ALL_STAGE,
+    GATE_STAGE,
+    GATE_TASK_ID,
+    REMAINDER_STAGE,
+    select_stage_tasks,
+)
 from scripts.standardize_benchmark_result import (
     _failure_class,
     _reward,
@@ -160,7 +166,10 @@ def attest_deepswe(
         ).hexdigest()
         if plan.get("full_task_order_sha256") != full_order_hash:
             errors.append("planned_full_task_order_digest_mismatch")
-        if cohort_stage == GATE_STAGE and plan.get("prior_gate") is not None:
+        if cohort_stage in (GATE_STAGE, ALL_STAGE) and plan.get("prior_gate") is not None:
+            # Only the remainder stage may carry a gate binding. A binding on a
+            # self-contained stage would be evidence of a plan built for a
+            # different dispatch than the one that ran.
             errors.append("gate_one_prior_gate_unexpected")
         if cohort_stage == REMAINDER_STAGE:
             binding = plan.get("prior_gate")
