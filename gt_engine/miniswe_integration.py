@@ -1244,6 +1244,12 @@ class MiniSweAdapter(GroundtruthController):
                 mode=receipt.build_mode,
                 reason=receipt.build_mode_reason,
                 parent_graph_revision=request.parent_graph_revision,
+                # The PATH, not just the revision. parent_graph_missing took 7
+                # of 10 fallbacks in the 2026-09-08 run and could not be
+                # diagnosed from the journal: the revision alone cannot say
+                # whether the file was pruned, never written where the engine
+                # expected it, or written under a different revision directory.
+                parent_graph_path=request.parent_graph_path,
                 dirty_path_count=len(request.dirty_paths),
                 amended=[dict(row) for row in receipt.incremental_results],
                 analysis_state=receipt.analysis_state,
