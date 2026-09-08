@@ -40,9 +40,11 @@ def test_direct_feature_registry_is_exact_and_complete():
         "GT_LOC_RESLOT",
         "GT_PATCH_DELTA",
         "GT_SS_SUBMIT_RED",
+        "persistent_plan",
+        "plan_gate",
         "select_catalog",
     }
-    assert len(DIRECT_FEATURES) == 19
+    assert len(DIRECT_FEATURES) == 21
     assert all(spec["boundaries"] for spec in DIRECT_FEATURES.values())
     assert all(spec["trigger"] for spec in DIRECT_FEATURES.values())
     assert all(spec["intended_action"] for spec in DIRECT_FEATURES.values())

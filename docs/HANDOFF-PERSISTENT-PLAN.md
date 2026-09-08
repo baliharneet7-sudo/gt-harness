@@ -129,9 +129,12 @@ oxvg 0 of 6, anko 1 of 2.
 
 **Twelve of twenty ended `submitted_unverified`** — the agent submitted while
 obligations had NO evidence. That single fact is the whole reason the
-attestation returned FAIL: it forces receipt status to ERROR, which raises
-`product_not_completed`, which cascades into every conservation check. One
-cause, one cascade. No task failed.
+attestation returned FAIL. The mechanism, corrected after reading the code:
+`submitted_unverified` maps to exit code 0 (`miniswe_gt_run.py:840`) and the
+receipt status is COMPLETED, so `product_not_completed` never fires. The FAIL
+comes from `attest_deepswe.py:440-447`, which raises
+`product_completion_unverified` and `product_unmet_predicates` directly off
+`verified` and `unmet_predicates`. One cause, one cascade. No task failed.
 
 Runtimes were 16-72 minutes against 85. There is large unused headroom for
 verification.

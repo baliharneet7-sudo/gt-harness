@@ -124,7 +124,7 @@ def test_the_gate_is_inert_without_a_plan(tmp_path):
         GTSessionConfig(task_id="off", repo_root=str(repo), mode="advisory"),
         engine=adapter,
     )
-    assert session._plan_gate() is None
+    assert session.plan_submit_gate() is True
 
 
 def test_the_receipt_counter_defaults_to_zero_for_older_runs():

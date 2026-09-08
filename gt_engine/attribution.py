@@ -138,6 +138,27 @@ DIRECT_FEATURES: dict[str, dict[str, Any]] = {
         "trigger": "the submit gate yields refusal for an observed unresolved RED check",
         "intended_action": "refuse once after an observed unresolved test failure",
     },
+    "persistent_plan": {
+        "kind": "CAP", "boundaries": ("task_start",),
+        "producer": "persistent_plan",
+        "trigger": (
+            "a task-level plan is built before the first edit from the prompt, "
+            "the base-commit repository and the graph, and delivered once"
+        ),
+        "intended_action": (
+            "satisfy every requirement the prompt states, including the ones "
+            "that only appear when crossed with an existing mode"
+        ),
+    },
+    "plan_gate": {
+        "kind": "CAP", "boundaries": ("submit",),
+        "producer": "persistent_plan",
+        "trigger": (
+            "submission is attempted while a plan requirement has no evidence, "
+            "or a test that was green before the first edit is now failing"
+        ),
+        "intended_action": "finish or disprove the outstanding plan rows",
+    },
     "select_catalog": {
         "kind": "CAP", "boundaries": ("task_start",),
         "producer": "persistent_execution_state",

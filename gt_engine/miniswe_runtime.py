@@ -220,6 +220,17 @@ def _run_submit_gate(session: GTSession, command: str, *, pre_execution: bool = 
             adapter.begin_implement()
             return False
     if pre_execution:
+        # The plan gate is a PRE-EXECUTION decision by necessity: after the
+        # command runs, Submitted is a native terminal this seam refuses to
+        # suppress. Refusing here suppresses nothing that has happened -- the
+        # action simply does not run, and the agent gets a directive saying so.
+        try:
+            if not session.plan_submit_gate():
+                if adapter.phase not in {"IMPLEMENT", "FINISHED", "STUCK"}:
+                    adapter.begin_implement()
+                return False
+        except Exception as exc:  # noqa: BLE001 - GT policy is fail-open
+            session.degrade("submit_gate", exc)
         return True
     accepted, _batch = session.request_submit()
     if accepted or not session.can_enforce:
@@ -1327,7 +1338,12 @@ def install_runtime_hooks(
             # Command-level fast path: the marker is literally in the command.
             if is_submit and not submit_allowed(pre_execution=True):
                 outputs.append(session.suppress(action, dict(_NOT_EXECUTED), reason="submit_refused"))
-                directives.append(_refusal_directive(adapter))
+                if session.can_enforce:
+                    # The enforced gate speaks for itself. A plan-gate refusal
+                    # has already queued its own directive, and rendering the
+                    # ENFORCED text beside it would describe a posture this run
+                    # is not in.
+                    directives.append(_refusal_directive(adapter))
                 continue
             preimage = None
             pre_snapshot = None

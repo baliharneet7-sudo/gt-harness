@@ -187,13 +187,11 @@ def test_the_gate_refuses_once_then_accepts(tmp_path, graph):
     adapter.begin_verify()
     adapter.begin_submit()
 
-    accepted, _batch = session.request_submit()
-    assert accepted is False
+    assert session.plan_submit_gate() is False
     assert adapter.pending_directives
     assert "GT PLAN GATE" in adapter.pending_directives[0]
 
-    accepted_again, _batch = session.request_submit()
-    assert accepted_again is True
+    assert session.plan_submit_gate() is True
 
 
 def test_the_gate_escapes_when_the_budget_is_nearly_gone(tmp_path, graph):
@@ -216,8 +214,7 @@ def test_the_gate_escapes_when_the_budget_is_nearly_gone(tmp_path, graph):
     adapter.start_task()
     adapter.begin_verify()
     adapter.begin_submit()
-    accepted, _batch = session.request_submit()
-    assert accepted is True
+    assert session.plan_submit_gate() is True
     rows = _journal(adapter)
     decision = [row for row in rows if row["event"] == "plan_gate_decision"][-1]
     assert decision["escaped"] == "time"
@@ -262,3 +259,73 @@ def test_final_state_declares_the_plan(tmp_path, graph):
     assert state["persistent_plan_bootstrap_calls"] == 1
     assert state["persistent_plan_status"] in {"READY", "PARTIAL"}
     assert state["unmet_plan_rows"]
+
+
+def test_the_gate_is_consulted_before_the_command_runs(tmp_path, graph):
+    """A refusal after execution would journal a decision and change nothing.
+
+    ``miniswe_runtime`` refuses to suppress an already-executed action and its
+    native ``Submitted`` terminal, and is right to. So the gate must sit on the
+    pre-execution branch of ``_run_submit_gate``; this pins that it does.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gt_engine" / "miniswe_runtime.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    gate = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_submit_gate"
+    )
+    calls = [
+        node
+        for node in ast.walk(gate)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "plan_submit_gate"
+    ]
+    assert calls, "the plan gate is not consulted in _run_submit_gate"
+
+    # and it must be reached only on the pre-execution branch
+    guards = [
+        node
+        for node in ast.walk(gate)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Attribute)
+            and inner.func.attr == "plan_submit_gate"
+            for inner in ast.walk(node)
+        )
+    ]
+    assert any(
+        isinstance(guard.test, ast.Name) and guard.test.id == "pre_execution"
+        for guard in guards
+    ), "the plan gate must be on the pre_execution branch"
+
+
+def test_a_refused_submit_leaves_the_lifecycle_editable(tmp_path, graph):
+    """After a refusal the agent must be able to keep working."""
+    adapter, inputs, _contract, _merged, repo = _built(tmp_path, graph)
+    _plan_for(inputs, adapter)
+    session = GTSession(
+        GTSessionConfig(task_id="plan-int", repo_root=str(repo), mode="advisory"),
+        engine=adapter,
+    )
+
+    class _Agent:
+        class config:
+            wall_time_limit_seconds = 5100
+            step_limit = 300
+
+        _start_time = __import__("time").time()
+        n_calls = 5
+
+    session._plan_agent = _Agent()
+    adapter.start_task()
+    assert session.plan_submit_gate() is False
+    assert adapter.phase == "IMPLEMENT"
+    (repo / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    adapter.note_edit(["mod.py"])

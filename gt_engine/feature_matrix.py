@@ -50,6 +50,18 @@ FEATURE_EVIDENCE: dict[str, tuple[str, ...]] = {
     "syntax_result": (
         "tests/test_gt_engine.py::test_post_edit_syntax_failure_delivers_immediately",
     ),
+    "persistent_plan": (
+        "tests/test_persistent_plan_integration.py::"
+        "test_a_merged_line_becomes_a_tracked_obligation",
+        "tests/test_persistent_plan_integration.py::"
+        "test_a_real_passing_observation_clears_a_plan_row",
+    ),
+    "plan_gate": (
+        "tests/test_persistent_plan_integration.py::"
+        "test_the_gate_refuses_once_then_accepts",
+        "tests/test_persistent_plan_integration.py::"
+        "test_the_gate_is_consulted_before_the_command_runs",
+    ),
     "select_catalog": (
         "tests/test_persistent_execution_state.py::"
         "test_feature18_selection_lifecycle_is_content_safe_and_action_bound",
@@ -116,6 +128,17 @@ FEATURE_NEGATIVE_EVIDENCE: dict[str, tuple[str, ...]] = {
     ),
     "syntax_result": (
         "tests/test_miniswe_runtime.py::test_newfile_precedent_does_not_preempt_executed_syntax_failure",
+    ),
+    "persistent_plan": (
+        "tests/test_persistent_plan_off.py::"
+        "test_no_plan_journal_rows_without_a_plan",
+        "tests/test_persistent_plan_bootstrap.py::"
+        "test_a_phantom_node_id_is_dropped_not_believed",
+    ),
+    "plan_gate": (
+        "tests/test_persistent_plan_gate.py::"
+        "test_low_time_escapes_rather_than_forcing_a_timeout",
+        "tests/test_persistent_plan_off.py::test_the_gate_is_inert_without_a_plan",
     ),
     "select_catalog": (
         "tests/test_persistent_execution_state.py::test_feature18_rejects_duplicate_and_out_of_catalog_ids_without_consumption",

@@ -1082,29 +1082,31 @@ class GTSession:
         remaining_steps = max(0, step_limit - int(getattr(agent, "n_calls", 0) or 0))
         return remaining_seconds, remaining_steps
 
-    def _plan_gate(self) -> tuple[bool, GTDecisionBatch] | None:
-        """Refuse a submission the plan says is not finished, once, with room.
+    def plan_submit_gate(self) -> bool:
+        """Decide, BEFORE the submit command runs, whether to let it through.
 
-        The benchmark runs advisory, where ``can_enforce`` is False and the
-        existing gate is unreachable -- which is why twelve of twenty tasks in
-        the measured run submitted with no evidence at all. This gate works in
-        advisory mode and is deliberately weaker than enforcement: one refusal,
-        a budget escape ahead of it, and an explicit statement to the agent that
-        submitting again will be accepted.
+        This must be a pre-execution decision. Once the command has executed and
+        raised ``Submitted`` the terminal is native and cannot be suppressed --
+        ``miniswe_runtime`` says so at that seam and is right to. A gate
+        consulted after the fact would journal a refusal and change nothing,
+        which is worse than no gate because it would read as working.
 
-        Returns None when it has nothing to say, so the caller falls through to
-        the existing advisory path unchanged.
+        Deliberately weaker than enforcement: one refusal, a budget escape ahead
+        of it, and the directive tells the agent plainly that submitting again
+        will be accepted. Returns True whenever it has nothing to say.
         """
+        if self._engine is None or self.disabled:
+            return True
         plan = getattr(self._engine, "persistent_plan", None)
         if plan is None or not getattr(plan, "rows", ()):
-            return None
+            return True
         from .persistent_plan.gate import decide
 
         remaining_seconds, remaining_steps = self.plan_gate_budget()
         try:
             unmet = self._engine.unmet_plan_rows()
         except Exception:  # noqa: BLE001 - a gate fault must never block
-            return None
+            return True
         regressions, baseline_status = self._plan_baseline_check()
         decision = decide(
             plan=plan,
@@ -1117,11 +1119,10 @@ class GTSession:
         )
         self._engine.store.append("plan_gate_decision", **decision.as_row())
         if decision.accepted:
-            self._engine.advisory_submit_decision()
-            return True, GTDecisionBatch()
+            return True
         self._plan_gate_refusals += 1
         self._engine.pending_directives.append(decision.directive)
-        return False, GTDecisionBatch(policy=["deny"])
+        return False
 
     def _plan_baseline_check(self) -> tuple[tuple[str, ...], str]:
         """Re-run the captured suite once, to name what stopped passing."""
@@ -1150,9 +1151,6 @@ class GTSession:
         if self._engine is None or self.disabled:
             return True, GTDecisionBatch()
         if not self.can_enforce:
-            gated = self._plan_gate()
-            if gated is not None:
-                return gated
             blocking = tuple(getattr(self._engine, "blocking_predicates", ()))
             if blocking:
                 self._engine.store.append(
