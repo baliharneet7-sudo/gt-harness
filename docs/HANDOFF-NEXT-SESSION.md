@@ -152,31 +152,42 @@ Disk runs ~75% of 32G. Each graph revision is ~900MB and retention keeps
 live + 1. Delete reproduction copies under `/tmp` when done — four of them
 filled the disk to 100% mid-run on 2026-09-07.
 
-## Where the 2026-09-07 smoke got to
+## The 2026-09-07 smoke — completed, submitted, and what it proves
 
-Run at `25a37a5f`, step limit 300, candidate producer. It did NOT terminate
-before the session ended; the journal is the record.
+Run at `25a37a5f`, step limit 300, candidate producer at `/opt/gtcand`.
+It TERMINATED cleanly: `session_closed`, `final_state`, `exit_code 0`,
+`terminal: submitted_unverified`, `research_valid: true`. Artifacts written
+00:52:25-27 (check mtimes yourself before reading any of them).
 
 ```
-resp 126 · edits 32 · publications 14 · invalidations 32
-caller_coverage  recorded 14 / unavailable 18   (56% blind, climbing)
-cache 92.1%  ·  in 6,317,402  cached  out 59,160
+1 obligation_reverified   0 rows                      still dark
+2 unmet                   18 -> min 2 -> final 2      33 resets
+3 steps                   230   vs GT-off's 166       +39%
+4 cache                   96.2%   in 20,518,443 / cached 19,728,896
+                                  uncached 789,547 / out 103,664
+5 verifier reward         NONE - bare supervisor run, no official verifier
 ```
 
-Read it as a **negative** result for graph cadence and a positive one for cache:
+**On (5):** this path has no verifier, so `submitted_unverified` + exit 0 is the
+correct terminal, not a failure. A reward requires the GitHub workflow. Do not
+report a reward from a codespace run.
 
-- Publications froze at 14 once the agent began editing continuously; every edit
-  after that read blind. Blindness went 29% → 56% during one nine-minute burst.
-  This is the full-rebuild path failing under load, exactly as 7c predicts, and
-  it is NOT evidence against the amend fix — the amend code never ran, because
-  nothing calls `-file`.
-- Cache held 84-92% against the graded run's 85.0%, and rises with history
-  length, which is the signature of the marker fix in `1920a127`. That one does
-  not depend on the graph path, so it is the only change in this run whose effect
-  is attributable.
+**Attributable win — the prompt cache.** Uncached input **789,547** against the
+graded run's **5,117,500**: a 6.5x reduction on the tokens billed at full rate,
+with the hit rate 85.0% -> 96.2%. This is `1920a127` (the history marker that
+used to move and invalidate already-sent messages). It is attributable precisely
+because it does not touch the graph path.
 
-Do not read `report.json` / `gt-run.json` / `gt-worktree.patch` for this run.
-They survive across runs; check mtimes first.
+**Also new:** `exit_code 0` with a clean receipt. Every earlier codespace run
+died at the finish line on `product_source_sha_invalid` because the launcher
+never passed the flag.
+
+**Confirms 7c, quantified.** 62 edits produced **19 publications**;
+`caller_coverage` ended 16 recorded / 46 unavailable = **74% blind**, identical
+to the graded run. Publications froze at 14 for ~25 minutes of continuous
+editing and only caught up once the agent STOPPED editing. That is the
+full-rebuild path losing to the edit rate, and it is not evidence about the
+amend fix, whose code never executed.
 
 ## Standing constraints
 
