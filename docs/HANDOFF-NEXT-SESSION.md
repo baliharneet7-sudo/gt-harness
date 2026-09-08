@@ -197,22 +197,41 @@ empty. This also repairs renames, which arrive as a delete beside a create and
 so were half-refusing. With that and (1), seven of those eleven rebuilds become
 amends.
 
-### The cost model, measured rather than assumed
+### The cost model, measured -- and three hypotheses it refused
 
 ```
-full rebuild        ~78s
-one-file amend      ~30s
-fixed cost, both    ~20-31s   git history freeze + re-materialising every
-                              producer-input file, paid on EVERY build
+full rebuild            ~78s   (16 samples, median; tail to 108s)
+one-file amend          ~30s
+  producer               ~20s
+  engine overhead        ~11s  (median; 7s warm, 31s cold)
 ```
 
-The amend's advantage is a fixed ~48s saving, not a per-file one.
-`INCREMENTAL_MAX_DIRTY_PATHS` is 3 for that reason, down from a first guess of 8
-taken from an isolated producer measurement. **Removing the fixed cost from the
-amend path is now the highest-value remaining work**: it would take the amend
-from ~30s to ~10s and move the crossover to roughly 8 files. The producer's
-`-file` mode barely needs the history -- it shells out only for `rev-parse HEAD`
-to seal a receipt.
+`INCREMENTAL_MAX_DIRTY_PATHS` is 3 because of this: the amend's advantage is a
+fixed saving, not a per-file one, so four files already cost more than a rebuild
+-- which also restores the co-change and candidate layers an amend cannot
+re-prove. Above the crossover a rebuild is better on both axes.
+
+**Three things this session guessed were the cost, and were not. Do not
+re-guess them; the refutations are cheap to re-run.**
+
+1. *git history freeze + re-materialising 513 files.* Measured: **0.7s
+   combined.** Not the cost.
+2. *sha256 of the ~926MB graph, twice.* Measured 7.4s each COLD, 0.8s warm at
+   1131 MB/s -- so it is page-cache state, not a constant. A fused copy-and-hash
+   would remove one full read with no accuracy loss, but it is worth ~1s warm.
+3. *`PromotePropertyEdges` running whole-graph after every single-file amend.*
+   This was the most plausible one and it is also wrong. Measured on the real
+   184,370-node graph: delete prior promoted edges 5.4s, build name indexes
+   5.2s, whole pass **7.2s warm**, 1,288 edges emitted. Scoping it to the
+   amended file would save a few seconds and COST correctness -- the delete is
+   graph-wide and the name index must stay graph-wide, because a promoted edge
+   from the amended file can target a node in any other file.
+   `internal/resolver/promote_cost_test.go` reproduces this in one command
+   (`GT_PROMOTE_COST_GRAPH=<graph.db> go test -run TestPromoteCostBreakdown`).
+
+The remaining ~13s of per-file producer time is **unattributed**: parse, the
+resolver ladder, FTS5 refresh, WAL checkpoint are all candidates and none has
+been measured. Measure before touching it.
 
 ### Run duration is provider tail latency, not the harness
 
