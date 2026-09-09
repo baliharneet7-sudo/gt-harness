@@ -58,6 +58,9 @@ class PlanInputs:
     source_revision: str = ""
     graph_revision: str = ""
     language: str = ""
+    # Test files the graph ties to each row's own definitions. This is the
+    # check that comes from context rather than from a model's suggestion.
+    covering: dict[str, tuple[str, ...]] = field(default_factory=dict)
     abstentions: tuple[tuple[str, str], ...] = ()
 
     def counts(self) -> dict[str, Any]:
@@ -72,6 +75,9 @@ class PlanInputs:
                 1 for _row, reason in self.anchors.abstentions if reason == "no_anchor"
             ),
             "mode_candidates": len(self.anchors.modes),
+            "rows_with_covering_tests": sum(
+                1 for value in self.covering.values() if value
+            ),
             "baseline_status": self.baseline.status,
             "baseline_seconds": round(self.baseline.duration_seconds, 3),
             "baseline_passing": self.baseline.passed,
@@ -95,6 +101,7 @@ class PlanInputs:
                 for node_id, callers in self.anchors.callers.items()
             },
             "modes": [mode.as_dict() for mode in self.anchors.modes],
+            "covering": {key: list(value) for key, value in self.covering.items()},
             "edit_order": list(self.anchors.edit_order),
             "baseline": self.baseline.as_dict(),
             "abstentions": [list(item) for item in self.abstentions],
@@ -164,6 +171,9 @@ class PersistentPlan:
     abstentions: tuple[tuple[str, str], ...] = ()
     process_id: str = ""
     planning_receipt: dict = field(default_factory=dict)
+    # "deterministic" when built from context alone; "enriched" when a
+    # planning call added interactions, derived rows or sharper checks on top.
+    origin: str = "deterministic"
 
     @property
     def derived_rows(self) -> tuple[PlanRow, ...]:
@@ -192,6 +202,7 @@ class PersistentPlan:
                     1 for row in self.rows if row.verification_command
                 ),
                 "plan_abstentions": len(self.abstentions),
+                "origin": self.origin,
                 "process_id": self.process_id,
             }
         )
@@ -201,6 +212,7 @@ class PersistentPlan:
         return {
             "schema": PLAN_SCHEMA,
             "status": self.status,
+            "origin": self.origin,
             "process_id": self.process_id,
             "source_revision": self.inputs.source_revision,
             "graph_revision": self.inputs.graph_revision,
@@ -261,6 +273,25 @@ def build_plan_inputs(
     if not baseline.captured:
         abstentions.append(("*", f"baseline_{baseline.status}"))
 
+    # The checks. Derived from the graph's own covering edges plus the caller
+    # closure, so each requirement carries the tests that actually exercise the
+    # definitions it names -- not a command a model thought sounded right.
+    covering: dict[str, tuple[str, ...]] = {}
+    if graph_db and repo_root:
+        from .deterministic import covering_tests_for
+
+        for row in ledger.rows:
+            names = tuple(
+                dict.fromkeys(
+                    anchor.name
+                    for anchor in anchors.anchors.get(row.row_id, ())
+                    if anchor.name
+                )
+            )
+            found = covering_tests_for(graph_db, repo_root, names)
+            if found:
+                covering[row.row_id] = found
+
     languages = {
         anchor.language
         for anchor_list in anchors.anchors.values()
@@ -274,6 +305,7 @@ def build_plan_inputs(
         source_revision=source_revision,
         graph_revision=graph_revision,
         language=sorted(languages)[0] if len(languages) == 1 else "",
+        covering=covering,
         abstentions=tuple(abstentions),
     )
 

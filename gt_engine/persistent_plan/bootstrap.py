@@ -20,7 +20,6 @@ import re
 from typing import Any
 
 from . import (
-    STATUS_ABSTAINED,
     STATUS_PARTIAL,
     STATUS_READY,
     InteractionCell,
@@ -420,16 +419,26 @@ def build_plan(payload: Any, inputs: PlanInputs, note: str = "") -> PersistentPl
     ``note`` records why the payload was unusable when it is, so the journal
     alone distinguishes "the model refused" from "the model never finished".
     """
+    from .deterministic import build_deterministic_plan
+
+    base = build_deterministic_plan(inputs)
     rows, interactions, order, abstentions = validate_plan(payload, inputs)
-    combined = tuple(inputs.abstentions) + tuple(abstentions)
-    if note and not rows:
-        combined = combined + (("*", note),)
+    combined = tuple(dict.fromkeys(tuple(inputs.abstentions) + tuple(abstentions)))
+    if note:
+        combined = tuple(dict.fromkeys(combined + (("*", note),)))
     if not rows:
-        return PersistentPlan(
-            status=STATUS_ABSTAINED,
-            inputs=inputs,
-            abstentions=combined or (("*", "plan_had_no_valid_rows"),),
-        )
+        # Keep the floor. Every requirement, anchor, caller and covering-test
+        # check was computed before the call and does not stop being true
+        # because the response was unusable. The note records that the
+        # enrichment did not happen.
+        base.abstentions = combined or base.abstentions
+        if base.abstentions:
+            base.status = STATUS_PARTIAL
+        base.process_id = _process_id(base)
+        base.planning_receipt = _planning_receipt(base)
+        return base
+    rows = _merge_rows(base.rows, rows)
+    order = order or base.edit_order
     if not order:
         order = tuple(
             row_id
@@ -444,12 +453,49 @@ def build_plan(payload: Any, inputs: PlanInputs, note: str = "") -> PersistentPl
         interactions=interactions,
         edit_order=order,
         abstentions=combined,
+        origin="enriched",
     )
     plan.process_id = hashlib.sha256(
         plan.canonical_json().encode("utf-8", "surrogatepass")
     ).hexdigest()
     plan.planning_receipt = _planning_receipt(plan)
     return plan
+
+
+def _merge_rows(
+    base: tuple[PlanRow, ...], enriched: tuple[PlanRow, ...]
+) -> tuple[PlanRow, ...]:
+    """Enrichment may sharpen a row or add one; it may never remove one.
+
+    A requirement the prompt states does not stop existing because the planning
+    call omitted it, so the deterministic row survives with its own anchors and
+    its covering-test check. Where the call supplied a value, the call wins.
+    """
+    by_id = {row.row_id: row for row in base}
+    for row in enriched:
+        current = by_id.get(row.row_id)
+        if current is None:
+            by_id[row.row_id] = row
+            continue
+        by_id[row.row_id] = PlanRow(
+            row_id=current.row_id,
+            text=current.text,
+            anchors=row.anchors or current.anchors,
+            verification_kind=row.verification_kind or current.verification_kind,
+            verification_command=(
+                row.verification_command or current.verification_command
+            ),
+            derived_from=row.derived_from,
+            mode_symbol=row.mode_symbol,
+            mode_member=row.mode_member,
+        )
+    return tuple(by_id.values())
+
+
+def _process_id(plan: PersistentPlan) -> str:
+    return hashlib.sha256(
+        plan.canonical_json().encode("utf-8", "surrogatepass")
+    ).hexdigest()
 
 
 def _planning_receipt(plan: PersistentPlan) -> dict:

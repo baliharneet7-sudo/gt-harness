@@ -10,7 +10,6 @@ import sqlite3
 import pytest
 
 from gt_engine.persistent_plan import (
-    STATUS_ABSTAINED,
     STATUS_PARTIAL,
     STATUS_READY,
     build_plan_inputs,
@@ -260,15 +259,19 @@ def test_a_command_naming_the_harness_is_stripped_but_the_row_survives(inputs):
     assert any("verification_command_" in reason for _row, reason in abstentions)
 
 
-def test_an_empty_plan_abstains(inputs):
+def test_an_empty_response_keeps_the_deterministic_plan(inputs):
+    """The floor survives. Every requirement was known before the call."""
     plan = build_plan({"rows": []}, inputs)
-    assert plan.status == STATUS_ABSTAINED
+    assert plan.origin == "deterministic"
+    assert len(plan.rows) == len(inputs.ledger.rows)
     assert plan.abstentions
 
 
-def test_a_non_object_payload_abstains(inputs):
-    assert build_plan(None, inputs).status == STATUS_ABSTAINED
-    assert build_plan("nope", inputs).status == STATUS_ABSTAINED
+def test_an_unusable_response_still_yields_every_requirement(inputs):
+    for payload in (None, "nope", {"rows": "not a list"}):
+        plan = build_plan(payload, inputs)
+        assert plan.origin == "deterministic"
+        assert len(plan.rows) == len(inputs.ledger.rows), payload
 
 
 def test_partial_status_when_anything_was_dropped(inputs):
@@ -369,8 +372,10 @@ def test_a_truncated_planning_call_is_named_as_such(inputs):
     assert response_finish_reason(response) == "length"
     assert parse_tool_arguments(response) is None
     plan = build_plan(None, inputs, note="plan_call_truncated")
-    assert plan.status == STATUS_ABSTAINED
     assert any(reason == "plan_call_truncated" for _t, reason in plan.abstentions)
+    # and the plan is still a plan: the call was the enrichment, not the floor
+    assert plan.origin == "deterministic"
+    assert len(plan.rows) == len(inputs.ledger.rows)
 
 
 def test_finish_reason_is_empty_when_absent():
@@ -381,12 +386,18 @@ def test_finish_reason_is_empty_when_absent():
     assert response_finish_reason(None) == ""
 
 
-def test_a_note_is_ignored_when_the_plan_has_rows(inputs):
+def test_enrichment_never_drops_a_requirement(inputs):
+    """The call named one row; the other requirements do not disappear."""
     row_id = _row_id(inputs, "build_container")
     plan = build_plan(
-        {"rows": [{"row_id": row_id, "anchors": [1]}]}, inputs, note="ignored"
+        {"rows": [{"row_id": row_id, "anchors": [1],
+                   "verification_command": "pytest -k container"}]},
+        inputs,
     )
-    assert not any(reason == "ignored" for _t, reason in plan.abstentions)
+    assert plan.origin == "enriched"
+    assert len(plan.rows) == len(inputs.ledger.rows)
+    enriched = plan.row(row_id)
+    assert enriched.verification_command == "pytest -k container"
 
 
 def test_the_planning_call_uses_the_runs_output_reservation():
@@ -409,3 +420,57 @@ def test_the_planning_call_uses_the_runs_output_reservation():
     )
     # and the old hardcoded 4096-only cap is gone
     assert "max_tokens=4096," not in source
+
+
+def test_the_deterministic_plan_carries_checks_from_the_graph(tmp_path, graph):
+    """A row's check comes from the covering tests, not from a suggestion."""
+    from gt_engine.persistent_plan.deterministic import (
+        build_deterministic_plan,
+        default_check,
+    )
+
+    kind, command = default_check(("pytest",), ("tests/test_container.py",))
+    assert kind == "existing_test"
+    assert command == "pytest tests/test_container.py"
+
+    # with no covering tests the repo's own suite is the check
+    kind, command = default_check(("pytest",), ())
+    assert (kind, command) == ("command", "pytest")
+
+    # with no declared suite the plan admits it cannot prove the row
+    assert default_check((), ()) == ("", "")
+
+    inputs = build_plan_inputs(
+        PROMPT, graph_db=graph, repo_root=str(tmp_path), capture_baseline=False
+    )
+    plan = build_deterministic_plan(inputs)
+    assert plan.origin == "deterministic"
+    assert len(plan.rows) == len(inputs.ledger.rows)
+    assert plan.edit_order
+
+
+def test_exactly_one_planning_call_is_ever_made():
+    """The plan is made once. Phase 0 spends nothing; the call is guarded."""
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gt_engine" / "miniswe_runtime.py"
+    ).read_text(encoding="utf-8")
+    body = source.split("def bootstrap_persistent_plan()", 1)[1].split(
+        "\n    def query(", 1
+    )[0]
+    # one guard, set before anything can fail, and one provider call
+    assert "if plan_started:" in body
+    assert body.index("plan_started = True") < body.index("native_query(")
+    assert body.count("native_query(") == 1
+
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_plan"
+    ]
+    assert len(calls) == 1, "the plan is built from exactly one response"
