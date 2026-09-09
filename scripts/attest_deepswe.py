@@ -20,6 +20,7 @@ from scripts.smoke_stage import (
     GATE_TASK_ID,
     REMAINDER_STAGE,
     select_stage_tasks,
+    single_task_id,
 )
 from scripts.standardize_benchmark_result import (
     _failure_class,
@@ -166,7 +167,10 @@ def attest_deepswe(
         ).hexdigest()
         if plan.get("full_task_order_sha256") != full_order_hash:
             errors.append("planned_full_task_order_digest_mismatch")
-        if cohort_stage in (GATE_STAGE, ALL_STAGE) and plan.get("prior_gate") is not None:
+        if (
+            cohort_stage in (GATE_STAGE, ALL_STAGE)
+            or single_task_id(str(cohort_stage or ""))
+        ) and plan.get("prior_gate") is not None:
             # Only the remainder stage may carry a gate binding. A binding on a
             # self-contained stage would be evidence of a plan built for a
             # different dispatch than the one that ran.

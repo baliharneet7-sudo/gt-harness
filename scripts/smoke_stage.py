@@ -22,6 +22,13 @@ REMAINDER_STAGE = "remaining-19"
 # identical per-task budget. Nothing about a task changes because it ran
 # alongside the others rather than after them.
 ALL_STAGE = "all-20"
+# One named task from the pinned cohort, written "single:<task_id>". It exists
+# because gate-one is bound to GATE_TASK_ID, so there was no way to smoke a
+# different single task without repointing the canary -- and repointing the
+# canary changes what every future gate-one means. The task must be one of the
+# canonical 20, runs at the same budget as the gate, and produces the same
+# receipts; the only thing it changes is which of the 20 runs.
+SINGLE_PREFIX = "single:"
 STAGES = frozenset({GATE_STAGE, REMAINDER_STAGE, ALL_STAGE})
 # The canary must be a task the product can actually finish, because gate-one's
 # whole job is to answer "does the attested path reach a verdict" before 19 more
@@ -54,8 +61,17 @@ GATE_TASK_ID = "aiomonitor-task-snapshots-diff"
 GATE_ONE_MAX_TIMEOUT_SECONDS = 90 * 60
 
 
+def single_task_id(stage: str) -> str:
+    """The task named by a ``single:<task_id>`` stage, or "" for any other."""
+    if not stage.startswith(SINGLE_PREFIX):
+        return ""
+    return stage[len(SINGLE_PREFIX):].strip()
+
+
 def stage_timeout_cap_seconds(stage: str) -> float | None:
-    if stage == GATE_STAGE:
+    if stage == GATE_STAGE or single_task_id(stage):
+        # The same rail as the gate, for the same reason: a single task must run
+        # at the cohort's budget or its result is not comparable to it.
         return float(GATE_ONE_MAX_TIMEOUT_SECONDS)
     if stage in (REMAINDER_STAGE, ALL_STAGE):
         # No cap, exactly as the remainder stage has always run. This is not a
@@ -79,16 +95,22 @@ def select_stage_tasks(tasks: Sequence[str], stage: str) -> list[str]:
         # The pinned order, unfiltered. The plan job re-hashes this and compares
         # it to task_order_sha256, so a reordering here fails the run.
         return ordered
-    raise ValueError("cohort_stage must be gate-one, remaining-19 or all-20")
+    named = single_task_id(stage)
+    if named:
+        if named not in ordered:
+            raise ValueError("single stage names a task outside the canonical cohort")
+        return [named]
+    raise ValueError("cohort_stage must be gate-one, remaining-19, all-20 or single:<task>")
 
 
 def validate_stage_inputs(stage: str, prior_gate_run_id: str) -> None:
     run_id = prior_gate_run_id.strip()
-    if stage in (GATE_STAGE, ALL_STAGE) and run_id:
+    named = single_task_id(stage)
+    if (stage in (GATE_STAGE, ALL_STAGE) or named) and run_id:
         raise ValueError(f"{stage} must not claim a prior gate run")
     if stage == REMAINDER_STAGE and not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise ValueError("remaining-19 requires a positive prior_gate_run_id")
-    if stage not in STAGES:
+    if stage not in STAGES and not named:
         raise ValueError("unknown cohort stage")
 
 

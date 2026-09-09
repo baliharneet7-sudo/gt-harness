@@ -178,3 +178,81 @@ def test_all_20_must_not_claim_a_prior_gate():
     validate_stage_inputs(ALL_STAGE, "")
     with pytest.raises(ValueError):
         validate_stage_inputs(ALL_STAGE, "34257199043")
+
+
+def _canonical():
+    import json
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    return json.loads(
+        (root / "eval" / "deepswe_smoke20_v1.json").read_text(encoding="utf-8")
+    )["task_ids"]
+
+
+def test_a_single_stage_selects_exactly_that_task():
+    from scripts.smoke_stage import select_stage_tasks
+
+    tasks = _canonical()
+    target = "bandit-incremental-cache-control"
+    assert target in tasks
+    assert select_stage_tasks(tasks, f"single:{target}") == [target]
+
+
+def test_a_single_stage_refuses_a_task_outside_the_cohort():
+    import pytest
+
+    from scripts.smoke_stage import select_stage_tasks
+
+    with pytest.raises(ValueError):
+        select_stage_tasks(_canonical(), "single:not-a-cohort-task")
+
+
+def test_a_single_stage_runs_at_the_gate_budget():
+    """A different budget would make its result incomparable to the cohort."""
+    from scripts.smoke_stage import (
+        GATE_STAGE,
+        stage_timeout_cap_seconds,
+    )
+
+    assert stage_timeout_cap_seconds("single:bandit-incremental-cache-control") == (
+        stage_timeout_cap_seconds(GATE_STAGE)
+    )
+
+
+def test_a_single_stage_may_not_claim_a_prior_gate():
+    import pytest
+
+    from scripts.smoke_stage import validate_stage_inputs
+
+    validate_stage_inputs("single:bandit-incremental-cache-control", "")
+    with pytest.raises(ValueError):
+        validate_stage_inputs("single:bandit-incremental-cache-control", "123")
+
+
+def test_the_existing_stages_are_unchanged_by_the_addition():
+    """The new stage is additive: nothing about the pinned three moves."""
+    from scripts.smoke_stage import (
+        ALL_STAGE,
+        GATE_STAGE,
+        GATE_TASK_ID,
+        REMAINDER_STAGE,
+        select_stage_tasks,
+        stage_timeout_cap_seconds,
+    )
+
+    tasks = _canonical()
+    assert select_stage_tasks(tasks, GATE_STAGE) == [GATE_TASK_ID]
+    assert select_stage_tasks(tasks, ALL_STAGE) == tasks
+    assert len(select_stage_tasks(tasks, REMAINDER_STAGE)) == 19
+    assert stage_timeout_cap_seconds(ALL_STAGE) is None
+    assert stage_timeout_cap_seconds(REMAINDER_STAGE) is None
+
+
+def test_an_unknown_stage_is_still_refused():
+    import pytest
+
+    from scripts.smoke_stage import select_stage_tasks
+
+    with pytest.raises(ValueError):
+        select_stage_tasks(_canonical(), "whatever")

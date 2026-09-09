@@ -12,8 +12,13 @@ on:
         description: "Paid cohort stage: gate exactly one task, then the remaining 19"
         required: false
         type: choice
-        options: [gate-one, remaining-19, all-20]
+        options: [gate-one, remaining-19, all-20, single]
         default: gate-one
+      single_task_id:
+        description: "Required for single: one task id from the canonical 20"
+        required: false
+        type: string
+        default: ""
       prior_gate_run_id:
         description: "Required for remaining-19: completed gate-one workflow run ID"
         required: false
@@ -36,6 +41,11 @@ on:
         required: false
         type: string
         default: gate-one
+      single_task_id:
+        description: "Required for single: one task id from the canonical 20"
+        required: false
+        type: string
+        default: ""
       prior_gate_run_id:
         description: "Required for remaining-19: completed gate-one workflow run ID"
         required: false
@@ -111,6 +121,7 @@ jobs:
           TREATMENT: groundtruth
           APPROVE_PAID_RUN: ${{ inputs.approve_paid_run || 'false' }}
           COHORT_STAGE: ${{ inputs.cohort_stage || 'gate-one' }}
+          SINGLE_TASK_ID: ${{ inputs.single_task_id || '' }}
           PRIOR_GATE_RUN_ID: ${{ inputs.prior_gate_run_id || '' }}
         run: |
           set -euo pipefail
@@ -163,6 +174,15 @@ jobs:
               raise SystemExit("DeepSWE smoke20 order hash mismatch")
 
           stage = os.environ["COHORT_STAGE"].strip() or GATE_STAGE
+          # The dispatch UI offers a fixed choice list, so "single" arrives as a
+          # bare word and the task travels beside it. The plan records the
+          # composed "single:<task>" form, which is what the attestation
+          # re-derives the cohort from.
+          if stage == "single":
+              named = os.environ.get("SINGLE_TASK_ID", "").strip()
+              if not named:
+                  raise SystemExit("single stage requires single_task_id")
+              stage = f"single:{named}"
           prior_gate_run_id = os.environ["PRIOR_GATE_RUN_ID"].strip()
           validate_stage_inputs(stage, prior_gate_run_id)
           prior_gate = None
