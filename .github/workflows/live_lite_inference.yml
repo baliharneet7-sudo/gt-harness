@@ -93,6 +93,7 @@ on:
 permissions:
   contents: read
   actions: read
+  packages: read
 
 jobs:
   # ── Phase 1: Build task matrix ──────────────────────────────────────
