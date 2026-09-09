@@ -58,6 +58,8 @@ from .runtime_observation import (
 # The marker that makes the plan block idempotent in the durable task
 # message: appended once, never twice, even if the bootstrap were re-entered.
 PLAN_BLOCK_TAG = "[GT_PERSISTENT_PLAN]"
+# Fallback when the run declares no output reservation of its own.
+PLAN_MAX_OUTPUT_TOKENS = 16384
 
 _SUBMIT_REFUSED_OUTPUT = "submission withheld by the Groundtruth contract gate"
 
@@ -1016,6 +1018,7 @@ def install_runtime_hooks(
             build_planning_messages,
             parse_tool_arguments,
             plan_tool_schema,
+            response_finish_reason,
         )
         from .persistent_plan.render import render_plan_block
 
@@ -1034,7 +1037,16 @@ def install_runtime_hooks(
                 _gt_provider_tools=[plan_tool_schema(inputs)],
                 _gt_persistent_plan=True,
                 temperature=0.0,
-                max_tokens=4096,
+                # The run's own output reservation, not a smaller private
+                # number. Measured in production at 4096: a reasoning model
+                # spent every one of those tokens thinking and returned
+                # finish_reason=length with no content and no tool call, so the
+                # plan abstained on a call that had already been paid for.
+                max_tokens=max(
+                    4096,
+                    int(os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS") or 0)
+                    or PLAN_MAX_OUTPUT_TOKENS,
+                ),
                 num_retries=0,
             )
             adapter.note_persistent_plan_bootstrap()
@@ -1045,7 +1057,16 @@ def install_runtime_hooks(
             adapter.bind_provider_response(
                 response, usage=usage, model=model_id, next_actions=()
             )
-            plan = build_plan(parse_tool_arguments(response), inputs)
+            finish_reason = response_finish_reason(response)
+            payload = parse_tool_arguments(response)
+            note = ""
+            if payload is None:
+                note = (
+                    "plan_call_truncated"
+                    if finish_reason == "length"
+                    else f"plan_call_returned_no_tool_call:{finish_reason or 'unknown'}"
+                )
+            plan = build_plan(payload, inputs, note=note)
         except Exception as exc:  # noqa: BLE001 - planning is advisory
             try:
                 adapter.bind_provider_failure(exc)
@@ -1063,7 +1084,12 @@ def install_runtime_hooks(
 
         try:
             adapter.persistent_plan = plan
-            adapter.store.append("persistent_plan_built", **plan.counts())
+            adapter.store.append(
+                "persistent_plan_built",
+                finish_reason=finish_reason,
+                tool_call_returned=payload is not None,
+                **plan.counts(),
+            )
             if plan.status != STATUS_ABSTAINED:
                 adapter.register_plan_predicates(plan)
                 block = render_plan_block(plan)

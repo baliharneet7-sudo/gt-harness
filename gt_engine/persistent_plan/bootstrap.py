@@ -414,10 +414,16 @@ def validate_plan(
     return tuple(rows), tuple(interactions), order, tuple(abstentions)
 
 
-def build_plan(payload: Any, inputs: PlanInputs) -> PersistentPlan:
-    """Turn a validated tool payload into the immutable plan artifact."""
+def build_plan(payload: Any, inputs: PlanInputs, note: str = "") -> PersistentPlan:
+    """Turn a validated tool payload into the immutable plan artifact.
+
+    ``note`` records why the payload was unusable when it is, so the journal
+    alone distinguishes "the model refused" from "the model never finished".
+    """
     rows, interactions, order, abstentions = validate_plan(payload, inputs)
     combined = tuple(inputs.abstentions) + tuple(abstentions)
+    if note and not rows:
+        combined = combined + (("*", note),)
     if not rows:
         return PersistentPlan(
             status=STATUS_ABSTAINED,
@@ -468,6 +474,30 @@ def _planning_receipt(plan: PersistentPlan) -> dict:
         "citations": citations,
         "gaps": [reason for _target, reason in plan.abstentions],
     }
+
+
+def response_finish_reason(response: Any) -> str:
+    """Why the provider stopped. ``length`` means the plan never got written.
+
+    Measured in production: the planning call returned finish_reason=length with
+    4,096 completion tokens, all of them reasoning, no content and no tool call.
+    A reasoning model spends its output budget thinking first, so a budget sized
+    for the answer alone buys nothing but a truncated turn.
+    """
+    choices = (
+        list(response.get("choices") or ())
+        if isinstance(response, dict)
+        else list(getattr(response, "choices", ()) or ())
+    )
+    if not choices:
+        return ""
+    first = choices[0]
+    value = (
+        first.get("finish_reason")
+        if isinstance(first, dict)
+        else getattr(first, "finish_reason", "")
+    )
+    return str(value or "")
 
 
 def parse_tool_arguments(response: Any) -> dict | None:

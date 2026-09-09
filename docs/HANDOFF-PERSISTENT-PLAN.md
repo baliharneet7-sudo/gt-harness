@@ -127,14 +127,27 @@ is the number a naive plan implementation would multiply.
 **Two are deeper failures** that no verification layer will fix:
 oxvg 0 of 6, anko 1 of 2.
 
-**Twelve of twenty ended `submitted_unverified`** — the agent submitted while
-obligations had NO evidence. That single fact is the whole reason the
-attestation returned FAIL. The mechanism, corrected after reading the code:
-`submitted_unverified` maps to exit code 0 (`miniswe_gt_run.py:840`) and the
-receipt status is COMPLETED, so `product_not_completed` never fires. The FAIL
-comes from `attest_deepswe.py:440-447`, which raises
-`product_completion_unverified` and `product_unmet_predicates` directly off
-`verified` and `unmet_predicates`. One cause, one cascade. No task failed.
+**The attestation FAIL has two disjoint causes, not one.** Read from run
+34272342544's own attestation artifact rather than inferred:
+
+| tasks | cause |
+|---|---|
+| 12 | receipt ISSUANCE raised, so no product row exists at all: `product_not_completed` + `treatment_receipt_missing` + every conservation check |
+| 7 | receipt issued fine, but `product_completion_unverified` + `product_unmet_predicates` |
+| 8 | product rows present (1 of them verified) |
+
+The two sets do not overlap. Only 8 of 20 receipts issued.
+
+The dominant failure is therefore NOT `submitted_unverified` — it is receipt
+issuance throwing before a receipt exists. On aiomonitor the exception is
+`semantic_localization_certified_graph_missing`
+(`gt_harness/runtime_receipts.py:559`): the task-start localization artifact
+names a graph revision, and by the end of the run no surviving
+`graph.manifest.json` matches it, because 42 publications and live+1 retention
+evicted it. Reproduced identically in run 34294960097, with the same nine
+errors, before and after the persistent plan existed. Fixing the completion
+predicate cannot make this attestation pass; the graph-retention lifetime is a
+separate and larger blocker.
 
 Runtimes were 16-72 minutes against 85. There is large unused headroom for
 verification.

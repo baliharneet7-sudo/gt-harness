@@ -353,3 +353,59 @@ def test_the_plan_artifact_is_deterministic(inputs):
     second = build_plan(payload, inputs)
     assert first.process_id == second.process_id
     assert first.canonical_json() == second.canonical_json()
+
+
+def test_a_truncated_planning_call_is_named_as_such(inputs):
+    """finish_reason=length must not read like a refusal.
+
+    Measured in production: the planning call spent its whole output budget on
+    reasoning tokens and returned no tool call. The journal has to say that, or
+    the only way to tell a truncated call from an unusable one is to download a
+    gigabyte of artifacts.
+    """
+    from gt_engine.persistent_plan.bootstrap import response_finish_reason
+
+    response = {"choices": [{"finish_reason": "length", "message": {"content": None}}]}
+    assert response_finish_reason(response) == "length"
+    assert parse_tool_arguments(response) is None
+    plan = build_plan(None, inputs, note="plan_call_truncated")
+    assert plan.status == STATUS_ABSTAINED
+    assert any(reason == "plan_call_truncated" for _t, reason in plan.abstentions)
+
+
+def test_finish_reason_is_empty_when_absent():
+    from gt_engine.persistent_plan.bootstrap import response_finish_reason
+
+    assert response_finish_reason({}) == ""
+    assert response_finish_reason({"choices": []}) == ""
+    assert response_finish_reason(None) == ""
+
+
+def test_a_note_is_ignored_when_the_plan_has_rows(inputs):
+    row_id = _row_id(inputs, "build_container")
+    plan = build_plan(
+        {"rows": [{"row_id": row_id, "anchors": [1]}]}, inputs, note="ignored"
+    )
+    assert not any(reason == "ignored" for _t, reason in plan.abstentions)
+
+
+def test_the_planning_call_uses_the_runs_output_reservation():
+    """A private budget smaller than the run's own is how the plan got cut off."""
+    import ast
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gt_engine" / "miniswe_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert "GT_PROVIDER_RESERVED_OUTPUT_TOKENS" in source
+    tree = ast.parse(source)
+    assert any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(t, ast.Name) and t.id == "PLAN_MAX_OUTPUT_TOKENS"
+            for t in node.targets
+        )
+        for node in ast.walk(tree)
+    )
+    # and the old hardcoded 4096-only cap is gone
+    assert "max_tokens=4096," not in source
