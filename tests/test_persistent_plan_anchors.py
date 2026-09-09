@@ -254,3 +254,38 @@ def test_lexical_anchors_are_capped_when_nothing_resolves(graph):
     anchors = resolve_row_anchors(connection, ("container", "loader", "scope"))
     lexical = [a for a in anchors if a.basis == "lexical"]
     assert len(lexical) <= MAX_LEXICAL_ANCHORS
+
+
+def test_required_arguments_are_offered_as_constraints(tmp_path):
+    """A host's required argument is what a new option collides with.
+
+    Measured: a CLI whose entry point takes a required positional grew three
+    management flags meant to run without it. All three failed with a usage
+    error. The flags were implemented; nothing in the plan said the host
+    demanded that argument.
+    """
+    path = tmp_path / "cli.db"
+    with sqlite3.connect(path) as db:
+        db.execute(_NODES)
+        db.execute(_EDGES)
+        db.execute(_PROPERTIES)
+        db.execute(
+            "INSERT INTO nodes (id,label,name,qualified_name,file_path,"
+            "start_line,is_test) VALUES (1,'Function','main','main',"
+            "'src/cli.py',1,0)"
+        )
+        db.executemany(
+            "INSERT INTO properties (node_id,kind,value,line) VALUES (?,?,?,?)",
+            [
+                (1, "param", "targets", 1),
+                (1, "param", "verbose:bool opt=False", 1),
+            ],
+        )
+    connection = connect_readonly(str(path))
+    anchors = resolve_row_anchors(connection, ("main",))
+    modes = mode_candidates(connection, anchors)
+    required = [m for m in modes if m.kind == "required_param"]
+    assert required, [(m.kind, m.symbol) for m in modes]
+    assert any("targets" in member for member in required[0].members)
+    # a defaulted parameter is a mode, not a constraint
+    assert not any("verbose" in m for m in required[0].members)

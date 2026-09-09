@@ -411,9 +411,16 @@ def mode_candidates(
             f"ORDER BY node_id, COALESCE(line,0)"
         )
         by_anchor: dict[int, list[str]] = {}
+        required_by_anchor: dict[int, list[str]] = {}
         for row in _rows(connection, sql, anchor_ids):
             raw = str(row["value"] or "").strip()
             match = _DEFAULTED_PARAM_RE.match(raw)
+            if not match:
+                bare, _value = _member_name(raw)
+                if bare and bare not in {"self", "cls"} and "=" not in raw:
+                    required_by_anchor.setdefault(int(row["node_id"]), []).append(
+                        raw[:80]
+                    )
             name = ""
             if match:
                 name = match.group("name")
@@ -424,6 +431,24 @@ def mode_candidates(
             if name and name not in {"self", "cls"}:
                 by_anchor.setdefault(int(row["node_id"]), []).append(raw[:80])
         anchor_by_id = {anchor.node_id: anchor for anchor in anchors}
+        # A required parameter is a CONSTRAINT, not a mode: it is something the
+        # host demands before it will run at all. New behaviour added to an
+        # existing component inherits those demands, and they are never in the
+        # change request, so the plan has to be told about them explicitly.
+        for node_id, params in required_by_anchor.items():
+            anchor = anchor_by_id.get(node_id)
+            if anchor is None or not params:
+                continue
+            found.append(
+                ModeCandidate(
+                    symbol=anchor.qualified_name or anchor.name,
+                    node_id=node_id,
+                    file_path=anchor.file_path,
+                    kind="required_param",
+                    members=tuple(params[:MAX_MEMBERS_PER_MODE]),
+                    reached_from=(node_id,),
+                )
+            )
         for node_id, params in by_anchor.items():
             anchor = anchor_by_id.get(node_id)
             if anchor is None or not params:

@@ -502,7 +502,7 @@ def test_the_prompt_demands_a_concrete_check():
     from gt_engine.persistent_plan.bootstrap import PLANNING_SYSTEM_PROMPT
 
     assert "CONCRETE command" in PLANNING_SYSTEM_PROMPT
-    assert "matched against the exact string" in PLANNING_SYSTEM_PROMPT
+    assert "through the real entry point" in PLANNING_SYSTEM_PROMPT
     assert "no_check_reason" in PLANNING_SYSTEM_PROMPT
     # and it is written in SDLC stages, so the artifact says what it is
     for stage in (
@@ -513,5 +513,6 @@ def test_the_prompt_demands_a_concrete_check():
         "DERIVED REQUIREMENTS",
         "TRACEABILITY",
         "SCOPE",
+        "HOST CONTRACT",
     ):
         assert stage in PLANNING_SYSTEM_PROMPT, stage
