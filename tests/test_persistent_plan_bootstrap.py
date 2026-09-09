@@ -503,6 +503,9 @@ def test_the_prompt_demands_a_concrete_check():
 
     assert "CONCRETE command" in PLANNING_SYSTEM_PROMPT
     assert "through the real entry point" in PLANNING_SYSTEM_PROMPT
+    # differential acceptance: a criterion that already passes proves nothing
+    assert "DIFFERENTIAL" in PLANNING_SYSTEM_PROMPT
+    assert "fail on the repository as it stands" in PLANNING_SYSTEM_PROMPT
     assert "no_check_reason" in PLANNING_SYSTEM_PROMPT
     # and it is written in SDLC stages, so the artifact says what it is
     for stage in (
@@ -511,8 +514,8 @@ def test_the_prompt_demands_a_concrete_check():
         "ACCEPTANCE CRITERIA",
         "CONFIGURATION INTERACTION MATRIX",
         "DERIVED REQUIREMENTS",
-        "TRACEABILITY",
+        "TRACEABILITY AND COVERAGE",
         "SCOPE",
-        "HOST CONTRACT",
+        "CONFLICT PASS",
     ):
         assert stage in PLANNING_SYSTEM_PROMPT, stage
