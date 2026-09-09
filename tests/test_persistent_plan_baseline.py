@@ -54,7 +54,7 @@ def _pytest_command() -> tuple[str, ...]:
 
 def test_budget_is_a_bounded_fraction_of_the_run():
     assert baseline_budget_seconds(5100) == pytest.approx(BASELINE_MAX_SECONDS)
-    assert baseline_budget_seconds(1000) == pytest.approx(50.0)
+    assert baseline_budget_seconds(1000) == pytest.approx(30.0)
     assert baseline_budget_seconds(0) > 0
     assert baseline_budget_seconds(None) > 0
     assert baseline_budget_seconds(10_000_000) <= BASELINE_MAX_SECONDS

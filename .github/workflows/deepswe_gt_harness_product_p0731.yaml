@@ -12,10 +12,10 @@ on:
         description: "Paid cohort stage: gate exactly one task, then the remaining 19"
         required: false
         type: choice
-        options: [gate-one, remaining-19, all-20, single]
+        options: [gate-one, remaining-19, all-20, single, subset]
         default: gate-one
       single_task_id:
-        description: "Required for single: one task id from the canonical 20"
+        description: "Required for single/subset: one task id, or a comma-separated list"
         required: false
         type: string
         default: ""
@@ -42,7 +42,7 @@ on:
         type: string
         default: gate-one
       single_task_id:
-        description: "Required for single: one task id from the canonical 20"
+        description: "Required for single/subset: one task id, or a comma-separated list"
         required: false
         type: string
         default: ""
@@ -178,11 +178,11 @@ jobs:
           # bare word and the task travels beside it. The plan records the
           # composed "single:<task>" form, which is what the attestation
           # re-derives the cohort from.
-          if stage == "single":
+          if stage in ("single", "subset"):
               named = os.environ.get("SINGLE_TASK_ID", "").strip()
               if not named:
-                  raise SystemExit("single stage requires single_task_id")
-              stage = f"single:{named}"
+                  raise SystemExit(f"{stage} stage requires single_task_id")
+              stage = f"{stage}:{named}"
           prior_gate_run_id = os.environ["PRIOR_GATE_RUN_ID"].strip()
           validate_stage_inputs(stage, prior_gate_run_id)
           prior_gate = None

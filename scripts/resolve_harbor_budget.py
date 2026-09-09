@@ -16,11 +16,19 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-# Pier starts Harbor's outer timer before the task-container runner attaches.
-# The live gate observed ~115 seconds of pre-run setup. Reserve five minutes so
-# the inner supervisor can stop, close the session, and publish receipts before
-# Pier cancels the entire process.
-SUPERVISOR_GRACE_SECONDS = 300
+# Pier starts Harbor's outer timer before the task-container runner attaches,
+# and the runner needs time after the deadline to close the session and publish
+# receipts. Both ends are now measured rather than estimated: on run
+# 34305004976 the step began at 02:57:14 and the journal opened at 02:58:54
+# (100s of pre-run setup), and the session closed at 03:38:39 with the step
+# ending at 03:39:47 (68s of finalization). 168s observed, so 240 keeps a 72s
+# margin on both ends together.
+#
+# The reserve is subtracted from the benchmark's own 5400s, so every second held
+# back here is a second the agent does not get and the leaderboard's agent did.
+# Seven tasks in run 34312022821 died exactly on our line rather than the
+# benchmark's. Size it from the measurement, not from a round number.
+SUPERVISOR_GRACE_SECONDS = 240
 TASK_CONFIG_IDENTITY = "sha256_canonical_lf_v1"
 
 

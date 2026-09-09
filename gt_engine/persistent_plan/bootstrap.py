@@ -32,6 +32,15 @@ PLAN_TOOL_NAME = "write_persistent_plan"
 MAX_ROWS_OFFERED = 60
 MAX_MODES_OFFERED = 16
 MAX_CALLERS_SHOWN = 6
+# The cartesian sweep is what made this call unaffordable. Measured on the
+# first production run: 52 requirements against 24 modes is 1,248 cells to
+# hold in mind, and on every task the planning call spent its ENTIRE output
+# budget reasoning and returned no tool call at all -- the plan that shipped
+# was the deterministic skeleton, with no design, no acceptance criteria and
+# no interaction cells. The graph already records which anchor each mode was
+# reached from, so the cells that can possibly matter are known without the
+# model enumerating them.
+MAX_PAIRS_OFFERED = 40
 MAX_DERIVED_ROWS = 24
 MAX_COMMAND_CHARS = 300
 
@@ -86,11 +95,15 @@ PLANNING_SYSTEM_PROMPT = (
     "only where the suite actually covers the requirement. A requirement that "
     "genuinely cannot be verified must carry no_check_reason instead of an "
     "invented command: unverifiable scope has to be visible as unverifiable.\n"
-    "4. CONFIGURATION INTERACTION MATRIX. For each requirement against each "
-    "mode member offered, decide whether behaviour must differ under that "
-    "member. Most cells will not apply; give the reason in one clause. The "
-    "cells that DO apply are the requirements no reading of the request alone "
-    "would enumerate, and they are the point of this section.\n"
+    "4. CONFIGURATION INTERACTIONS. The pairs to decide are listed for you: "
+    "each is one requirement crossed with one mode its own definitions already "
+    "reach. Decide those pairs only, and do not enumerate the full product -- "
+    "the listed pairs are the ones the code can actually reach. REPORT ONLY "
+    "THE CELLS THAT APPLY, and give considered_count so the pass stays "
+    "auditable. Do not emit a row per non-applying cell: on a real task that "
+    "was 73 emitted cells of which none applied, which spent output budget and "
+    "said nothing. The applying cells are the requirements no reading of the "
+    "request alone would enumerate, and they are the point of this section.\n"
     "4b. CONFLICT PASS. Two requirements, each sensible on its own, may not "
     "both hold at once; so may a new requirement and a rule the existing code "
     "already enforces. For each requirement ask: which demand of the path it "
@@ -119,7 +132,12 @@ PLANNING_SYSTEM_PROMPT = (
     "places, describe the pattern once rather than enumerating every site. "
     "Specify only what must be true when the work is complete.\n"
     "\n"
-    "Record the design by calling the write_persistent_plan tool exactly once.\n"
+    "Record the design by calling the write_persistent_plan tool exactly once. "
+    "You have one call and a finite output budget, and a design that is never "
+    "written down is worth nothing: reach the tool call. Deliberate briefly, "
+    "then write. If the budget is tight, cover every requirement shallowly "
+    "rather than a few of them exhaustively -- an unlisted requirement reads "
+    "as one nobody has to satisfy.\n"
 )
 
 
@@ -190,11 +208,18 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
                             "required": ["row_id", "approach"],
                         },
                     },
+                    "considered_count": {
+                        "type": "integer",
+                        "description": (
+                            "How many requirement x mode cells you swept, so "
+                            "the matrix stays auditable without listing them."
+                        ),
+                    },
                     "interactions": {
                         "type": "array",
                         "description": (
-                            "Requirement x existing mode member. Include the "
-                            "cells you considered, applying or not."
+                            "ONLY the cells where applies is true. Non-applying "
+                            "cells are counted in considered_count, not listed."
                         ),
                         "items": {
                             "type": "object",
@@ -250,6 +275,32 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
     }
 
 
+def mode_pairs(inputs: PlanInputs) -> list[tuple[str, Any]]:
+    """The requirement-by-mode cells the graph itself connects.
+
+    A mode candidate records the anchors it was reached from, and every anchor
+    belongs to a requirement row, so the product that can possibly matter is
+    already known. Emitting it beats asking for a full sweep: the sweep is
+    quadratic in inputs the engine controls, and paying for it in the model's
+    reasoning budget bought nothing on the one run that tried.
+    """
+    rows_by_node: dict[int, list[str]] = {}
+    for row_id, anchors in inputs.anchors.anchors.items():
+        for anchor in anchors:
+            rows_by_node.setdefault(anchor.node_id, []).append(row_id)
+    pairs: list[tuple[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for mode in inputs.anchors.modes:
+        for node_id in mode.reached_from:
+            for row_id in rows_by_node.get(node_id, ()):
+                key = (row_id, mode.symbol)
+                if key in seen:
+                    continue
+                seen.add(key)
+                pairs.append((row_id, mode))
+    return pairs
+
+
 def _render_inputs(inputs: PlanInputs) -> str:
     """The planning message: requirements, graph facts, modes, baseline, gaps."""
     lines: list[str] = ["REQUIREMENTS (verbatim, one per line of the task statement)"]
@@ -277,15 +328,32 @@ def _render_inputs(inputs: PlanInputs) -> str:
         if not anchors_by_row.get(row.row_id):
             lines.append("    anchor: NONE - the graph resolved nothing for this row")
 
-    if inputs.anchors.modes:
+    pairs = mode_pairs(inputs)
+    if pairs:
         lines.append("")
         lines.append(
-            "EXISTING MODES AND CONSTRAINTS near those definitions. An "
-            "enum_like, config_like or flag_param member is a path the code "
-            "already takes. A required_param is an argument the host already "
-            "DEMANDS. Decide, per requirement, whether it must behave "
-            "differently under each mode, and whether it can satisfy each "
-            "constraint or has to relax it."
+            "CONFIGURATION PAIRS TO DECIDE. Each line is one requirement crossed "
+            "with one mode that the graph says that requirement's own "
+            "definitions already reach. An enum_like, config_like or flag_param "
+            "member is a path the code already takes; a required_param is an "
+            "argument the host already DEMANDS. This list IS the sweep: decide "
+            "these pairs, report only the ones where behaviour must differ, and "
+            "do not construct pairs that are not listed."
+        )
+        for row_id, mode in pairs[:MAX_PAIRS_OFFERED]:
+            members = ", ".join(mode.members[:12])
+            lines.append(
+                f"  {row_id} x {mode.symbol} ({mode.kind}) "
+                f"@ {mode.file_path}: {members}"
+            )
+        remaining = len(pairs) - MAX_PAIRS_OFFERED
+        if remaining > 0:
+            lines.append(f"  ... {remaining} further pairs not listed")
+    elif inputs.anchors.modes:
+        lines.append("")
+        lines.append(
+            "EXISTING MODES near these definitions. The graph ties none of them "
+            "to a specific requirement, so treat them as context, not as a sweep:"
         )
         for mode in inputs.anchors.modes[:MAX_MODES_OFFERED]:
             members = ", ".join(mode.members[:12])

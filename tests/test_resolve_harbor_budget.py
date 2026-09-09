@@ -14,9 +14,13 @@ from scripts.resolve_harbor_budget import (
 
 
 def test_supervisor_reserve_covers_observed_container_startup_and_finalization() -> None:
-    # The paid gate observed ~115 seconds between Pier starting its outer timer
-    # and the GT runner attaching. Ninety seconds let Pier kill the runner first.
-    assert SUPERVISOR_GRACE_SECONDS >= 300
+    # Both ends measured on run 34305004976: 100s from step start to the journal
+    # opening, and 68s from session close to step end. 168s observed. The
+    # reserve must cover that with margin, and must not exceed it so far that it
+    # hands back minutes of the benchmark's own budget -- seven tasks in run
+    # 34312022821 hit our line rather than the benchmark's 5400.
+    assert SUPERVISOR_GRACE_SECONDS >= 200
+    assert SUPERVISOR_GRACE_SECONDS <= 300
 
 
 def test_task_config_identity_is_checkout_line_ending_independent(

@@ -256,3 +256,35 @@ def test_an_unknown_stage_is_still_refused():
 
     with pytest.raises(ValueError):
         select_stage_tasks(_canonical(), "whatever")
+
+
+def test_a_subset_stage_selects_exactly_those_tasks():
+    from scripts.smoke_stage import select_stage_tasks
+
+    tasks = _canonical()
+    wanted = ["oxvg-structural-selector-preservation", "boa-hierarchical-evaluation-cancellation"]
+    selected = select_stage_tasks(tasks, "subset:" + ",".join(wanted))
+    assert set(selected) == set(wanted)
+    # canonical cohort order, not the order they were typed
+    assert selected == [t for t in tasks if t in set(wanted)]
+
+
+def test_a_subset_stage_refuses_an_unknown_task():
+    import pytest
+
+    from scripts.smoke_stage import select_stage_tasks
+
+    with pytest.raises(ValueError):
+        select_stage_tasks(_canonical(), "subset:oxvg-structural-selector-preservation,nope")
+
+
+def test_a_subset_stage_deduplicates_and_may_not_claim_a_prior_gate():
+    import pytest
+
+    from scripts.smoke_stage import named_task_ids, validate_stage_inputs
+
+    stage = "subset:pest-character-class-coalescing,pest-character-class-coalescing"
+    assert named_task_ids(stage) == ("pest-character-class-coalescing",)
+    validate_stage_inputs(stage, "")
+    with pytest.raises(ValueError):
+        validate_stage_inputs(stage, "123")

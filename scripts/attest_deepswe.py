@@ -19,8 +19,8 @@ from scripts.smoke_stage import (
     GATE_STAGE,
     GATE_TASK_ID,
     REMAINDER_STAGE,
+    named_task_ids,
     select_stage_tasks,
-    single_task_id,
 )
 from scripts.standardize_benchmark_result import (
     _failure_class,
@@ -169,7 +169,7 @@ def attest_deepswe(
             errors.append("planned_full_task_order_digest_mismatch")
         if (
             cohort_stage in (GATE_STAGE, ALL_STAGE)
-            or single_task_id(str(cohort_stage or ""))
+            or named_task_ids(str(cohort_stage or ""))
         ) and plan.get("prior_gate") is not None:
             # Only the remainder stage may carry a gate binding. A binding on a
             # self-contained stage would be evidence of a plan built for a

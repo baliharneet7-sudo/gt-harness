@@ -512,10 +512,91 @@ def test_the_prompt_demands_a_concrete_check():
         "DESIGN INTENT",
         "DESIGN PER REQUIREMENT",
         "ACCEPTANCE CRITERIA",
-        "CONFIGURATION INTERACTION MATRIX",
+        "CONFIGURATION INTERACTIONS",
         "DERIVED REQUIREMENTS",
         "TRACEABILITY AND COVERAGE",
         "SCOPE",
         "CONFLICT PASS",
     ):
         assert stage in PLANNING_SYSTEM_PROMPT, stage
+
+
+def test_the_sweep_offers_only_pairs_the_graph_connects(inputs):
+    """The full product is what the planning call could not afford.
+
+    Measured on the first production run: every task's planning call spent its
+    whole output budget reasoning over a requirement-by-mode sweep and returned
+    no tool call at all. The graph records which anchor each mode was reached
+    from, so the cells that can matter are known without asking for them.
+    """
+    from gt_engine.persistent_plan.bootstrap import mode_pairs
+
+    pairs = mode_pairs(inputs)
+    assert pairs, "the fixture graph connects at least one requirement to a mode"
+
+    anchors_by_row = inputs.anchors.anchors
+    for row_id, mode in pairs:
+        reached = set(mode.reached_from)
+        anchored = {anchor.node_id for anchor in anchors_by_row.get(row_id, ())}
+        assert reached & anchored, (
+            f"{row_id} x {mode.symbol} is not a pair the graph connects"
+        )
+
+    # every pair is distinct, so the sweep is never padded with repeats
+    assert len({(row_id, mode.symbol) for row_id, mode in pairs}) == len(pairs)
+
+    # and the sweep is strictly smaller than the product it replaces
+    product = len(inputs.ledger.rows) * len(inputs.anchors.modes)
+    assert len(pairs) < product
+
+    rendered = build_planning_messages(inputs, PROMPT)[1]["content"]
+    assert "CONFIGURATION PAIRS TO DECIDE" in rendered
+    row_id, mode = pairs[0]
+    assert f"{row_id} x {mode.symbol}" in rendered
+
+
+def test_the_planning_budget_is_a_floor_not_the_runs_reservation():
+    """The reservation may raise the planning budget; it may not lower it.
+
+    The previous form took the run's reservation whenever one was set, so a run
+    reserving 16,384 output tokens handed the planning call exactly 16,384 --
+    which the model spent entirely on reasoning, on all twenty tasks, returning
+    no plan.
+    """
+    import ast
+    from pathlib import Path
+
+    from gt_engine.miniswe_runtime import PLAN_MAX_OUTPUT_TOKENS
+
+    assert PLAN_MAX_OUTPUT_TOKENS >= 32768
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gt_engine" / "miniswe_runtime.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    budgets = [
+        keyword.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "max_tokens"
+        and isinstance(keyword.value, ast.Call)
+        and isinstance(keyword.value.func, ast.Name)
+        and keyword.value.func.id == "max"
+    ]
+    assert budgets, "the planning call still bounds its own output budget"
+    first = budgets[0].args[0]
+    assert isinstance(first, ast.Name) and first.id == "PLAN_MAX_OUTPUT_TOKENS", (
+        "the constant must be the floor of the max(), not the fallback"
+    )
+
+
+def test_gt_only_routing_flags_never_reach_the_provider():
+    """A GT keyword left in the kwargs is forwarded in the request body."""
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "gt_engine" / "miniswe_runtime.py"
+    ).read_text(encoding="utf-8")
+    for flag in ("_gt_select_catalog", "_gt_persistent_plan"):
+        assert source.count(f'pop("{flag}", None)') >= 2, flag

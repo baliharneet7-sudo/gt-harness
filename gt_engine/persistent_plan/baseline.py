@@ -23,8 +23,13 @@ from dataclasses import dataclass, field
 # were 16-72 minutes against an 85-minute budget, so a few minutes buys the
 # regression signal the run has never had -- but a suite that wants longer than
 # this is one this feature declines to wait for.
-BASELINE_FRACTION = 0.05
-BASELINE_MAX_SECONDS = 240.0
+# Measured cost matters more than coverage here. The capture buys a regression
+# signal, but it is spent from the benchmark's own budget, and on run
+# 34312022821 seven tasks died at the deadline carrying it. Half the previous
+# cap still catches a fast suite; a slow one abstains and says so, which is a
+# better trade than four minutes off every task's clock.
+BASELINE_FRACTION = 0.03
+BASELINE_MAX_SECONDS = 120.0
 BASELINE_MIN_SECONDS = 20.0
 RECHECK_MAX_SECONDS = 240.0
 MAX_OUTPUT_CHARS = 20_000

@@ -59,7 +59,14 @@ from .runtime_observation import (
 # message: appended once, never twice, even if the bootstrap were re-entered.
 PLAN_BLOCK_TAG = "[GT_PERSISTENT_PLAN]"
 # Fallback when the run declares no output reservation of its own.
-PLAN_MAX_OUTPUT_TOKENS = 16384
+# Measured on the first production run, on every task: the planning call spent
+# its entire 16,384-token output budget on reasoning (14,832 of it on the task
+# with 52 requirements, 15,903 on the one with 41) and returned finish_reason
+# =length with no tool call, so the plan that shipped was the deterministic
+# skeleton with no design and no acceptance criteria. Both tasks stopped
+# exactly AT the ceiling, which is what a binding limit looks like. The ask is
+# smaller now; this is the headroom that lets a converging chain finish.
+PLAN_MAX_OUTPUT_TOKENS = 32768
 
 _SUBMIT_REFUSED_OUTPUT = "submission withheld by the Groundtruth contract gate"
 
@@ -762,6 +769,10 @@ def install_runtime_hooks(
         ) -> Any:
             provider_tools = kwargs.pop("_gt_provider_tools", None) or [BASH_TOOL]
             kwargs.pop("_gt_select_catalog", None)
+            # Same removal as the catalog marker above. Without it this GT-only
+            # routing flag reached litellm.completion as an unknown keyword and
+            # was forwarded to the provider in the request body.
+            kwargs.pop("_gt_persistent_plan", None)
             try:
                 return litellm.completion(
                     model=_model.config.model_name,
@@ -782,6 +793,7 @@ def install_runtime_hooks(
             call_kwargs = dict(kwargs)
             provider_tools = call_kwargs.pop("_gt_provider_tools", None) or [BASH_TOOL]
             call_kwargs.pop("_gt_select_catalog", None)
+            call_kwargs.pop("_gt_persistent_plan", None)
             return {
                 "model": model.config.model_name,
                 "messages": messages,
@@ -1076,15 +1088,14 @@ def install_runtime_hooks(
                 _gt_provider_tools=[plan_tool_schema(inputs)],
                 _gt_persistent_plan=True,
                 temperature=0.0,
-                # The run's own output reservation, not a smaller private
-                # number. Measured in production at 4096: a reasoning model
-                # spent every one of those tokens thinking and returned
-                # finish_reason=length with no content and no tool call, so the
-                # plan abstained on a call that had already been paid for.
+                # A FLOOR, not the run's reservation. The previous form took
+                # the reservation whenever one was set, which is how a run that
+                # reserved 16,384 gave the planning call exactly 16,384 and got
+                # nothing back on all twenty tasks. The reservation may raise
+                # this budget; it may not lower it.
                 max_tokens=max(
-                    4096,
-                    int(os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS") or 0)
-                    or PLAN_MAX_OUTPUT_TOKENS,
+                    PLAN_MAX_OUTPUT_TOKENS,
+                    int(os.environ.get("GT_PROVIDER_RESERVED_OUTPUT_TOKENS") or 0),
                 ),
                 num_retries=0,
             )

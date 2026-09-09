@@ -29,6 +29,12 @@ ALL_STAGE = "all-20"
 # canonical 20, runs at the same budget as the gate, and produces the same
 # receipts; the only thing it changes is which of the 20 runs.
 SINGLE_PREFIX = "single:"
+# The same mechanism for more than one named task, written
+# "subset:<id>,<id>,...". It exists to re-run a specific set -- the tasks that
+# hit the deadline in run 34312022821, say -- without paying for the other
+# thirteen. A subset result is a diagnostic, never a cohort score: it is not
+# comparable to GT-prev or to the GT-off baseline, both of which ran all 20.
+SUBSET_PREFIX = "subset:"
 STAGES = frozenset({GATE_STAGE, REMAINDER_STAGE, ALL_STAGE})
 # The canary must be a task the product can actually finish, because gate-one's
 # whole job is to answer "does the attested path reach a verdict" before 19 more
@@ -68,8 +74,21 @@ def single_task_id(stage: str) -> str:
     return stage[len(SINGLE_PREFIX):].strip()
 
 
+def named_task_ids(stage: str) -> tuple[str, ...]:
+    """Tasks named by a ``single:`` or ``subset:`` stage, in the order given."""
+    single = single_task_id(stage)
+    if single:
+        return (single,)
+    if not stage.startswith(SUBSET_PREFIX):
+        return ()
+    raw = stage[len(SUBSET_PREFIX):]
+    return tuple(
+        dict.fromkeys(item.strip() for item in raw.split(",") if item.strip())
+    )
+
+
 def stage_timeout_cap_seconds(stage: str) -> float | None:
-    if stage == GATE_STAGE or single_task_id(stage):
+    if stage == GATE_STAGE or named_task_ids(stage):
         # The same rail as the gate, for the same reason: a single task must run
         # at the cohort's budget or its result is not comparable to it.
         return float(GATE_ONE_MAX_TIMEOUT_SECONDS)
@@ -95,17 +114,20 @@ def select_stage_tasks(tasks: Sequence[str], stage: str) -> list[str]:
         # The pinned order, unfiltered. The plan job re-hashes this and compares
         # it to task_order_sha256, so a reordering here fails the run.
         return ordered
-    named = single_task_id(stage)
+    named = named_task_ids(stage)
     if named:
-        if named not in ordered:
-            raise ValueError("single stage names a task outside the canonical cohort")
-        return [named]
+        unknown = [task for task in named if task not in ordered]
+        if unknown:
+            raise ValueError("named stage includes a task outside the canonical cohort")
+        # Canonical cohort order, never the order they were typed in, so the
+        # selection is a function of the set rather than of the request.
+        return [task for task in ordered if task in set(named)]
     raise ValueError("cohort_stage must be gate-one, remaining-19, all-20 or single:<task>")
 
 
 def validate_stage_inputs(stage: str, prior_gate_run_id: str) -> None:
     run_id = prior_gate_run_id.strip()
-    named = single_task_id(stage)
+    named = named_task_ids(stage)
     if (stage in (GATE_STAGE, ALL_STAGE) or named) and run_id:
         raise ValueError(f"{stage} must not claim a prior gate run")
     if stage == REMAINDER_STAGE and not re.fullmatch(r"[1-9][0-9]*", run_id):
