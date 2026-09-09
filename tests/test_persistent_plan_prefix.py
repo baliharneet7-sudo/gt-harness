@@ -202,3 +202,36 @@ def test_an_exact_anchor_carries_no_caveat():
     block = render_plan_block(_plan())
     assert "load @ src/loader.py:12" in block
     assert "name guess" not in block
+
+
+def test_the_plan_summary_prints_rows_gaps_and_status(capsys):
+    """The job log must answer "what plan was built" without an artifact download."""
+    from gt_engine.miniswe_runtime import _print_plan_summary
+
+    plan = _plan(
+        interactions=(
+            InteractionCell(
+                _plan().rows[0].row_id, "DebugMode", "ALL", True, "differs"
+            ),
+        ),
+        abstentions=(("req-x", "no_anchor"),),
+    )
+    _print_plan_summary(plan, "stop")
+    out = capsys.readouterr().out
+    assert "[GT_PLAN_SUMMARY]" in out
+    assert "status=READY" in out
+    assert "finish_reason=stop" in out
+    assert "[GT_PLAN_ROW]" in out
+    assert "pytest tests/test_loader.py" in out
+    assert "[GT_PLAN_GAP] req-x: no_anchor" in out
+
+
+def test_the_plan_summary_never_raises_on_a_broken_plan(capsys):
+    from gt_engine.miniswe_runtime import _print_plan_summary
+
+    class Broken:
+        def counts(self):
+            raise RuntimeError("boom")
+
+    _print_plan_summary(Broken(), "stop")
+    assert capsys.readouterr().out == ""

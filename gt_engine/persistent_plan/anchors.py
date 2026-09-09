@@ -43,6 +43,9 @@ MAX_ANCHORS_PER_ROW = 6
 # A lexical hit is a shared word, not a resolved identifier. Two is enough to
 # offer a starting point; more of them drown the exact matches that are facts.
 MAX_LEXICAL_ANCHORS = 2
+# Discovery is candidate generation, not assertion, so it casts wider: the
+# model decides which modes apply and cites only what it was offered.
+MAX_DISCOVERY_ANCHORS = 8
 MAX_CALLERS_PER_ANCHOR = 12
 MAX_MODE_CANDIDATES = 24
 MAX_MEMBERS_PER_MODE = 16
@@ -188,7 +191,11 @@ _NODE_COLUMNS = (
 
 
 def resolve_row_anchors(
-    connection: sqlite3.Connection, terms: tuple[str, ...], *, limit: int = MAX_ANCHORS_PER_ROW
+    connection: sqlite3.Connection,
+    terms: tuple[str, ...],
+    *,
+    limit: int = MAX_ANCHORS_PER_ROW,
+    exact_only: bool = True,
 ) -> tuple[Anchor, ...]:
     """Definitions a requirement's own identifiers name, exact match first.
 
@@ -220,7 +227,7 @@ def resolve_row_anchors(
     # attached to four different requirements. A row that already resolved the
     # identifier it named gains nothing from a bag of words that merely share a
     # token, and the noise makes the plan read as though everything is located.
-    if not found and "nodes_fts" in _tables(connection):
+    if (not found or not exact_only) and "nodes_fts" in _tables(connection):
         query = " OR ".join(f'"{term}"' for term in candidates[:8] if term)
         if query:
             sql = (
@@ -230,8 +237,9 @@ def resolve_row_anchors(
                 f"WHERE nodes_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
                 f"AND n.label IN ({labels}) ORDER BY bm25(nodes_fts) LIMIT ?"
             )
+            lexical_cap = MAX_LEXICAL_ANCHORS if exact_only else MAX_DISCOVERY_ANCHORS
             for row in _rows(
-                connection, sql, (query, *_DEFINITION_LABELS, MAX_LEXICAL_ANCHORS)
+                connection, sql, (query, *_DEFINITION_LABELS, lexical_cap)
             ):
                 anchor = _anchor_from_row(row, "lexical")
                 found.setdefault(anchor.node_id, anchor)
@@ -500,18 +508,34 @@ def build_anchor_result(graph_db: str | None, ledger) -> AnchorResult:
             result.abstentions = (("*", "graph_has_no_nodes_surface"),)
             return result
         abstentions: list[tuple[str, str]] = []
+        discovery: dict[int, Anchor] = {}
         for row in ledger.rows:
             terms = tuple(dict.fromkeys((*row.subjects, *row.tokens)))
             anchors = resolve_row_anchors(connection, terms)
             result.anchors[row.row_id] = anchors
             if not anchors:
                 abstentions.append((row.row_id, "no_anchor"))
+            # Precision on what the plan ASSERTS, recall on what it OFFERS.
+            # A row's anchors are claims about what it touches, so they stay
+            # exact. Mode candidates are the opposite: the model decides which
+            # apply, so a wider net costs a line of prompt and buys the
+            # interaction a narrow net would never reach. Restricting both at
+            # once dropped mode candidates from 15 to 2 on a real graph, losing
+            # the enum a requirement actually named.
+            for anchor in resolve_row_anchors(
+                connection, terms, limit=MAX_DISCOVERY_ANCHORS, exact_only=False
+            ):
+                discovery.setdefault(anchor.node_id, anchor)
         node_ids = result.all_node_ids()
         result.callers = callers_of(connection, node_ids)
         every_anchor = tuple(
             anchor for anchors in result.anchors.values() for anchor in anchors
         )
-        result.modes = mode_candidates(connection, every_anchor)
+        reachable = tuple(
+            {anchor.node_id: anchor for anchor in (*every_anchor, *discovery.values())}
+            .values()
+        )
+        result.modes = mode_candidates(connection, reachable)
         if not result.modes and every_anchor:
             abstentions.append(("*", "no_mode_candidates_reachable"))
         result.edit_order = edit_order(connection, result.anchors)

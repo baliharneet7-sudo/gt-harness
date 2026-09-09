@@ -181,6 +181,49 @@ _NOT_EXECUTED = {
 }
 
 
+def _print_plan_summary(plan: Any, finish_reason: str) -> None:
+    """Print the plan to the runner's stdout so it lands in the job log.
+
+    The journal is the record of truth, but it lives inside a multi-gigabyte
+    task artifact. A bounded summary on stdout makes "what plan was built"
+    answerable from the job log alone, which is the difference between a
+    diagnosis that takes a minute and one that takes an hour.
+    """
+    try:
+        counts = plan.counts()
+        lines = [
+            "[GT_PLAN_SUMMARY] status=%s rows=%d derived=%d interactions=%d "
+            "applies=%d anchored=%d/%d modes=%d baseline=%s finish_reason=%s"
+            % (
+                counts.get("status"),
+                counts.get("plan_rows", 0),
+                counts.get("derived_rows", 0),
+                counts.get("interaction_cells", 0),
+                counts.get("applies_true", 0),
+                counts.get("anchored_rows", 0),
+                counts.get("ledger_rows", 0),
+                counts.get("mode_candidates", 0),
+                counts.get("baseline_status"),
+                finish_reason or "-",
+            )
+        ]
+        for row in list(getattr(plan, "rows", ()))[:40]:
+            proof = row.verification_command or row.verification_kind or "-"
+            lines.append(
+                f"[GT_PLAN_ROW] {row.row_id} anchors={len(row.anchors)} "
+                f"proof={proof[:60]} :: {row.text[:110]}"
+            )
+        for cell in list(getattr(plan, "applicable_cells", ()))[:20]:
+            lines.append(
+                f"[GT_PLAN_CELL] {cell.row_id} under {cell.mode_symbol}.{cell.member}"
+            )
+        for target, reason in list(getattr(plan, "abstentions", ()))[:20]:
+            lines.append(f"[GT_PLAN_GAP] {target}: {reason}")
+        print("\n".join(lines), flush=True)
+    except Exception:  # noqa: BLE001 - a summary must never break the run
+        pass
+
+
 def _refusal_directive(adapter: MiniSweAdapter) -> dict:
     """Visible proof-backed refusal that preserves continued exploration."""
     adapter.store.append(
@@ -1084,12 +1127,26 @@ def install_runtime_hooks(
 
         try:
             adapter.persistent_plan = plan
+            # Store the plan document itself, not only its counts. Diagnosing
+            # the first production run meant downloading a gigabyte of artifacts
+            # to answer "what plan was built"; the answer should be a small file
+            # next to the journal that names it.
+            plan_blob = ""
+            try:
+                encoded = plan.canonical_json().encode("utf-8", "surrogatepass")
+                digest = hashlib.sha256(encoded).hexdigest()
+                adapter.store.put_blob("persistent_plans", digest, encoded)
+                plan_blob = f"persistent_plans/{digest}.json"
+            except Exception:  # noqa: BLE001 - storing the plan is advisory
+                plan_blob = ""
             adapter.store.append(
                 "persistent_plan_built",
                 finish_reason=finish_reason,
                 tool_call_returned=payload is not None,
+                plan_blob=plan_blob,
                 **plan.counts(),
             )
+            _print_plan_summary(plan, finish_reason)
             if plan.status != STATUS_ABSTAINED:
                 adapter.register_plan_predicates(plan)
                 block = render_plan_block(plan)
