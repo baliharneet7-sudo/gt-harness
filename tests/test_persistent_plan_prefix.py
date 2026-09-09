@@ -73,9 +73,9 @@ def test_the_block_states_requirements_proofs_and_the_completion_rule():
     block = render_plan_block(_plan())
     assert block.startswith(f"[{PLAN_TAG}]")
     assert "The loader must retry twice." in block
-    assert "prove with: pytest tests/test_loader.py" in block
+    assert "acceptance: pytest tests/test_loader.py" in block
     assert "load @ src/loader.py:12" in block
-    assert "COMPLETE when every requirement above has evidence" in block
+    assert "DONE when every requirement above has acceptance evidence" in block
 
 
 def test_the_block_says_it_is_advisory():
@@ -87,7 +87,7 @@ def test_the_block_says_it_is_advisory():
 
 def test_the_block_carries_the_blast_radius():
     block = render_plan_block(_plan())
-    assert "CALLERS" in block
+    assert "IMPACT - callers reached" in block
     assert "boot @ src/app.py" in block
 
 
@@ -111,14 +111,14 @@ def test_applying_interactions_are_listed():
         InteractionCell(ledger.rows[0].row_id, "DebugMode", "OFF", False, "same"),
     )
     block = render_plan_block(_plan(interactions=cells))
-    assert "INTERACTIONS that apply" in block
+    assert "CONFIGURATION INTERACTIONS that apply" in block
     assert "DebugMode.ALL" in block
     assert "DebugMode.OFF" not in block
 
 
 def test_gaps_are_rendered_rather_than_dropped():
     block = render_plan_block(_plan(abstentions=(("req-x", "no_anchor"),)))
-    assert "GAPS" in block
+    assert "OPEN ITEMS" in block
     assert "no_anchor" in block
 
 
@@ -251,12 +251,12 @@ def test_the_block_carries_the_understanding_and_the_per_row_change():
         plan.rows[1],
     )
     block = render_plan_block(plan)
-    assert "WHAT THIS TASK MEANS HERE:" in block
+    assert "DESIGN INTENT:" in block
     assert "async initialisation pass" in block
-    assert "change: Add an initializer hook to the resolver." in block
+    assert "design: Add an initializer hook to the resolver." in block
 
 
 def test_a_plan_without_understanding_omits_the_section():
     block = render_plan_block(_plan())
-    assert "WHAT THIS TASK MEANS HERE:" not in block
-    assert "change:" not in block
+    assert "DESIGN INTENT:" not in block
+    assert "design:" not in block

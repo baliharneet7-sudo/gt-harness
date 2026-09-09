@@ -502,5 +502,16 @@ def test_the_prompt_demands_a_concrete_check():
     from gt_engine.persistent_plan.bootstrap import PLANNING_SYSTEM_PROMPT
 
     assert "CONCRETE command" in PLANNING_SYSTEM_PROMPT
-    assert "grepped for the exact string" in PLANNING_SYSTEM_PROMPT
+    assert "matched against the exact string" in PLANNING_SYSTEM_PROMPT
     assert "no_check_reason" in PLANNING_SYSTEM_PROMPT
+    # and it is written in SDLC stages, so the artifact says what it is
+    for stage in (
+        "DESIGN INTENT",
+        "DESIGN PER REQUIREMENT",
+        "ACCEPTANCE CRITERIA",
+        "CONFIGURATION INTERACTION MATRIX",
+        "DERIVED REQUIREMENTS",
+        "TRACEABILITY",
+        "SCOPE",
+    ):
+        assert stage in PLANNING_SYSTEM_PROMPT, stage

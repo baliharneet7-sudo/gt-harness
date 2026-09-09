@@ -39,14 +39,14 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
         return ""
     head = [
         f"[{PLAN_TAG}]",
-        "Plan built before the first edit, from the task statement and a "
-        "verified code graph. It is advisory: inspect anything, disagree with "
-        "anything, and follow your own evidence. It is not a boundary.",
+        "Design produced before implementation began, from the change request "
+        "and a verified code graph. It is advisory: inspect anything, disagree "
+        "with anything, and follow your own evidence. It is not a boundary.",
     ]
     if plan.understanding:
-        head.extend(["", "WHAT THIS TASK MEANS HERE:", f"  {plan.understanding}"])
+        head.extend(["", "DESIGN INTENT:", f"  {plan.understanding}"])
     head.extend(
-        ["", "REQUIREMENTS - every one needs evidence before this task is complete:"]
+        ["", "REQUIREMENTS - each needs acceptance evidence before this is done:"]
     )
     body: list[str] = []
     ordered = list(plan.edit_order) or [row.row_id for row in plan.rows]
@@ -58,15 +58,15 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
         rendered.add(row_id)
         body.append(f"  {row.row_id}: {row.text}")
         if row.approach:
-            body.append(f"      change: {row.approach}")
+            body.append(f"      design: {row.approach}")
         if row.anchors:
             anchors = _anchor_labels(plan, row.anchors)
             if anchors:
                 body.append(f"      touches: {anchors}")
         if row.verification_command:
-            body.append(f"      prove with: {row.verification_command}")
+            body.append(f"      acceptance: {row.verification_command}")
         elif row.verification_kind:
-            body.append(f"      prove with: {row.verification_kind} (no command given)")
+            body.append(f"      acceptance: {row.verification_kind} (no command given)")
     for row in plan.rows:
         if row.row_id in rendered:
             continue
@@ -74,16 +74,16 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
         origin = f" [from {row.derived_from} under {row.mode_symbol}.{row.mode_member}]" if row.is_derived else ""
         body.append(f"  {row.row_id}: {row.text}{origin}")
         if row.approach:
-            body.append(f"      change: {row.approach}")
+            body.append(f"      design: {row.approach}")
         if row.verification_command:
-            body.append(f"      prove with: {row.verification_command}")
+            body.append(f"      acceptance: {row.verification_command}")
 
     applying = plan.applicable_cells
     if applying:
         body.append("")
         body.append(
-            "INTERACTIONS that apply - existing modes this change must still be "
-            "correct under:"
+            "CONFIGURATION INTERACTIONS that apply - modes this change must still "
+            "be correct under:"
         )
         for cell in applying[:24]:
             reason = f" ({cell.reason})" if cell.reason else ""
@@ -94,14 +94,14 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
     blast = _blast_radius_lines(plan)
     if blast:
         body.append("")
-        body.append("CALLERS of the code above - changing a signature reaches these:")
+        body.append("IMPACT - callers reached by changing the definitions above:")
         body.extend(blast)
 
     baseline = plan.inputs.baseline
     body.append("")
     if baseline.captured:
         body.append(
-            f"GREEN BASELINE before any edit: {baseline.passed} passing, "
+            f"REGRESSION BASELINE before any change: {baseline.passed} passing, "
             f"{baseline.failed} failing via `{' '.join(baseline.command)}`. "
             "Every test passing now must still pass at the end."
         )
@@ -112,20 +112,20 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
             )
     else:
         body.append(
-            f"GREEN BASELINE: not captured ({baseline.status}). No regression "
+            f"REGRESSION BASELINE: not captured ({baseline.status}). No regression "
             "check is available, so be conservative with existing behaviour."
         )
 
     if plan.abstentions:
         body.append("")
-        body.append("GAPS - this plan could not settle these, so treat them as open:")
+        body.append("OPEN ITEMS - this design could not settle these:")
         for target, reason in plan.abstentions[:12]:
             body.append(f"  {target}: {reason}")
 
     body.append("")
     body.append(
-        "COMPLETE when every requirement above has evidence and the green "
-        "baseline is intact."
+        "DONE when every requirement above has acceptance evidence and the "
+        "regression baseline is intact."
     )
 
     kept, dropped = _truncate(body, max(0, limit - sum(len(x) + 1 for x in head)))
