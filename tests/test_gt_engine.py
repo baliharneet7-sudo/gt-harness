@@ -1455,17 +1455,14 @@ def test_submit_probe_quiet_on_clean_or_unedited(indexed_repo):
         row for row in b._attribution.rows
         if row["event_type"] == "run.feature_census"
     ]
-    assert len(census[-1]["payload"]["features"]) == 19
+    # Against the registry, not a literal. This test is Linux-and-producer
+    # only, so a hardcoded count is a number most machines skip and CI finds.
+    from gt_engine.attribution import DIRECT_FEATURES
+
+    assert len(census[-1]["payload"]["features"]) == len(DIRECT_FEATURES)
     assert {
         item["feature_id"] for item in census[-1]["payload"]["features"]
-    } == {
-        "caller_contract", "covering_red", "def_partition", "localization",
-        "newfile_precedent", "obligations", "recovery", "signature_delta",
-        "cochange_prior",
-        "submit_refusal", "syntax_result", "GT_CERT_DELIVERY",
-        "GT_CHANGE_SURFACE", "GT_EDIT_CHECK", "GT_HYPOTHESIS",
-        "GT_LOC_RESLOT", "GT_PATCH_DELTA", "GT_SS_SUBMIT_RED", "select_catalog",
-    }
+    } == set(DIRECT_FEATURES)
     b.edited_files.append("pkg/alpha.py")    # syntactically fine
     assert b.submit_probe() is None
 
