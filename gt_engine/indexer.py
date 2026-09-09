@@ -1101,6 +1101,27 @@ def _referenced_revisions(parent: Path) -> set[Path]:
     return referenced
 
 
+def _pinned_revisions(parent: Path) -> set[Path]:
+    """Revisions a delivered artifact still has to be certified against.
+
+    ``_referenced_revisions`` reads manifest derivations, which covers artifacts
+    that reference each other. It cannot see the other kind of load-bearing
+    reference: a semantic-localization advisory that was DELIVERED to the model
+    records the graph revision it was ranked from, and ``verify_runtime_receipt``
+    later demands exactly one surviving certified graph matching it.
+
+    Measured: three localization deliveries all named the task-start revision,
+    thirty-odd publications followed, retention evicted it, and receipt issuance
+    raised ``semantic_localization_certified_graph_missing`` before any receipt
+    existed -- 12 of 20 tasks on one run, with no product row at all. The writer
+    of the advisory pins its revision; this is retention honouring the pin.
+    """
+    pinned: set[Path] = set()
+    for marker in parent.glob("*/pinned.json"):
+        pinned.add(marker.parent.resolve())
+    return pinned
+
+
 def _prune_superseded_revisions(live: Path) -> None:
     """Drop superseded sibling revisions that nothing still references."""
     parent = live.parent
@@ -1113,7 +1134,7 @@ def _prune_superseded_revisions(live: Path) -> None:
         ]
     except OSError:
         return
-    protected = _referenced_revisions(parent)
+    protected = _referenced_revisions(parent) | _pinned_revisions(parent)
     siblings = [path for path in siblings if path.resolve() not in protected]
     # Order by the GRAPH's mtime, not the directory's. A directory's mtime moves
     # whenever an entry is added or removed - lsp-promotion.json is written into

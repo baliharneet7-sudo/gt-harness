@@ -192,6 +192,12 @@ class ExternalStateStore:
         return target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == digest
 
 
+# Each revision is roughly 900MB and a full disk has already cost this
+# project a run. Pins protect receipts, so the bound is generous, and
+# exceeding it is journaled rather than swallowed.
+MAX_PINNED_REVISIONS = 4
+
+
 class MiniSweAdapter(GroundtruthController):
     """Controller plus external state/provider-bound request witness.
 
@@ -344,6 +350,56 @@ class MiniSweAdapter(GroundtruthController):
     def graph_query_snapshot(self) -> GraphQuerySnapshot:
         """The only supported graph identity consumed by native features."""
         return self.engine_state.query_snapshot()
+
+    def _pin_graph_revision(self, graph_path: str, artifact_sha256: str) -> None:
+        """Keep a revision a delivered artifact will have to be certified against.
+
+        Retention keeps the live revision plus one and cannot tell that an old
+        one is load-bearing. A delivered semantic-localization advisory records
+        the revision it was ranked from, and ``verify_runtime_receipt`` later
+        demands exactly one surviving certified graph matching it. Without this
+        the revision is evicted and receipt issuance raises before a receipt
+        exists -- measured on 12 of 20 tasks, which produced no product row at
+        all.
+
+        Correct-or-quiet: a pin that cannot be written costs the receipt, not
+        the run, and the run must not die trying to protect its own paperwork.
+        """
+        try:
+            revision = Path(graph_path).resolve().parent
+            if revision.parent.name != "revisions" or not revision.is_dir():
+                return
+            marker = revision / "pinned.json"
+            if marker.exists():
+                return
+            # A revision is ~900MB and this repository has already lost a run to
+            # a full disk. Pins are load-bearing, so the bound is generous
+            # rather than tight, and hitting it is journaled: a receipt that
+            # fails for want of a pin must not fail silently.
+            existing = len(list(revision.parent.glob("*/pinned.json")))
+            if existing >= MAX_PINNED_REVISIONS:
+                self.store.append(
+                    "revision_pin_refused",
+                    reason="pin_budget_exhausted",
+                    pinned=existing,
+                    artifact_sha256=artifact_sha256,
+                )
+                return
+            marker.write_text(
+                json.dumps(
+                    {
+                        "schema": "gt.revision_pin.v1",
+                        "reason": "delivered_semantic_localization",
+                        "artifact_sha256": artifact_sha256,
+                        "task_id": self.task_id,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001 - a pin is best effort, never fatal
+            return
 
     def _record_state(self) -> None:
         self.store.append(
@@ -2326,6 +2382,14 @@ class MiniSweAdapter(GroundtruthController):
             ).encode("utf-8")
             digest = hashlib.sha256(encoded).hexdigest()
             self.store.put_blob("localization_advisory", digest, encoded)
+            # This advisory names the graph revision it was ranked from, and
+            # the receipt layer later demands exactly one surviving certified
+            # graph matching it. Retention keeps live + 1 and would otherwise
+            # evict it: measured, three deliveries all named the task-start
+            # revision, and receipt issuance then raised
+            # semantic_localization_certified_graph_missing before any receipt
+            # existed. Pin it here, where the reference is created.
+            self._pin_graph_revision(snapshot.graph_path, digest)
             rendered = render_semantic_localization(items)
             self._localization_metadata = {
                 "kind": "localization",

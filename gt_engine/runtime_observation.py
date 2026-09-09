@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .repository_identity import (
-    RepositoryHistory, canonical_repository_bytes, is_untracked_runtime_artifact,
+    RepositoryHistory,
+    canonical_repository_bytes,
+    is_untracked_runtime_artifact,
     repository_history,
 )
 

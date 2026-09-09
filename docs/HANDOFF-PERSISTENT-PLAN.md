@@ -74,6 +74,20 @@ where the public leaderboard's agent gets the full 5400.
 
 ---
 
+## Naming, so comparisons stay honest
+
+Three different things, never interchangeable:
+
+| name | what it is |
+|---|---|
+| **GT-off baseline** | the control with the engine off. NEVER run by us. Frozen locally, or the `deepseek-v4-flash` row of the public leaderboard. On these 20 tasks the difficulty-adjusted expectation is 0.524. |
+| **GT-prev** | the previous GT-on run. 34272342544, 8/20 = 0.400. A prior measurement of our own product, not a baseline. |
+| **GT-now** | the run under discussion. |
+| **regression baseline** | unrelated to the above: the repository's own passing tests captured before the first edit, used to detect breakage within a single task. |
+
+Calling GT-prev "the baseline" makes a product regression read as a control,
+which is the one comparison error that cannot be recovered after the fact.
+
 ## Part 2 — The run, and what it says
 
 GitHub Actions run **34272342544**, all 20 tasks, one dispatch, commit

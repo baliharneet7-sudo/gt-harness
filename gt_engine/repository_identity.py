@@ -7,7 +7,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-
 RUNTIME_GENERATED_DIRS = frozenset({
     "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
 })
