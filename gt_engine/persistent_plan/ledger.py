@@ -45,6 +45,20 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # never done. A period with no following space (result.metrics.database.level)
 # is not a boundary.
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`\"'(])")
+# An enumerated list packed into ONE line. Measured on a real prompt: eight
+# method requirements, six CLI subcommands and five web endpoints arrived as
+# three lines, so a line-level ledger tracked three things instead of
+# nineteen. That is the same swallowing the sentence extractor does, one level
+# up, and it hides requirements exactly as effectively.
+_LIST_LABEL_RE = re.compile(r"^(?P<label>[^:]{3,200}):\s+(?P<items>.+)$")
+# Phrases that introduce a multi-part SHAPE rather than a new list item, so the
+# bare words after them belong to the item that declared the shape.
+_SHAPE_INTRODUCER_RE = re.compile(
+    r"(?:with|returns?|returning|containing|contains|including|of)\s+\S+$"
+)
+_IDENTIFIERISH_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*\s*\(|[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]+|/[A-Za-z_]"
+)
 
 # Sections whose content is context rather than requirement. The same three
 # names ``task_contract._normative_issue_text`` drops, so the two views of the
@@ -68,6 +82,9 @@ class LedgerRow:
     line_no: int
     shape: str
     sentence_index: int = 0
+    # The label an enumerated item was listed under, kept beside the verbatim
+    # item so a row like "get_snapshot" still says what it is a member of.
+    context: str = ""
     subjects: tuple[str, ...] = ()
     tokens: tuple[str, ...] = ()
     obligation_ids: tuple[str, ...] = ()
@@ -85,6 +102,7 @@ class LedgerRow:
             "line_no": self.line_no,
             "shape": self.shape,
             "sentence_index": self.sentence_index,
+            "context": self.context,
             "subjects": list(self.subjects),
             "obligation_ids": list(self.obligation_ids),
         }
@@ -147,6 +165,79 @@ def _shape(raw: str) -> str:
     return "prose"
 
 
+def _split_top_level(text: str, separator: str = ",") -> tuple[str, ...]:
+    """Split on a separator, ignoring anything inside brackets or backticks.
+
+    ``save(--name, echoed in output), list(ls), show`` is three items, not five:
+    a comma inside parentheses belongs to the item that owns it.
+    """
+    parts: list[str] = []
+    depth = 0
+    tick = False
+    current: list[str] = []
+    for char in text:
+        if char == "`":
+            tick = not tick
+        elif not tick and char in "([{":
+            depth += 1
+        elif not tick and char in ")]}":
+            depth = max(0, depth - 1)
+        if char == separator and depth == 0 and not tick:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    return tuple(part.strip() for part in parts if part.strip())
+
+
+def _split_enumerated(text: str) -> tuple[str, tuple[str, ...]]:
+    """Return ``(label, items)`` when a line is really a list, else ``("", ())``.
+
+    Fires only on a genuine enumeration: a label, three or more items, and at
+    least half of them carrying something identifier-shaped. Ordinary prose with
+    commas is left whole, because fragments of it would assert nothing.
+    """
+    match = _LIST_LABEL_RE.match(text)
+    if not match:
+        return "", ()
+    items = _merge_trailing_clauses(_split_top_level(match.group("items")))
+    if len(items) < 3:
+        return "", ()
+    identifierish = sum(1 for item in items if _IDENTIFIERISH_RE.search(item))
+    if identifierish < max(2, len(items) // 2):
+        return "", ()
+    return _clean(match.group("label")), items
+
+
+def _merge_trailing_clauses(items: tuple[str, ...]) -> tuple[str, ...]:
+    """Reattach a fragment that names nothing to the item it belongs to.
+
+    ``format_snapshot_diff(a, b) returning an object with added, removed,
+    common lists`` is ONE requirement whose return shape happens to contain
+    commas. Split naively it becomes "…with added", "removed", "common lists" --
+    three rows that assert nothing on their own. Rejoining with ", "
+    reconstructs the original substring exactly.
+    """
+    merged: list[str] = []
+    in_shape = False
+    for item in items:
+        identifierish = bool(_IDENTIFIERISH_RE.search(item))
+        if identifierish:
+            merged.append(item)
+            in_shape = bool(_SHAPE_INTRODUCER_RE.search(item))
+            continue
+        if merged and in_shape:
+            merged[-1] = f"{merged[-1]}, {item}"
+            continue
+        # A bare word that continues no shape is its own requirement. Losing
+        # "show, where, diff, delete" from a CLI list is precisely the
+        # completeness failure this ledger exists to prevent, so the merge is
+        # deliberately narrow: it only absorbs the tail of a declared shape.
+        merged.append(item)
+    return tuple(merged)
+
+
 def _split_sentences(line_text: str) -> tuple[str, ...]:
     """Sentence pieces of ONE physical line, each kept verbatim.
 
@@ -205,7 +296,14 @@ def build_requirement_ledger(
         if not line_text:
             continue
         shape = _shape(raw)
-        for sentence_index, text in enumerate(_split_sentences(line_text)):
+        pieces: list[tuple[str, str]] = []
+        for sentence in _split_sentences(line_text):
+            label, items = _split_enumerated(sentence)
+            if not label:
+                pieces.append((sentence, ""))
+                continue
+            pieces.extend((item, label) for item in items)
+        for sentence_index, (text, context) in enumerate(pieces):
             if len(text) > MAX_ROW_CHARS:
                 # Truncating would make the row non-verbatim, which is the exact
                 # defect this ledger exists to remove. Record it instead.
@@ -233,8 +331,12 @@ def build_requirement_ledger(
                     line_no=line_no,
                     shape=shape,
                     sentence_index=sentence_index,
-                    subjects=_subjects(text),
-                    tokens=significant_tokens(text),
+                    context=context,
+                    # The label is part of the requirement's identity: an item
+                    # listed under "Monitor methods" is about Monitor even
+                    # though the item text never repeats the word.
+                    subjects=_subjects(f"{context} {text}" if context else text),
+                    tokens=significant_tokens(f"{context} {text}" if context else text),
                 )
             )
 

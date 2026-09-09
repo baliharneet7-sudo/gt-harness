@@ -40,6 +40,9 @@ _DEFAULTED_PARAM_RE = re.compile(
 _MODE_TYPE_RE = re.compile(r"(?i)\b(bool|boolean|optional|literal|enum|flag|mode|option)\b")
 
 MAX_ANCHORS_PER_ROW = 6
+# A lexical hit is a shared word, not a resolved identifier. Two is enough to
+# offer a starting point; more of them drown the exact matches that are facts.
+MAX_LEXICAL_ANCHORS = 2
 MAX_CALLERS_PER_ANCHOR = 12
 MAX_MODE_CANDIDATES = 24
 MAX_MEMBERS_PER_MODE = 16
@@ -212,7 +215,12 @@ def resolve_row_anchors(
         for row in _rows(connection, sql, params):
             anchor = _anchor_from_row(row, "exact_name")
             found.setdefault(anchor.node_id, anchor)
-    if len(found) < limit and "nodes_fts" in _tables(connection):
+    # Lexical search is a FALLBACK, not a supplement. Measured on a real task:
+    # 51 lexical anchors against 8 exact ones, with a single unrelated helper
+    # attached to four different requirements. A row that already resolved the
+    # identifier it named gains nothing from a bag of words that merely share a
+    # token, and the noise makes the plan read as though everything is located.
+    if not found and "nodes_fts" in _tables(connection):
         query = " OR ".join(f'"{term}"' for term in candidates[:8] if term)
         if query:
             sql = (
@@ -222,7 +230,9 @@ def resolve_row_anchors(
                 f"WHERE nodes_fts MATCH ? AND COALESCE(n.is_test,0)=0 "
                 f"AND n.label IN ({labels}) ORDER BY bm25(nodes_fts) LIMIT ?"
             )
-            for row in _rows(connection, sql, (query, *_DEFINITION_LABELS, limit)):
+            for row in _rows(
+                connection, sql, (query, *_DEFINITION_LABELS, MAX_LEXICAL_ANCHORS)
+            ):
                 anchor = _anchor_from_row(row, "lexical")
                 found.setdefault(anchor.node_id, anchor)
     ordered = sorted(

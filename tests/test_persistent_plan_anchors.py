@@ -230,3 +230,27 @@ def test_full_result_reports_surfaces_and_anchors(graph):
     assert result.anchored_rows() == 1
     assert result.all_names()
     assert result.edit_order
+
+
+def test_lexical_search_is_a_fallback_not_a_supplement(graph):
+    """A row that resolved its own identifier gains nothing from word matches.
+
+    Measured on a real task: 51 lexical anchors against 8 exact ones, with one
+    unrelated helper attached to four different requirements. The noise made
+    every row look located.
+    """
+    connection = connect_readonly(graph)
+    anchors = resolve_row_anchors(connection, ("build_container",))
+    assert anchors
+    assert all(anchor.basis == "exact_name" for anchor in anchors), [
+        (a.name, a.basis) for a in anchors
+    ]
+
+
+def test_lexical_anchors_are_capped_when_nothing_resolves(graph):
+    from gt_engine.persistent_plan.anchors import MAX_LEXICAL_ANCHORS
+
+    connection = connect_readonly(graph)
+    anchors = resolve_row_anchors(connection, ("container", "loader", "scope"))
+    lexical = [a for a in anchors if a.basis == "lexical"]
+    assert len(lexical) <= MAX_LEXICAL_ANCHORS
