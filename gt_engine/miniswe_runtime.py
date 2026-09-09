@@ -192,20 +192,16 @@ def _print_plan_summary(plan: Any, finish_reason: str) -> None:
     try:
         counts = plan.counts()
         lines = [
-            "[GT_PLAN_SUMMARY] status=%s rows=%d derived=%d interactions=%d "
-            "applies=%d anchored=%d/%d modes=%d baseline=%s finish_reason=%s"
-            % (
-                counts.get("status"),
-                counts.get("plan_rows", 0),
-                counts.get("derived_rows", 0),
-                counts.get("interaction_cells", 0),
-                counts.get("applies_true", 0),
-                counts.get("anchored_rows", 0),
-                counts.get("ledger_rows", 0),
-                counts.get("mode_candidates", 0),
-                counts.get("baseline_status"),
-                finish_reason or "-",
-            )
+            "[GT_PLAN_SUMMARY] "
+            f"status={counts.get('status')} "
+            f"rows={counts.get('plan_rows', 0)} "
+            f"derived={counts.get('derived_rows', 0)} "
+            f"interactions={counts.get('interaction_cells', 0)} "
+            f"applies={counts.get('applies_true', 0)} "
+            f"anchored={counts.get('anchored_rows', 0)}/{counts.get('ledger_rows', 0)} "
+            f"modes={counts.get('mode_candidates', 0)} "
+            f"baseline={counts.get('baseline_status')} "
+            f"finish_reason={finish_reason or '-'}"
         ]
         for row in list(getattr(plan, "rows", ()))[:40]:
             proof = row.verification_command or row.verification_kind or "-"
