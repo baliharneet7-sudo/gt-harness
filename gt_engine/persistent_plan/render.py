@@ -42,9 +42,12 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
         "Plan built before the first edit, from the task statement and a "
         "verified code graph. It is advisory: inspect anything, disagree with "
         "anything, and follow your own evidence. It is not a boundary.",
-        "",
-        "REQUIREMENTS - every one needs evidence before this task is complete:",
     ]
+    if plan.understanding:
+        head.extend(["", "WHAT THIS TASK MEANS HERE:", f"  {plan.understanding}"])
+    head.extend(
+        ["", "REQUIREMENTS - every one needs evidence before this task is complete:"]
+    )
     body: list[str] = []
     ordered = list(plan.edit_order) or [row.row_id for row in plan.rows]
     rendered: set[str] = set()
@@ -54,6 +57,8 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
             continue
         rendered.add(row_id)
         body.append(f"  {row.row_id}: {row.text}")
+        if row.approach:
+            body.append(f"      change: {row.approach}")
         if row.anchors:
             anchors = _anchor_labels(plan, row.anchors)
             if anchors:
@@ -68,6 +73,8 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
         rendered.add(row.row_id)
         origin = f" [from {row.derived_from} under {row.mode_symbol}.{row.mode_member}]" if row.is_derived else ""
         body.append(f"  {row.row_id}: {row.text}{origin}")
+        if row.approach:
+            body.append(f"      change: {row.approach}")
         if row.verification_command:
             body.append(f"      prove with: {row.verification_command}")
 

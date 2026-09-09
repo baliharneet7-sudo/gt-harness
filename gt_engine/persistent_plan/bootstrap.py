@@ -55,23 +55,35 @@ PLANNING_SYSTEM_PROMPT = (
     "graph, the callers of those definitions, the configuration modes and enums "
     "already present near them, and the repository's current test result.\n"
     "\n"
+    "All of that is already established, and it is given to you so that you do "
+    "not have to rediscover it. You are being asked what it MEANS: read the "
+    "task against this repository and say what has to change for it to be "
+    "satisfied.\n"
+    "\n"
     "Produce a plan by calling the write_persistent_plan tool exactly once.\n"
     "\n"
     "Rules:\n"
     "1. Cite only ids that appear in the input. Never invent a node id, a row "
     "id, a mode symbol or a member name. If something is not in the input, say "
     "so in abstentions instead.\n"
-    "2. For every requirement row, give the anchors it will touch and the "
-    "command that would demonstrate it. A requirement with no way to check it "
-    "is a comment, not a requirement.\n"
-    "3. Work through the interaction matrix honestly. For each requirement and "
+    "2. Start with understanding: two to five sentences on what this task is "
+    "actually asking for in terms of the code above -- which pieces already "
+    "exist, what is missing, and how the missing part has to fit the shape of "
+    "what is there. Not a restatement of the task.\n"
+    "3. For every requirement row, say in one or two sentences what must change "
+    "for it to hold, naming the definitions it touches. That is the plan; the "
+    "anchors and the check are only how it is located and proven.\n"
+    "4. Give the anchors a row touches and the command that would demonstrate "
+    "it. A requirement with no way to check it is a comment, not a "
+    "requirement.\n"
+    "5. Work through the interaction matrix honestly. For each requirement and "
     "each mode member offered, decide whether the requirement has to behave "
     "differently under that member. Most cells will not apply; say why in one "
     "short clause. The cells that DO apply are the behaviours a reader of the "
     "task statement alone would never enumerate.\n"
-    "4. When an interaction applies and needs its own proof, add a derived row "
+    "6. When an interaction applies and needs its own proof, add a derived row "
     "stating the required behaviour under that specific member.\n"
-    "5. Do not write implementation code, and do not restate the task. Plan "
+    "7. Do not write implementation code, and do not restate the task. Plan "
     "only what must be true when the work is finished.\n"
 )
 
@@ -90,6 +102,14 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "understanding": {
+                        "type": "string",
+                        "description": (
+                            "Two to five sentences: what this task asks for in "
+                            "terms of the code above, what already exists, and "
+                            "what is missing."
+                        ),
+                    },
                     "rows": {
                         "type": "array",
                         "description": "One entry per requirement row you can anchor.",
@@ -97,6 +117,14 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
                             "type": "object",
                             "properties": {
                                 "row_id": {"type": "string", "enum": row_ids},
+                                "approach": {
+                                    "type": "string",
+                                    "description": (
+                                        "One or two sentences: what must change "
+                                        "for this requirement to hold, naming "
+                                        "the definitions it touches."
+                                    ),
+                                },
                                 "anchors": {
                                     "type": "array",
                                     "items": {"type": "integer"},
@@ -114,7 +142,7 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
                                     ),
                                 },
                             },
-                            "required": ["row_id"],
+                            "required": ["row_id", "approach"],
                         },
                     },
                     "interactions": {
@@ -171,7 +199,7 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
                         },
                     },
                 },
-                "required": ["rows"],
+                "required": ["understanding", "rows"],
             },
         },
     }
@@ -325,6 +353,7 @@ def validate_plan(
             PlanRow(
                 row_id=row_id,
                 text=ledger_row.text,
+                approach=str(item.get("approach") or "").strip()[:400],
                 anchors=tuple(dict.fromkeys(anchors)),
                 verification_kind=kind,
                 verification_command=command,
@@ -391,6 +420,7 @@ def validate_plan(
             PlanRow(
                 row_id=f"drv-{digest}",
                 text=text,
+                approach=str(item.get("approach") or "").strip()[:400],
                 anchors=(),
                 verification_kind=str(item.get("verification_kind") or "") or "new_test",
                 verification_command=command,
@@ -454,6 +484,11 @@ def build_plan(payload: Any, inputs: PlanInputs, note: str = "") -> PersistentPl
         edit_order=order,
         abstentions=combined,
         origin="enriched",
+        understanding=(
+            str((payload or {}).get("understanding") or "").strip()[:1200]
+            if isinstance(payload, dict)
+            else ""
+        ),
     )
     plan.process_id = hashlib.sha256(
         plan.canonical_json().encode("utf-8", "surrogatepass")
@@ -480,6 +515,7 @@ def _merge_rows(
         by_id[row.row_id] = PlanRow(
             row_id=current.row_id,
             text=current.text,
+            approach=row.approach or current.approach,
             anchors=row.anchors or current.anchors,
             verification_kind=row.verification_kind or current.verification_kind,
             verification_command=(

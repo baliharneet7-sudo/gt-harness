@@ -116,6 +116,10 @@ class PlanRow:
     row_id: str
     text: str
     anchors: tuple[int, ...] = ()
+    # What must actually change for this requirement to hold, in terms of the
+    # code the anchors name. Without it a plan is an index of requirements, not
+    # a plan: it says where to look and how to check, but never what is meant.
+    approach: str = ""
     verification_kind: str = ""
     verification_command: str = ""
     derived_from: str = ""
@@ -131,6 +135,7 @@ class PlanRow:
             "row_id": self.row_id,
             "text": self.text,
             "anchors": list(self.anchors),
+            "approach": self.approach,
             "verification_kind": self.verification_kind,
             "verification_command": self.verification_command,
             "derived_from": self.derived_from,
@@ -166,6 +171,9 @@ class PersistentPlan:
     status: str
     inputs: PlanInputs
     rows: tuple[PlanRow, ...] = ()
+    # The model's reading of what the task asks for, in terms of this
+    # repository. The deterministic half cannot produce this and does not try.
+    understanding: str = ""
     interactions: tuple[InteractionCell, ...] = ()
     edit_order: tuple[str, ...] = ()
     abstentions: tuple[tuple[str, str], ...] = ()
@@ -203,6 +211,8 @@ class PersistentPlan:
                 ),
                 "plan_abstentions": len(self.abstentions),
                 "origin": self.origin,
+                "has_understanding": bool(self.understanding),
+                "rows_with_approach": sum(1 for row in self.rows if row.approach),
                 "process_id": self.process_id,
             }
         )
@@ -213,6 +223,7 @@ class PersistentPlan:
             "schema": PLAN_SCHEMA,
             "status": self.status,
             "origin": self.origin,
+            "understanding": self.understanding,
             "process_id": self.process_id,
             "source_revision": self.inputs.source_revision,
             "graph_revision": self.inputs.graph_revision,

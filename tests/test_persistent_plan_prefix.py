@@ -235,3 +235,28 @@ def test_the_plan_summary_never_raises_on_a_broken_plan(capsys):
 
     _print_plan_summary(Broken(), "stop")
     assert capsys.readouterr().out == ""
+
+
+def test_the_block_carries_the_understanding_and_the_per_row_change():
+    """A plan says what is meant and what changes, not only where to look."""
+    from dataclasses import replace as _replace
+
+    plan = _plan()
+    plan.understanding = (
+        "The container already resolves singletons eagerly; what is missing is "
+        "an async initialisation pass that runs before resolution."
+    )
+    plan.rows = (
+        _replace(plan.rows[0], approach="Add an initializer hook to the resolver."),
+        plan.rows[1],
+    )
+    block = render_plan_block(plan)
+    assert "WHAT THIS TASK MEANS HERE:" in block
+    assert "async initialisation pass" in block
+    assert "change: Add an initializer hook to the resolver." in block
+
+
+def test_a_plan_without_understanding_omits_the_section():
+    block = render_plan_block(_plan())
+    assert "WHAT THIS TASK MEANS HERE:" not in block
+    assert "change:" not in block
