@@ -110,3 +110,5 @@ def test_live_lite_workflow_keeps_verifier_errors_out_of_reward_zero() -> None:
     assert "expected_tasks_json: ${{ needs.prepare.outputs.task_ids }}" in workflow
     assert "Passed (official reward 1)" in monitor
     assert "Successful task jobs" not in monitor
+    assert "task image(s) were not available before inference" in workflow
+    assert "harness will attempt to build them" not in workflow
