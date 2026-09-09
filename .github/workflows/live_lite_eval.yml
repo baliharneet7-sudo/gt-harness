@@ -20,6 +20,10 @@ on:
         description: "Max concurrent eval jobs"
         required: true
         default: "6"
+      image_owner:
+        description: "GHCR owner containing the verified Live Lite task-image cache"
+        required: true
+        default: "hbali-stack"
   workflow_call:
     inputs:
       run_id:
@@ -37,6 +41,10 @@ on:
         type: string
         required: false
         default: "6"
+      image_owner:
+        type: string
+        required: false
+        default: "hbali-stack"
 
 jobs:
   # ── Phase 1: Split predictions into eval batches ────────────────────
@@ -146,7 +154,7 @@ jobs:
           df -h /
           df -h / > /tmp/disk_report.txt
 
-          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          GHCR_PREFIX="ghcr.io/${{ inputs.image_owner }}"
           BATCH_FILE="/tmp/eval/eval_batch_${{ matrix.batch_id }}.jsonl"
 
           if [ ! -f "$BATCH_FILE" ]; then
