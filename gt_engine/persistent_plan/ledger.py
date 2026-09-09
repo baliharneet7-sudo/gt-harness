@@ -44,7 +44,12 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
 # suite pins that. Merging ACROSS lines is what produced the awilix miss and is
 # never done. A period with no following space (result.metrics.database.level)
 # is not a boundary.
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`\"'(])")
+# Any sentence boundary, not only one followed by a capital. Measured: a real
+# prompt continued with "--clear-cache is no-op..." and "cache_expiration...",
+# so a capital-letter lookahead swallowed two requirements into the sentence
+# before them. A period with no following whitespace (1.5, result.metrics) is
+# still not a boundary.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=\S)")
 # An enumerated list packed into ONE line. Measured on a real prompt: eight
 # method requirements, six CLI subcommands and five web endpoints arrived as
 # three lines, so a line-level ledger tracked three things instead of
