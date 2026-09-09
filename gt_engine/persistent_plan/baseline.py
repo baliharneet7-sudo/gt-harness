@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -216,6 +217,24 @@ def run_baseline(
             confidence=confidence, duration_seconds=elapsed,
             restored_paths=restored,
             detail=f"suite exceeded {budget_seconds:.0f}s",
+        )
+    except FileNotFoundError:
+        # The discovered command names a runner the container does not have.
+        # Measured: a repository whose only signal was a tox.ini resolved to
+        # `tox`, which was not installed, so the baseline died and every row
+        # that had no covering test silently lost its check as well. A
+        # low-confidence guess that cannot even spawn is worth one retry
+        # through this interpreter before giving up.
+        fallback = (sys.executable, "-m", "pytest")
+        if tuple(command) != fallback and basis != "interpreter_fallback":
+            return run_baseline(
+                repo_root, budget_seconds=budget_seconds, command=fallback,
+                basis="interpreter_fallback", confidence="low",
+            )
+        return BaselineResult(
+            status="spawn_failed", command=tuple(command), basis=basis,
+            confidence=confidence, detail="FileNotFoundError",
+            duration_seconds=time.monotonic() - started,
         )
     except Exception as exc:  # noqa: BLE001 - a probe fault is correct-or-quiet
         return BaselineResult(

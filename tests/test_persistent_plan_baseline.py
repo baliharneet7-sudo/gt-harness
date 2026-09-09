@@ -186,3 +186,34 @@ def test_an_unparseable_recheck_is_unknown_not_a_block(repo, monkeypatch):
     report = compare_to_baseline(baseline, str(repo), budget_seconds=10)
     assert report.status == "unknown"
     assert not report.regressed
+
+
+def test_a_runner_the_container_lacks_falls_back_to_this_interpreter(repo):
+    """A low-confidence guess that cannot spawn must not cost the baseline.
+
+    Measured in production: a repo whose only signal was a tox.ini resolved to
+    `tox`, which was absent, so the baseline died with FileNotFoundError. That
+    emptied the test command, and every requirement without a covering test
+    silently lost its check too.
+    """
+    result = run_baseline(
+        str(repo), budget_seconds=120,
+        command=("definitely-not-installed-runner",),
+        basis="extension_fallback", confidence="low",
+    )
+    assert result.captured, result.as_dict()
+    assert result.basis == "interpreter_fallback"
+    assert result.passed == 2
+    assert result.failed == 1
+
+
+def test_the_fallback_is_attempted_only_once(tmp_path):
+    root = tmp_path / "empty"
+    root.mkdir()
+    result = run_baseline(
+        str(root), budget_seconds=30, command=("definitely-not-installed",),
+        basis="extension_fallback", confidence="low",
+    )
+    # pytest runs, finds no tests, so this is a parse result rather than a
+    # second spawn failure; either way it must terminate rather than recurse.
+    assert result.status in {"no_tests_observed", "spawn_failed", "captured"}

@@ -73,9 +73,13 @@ PLANNING_SYSTEM_PROMPT = (
     "3. For every requirement row, say in one or two sentences what must change "
     "for it to hold, naming the definitions it touches. That is the plan; the "
     "anchors and the check are only how it is located and proven.\n"
-    "4. Give the anchors a row touches and the command that would demonstrate "
-    "it. A requirement with no way to check it is a comment, not a "
-    "requirement.\n"
+    "4. Give the anchors a row touches and a CONCRETE command that "
+    "demonstrates it. Where the task states observable behaviour -- a flag, an "
+    "exit code, a line of output, a field in JSON -- the check is that "
+    "behaviour, run directly and grepped for the exact string the task names. "
+    "A whole-suite command proves a requirement only if the suite covers it. "
+    "If a row genuinely cannot be checked, set no_check_reason rather than "
+    "inventing a command: an unprovable requirement has to be visible as one.\n"
     "5. Work through the interaction matrix honestly. For each requirement and "
     "each mode member offered, decide whether the requirement has to behave "
     "differently under that member. Most cells will not apply; say why in one "
@@ -137,8 +141,18 @@ def plan_tool_schema(inputs: PlanInputs) -> dict:
                                 "verification_command": {
                                     "type": "string",
                                     "description": (
-                                        "Repository-relative command that would "
-                                        "demonstrate this row."
+                                        "Repository-relative command that "
+                                        "demonstrates this row. For observable "
+                                        "behaviour, run it and grep for the "
+                                        "exact string the task names."
+                                    ),
+                                },
+                                "no_check_reason": {
+                                    "type": "string",
+                                    "description": (
+                                        "Only when this row genuinely cannot "
+                                        "be checked. Never a substitute for "
+                                        "thinking of one."
                                     ),
                                 },
                             },
@@ -349,6 +363,11 @@ def validate_plan(
             if not admissible:
                 abstentions.append((row_id, f"verification_command_{reason}"))
                 command = ""
+        if not command:
+            # An unprovable requirement must be visible as one. Measured: 14 of
+            # 25 rows came back with no command at all and nothing said so.
+            stated = str(item.get("no_check_reason") or "").strip()[:120]
+            abstentions.append((row_id, f"no_check:{stated or 'unstated'}"))
         rows.append(
             PlanRow(
                 row_id=row_id,

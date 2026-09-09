@@ -474,3 +474,33 @@ def test_exactly_one_planning_call_is_ever_made():
         and node.func.id == "build_plan"
     ]
     assert len(calls) == 1, "the plan is built from exactly one response"
+
+
+def test_a_row_with_no_check_is_recorded_as_unprovable(inputs):
+    """14 of 25 rows came back with no command and nothing said so."""
+    row_id = _row_id(inputs, "build_container")
+    _rows, _cells, _order, abstentions = validate_plan(
+        {"rows": [{"row_id": row_id, "approach": "x"}]}, inputs
+    )
+    assert any(reason.startswith("no_check:") for _t, reason in abstentions)
+
+
+def test_a_stated_reason_for_no_check_is_kept(inputs):
+    row_id = _row_id(inputs, "build_container")
+    _rows, _cells, _order, abstentions = validate_plan(
+        {"rows": [{"row_id": row_id, "approach": "x",
+                   "no_check_reason": "behaviour is only observable in CI"}]},
+        inputs,
+    )
+    assert any(
+        reason == "no_check:behaviour is only observable in CI"
+        for _t, reason in abstentions
+    )
+
+
+def test_the_prompt_demands_a_concrete_check():
+    from gt_engine.persistent_plan.bootstrap import PLANNING_SYSTEM_PROMPT
+
+    assert "CONCRETE command" in PLANNING_SYSTEM_PROMPT
+    assert "grepped for the exact string" in PLANNING_SYSTEM_PROMPT
+    assert "no_check_reason" in PLANNING_SYSTEM_PROMPT
