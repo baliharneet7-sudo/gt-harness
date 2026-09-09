@@ -49,6 +49,10 @@ on:
         description: "Explicit comma-separated instance IDs (overrides mode; for targeted re-runs)"
         required: false
         default: ""
+      image_owner:
+        description: "GHCR owner containing the verified Live Lite task-image cache"
+        required: true
+        default: "hbali-stack"
   workflow_call:
     inputs:
       mode:
@@ -88,6 +92,10 @@ on:
       task_ids:
         type: string
         required: false
+      image_owner:
+        type: string
+        required: false
+        default: "hbali-stack"
         default: ""
 
 permissions:
@@ -238,7 +246,7 @@ jobs:
           df -h /
           df -h / > /tmp/disk_report.txt
 
-          GHCR_PREFIX="ghcr.io/${{ github.repository_owner }}"
+          GHCR_PREFIX="ghcr.io/${{ inputs.image_owner }}"
 
           pull_with_retry() {
             local IMG="$1" RETRIES=3 DELAY=5

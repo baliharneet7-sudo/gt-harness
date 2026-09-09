@@ -59,6 +59,10 @@ on:
         description: "Explicit comma-separated instance IDs (overrides mode; for targeted re-runs)"
         required: false
         default: ""
+      image_owner:
+        description: "GHCR owner containing the verified Live Lite task-image cache"
+        required: true
+        default: "hbali-stack"
 
 jobs:
   # Inference + per-shard eval + merge + eval aggregation
@@ -75,6 +79,7 @@ jobs:
       dry_run: false
       baseline: ${{ inputs.baseline }}
       task_ids: ${{ inputs.task_ids }}
+      image_owner: ${{ inputs.image_owner }}
     secrets: inherit
 
   # Bundle consumes predictions-{run_id} + eval-results-{run_id}

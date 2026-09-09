@@ -33,7 +33,7 @@ on:
       image_owner:
         description: "GHCR owner to pull task images from. Images are public, so any account can pull the complete cache."
         required: true
-        default: "harneet2512"
+        default: "hbali-stack"
       mode:
         description: "Run mode: smoke (5 tasks), pilot (20), pilot100 (100), full (300)"
         required: true
