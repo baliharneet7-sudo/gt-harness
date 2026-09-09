@@ -185,3 +185,20 @@ def test_the_render_module_exposes_no_progress_renderer():
     import gt_engine.persistent_plan.render as render
 
     assert not hasattr(render, "render_progress_lines")
+
+
+def test_a_lexical_anchor_is_marked_as_a_guess():
+    """A text match against prose must not read like a resolved symbol."""
+    from dataclasses import replace as _replace
+
+    plan = _plan()
+    weak = _replace(_anchor(node_id=1, name="load"), basis="lexical")
+    plan.inputs.anchors.anchors[plan.rows[0].row_id] = (weak,)
+    block = render_plan_block(plan)
+    assert "name guess, unconfirmed" in block
+
+
+def test_an_exact_anchor_carries_no_caveat():
+    block = render_plan_block(_plan())
+    assert "load @ src/loader.py:12" in block
+    assert "name guess" not in block

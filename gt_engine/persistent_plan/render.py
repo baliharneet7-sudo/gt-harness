@@ -128,6 +128,15 @@ def render_plan_block(plan: PersistentPlan, *, limit: int = MAX_BLOCK_CHARS) -> 
 
 
 def _anchor_labels(plan: PersistentPlan, node_ids: tuple[int, ...]) -> str:
+    """Name each anchor, and say which ones are only a lexical guess.
+
+    An exact-name anchor is the identifier the prompt wrote resolved in the
+    graph. A lexical anchor is a text match against prose that named no symbol,
+    and it is routinely wrong -- on a real graph a line about a default value
+    matched an unrelated ``default`` in a webhook module. Rendering both the
+    same way would make a guess read like a fact, which is the exact failure
+    this plan exists to remove.
+    """
     lookup = {
         anchor.node_id: anchor
         for anchors in plan.inputs.anchors.anchors.values()
@@ -136,8 +145,12 @@ def _anchor_labels(plan: PersistentPlan, node_ids: tuple[int, ...]) -> str:
     parts: list[str] = []
     for node_id in node_ids[:4]:
         anchor = lookup.get(node_id)
-        if anchor is not None:
-            parts.append(f"{anchor.name} @ {anchor.file_path}:{anchor.start_line}")
+        if anchor is None:
+            continue
+        label = f"{anchor.name} @ {anchor.file_path}:{anchor.start_line}"
+        if anchor.basis != "exact_name":
+            label += " (name guess, unconfirmed)"
+        parts.append(label)
     return ", ".join(parts)
 
 
