@@ -28,6 +28,7 @@ TASKS_ROOT = Path(_arg("tasks-root", r"D:\gt-harness\.tmp_deepswe\tasks"))
 OUT = Path(_arg("out", str(Path(__file__).parent / "results.jsonl")))
 REPO_CACHE = Path(_arg("repos", str(Path(__file__).parent / "repos")))
 ONLY_TASK = _arg("task", "")
+ONLY_MODEL = _arg("model", "")
 
 TASKS = [
     "abs-module-cache-flags",
@@ -156,9 +157,15 @@ def main() -> None:
     from sentence_transformers import SentenceTransformer
 
     print("loading models...", flush=True)
-    arctic = SentenceTransformer("Snowflake/snowflake-arctic-embed-m", device="cpu")
-    codet5p = CodeT5pEncoder()
-    models = {"arctic_m": arctic, "codet5p_110m": codet5p}
+    builders = {
+        "arctic_m": lambda: SentenceTransformer(
+            "Snowflake/snowflake-arctic-embed-m", device="cpu"),
+        "codet5p_110m": CodeT5pEncoder,
+        "qodo_1_5b": lambda: SentenceTransformer(
+            "Qodo/Qodo-Embed-1-1.5B", device="cpu", trust_remote_code=True),
+    }
+    names = [ONLY_MODEL] if ONLY_MODEL else list(builders)
+    models = {n: builders[n]() for n in names}
 
     REPO_CACHE.mkdir(parents=True, exist_ok=True)
     task_list = [ONLY_TASK] if ONLY_TASK else TASKS

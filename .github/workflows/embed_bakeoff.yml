@@ -27,6 +27,8 @@ jobs:
           - awilix-async-container-initialization
           - katex-multicolumn-array-spans
           - fd-deterministic-multi-key-sorting
+        model:
+          - qodo_1_5b
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -41,17 +43,18 @@ jobs:
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1
           pip install sentence-transformers==5.1.2 transformers==4.57.1 numpy
-      - name: Run bakeoff for ${{ matrix.task }}
+      - name: Run bakeoff for ${{ matrix.task }} / ${{ matrix.model }}
         run: |
           python scripts/embed_bakeoff.py \
             --task "${{ matrix.task }}" \
+            --model "${{ matrix.model }}" \
             --tasks-root deepswe-bench/tasks \
-            --out results-${{ matrix.task }}.jsonl \
+            --out results-${{ matrix.task }}-${{ matrix.model }}.jsonl \
             --repos repos
       - uses: actions/upload-artifact@v4
         with:
-          name: bakeoff-${{ matrix.task }}
-          path: results-${{ matrix.task }}.jsonl
+          name: bakeoff-${{ matrix.task }}-${{ matrix.model }}
+          path: results-${{ matrix.task }}-${{ matrix.model }}.jsonl
           if-no-files-found: warn
           retention-days: 14
 
@@ -69,8 +72,9 @@ jobs:
         run: |
           cat results-*.jsonl > results-merged.jsonl 2>/dev/null || true
           python - <<'EOF'
-          import json, sys
-          rows = {}
+          import json
+          META = {"task", "files", "chunks", "gold"}
+          tasks, models = {}, set()
           for line in open("results-merged.jsonl"):
               line = line.strip()
               if not line:
@@ -79,20 +83,24 @@ jobs:
                   r = json.loads(line)
               except json.JSONDecodeError:
                   continue
-              if "arctic_m" in r and "codet5p_110m" in r:
-                  rows[r["task"]] = r
+              row = tasks.setdefault(r["task"], dict(r))
+              for k in r:
+                  if k not in META:
+                      row[k] = r[k]
+                      models.add(k)
           agg = {}
-          for m in ("arctic_m", "codet5p_110m"):
+          for m in sorted(models):
+              rows = [t[m] for t in tasks.values() if m in t]
               for k in ("recall@10", "recall@20", "recall@50"):
                   agg[f"{m} {k}"] = round(
-                      sum(r[m][k] for r in rows.values()) / max(1, len(rows)), 4)
+                      sum(r[k] for r in rows) / max(1, len(rows)), 4)
               agg[f"{m} ms/chunk"] = round(
-                  sum(r[m]["ms_per_chunk"] for r in rows.values()) / max(1, len(rows)), 1)
-          print(json.dumps({"tasks": len(rows), "aggregate": agg}, indent=2))
-          for t, r in sorted(rows.items()):
-              print(f"{t}: files={r['files']} gold={r['gold']} "
-                    f"arctic r@20={r['arctic_m']['recall@20']:.2f} "
-                    f"codet5p r@20={r['codet5p_110m']['recall@20']:.2f}")
+                  sum(r["ms_per_chunk"] for r in rows) / max(1, len(rows)), 1)
+          print(json.dumps({"tasks": len(tasks), "aggregate": agg}, indent=2))
+          for t, r in sorted(tasks.items()):
+              bits = "  ".join(
+                  f"{m} r@20={r[m]['recall@20']:.2f}" for m in sorted(models) if m in r)
+              print(f"{t}: files={r['files']} gold={r['gold']} {bits}")
           EOF
       - uses: actions/upload-artifact@v4
         with:
