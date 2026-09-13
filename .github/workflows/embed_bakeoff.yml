@@ -28,7 +28,9 @@ jobs:
           - katex-multicolumn-array-spans
           - fd-deterministic-multi-key-sorting
         model:
-          - qodo_1_5b
+          - unixcoder_125m
+          - codesage_small_v2
+          - st_codesearch_82m
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4

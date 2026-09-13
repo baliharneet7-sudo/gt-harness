@@ -154,6 +154,29 @@ class QodoEncoder:
         return out / np.clip(np.linalg.norm(out, axis=1, keepdims=True), 1e-12, None)
 
 
+class UniXcoderEncoder:
+    """microsoft/unixcoder-base-nine — RoBERTa; recipe: first-token (<s>) pooling."""
+
+    def __init__(self):
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+        self._torch = torch
+        self._tok = AutoTokenizer.from_pretrained("microsoft/unixcoder-base-nine")
+        self._model = AutoModel.from_pretrained("microsoft/unixcoder-base-nine").eval()
+
+    def encode(self, texts, batch_size=64, **_kw):
+        torch = self._torch
+        vecs = []
+        for i in range(0, len(texts), batch_size):
+            inp = self._tok(texts[i:i + batch_size], return_tensors="pt",
+                            truncation=True, max_length=512, padding=True)
+            with torch.no_grad():
+                out = self._model(**inp).last_hidden_state[:, 0, :]
+            vecs.append(out.cpu().numpy())
+        out = np.concatenate(vecs)
+        return out / np.clip(np.linalg.norm(out, axis=1, keepdims=True), 1e-12, None)
+
+
 class CodeT5pEncoder:
     """codet5p-110m-embedding returns [B, 256] embeddings directly."""
 
@@ -187,6 +210,12 @@ def main() -> None:
             "Snowflake/snowflake-arctic-embed-m", device="cpu"),
         "codet5p_110m": CodeT5pEncoder,
         "qodo_1_5b": QodoEncoder,
+        "unixcoder_125m": UniXcoderEncoder,
+        "codesage_small_v2": lambda: SentenceTransformer(
+            "codesage/codesage-small-v2", device="cpu", trust_remote_code=True),
+        "st_codesearch_82m": lambda: SentenceTransformer(
+            "flax-sentence-embeddings/st-codesearch-distilroberta-base",
+            device="cpu"),
     }
     names = [ONLY_MODEL] if ONLY_MODEL else list(builders)
     models = {n: builders[n]() for n in names}
