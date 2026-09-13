@@ -1,0 +1,102 @@
+name: "Embed bakeoff: dense retriever comparison"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [embed-bakeoff]
+
+permissions:
+  contents: read
+
+jobs:
+  bakeoff:
+    name: "bakeoff / ${{ matrix.task }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - abs-module-cache-flags
+          - adaptix-name-mapping-aliases
+          - arktype-json-schema-refs-dependencies
+          - csstree-shorthand-expansion-compression
+          - boa-hierarchical-evaluation-cancellation
+          - abs-stepped-slices
+          - aiomonitor-task-snapshots-diff
+          - awilix-async-container-initialization
+          - katex-multicolumn-array-spans
+          - fd-deterministic-multi-key-sorting
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: datacurve-ai/deep-swe
+          ref: 435ee89ec2f2e2289f33b0da4f992f0b7b7266b9
+          path: deepswe-bench
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install embedders
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1
+          pip install sentence-transformers==5.1.2 transformers==4.57.1 numpy
+      - name: Run bakeoff for ${{ matrix.task }}
+        run: |
+          python scripts/embed_bakeoff.py \
+            --task "${{ matrix.task }}" \
+            --tasks-root deepswe-bench/tasks \
+            --out results-${{ matrix.task }}.jsonl \
+            --repos repos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bakeoff-${{ matrix.task }}
+          path: results-${{ matrix.task }}.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+
+  collect:
+    name: "merge + summarize"
+    needs: bakeoff
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bakeoff-*
+          merge-multiple: true
+      - name: Merge results
+        run: |
+          cat results-*.jsonl > results-merged.jsonl 2>/dev/null || true
+          python - <<'EOF'
+          import json, sys
+          rows = {}
+          for line in open("results-merged.jsonl"):
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  r = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if "arctic_m" in r and "codet5p_110m" in r:
+                  rows[r["task"]] = r
+          agg = {}
+          for m in ("arctic_m", "codet5p_110m"):
+              for k in ("recall@10", "recall@20", "recall@50"):
+                  agg[f"{m} {k}"] = round(
+                      sum(r[m][k] for r in rows.values()) / max(1, len(rows)), 4)
+              agg[f"{m} ms/chunk"] = round(
+                  sum(r[m]["ms_per_chunk"] for r in rows.values()) / max(1, len(rows)), 1)
+          print(json.dumps({"tasks": len(rows), "aggregate": agg}, indent=2))
+          for t, r in sorted(rows.items()):
+              print(f"{t}: files={r['files']} gold={r['gold']} "
+                    f"arctic r@20={r['arctic_m']['recall@20']:.2f} "
+                    f"codet5p r@20={r['codet5p_110m']['recall@20']:.2f}")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bakeoff-merged
+          path: results-merged.jsonl
+          if-no-files-found: warn
+          retention-days: 30
