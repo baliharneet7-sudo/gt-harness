@@ -177,6 +177,24 @@ class UniXcoderEncoder:
         return out / np.clip(np.linalg.norm(out, axis=1, keepdims=True), 1e-12, None)
 
 
+class CodeSageEncoder:
+    """codesage-small-v2 remote code needs Conv1D, moved in newer transformers."""
+
+    def __init__(self):
+        import transformers.modeling_utils as mu
+        from transformers.pytorch_utils import Conv1D
+        if not hasattr(mu, "Conv1D"):
+            mu.Conv1D = Conv1D
+        from sentence_transformers import SentenceTransformer
+        self._st = SentenceTransformer(
+            "codesage/codesage-small-v2", device="cpu", trust_remote_code=True)
+
+    def encode(self, texts, batch_size=64, **_kw):
+        return np.asarray(self._st.encode(
+            list(texts), batch_size=batch_size, show_progress_bar=False,
+            convert_to_numpy=True, normalize_embeddings=True), dtype=np.float32)
+
+
 class CodeT5pEncoder:
     """codet5p-110m-embedding returns [B, 256] embeddings directly."""
 
@@ -211,8 +229,7 @@ def main() -> None:
         "codet5p_110m": CodeT5pEncoder,
         "qodo_1_5b": QodoEncoder,
         "unixcoder_125m": UniXcoderEncoder,
-        "codesage_small_v2": lambda: SentenceTransformer(
-            "codesage/codesage-small-v2", device="cpu", trust_remote_code=True),
+        "codesage_small_v2": CodeSageEncoder,
         "st_codesearch_82m": lambda: SentenceTransformer(
             "flax-sentence-embeddings/st-codesearch-distilroberta-base",
             device="cpu"),
