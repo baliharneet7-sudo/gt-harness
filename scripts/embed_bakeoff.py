@@ -129,6 +129,31 @@ def embed(model, texts, is_query, batch=64):
     return np.asarray(vecs, dtype=np.float32), (time.time() - t0) / max(1, len(texts))
 
 
+class QodoEncoder:
+    """Qodo-Embed-1-1.5B loaded as native Qwen2 (no remote code) + last-token pool."""
+
+    def __init__(self):
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+        self._torch = torch
+        self._tok = AutoTokenizer.from_pretrained("Qodo/Qodo-Embed-1-1.5B")
+        self._model = AutoModel.from_pretrained(
+            "Qodo/Qodo-Embed-1-1.5B", trust_remote_code=False).eval()
+
+    def encode(self, texts, batch_size=32, **_kw):
+        torch = self._torch
+        vecs = []
+        for i in range(0, len(texts), batch_size):
+            inp = self._tok(texts[i:i + batch_size], return_tensors="pt",
+                            truncation=True, max_length=512, padding=True)
+            with torch.no_grad():
+                out = self._model(**inp).last_hidden_state
+            idx = inp["attention_mask"].sum(1) - 1
+            vecs.append(out[torch.arange(out.size(0)), idx].cpu().numpy())
+        out = np.concatenate(vecs)
+        return out / np.clip(np.linalg.norm(out, axis=1, keepdims=True), 1e-12, None)
+
+
 class CodeT5pEncoder:
     """codet5p-110m-embedding returns [B, 256] embeddings directly."""
 
@@ -161,8 +186,7 @@ def main() -> None:
         "arctic_m": lambda: SentenceTransformer(
             "Snowflake/snowflake-arctic-embed-m", device="cpu"),
         "codet5p_110m": CodeT5pEncoder,
-        "qodo_1_5b": lambda: SentenceTransformer(
-            "Qodo/Qodo-Embed-1-1.5B", device="cpu", trust_remote_code=True),
+        "qodo_1_5b": QodoEncoder,
     }
     names = [ONLY_MODEL] if ONLY_MODEL else list(builders)
     models = {n: builders[n]() for n in names}
