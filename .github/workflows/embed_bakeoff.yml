@@ -42,7 +42,12 @@ jobs:
       - name: Install embedders
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.9.1
-          pip install sentence-transformers==5.1.2 transformers==4.57.1 numpy
+          if [ "${{ matrix.model }}" = "qodo_1_5b" ]; then
+            # Qodo's remote modeling_qwen.py needs the pre-4.44 cache API
+            pip install sentence-transformers==3.3.1 transformers==4.43.4 numpy
+          else
+            pip install sentence-transformers==5.1.2 transformers==4.57.1 numpy
+          fi
       - name: Run bakeoff for ${{ matrix.task }} / ${{ matrix.model }}
         run: |
           python scripts/embed_bakeoff.py \
