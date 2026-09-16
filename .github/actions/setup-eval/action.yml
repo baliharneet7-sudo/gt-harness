@@ -37,12 +37,10 @@ runs:
         # If anything under gt-index/**.go changes, invalidate the Python
         # cache so any installed groundtruth import paths that reference the
         # new schema are not served from a stale wheel.
-        # M5: also hash patches/oh054/** + src/groundtruth/**. The GT-tools
-        # registration patch (apply_gt_tools.py) runs ONLY in the cache-MISS
-        # install branch below; on a cache HIT it never re-applies, so a change
-        # to the patch or to the GT tools it registers would silently never land.
-        # Hashing them busts the cache (→ reinstall → re-patch) when they change.
-        key: eval-env-oh054v2-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go', 'patches/oh054/**', 'src/groundtruth/**') }}
+        # Include the editable package and OpenHands wrapper sources. Changes
+        # to either must invalidate the environment instead of reusing stale
+        # installed code from an earlier benchmark run.
+        key: eval-env-oh054v3-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go', 'src/groundtruth/**', 'scripts/swebench/oh_gt_full_wrapper.py') }}
 
     - name: Install Python packages (skip if cached)
       shell: bash
@@ -61,8 +59,6 @@ runs:
           cd /tmp/OpenHands && python -m pip install -e .
           python -m pip install datasets
           cd $GITHUB_WORKSPACE && python -m pip install -e .
-          # Patch OH to register GT tools as native function-calling tools
-          python $GITHUB_WORKSPACE/patches/oh054/apply_gt_tools.py
           if ! python -c "import swebench" 2>/dev/null; then
             git clone --depth 1 --branch python-only --recursive \
               https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
