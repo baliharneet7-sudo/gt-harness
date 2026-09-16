@@ -214,6 +214,14 @@ jobs:
 
       - uses: ./.github/actions/setup-eval
 
+      - name: Install lossless Live patch capture
+        if: inputs.dry_run != true
+        run: |
+          cp scripts/swebench/openhands_live_utils_chunked.py \
+            /tmp/OpenHands/evaluation/benchmarks/swe_bench/live_utils.py
+          python -m py_compile \
+            /tmp/OpenHands/evaluation/benchmarks/swe_bench/live_utils.py
+
       # ─── Pre-flight GT health check (GT arm only) ──────────────────
       # Cheap, once-per-shard: prove the gt-index binary builds a valid graph +
       # schema BEFORE the paid 300-task run, so a broken binary fails fast (a few
