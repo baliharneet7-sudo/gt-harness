@@ -1698,7 +1698,7 @@ jobs:
               # form). GUARD: single-quoted docker block — NO apostrophe/single-quote anywhere here.
               GT_PY=""
               for _c in python3.12 python3.11 python3 python; do
-                command -v "$_c" >/dev/null 2>&1 && "$_c" -c "import minisweagent" >/dev/null 2>&1 && { GT_PY="$_c"; break; }
+                command -v "$_c" >/dev/null 2>&1 && "$_c" -c "import minisweagent.models.litellm_model" >/dev/null 2>&1 && { GT_PY="$_c"; break; }
               done
               if [ -z "$GT_PY" ]; then
                 for _s in mini-swe-agent mini mini-extra; do
@@ -1710,10 +1710,26 @@ jobs:
                     */env) _rest="${_line#* }"; _cand="${_rest%% *}" ;;
                     *) _cand="$_first" ;;
                   esac
-                  [ -n "$_cand" ] && "$_cand" -c "import minisweagent" >/dev/null 2>&1 && { GT_PY="$_cand"; break; }
+                  [ -n "$_cand" ] && "$_cand" -c "import minisweagent.models.litellm_model" >/dev/null 2>&1 && { GT_PY="$_cand"; break; }
                 done
               fi
-              [ -z "$GT_PY" ] && GT_PY=python
+              # Some task images have a system Pydantic or typing-extensions pair that lets
+              # minisweagent import but crashes while importing the LiteLLM model. Build a
+              # clean runtime only on those contaminated images. The named venv keeps every
+              # model dependency outside the repository Python environment.
+              if [ -z "$GT_PY" ]; then
+                command -v uv >/dev/null 2>&1 || {
+                  curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
+                  export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
+                }
+                uv venv --python 3.11 /opt/gt/miniswe-runtime >/dev/null 2>&1
+                uv pip install --python /opt/gt/miniswe-runtime/bin/python mini-swe-agent==2.4.5 fastapi orjson >/dev/null 2>&1
+                GT_PY=/opt/gt/miniswe-runtime/bin/python
+              fi
+              "$GT_PY" -c "import minisweagent.models.litellm_model" >/dev/null 2>&1 || {
+                echo "FATAL: Mini-SWE LiteLLM runtime is not importable"
+                exit 1
+              }
               export GT_PY
               echo "[GT] headless interpreter GT_PY=$GT_PY exe=$("$GT_PY" -c "import sys;print(sys.executable)" 2>/dev/null)"
               echo "[GT] minisweagent module: $("$GT_PY" -c "import minisweagent;print(minisweagent.__file__)" 2>/dev/null || echo NOT-IMPORTABLE)"
