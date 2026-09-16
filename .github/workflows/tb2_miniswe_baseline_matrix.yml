@@ -27,9 +27,9 @@ on:
         type: string
         default: "20"
       agent_timeout_multiplier:
-        description: "Harbor agent wall-clock multiplier; official TB2 comparator is 1.0"
+        description: "Harbor agent wall-clock multiplier; keeps the 100-call limit unchanged"
         type: string
-        default: "1.0"
+        default: "5.0"
       include:
         description: "Optional comma-separated task names/globs to restrict the pool (default: all tasks)"
         type: string
@@ -235,19 +235,41 @@ jobs:
           TASK: ${{ matrix.task }}
         run: |
           set -uo pipefail
-          JOB_NAME="tb2-miniswe-${GITHUB_RUN_ID}-${TASK}"
-          echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
+          mkdir -p results/attempts infra-retry-audit
+          ATTEMPT=1
+          while [ "$ATTEMPT" -le 3 ]; do
+            ATTEMPT_ROOT="results/attempts/${ATTEMPT}"
+            JOB_NAME="tb2-miniswe-${GITHUB_RUN_ID}-${TASK}-attempt-${ATTEMPT}"
+            echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
 
-          harbor run \
-            -d "$DATASET" \
-            -a eval.miniswe_agent:MiniSweAgent \
-            -m "$MODEL" \
-            -o results/terminal-bench \
-            --job-name "$JOB_NAME" \
-            --agent-timeout-multiplier ${{ inputs.agent_timeout_multiplier }} \
-            -n 1 \
-            -y \
-            -i "$TASK"
+            harbor run \
+              -d "$DATASET" \
+              -a eval.miniswe_agent:MiniSweAgent \
+              -m "$MODEL" \
+              -o "$ATTEMPT_ROOT" \
+              --job-name "$JOB_NAME" \
+              --agent-timeout-multiplier ${{ inputs.agent_timeout_multiplier }} \
+              -n 1 \
+              -y \
+              -i "$TASK"
+            HARBOR_EXIT=$?
+
+            STATUS="infra-retry-audit/attempt-${ATTEMPT}.json"
+            python -m scripts.tb2_attempt_status \
+              --root "$ATTEMPT_ROOT" \
+              --task-id "$TASK" \
+              --output "$STATUS"
+            RETRYABLE=$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["retryable"]).lower())' "$STATUS")
+            echo "attempt=${ATTEMPT} harbor_exit=${HARBOR_EXIT} retryable=${RETRYABLE}"
+
+            if [ "$RETRYABLE" != "true" ] || [ "$ATTEMPT" -eq 3 ]; then
+              mkdir -p results/terminal-bench
+              cp -a "$ATTEMPT_ROOT"/. results/terminal-bench/
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep $((15 * ATTEMPT))
+          done
 
       - name: Disk after run
         if: always()
@@ -267,12 +289,32 @@ jobs:
             chmod -R a+rX results/terminal-bench || true
           fi
 
+      - name: Create official-verifier progress receipt
+        if: always()
+        env:
+          TASK: ${{ matrix.task }}
+        run: |
+          python -m scripts.benchmark_progress emit-harbor \
+            --root results/terminal-bench \
+            --task-id "$TASK" \
+            --output benchmark-progress.json
+
+      - name: Upload official-verifier progress receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-progress-tb2-${{ github.run_id }}-${{ matrix.task }}
+          path: benchmark-progress.json
+          if-no-files-found: error
+
       - name: Upload task result
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tb2-miniswe-${{ github.run_id }}-task-${{ matrix.task }}
-          path: results/terminal-bench/
+          path: |
+            results/terminal-bench/
+            infra-retry-audit/
           if-no-files-found: warn
 
   merge:
@@ -281,9 +323,35 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Download official-verifier progress receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: benchmark-progress-tb2-${{ github.run_id }}-*
+          path: progress
+          merge-multiple: false
+
+      - name: Aggregate official-verifier progress
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
+        run: |
+          python -m scripts.benchmark_progress aggregate \
+            --root progress \
+            --expected-tasks-json "$EXPECTED_TASKS_JSON" \
+            --finalize-missing \
+            --output official-progress.json
+
+      - name: Upload aggregate official-verifier progress
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-progress-${{ github.run_id }}
+          path: official-progress.json
+          if-no-files-found: error
 
       - name: Download all task artifacts
         uses: actions/download-artifact@v4
@@ -387,3 +455,20 @@ jobs:
             merged.json
             SUMMARY.md
           if-no-files-found: warn
+
+      - name: Require an official grade for every planned task
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.plan.outputs.tasks }}
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+
+          expected = json.loads(os.environ["EXPECTED_TASKS_JSON"])
+          receipt = json.load(open("official-progress.json", encoding="utf-8"))
+          tasks = receipt.get("tasks") or []
+          graded = [row for row in tasks if row.get("official_verifier") is True]
+          if len(graded) != len(expected):
+              print(f"::error::official grades incomplete: {len(graded)}/{len(expected)}")
+              sys.exit(1)
+          print(f"official grades complete: {len(graded)}/{len(expected)}")
+          EOF
