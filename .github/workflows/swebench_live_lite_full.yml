@@ -46,6 +46,10 @@ on:
         description: "Concurrent jobs (default 20; lower if runner ceiling below 20)"
         required: true
         default: "20"
+      agent_wall_timeout_seconds:
+        description: "Agent wall clock only; does not change Mini-SWE's 150-step cap. Use 9000 for Union Alpha (5x the 30-minute reference allowance)."
+        required: true
+        default: "5400"
       shadow_rate:
         description: "Deterministic SS shadow-holdout fraction in [0,1]. Exact request is validated and sealed; default 0 withholds nothing."
         required: true
@@ -624,7 +628,9 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     name: "${{ matrix.task }} (${{ matrix.language }})"
-    timeout-minutes: 150
+    # 240 minutes leaves setup, a 150-minute Union Alpha agent window, the
+    # official 30-minute verifier, and enough time to seal/upload evidence.
+    timeout-minutes: 240
     env:
       # Preserve the dispatch token for audit while exposing only the validated canonical
       # value to the deterministic seam. Both values are cross-checked in sealed artifacts.
@@ -653,6 +659,7 @@ jobs:
       # BOTH this and the `-e` forward in the docker run below are required: this alone never
       # crosses the container boundary, and the `-e` alone resolves to its :-0 default.
       GT_ROLE_DRIVEN_COALITION: '1'
+      GT_AGENT_WALL_TIMEOUT_S: ${{ inputs.agent_wall_timeout_seconds }}
     defaults:
       run:
         shell: bash
@@ -1355,8 +1362,8 @@ jobs:
           GT_AGENT_WALL_TIMEOUT_S="${GT_AGENT_WALL_TIMEOUT_S:-5400}"
           GT_RUNNER_HOST_RESERVE_MB="${GT_RUNNER_HOST_RESERVE_MB:-3072}"
           GT_AGENT_SWAP_ALLOWANCE_MB="${GT_AGENT_SWAP_ALLOWANCE_MB:-2048}"
-          GT_AGENT_JOB_TIMEOUT_S=9000
-          GT_AGENT_MIN_UPLOAD_RESERVE_S=1800
+          GT_AGENT_JOB_TIMEOUT_S=14400
+          GT_AGENT_MIN_UPLOAD_RESERVE_S=2400
           _GT_HOST_MEM_MB=$(awk '/MemTotal:/{print int($2/1024); exit}' /proc/meminfo)
           _GT_NOW_EPOCH=$(date +%s)
           if ! [[ "$GT_AGENT_WALL_TIMEOUT_S" =~ ^[0-9]+$ ]] \
@@ -2147,47 +2154,84 @@ jobs:
             fi
           fi
 
-          REWARD=0
+          # Every selected task goes through the official evaluator. An empty patch
+          # remains in the benchmark denominator and is submitted as such.
+          REWARD=""
           if [ -z "$PATCH_FILE" ] || [ ! -s "$PATCH_FILE" ]; then
-            echo "EVAL: no agent patch produced — unresolved (reward 0)" | tee -a trial_output.log
+            PATCH_FILE=/tmp/empty-agent.patch
+            : > "$PATCH_FILE"
+            echo "EVAL: no agent patch produced; submitting an empty patch to the official evaluator" | tee -a trial_output.log
           else
             cp "$PATCH_FILE" trial_results/agent_patch.diff
-            # harness present (baked venv on PATH)? else inline-install ONCE (cache-miss fallback only)
-            if ! python3 -c "import swebench" 2>/dev/null; then
-              echo "swebench absent (venv cache miss) — inline install"
-              git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null || true
-              python3 -m pip install -q /tmp/sbl-src 2>/dev/null || true
-            fi
-            # 1-line predictions.jsonl for this instance
-            MODEL_NAME="${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}"
-            python3 -c "import json,sys; open('/tmp/pred.jsonl','w',encoding='utf-8').write(json.dumps({'instance_id':sys.argv[1],'model_patch':open(sys.argv[2],encoding='utf-8').read(),'model_name_or_path':sys.argv[3]}))" "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME"
-            # WARM IMAGE: tag the agent's pulled image to the harness's expected key so get()-before-pull hits local
-            if [ -n "${LL_TASK_IMAGE:-}" ]; then
-              BN=$(basename "$LL_TASK_IMAGE"); BN="${BN%%:*}"
-              docker tag "$LL_TASK_IMAGE" "starryzhang/${BN}:latest" 2>/dev/null \
-                && echo "warm-image: $LL_TASK_IMAGE -> starryzhang/${BN}:latest (no re-pull)" \
-                || echo "warm-image: tag failed (harness will pull this one image)"
-            fi
-            docker container prune -f >/dev/null 2>&1 || true
-            # OFFICIAL eval — single instance, OFFLINE local dataset, warm image
-            python3 -m swebench.harness.run_evaluation \
-              --dataset_name benchmarks/data/swebench_live_lite.jsonl \
-              --predictions_path /tmp/pred.jsonl \
-              --instance_ids "$TASK_ID" \
-              --namespace starryzhang \
-              --run_id "ll_${TASK_ID}" \
-              --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log || true
-            # parse the harness report.json -> resolved
-            REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1)
-            if [ -n "$REPORT" ]; then
-              REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
-              cp "$REPORT" trial_results/report.json 2>/dev/null || true
-            else
-              echo "EVAL: no report.json produced (harness error) — reward 0" | tee -a trial_output.log
-            fi
-            echo "OFFICIAL_EVAL: ${TASK_ID} resolved=$([ "$REWARD" = "1" ] && echo YES || echo NO) (Reward: ${REWARD}.0)" | tee -a trial_output.log
           fi
 
+          if ! python3 -c "import swebench" 2>/dev/null; then
+            echo "swebench absent (venv cache miss) - inline install"
+            git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/sbl-src 2>/dev/null || true
+            python3 -m pip install -q /tmp/sbl-src 2>/dev/null || true
+          fi
+
+          MODEL_NAME="${{ inputs.baseline == true && format('mini-swe-agent + {0} (baseline)', inputs.model) || format('GroundTruth + mini-swe-agent + {0}', inputs.model) }}"
+          python3 -c "import json,sys; open('/tmp/pred.jsonl','w',encoding='utf-8').write(json.dumps({'instance_id':sys.argv[1],'model_patch':open(sys.argv[2],encoding='utf-8').read(),'model_name_or_path':sys.argv[3]}))" "$TASK_ID" "$PATCH_FILE" "$MODEL_NAME"
+
+          if [ -n "${LL_TASK_IMAGE:-}" ]; then
+            BN=$(basename "$LL_TASK_IMAGE"); BN="${BN%%:*}"
+            docker tag "$LL_TASK_IMAGE" "starryzhang/${BN}:latest" 2>/dev/null \
+              && echo "warm-image: $LL_TASK_IMAGE -> starryzhang/${BN}:latest (no re-pull)" \
+              || echo "warm-image: tag failed (harness will pull this one image)"
+          fi
+          docker container prune -f >/dev/null 2>&1 || true
+
+          set +e
+          python3 -m swebench.harness.run_evaluation \
+            --dataset_name benchmarks/data/swebench_live_lite.jsonl \
+            --predictions_path /tmp/pred.jsonl \
+            --instance_ids "$TASK_ID" \
+            --namespace starryzhang \
+            --run_id "ll_${TASK_ID}" \
+            --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log
+          EVAL_RC=${PIPESTATUS[0]}
+          set -e
+
+          REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1)
+          if [ -n "$REPORT" ]; then
+            REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
+            cp "$REPORT" trial_results/report.json
+            GT_TASK_ID="$TASK_ID" GT_REWARD="$REWARD" GT_EVAL_RC="$EVAL_RC" python3 - <<'PY'
+          import json, os
+          reward = int(os.environ["GT_REWARD"])
+          with open("trial_results/official_grade.json", "w", encoding="utf-8") as stream:
+              json.dump({
+                  "schema": "gt.swebench_live.official_grade.v1",
+                  "instance_id": os.environ["GT_TASK_ID"],
+                  "status": "passed" if reward == 1 else "failed",
+                  "reward": reward,
+                  "official_report_present": True,
+                  "evaluator_exit_code": int(os.environ["GT_EVAL_RC"]),
+              }, stream, indent=2)
+          PY
+          else
+            GT_TASK_ID="$TASK_ID" GT_EVAL_RC="$EVAL_RC" python3 - <<'PY'
+          import json, os
+          with open("trial_results/official_grade.json", "w", encoding="utf-8") as stream:
+              json.dump({
+                  "schema": "gt.swebench_live.official_grade.v1",
+                  "instance_id": os.environ["GT_TASK_ID"],
+                  "status": "infrastructure",
+                  "reward": None,
+                  "official_report_present": False,
+                  "evaluator_exit_code": int(os.environ["GT_EVAL_RC"]),
+                  "reason": "official_report_missing",
+              }, stream, indent=2)
+          PY
+            echo "EVAL_INFRASTRUCTURE: no official report.json produced (evaluator rc=$EVAL_RC)" | tee -a trial_output.log
+          fi
+
+          if [ -z "$REWARD" ]; then
+            echo "::error::OFFICIAL_EVAL_MISSING_REPORT task=${TASK_ID} evaluator_rc=${EVAL_RC}"
+            exit 1
+          fi
+          echo "OFFICIAL_EVAL: ${TASK_ID} resolved=$([ "$REWARD" = "1" ] && echo YES || echo NO) (Reward: ${REWARD}.0)" | tee -a trial_output.log
           # Bridge REWARD to the reader paths (UNCHANGED consumer contract):
           # reward.txt (back-compat) + jobs/*/*__*/verifier/reward.json (gt_deep_metrics + deepswe_outcome).
           echo "${REWARD}" > trial_results/reward.txt
