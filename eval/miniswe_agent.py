@@ -55,7 +55,9 @@ _GT_STAGED_SOURCE_CLEANUP = (
 # bring its own Python so we never depend on the image's python3.
 _ENSURE_CURL = (
     "command -v curl >/dev/null 2>&1 || { "
-    "command -v apt-get >/dev/null && apt-get update && apt-get install -y curl; } || { "
+    "command -v apt-get >/dev/null && apt-get clean && "
+    "rm -rf /var/lib/apt/lists/* && apt-get update && "
+    "apt-get install -y --fix-missing curl; } || { "
     "command -v apk >/dev/null && apk add --no-cache curl bash; } || { "
     "command -v dnf >/dev/null && dnf install -y curl; } || { "
     "command -v yum >/dev/null && yum install -y curl; }"

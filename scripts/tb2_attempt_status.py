@@ -67,6 +67,9 @@ def classify_attempt(root: Path, task_id: str) -> dict[str, Any]:
     exception_type = (
         str(exception.get("exception_type") or "") if isinstance(exception, dict) else ""
     )
+    exception_message = (
+        str(exception.get("exception_message") or "") if isinstance(exception, dict) else ""
+    )
     trajectories = sorted(root.rglob("miniswe_trajectory.json"))
     assistant_actions = 0
     for path in trajectories:
@@ -79,13 +82,17 @@ def classify_attempt(root: Path, task_id: str) -> dict[str, Any]:
                 if isinstance(message, dict) and message.get("role") == "assistant"
             )
 
+    transient_provider = exception_type in TRANSIENT_PROVIDER_EXCEPTIONS
+    package_setup_failure = bool(
+        exception_type == "NonZeroAgentExitCodeError"
+        and "command -v curl" in exception_message
+        and "apt-get" in exception_message
+    )
     retryable = bool(
-        exception_type in TRANSIENT_PROVIDER_EXCEPTIONS and trajectories and assistant_actions == 0
+        (transient_provider and trajectories or package_setup_failure) and assistant_actions == 0
     )
     reason = (
-        "transient_provider_before_first_action"
-        if retryable
-        else "nonretryable_infrastructure_failure"
+        "infrastructure_before_first_action" if retryable else "nonretryable_infrastructure_failure"
     )
     return {
         "schema": "gt.tb2_attempt_status.v1",
