@@ -418,7 +418,14 @@ def audit() -> dict[str, bool]:
                 and "--ak enable_submit_readiness=true" in item
                 and "scripts/resolve_harbor_budget.py" in item
                 and '--ak execution_budget_sec="$EXECUTION_BUDGET"' in item
-                and "--agent-timeout-multiplier 1.0" in item
+                and (
+                    "--agent-timeout-multiplier 1.0" in item
+                    or (
+                        'TIMEOUT_MULTIPLIER: ${{ inputs.timeout_multiplier }}' in item
+                        and '--multiplier "$TIMEOUT_MULTIPLIER"' in item
+                        and '--agent-timeout-multiplier "$TIMEOUT_MULTIPLIER"' in item
+                    )
+                )
                 and "--ak model_timeout_sec" not in item
                 and "--ak model_loop_timeout_sec" not in item
                 for item in workflows
