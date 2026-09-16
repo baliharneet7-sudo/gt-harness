@@ -263,7 +263,7 @@ jobs:
         run: |
           # The harness writes results to the current dir or a run-specific path
           # Collect all JSON result files
-          find . /tmp/eval_results -name "eval_batch_*.json" -o -name "*.eval.json" \
+          find . /tmp/eval_results \( -name "*eval_batch_*.json" -o -name "*.eval.json" \) \
             2>/dev/null | while read f; do
             cp "$f" /tmp/eval_results/ 2>/dev/null || true
           done
@@ -337,10 +337,13 @@ jobs:
           python3 << 'PYEOF'
           import json, glob, os
 
-          # Collect all eval result JSON files
-          result_files = []
-          for pattern in ["**/eval_batch_*.json", "**/*.eval.json"]:
-              result_files.extend(glob.glob(f"/tmp/all_eval/{pattern}", recursive=True))
+          # Each batch emits a normalized, authoritative mapping of
+          # {instance_id: {reward: 0|1}} from the official harness report.
+          # Summarize those mappings instead of depending on the harness's
+          # model-prefixed report filename or internal report schema.
+          result_files = glob.glob(
+              "/tmp/all_eval/**/official-verifier-results.json", recursive=True
+          )
 
           if not result_files:
               print("::warning::No eval result JSON files found")
@@ -351,27 +354,22 @@ jobs:
                   json.dump({"status": "no_results_found", "log_files": len(log_files)}, f)
               exit(0)
 
-          # Merge results
+          # Merge normalized official results.
           all_results = {}
           for rf in result_files:
               try:
                   with open(rf) as f:
                       data = json.load(f)
                   if isinstance(data, dict):
-                      for instance_id, result in data.items():
-                          all_results[instance_id] = result
-                  elif isinstance(data, list):
-                      for item in data:
-                          if "instance_id" in item:
-                              all_results[item["instance_id"]] = item
+                      all_results.update(data)
               except Exception as e:
                   print(f"WARN: Failed to parse {rf}: {e}")
 
           total = len(all_results)
-          resolved = sum(1 for r in all_results.values()
-                         if (isinstance(r, dict) and r.get("resolved", False))
-                         or r == "RESOLVED"
-                         or (isinstance(r, str) and "resolved" in r.lower()))
+          resolved = sum(
+              1 for result in all_results.values()
+              if isinstance(result, dict) and result.get("reward") == 1
+          )
 
           rate = (resolved / total * 100) if total > 0 else 0
 
@@ -394,7 +392,14 @@ jobs:
 
           # Write merged results
           with open("/tmp/final_eval/eval_results.json", "w") as f:
-              json.dump(all_results, f, indent=2)
+              json.dump(
+                  {
+                      instance_id: {"resolved": result.get("reward") == 1}
+                      for instance_id, result in all_results.items()
+                  },
+                  f,
+                  indent=2,
+              )
 
           with open("/tmp/final_eval/eval_summary.json", "w") as f:
               json.dump(summary, f, indent=2)
