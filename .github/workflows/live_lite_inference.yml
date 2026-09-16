@@ -14,15 +14,15 @@ on:
         required: true
         default: "20"
       tasks_per_job:
-        description: "Tasks per job. 3 for the GT arm (GT adds per-task build; smaller shards stay under the 340-min ceiling so no batch goes missing -> merge isn't blocked). 5 was baseline-only sizing."
+        description: "Tasks per job. Use 1 for high-latency models so each task receives the full 340-minute job envelope."
         required: true
         type: choice
         options: ["1", "2", "3", "5", "7", "10"]
-        default: "3"
+        default: "1"
       model:
         description: "LLM model identifier"
         required: true
-        default: "deepseek/deepseek-v4-flash"
+        default: "openrouter/stealth/union-alpha"
       max_iterations:
         description: "Max agent iterations per task"
         required: true
@@ -65,7 +65,7 @@ on:
       tasks_per_job:
         type: string
         required: false
-        default: "3"
+        default: "1"
       model:
         type: string
         required: false
@@ -92,11 +92,11 @@ on:
       task_ids:
         type: string
         required: false
+        default: ""
       image_owner:
         type: string
         required: false
         default: "hbali-stack"
-        default: ""
 
 permissions:
   contents: read
@@ -314,13 +314,13 @@ jobs:
 
       - name: Preflight checks (fail-fast on infra, warn on quality)
         env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
         run: |
           set -e
           echo "=== INFRA PREFLIGHT (fail-fast) ==="
           # 1. API key — must be present before any LLM spend (replaces the old Validate API key step)
-          [ "${#DEEPSEEK_API_KEY}" -gt 10 ] || { echo "::error::DEEPSEEK_API_KEY missing or too short"; exit 1; }
-          echo "  DEEPSEEK_API_KEY present (${#DEEPSEEK_API_KEY} chars)"
+          [ "${#OPENROUTER_API_KEY}" -gt 10 ] || { echo "::error::OPENROUTER_NEW missing or too short"; exit 1; }
+          echo "  OPENROUTER_NEW present (${#OPENROUTER_API_KEY} chars)"
           # 2. Docker CLI
           docker --version || { echo "::error::docker CLI not available"; exit 1; }
           docker compose version || echo "::warning::docker compose not available"
@@ -374,8 +374,8 @@ jobs:
 
           [llm.eval]
           model = "${{ inputs.model }}"
-          api_key = "${{ secrets.DEEPSEEK_API_KEY }}"
-          base_url = "https://api.deepseek.com"
+          api_key = "${{ secrets.OPENROUTER_NEW }}"
+          base_url = "https://openrouter.ai/api/v1"
           temperature = 1.0
           top_p = 1.0
           max_output_tokens = 65536
@@ -507,7 +507,12 @@ jobs:
 
           OUTPUT_JSONL="$OUTPUT_JSONL" python3 << 'PYEOF'
           import json, os
-          MODEL = "${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || 'GroundTruth + OpenHands-CodeActAgent + DeepSeek-V4-Flash' }}"
+          model_id = "${{ inputs.model }}"
+          MODEL = (
+              f"OpenHands-CodeActAgent + {model_id} (baseline)"
+              if "${{ inputs.baseline }}" == "true"
+              else f"GroundTruth + OpenHands-CodeActAgent + {model_id}"
+          )
           preds = []
           with open(os.environ["OUTPUT_JSONL"]) as f:
               for line in f:
@@ -645,6 +650,7 @@ jobs:
     with:
       expected_tasks_json: ${{ needs.prepare.outputs.task_ids }}
       task_job_regex: '^inference \(.+\)$'
+      checkpoint_every: "5"
     secrets: inherit
 
   merge:
@@ -724,7 +730,7 @@ jobs:
           # Label the submission correctly: a BASELINE run must NOT be stamped
           # "GroundTruth + ...". Set the override for baseline; for GT runs leave it
           # empty so convert derives "GroundTruth + OpenHands + <model>" from metadata.
-          export GT_SUBMISSION_MODEL_NAME="${{ inputs.baseline == true && 'OpenHands-CodeActAgent + DeepSeek-V4-Flash (baseline)' || '' }}"
+          export GT_SUBMISSION_MODEL_NAME="${{ inputs.baseline == true && inputs.model || '' }}"
           python scripts/swebench/convert_to_submission.py \
             /tmp/merged/output.jsonl \
             --output-dir /tmp/merged

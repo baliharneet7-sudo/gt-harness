@@ -32,11 +32,11 @@ on:
         required: true
         type: choice
         options: ["1", "2", "3", "5", "7", "10"]
-        default: "5"
+        default: "1"
       model:
         description: "LLM model identifier"
         required: true
-        default: "deepseek/deepseek-v4-flash"
+        default: "openrouter/stealth/union-alpha"
       max_iterations:
         description: "Max agent iterations per task"
         required: true
@@ -90,4 +90,5 @@ jobs:
     uses: ./.github/workflows/live_lite_bundle.yml
     with:
       run_id: ${{ inputs.run_id }}
+      model_name: ${{ inputs.model }}
     secrets: inherit
