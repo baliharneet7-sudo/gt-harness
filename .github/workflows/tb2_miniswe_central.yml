@@ -9,7 +9,8 @@
 # selected slice). The default pool covers every known outcome regression,
 # known GT-working trajectories, and prior GT-on flips. This is not a
 # leaderboard submission; clear `include` explicitly before any full run.
-# --agent-timeout-multiplier 1.0. Do not rerun the baseline.
+# Union Alpha runs use a 5.0 agent-timeout multiplier while preserving the
+# frozen 100-call limit. Do not rerun the baseline.
 name: TB2 miniswe central matrix (GT-on)
 
 on:
@@ -76,6 +77,10 @@ on:
         description: "Maximum Mini-SWE model calls per task; use 1 only for authorized decision-point capture"
         type: string
         default: "100"
+      timeout_multiplier:
+        description: "Multiply each task-owned Harbor agent timeout without changing the model-call limit"
+        type: string
+        default: "5.0"
       provider_preflight_timeout_sec:
         description: "Provider preflight timeout for this run; increase for queued TokenRouter routes"
         type: string
@@ -455,6 +460,7 @@ jobs:
         env:
           DATASET: ${{ inputs.dataset }}
           TASK: ${{ matrix.task }}
+          TIMEOUT_MULTIPLIER: ${{ inputs.timeout_multiplier }}
         run: |
           set -euo pipefail
           harbor dataset download "$DATASET" -o ds --export
@@ -463,7 +469,7 @@ jobs:
           mkdir -p results/terminal-bench
           EXECUTION_BUDGET=$(python scripts/resolve_harbor_budget.py \
             --task-config "$TASK_CONFIG" \
-            --multiplier 1.0 \
+            --multiplier "$TIMEOUT_MULTIPLIER" \
             --output "results/terminal-bench/harbor-budget-${TASK}.json")
           echo "EXECUTION_BUDGET=${EXECUTION_BUDGET}" >> "$GITHUB_ENV"
           echo "resolved Harbor agent budget: ${EXECUTION_BUDGET}s"
@@ -478,6 +484,7 @@ jobs:
           FEATURE: ${{ inputs.feature }}
           REPLAY_CAPTURE: ${{ inputs.replay_capture }}
           STEP_LIMIT: ${{ inputs.step_limit }}
+          TIMEOUT_MULTIPLIER: ${{ inputs.timeout_multiplier }}
         run: |
           set -uo pipefail
           AGENT="eval.gt_central_agent:MiniSweCentralAgent"
@@ -575,7 +582,7 @@ jobs:
             -m "$MODEL" \
             -o results/terminal-bench \
             --job-name "$JOB_NAME" \
-            --agent-timeout-multiplier 1.0 \
+            --agent-timeout-multiplier "$TIMEOUT_MULTIPLIER" \
             -n 1 \
             -y \
             "${FEATURE_ARGS[@]}" \
@@ -659,6 +666,7 @@ jobs:
     with:
       expected_tasks_json: ${{ needs.plan.outputs.tasks }}
       task_job_regex: '^run \(.+\)$'
+      checkpoint_every: "5"
     secrets: inherit
 
   merge:
