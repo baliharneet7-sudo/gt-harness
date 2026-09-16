@@ -39,6 +39,10 @@ _PYTHON_VERSION = "3.12.13"
 _DEFAULT_MINISWE_AGENT_VERSION = "2.3.0"
 _ALLOWED_MINISWE_AGENT_VERSIONS = frozenset({"2.2.8", "2.3.0"})
 _UV_INSTALL = f"https://astral.sh/uv/{_UV_VERSION}/install.sh"
+_UV_INSTALL_COMMAND = (
+    f"if command -v curl >/dev/null 2>&1; then curl -LsSf {_UV_INSTALL}; "
+    f"else wget -qO- {_UV_INSTALL}; fi"
+)
 # After the uv tool install the staged checkout is removed (the tool venv holds
 # the installed wheel copy). Leaving it readable lets a root task model
 # discover GT's gate logic with a broad `find /` and reverse-engineer the
@@ -51,29 +55,25 @@ _GT_STAGED_SOURCE_CLEANUP = (
     f"rm -rf -- {_REMOTE_DIR}"
 )
 
-# Task images vary (debian, alpine, ...); make sure curl exists, then let uv
-# bring its own Python so we never depend on the image's python3.
-_ENSURE_CURL = (
-    "command -v curl >/dev/null 2>&1 || { "
+# Task images vary (debian, alpine, ...); use either common downloader, then
+# let uv bring its own Python so we never depend on the image's python3.
+_ENSURE_DOWNLOADER = (
+    "command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { "
     "command -v apt-get >/dev/null && apt-get clean && "
     "rm -rf /var/lib/apt/lists/* && apt-get update && "
-    "apt-get install -y --fix-missing curl; } || { "
-    "command -v apk >/dev/null && apk add --no-cache curl bash; } || { "
-    "command -v dnf >/dev/null && dnf install -y curl; } || { "
-    "command -v yum >/dev/null && yum install -y curl; }"
+    "apt-get install -y --fix-missing wget; } || { "
+    "command -v apk >/dev/null && apk add --no-cache wget bash; } || { "
+    "command -v dnf >/dev/null && dnf install -y wget; } || { "
+    "command -v yum >/dev/null && yum install -y wget; }"
 )
 
 
 def _miniswe_agent_version() -> str:
     """Return the closed Mini-SWE treatment version for this execution."""
-    version = os.environ.get(
-        "MINISWE_AGENT_VERSION", _DEFAULT_MINISWE_AGENT_VERSION
-    )
+    version = os.environ.get("MINISWE_AGENT_VERSION", _DEFAULT_MINISWE_AGENT_VERSION)
     if version not in _ALLOWED_MINISWE_AGENT_VERSIONS:
         allowed = ", ".join(sorted(_ALLOWED_MINISWE_AGENT_VERSIONS))
-        raise ValueError(
-            f"MINISWE_AGENT_VERSION must be one of: {allowed}; got {version!r}"
-        )
+        raise ValueError(f"MINISWE_AGENT_VERSION must be one of: {allowed}; got {version!r}")
     return version
 
 
@@ -115,9 +115,7 @@ class MiniSweAgent(BaseInstalledAgent):
         miniswe_version = _miniswe_agent_version()
         await environment.upload_dir(_REPO_ROOT / "scripts", f"{_REMOTE_DIR}/scripts")
         await environment.upload_dir(_REPO_ROOT / "eval", f"{_REMOTE_DIR}/eval")
-        await environment.upload_dir(
-            _REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine"
-        )
+        await environment.upload_dir(_REPO_ROOT / "gt_engine", f"{_REMOTE_DIR}/gt_engine")
         await environment.upload_file(
             _REPO_ROOT / "pyproject.toml", f"{_REMOTE_DIR}/pyproject.toml"
         )
@@ -125,12 +123,12 @@ class MiniSweAgent(BaseInstalledAgent):
         await environment.upload_file(wheel, remote_wheel)
         await environment.upload_file(binary, _REMOTE_GT_BINARY)
         await self.exec_as_root(
-            environment, _ENSURE_CURL, env={"DEBIAN_FRONTEND": "noninteractive"}
+            environment, _ENSURE_DOWNLOADER, env={"DEBIAN_FRONTEND": "noninteractive"}
         )
         await self.exec_as_root(environment, f"chmod 755 {_REMOTE_GT_BINARY}")
         install = (
             "set -eu; "
-            f"curl -LsSf {_UV_INSTALL} | sh && "
+            f"{_UV_INSTALL_COMMAND} | sh && "
             f'"$HOME/.local/bin/uv" tool install --python {_PYTHON_VERSION} '
             f'--with "mini-swe-agent=={miniswe_version}" '
             f"--with {shlex.quote(remote_wheel)} --with 'numpy==2.5.1' "
@@ -164,7 +162,7 @@ class MiniSweAgent(BaseInstalledAgent):
         return (
             f'"{_REMOTE_PY}" {_REMOTE_RUNNER} '
             f"--task {shlex.quote(instruction)} --model {shlex.quote(model)} "
-            f"--cwd \"$PWD\" "
+            f'--cwd "$PWD" '
             f"--output /logs/agent/miniswe_trajectory.json "
             f"--temperature 1.0 "
             f"--metrics /logs/agent/miniswe_report.json "
@@ -208,7 +206,7 @@ class MiniSweGtAgent(MiniSweAgent):
         return (
             f'"{_REMOTE_PY}" -c '
             '"import minisweagent, groundtruth, gt_engine; '
-            "print(minisweagent.__version__)\""
+            'print(minisweagent.__version__)"'
         )
 
     @with_prompt_template

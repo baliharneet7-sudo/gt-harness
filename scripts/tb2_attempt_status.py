@@ -86,6 +86,7 @@ def classify_attempt(root: Path, task_id: str) -> dict[str, Any]:
     package_setup_failure = bool(
         exception_type == "NonZeroAgentExitCodeError"
         and "command -v curl" in exception_message
+        and "command -v wget" in exception_message
         and "apt-get" in exception_message
     )
     retryable = bool(

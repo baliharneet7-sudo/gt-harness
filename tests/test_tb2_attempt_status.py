@@ -60,7 +60,7 @@ def test_curl_package_setup_failure_is_retryable(tmp_path: Path) -> None:
     _attempt(
         tmp_path,
         exception="NonZeroAgentExitCodeError",
-        exception_message="Command failed: command -v curl || apt-get update",
+        exception_message=("Command failed: command -v curl || command -v wget || apt-get update"),
         trajectory=False,
     )
     result = classify_attempt(tmp_path, "task")
