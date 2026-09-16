@@ -3973,7 +3973,11 @@ def test_paid_central_matrix_uses_the_same_outcome_preserving_contract():
     assert "--ak enable_progress_control=true" in workflow
     assert '--ak execution_budget_sec="$EXECUTION_BUDGET"' in workflow
     assert "scripts/resolve_harbor_budget.py" in workflow
-    assert "--agent-timeout-multiplier 1.0" in workflow
+    assert 'timeout_multiplier:' in workflow
+    assert 'default: "5.0"' in workflow
+    assert '--multiplier "$TIMEOUT_MULTIPLIER"' in workflow
+    assert '--agent-timeout-multiplier "$TIMEOUT_MULTIPLIER"' in workflow
+    assert 'STEP_LIMIT: ${{ inputs.step_limit }}' in workflow
     assert "--ak model_timeout_sec" not in workflow
     assert "--ak model_loop_timeout_sec" not in workflow
     assert "harbor_result=got[0] if got else None" in workflow
