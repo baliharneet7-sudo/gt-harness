@@ -1269,6 +1269,18 @@ jobs:
           fi
           # Python 3.10 task images need the typing backport before LiteLLM is imported.
           cp artifact_deepswe/sitecustomize.py "${HOST_GT_INJECT}/"
+          # Stage a static uv binary from the host. Minimal task images may have no
+          # usable Python, curl, or wget, so agent bootstrap must not depend on tools
+          # inside the benchmark image. Pin the fallback download for reproducibility.
+          if command -v uv >/dev/null 2>&1; then
+            cp "$(command -v uv)" "${HOST_GT_INJECT}/uv"
+          else
+            UV_VERSION=0.8.17
+            curl -LsSf "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/gt-uv.tar.gz
+            tar -xzf /tmp/gt-uv.tar.gz -C /tmp
+            cp /tmp/uv-x86_64-unknown-linux-gnu/uv "${HOST_GT_INJECT}/uv"
+          fi
+          chmod +x "${HOST_GT_INJECT}/uv"
           cp artifact_deepswe/gt_hook.py        "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle.py      "${HOST_GT_INJECT}/" 2>/dev/null || true
           cp artifact_deepswe/gt_oracle_sense.py "${HOST_GT_INJECT}/" 2>/dev/null || true
@@ -1672,9 +1684,9 @@ jobs:
               # belt AFTER interpreter resolution (below) is the load-bearing guarantee; these --with/
               # pip additions cover the happy path. GUARD: single-quoted docker block — NO apostrophe.
               python -m pip install --quiet datacurve-pier mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || python -m pip install --quiet mini-swe-agent==2.4.5 fastapi orjson 2>/dev/null || {
-                curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
-                export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                uv tool install --python 3.11 --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null || uv tool install --with fastapi --with orjson mini-swe-agent==2.4.5 2>/dev/null
+                /opt/gt/uv venv --python 3.11 /tmp/gt-miniswe-runtime >/dev/null 2>&1
+                /opt/gt/uv pip install --python /tmp/gt-miniswe-runtime/bin/python mini-swe-agent==2.4.5 fastapi orjson >/dev/null 2>&1
+                export PATH="/tmp/gt-miniswe-runtime/bin:$PATH"
               }
               # Verify installation
               if ! command -v mini-swe-agent >/dev/null 2>&1; then
@@ -1718,13 +1730,9 @@ jobs:
               # clean runtime only on those contaminated images. The named venv keeps every
               # model dependency outside the repository Python environment.
               if [ -z "$GT_PY" ]; then
-                command -v uv >/dev/null 2>&1 || {
-                  curl -LsSf https://astral.sh/uv/install.sh 2>/dev/null | sh 2>/dev/null
-                  export PATH="$HOME/.local/bin:/root/.local/bin:$PATH"
-                }
-                uv venv --python 3.11 /opt/gt/miniswe-runtime >/dev/null 2>&1
-                uv pip install --python /opt/gt/miniswe-runtime/bin/python mini-swe-agent==2.4.5 fastapi orjson >/dev/null 2>&1
-                GT_PY=/opt/gt/miniswe-runtime/bin/python
+                /opt/gt/uv venv --python 3.11 /tmp/gt-miniswe-runtime >/dev/null 2>&1
+                /opt/gt/uv pip install --python /tmp/gt-miniswe-runtime/bin/python mini-swe-agent==2.4.5 fastapi orjson >/dev/null 2>&1
+                GT_PY=/tmp/gt-miniswe-runtime/bin/python
               fi
               "$GT_PY" -c "import minisweagent.models.litellm_model" >/dev/null 2>&1 || {
                 echo "FATAL: Mini-SWE LiteLLM runtime is not importable"
