@@ -1924,6 +1924,16 @@ jobs:
           set -e
           # NEVER exit 1 from trial — Collect/Upload MUST run to capture partial artifacts.
 
+      - name: Normalize Mini-SWE output permissions
+        if: always()
+        shell: bash
+        run: |
+          # The task container runs as root and may create 0600/0700 outputs.
+          # Transfer ownership before any host-side classifier or official grader
+          # reads the trajectory and patch.
+          sudo chown -R "$(id -u):$(id -g)" /tmp/gt_out
+          chmod -R u+rwX,go+rX /tmp/gt_out
+
       - name: Classify task execution (live diagnostic)
         if: always()
         run: |
@@ -2189,11 +2199,11 @@ jobs:
             --instance_ids "$TASK_ID" \
             --namespace starryzhang \
             --run_id "ll_${TASK_ID}" \
-            --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log
+            --max_workers 1 --timeout 1800 --cache_level env 2>&1 | tee -a trial_output.log trial_results/evaluator.log
           EVAL_RC=${PIPESTATUS[0]}
           set -e
 
-          REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1)
+          REPORT=$(find "logs/run_evaluation/ll_${TASK_ID}" -name report.json 2>/dev/null | head -1 || true)
           if [ -n "$REPORT" ]; then
             REWARD=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); v=(list(d.values())[0] if d else {}) or {}; print(1 if v.get('resolved') else 0)" "$REPORT")
             cp "$REPORT" trial_results/report.json
