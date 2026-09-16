@@ -2952,7 +2952,7 @@ jobs:
     if: always()
     uses: ./.github/workflows/task_progress.yml
     with:
-      expected_total: ${{ needs.prepare.outputs.total }}
+      expected_tasks_json: ${{ needs.prepare.outputs.matrix }}
       task_job_regex: '^.+ \(.+\)$'
       # Exit before the GitHub hard timeout; observability must not cancel the
       # benchmark workflow while task jobs remain queued.
