@@ -506,7 +506,9 @@ jobs:
           echo "Found inference output: $OUTPUT_JSONL"
 
           OUTPUT_JSONL="$OUTPUT_JSONL" python3 << 'PYEOF'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, "scripts/swebench")
+          from patch_transport import normalize_patch_transport
           model_id = "${{ inputs.model }}"
           MODEL = (
               f"OpenHands-CodeActAgent + {model_id} (baseline)"
@@ -519,10 +521,11 @@ jobs:
                   if not line.strip():
                       continue
                   obj = json.loads(line)
-                  patch = obj.get("test_result", {}).get("git_patch", "") or ""
+                  raw_patch = obj.get("test_result", {}).get("git_patch", "") or ""
+                  patch = normalize_patch_transport(raw_patch)
                   preds.append({
                       "instance_id": obj["instance_id"],
-                      "model_patch": patch.strip(),
+                      "model_patch": patch,
                       "model_name_or_path": MODEL,
                   })
           with open("/tmp/shard_eval/predictions.jsonl", "w") as f:

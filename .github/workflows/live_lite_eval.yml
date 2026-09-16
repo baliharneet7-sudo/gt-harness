@@ -6,6 +6,9 @@ on:
       run_id:
         description: "Run ID from inference workflow (matches predictions artifact name)"
         required: true
+      source_workflow_run_id:
+        description: "Numeric Actions run containing the predictions artifact"
+        required: true
       eval_batch_size:
         description: "Tasks per eval job"
         required: true
@@ -27,6 +30,9 @@ on:
   workflow_call:
     inputs:
       run_id:
+        type: string
+        required: true
+      source_workflow_run_id:
         type: string
         required: true
       eval_batch_size:
@@ -53,12 +59,17 @@ jobs:
     outputs:
       matrix: ${{ steps.split.outputs.matrix }}
       total_preds: ${{ steps.split.outputs.total_preds }}
+      task_ids: ${{ steps.split.outputs.task_ids }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download predictions artifact
         uses: actions/download-artifact@v4
         with:
           name: predictions-${{ inputs.run_id }}
           path: /tmp/predictions
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_workflow_run_id }}
 
       - id: split
         name: Split predictions into eval batches
@@ -77,10 +88,14 @@ jobs:
           BATCH_SIZE=${{ inputs.eval_batch_size }}
 
           python3 << PYEOF
-          import json, math
+          import json, math, os, sys
+          sys.path.insert(0, os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts/swebench"))
+          from patch_transport import normalize_patch_transport
 
           with open("predictions.jsonl") as f:
               preds = [json.loads(l) for l in f if l.strip()]
+          for pred in preds:
+              pred["model_patch"] = normalize_patch_transport(pred.get("model_patch") or "")
 
           bs = int("$BATCH_SIZE")
           n = math.ceil(len(preds) / bs) if preds else 0
@@ -98,6 +113,7 @@ jobs:
           import os
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
               gh.write(f"matrix={json.dumps(matrix)}\n")
+              gh.write(f"task_ids={json.dumps([p['instance_id'] for p in preds])}\n")
           PYEOF
 
       - name: Upload eval splits
@@ -253,6 +269,42 @@ jobs:
           done
           ls -la /tmp/eval_results/
 
+          python3 << 'PYEOF'
+          import glob, json
+
+          bid = "${{ matrix.batch_id }}"
+          official = {}
+          paths = glob.glob(f"*eval_batch_{bid}.json")
+          paths += glob.glob(f"/tmp/eval_results/*eval_batch_{bid}.json")
+          for path in paths:
+              try:
+                  report = json.load(open(path, encoding="utf-8"))
+              except Exception:
+                  continue
+              if not isinstance(report, dict) or "resolved_ids" not in report:
+                  continue
+              for task in report.get("resolved_ids", []):
+                  official[task] = {"reward": 1}
+              unresolved = set(report.get("unresolved_ids", []))
+              unresolved |= set(report.get("empty_patch_ids", []))
+              for task in unresolved:
+                  official[task] = {"reward": 0}
+              for task in report.get("error_ids", []):
+                  official[task] = {
+                      "reward": None,
+                      "failure_class": "verifier_error",
+                      "error_code": "official_verifier_error",
+                  }
+          with open("/tmp/eval_results/official-verifier-results.json", "w") as out:
+              json.dump(official, out)
+          PYEOF
+
+          TASK_CSV=$(python3 -c 'import json; print(",".join(json.loads(line)["instance_id"] for line in open("/tmp/eval/eval_batch_${{ matrix.batch_id }}.jsonl") if line.strip()))')
+          python scripts/benchmark_progress.py emit-live \
+            --planned-csv "$TASK_CSV" \
+            --results /tmp/eval_results/official-verifier-results.json \
+            --output /tmp/eval_results/benchmark-progress.json
+
       - name: Upload eval results
         uses: actions/upload-artifact@v4
         if: always()
@@ -262,6 +314,7 @@ jobs:
             /tmp/eval_results/
             /tmp/disk_report.txt
           retention-days: 90
+          if-no-files-found: error
 
   # ── Phase 3: Aggregate results ──────────────────────────────────────
   aggregate:
@@ -269,6 +322,8 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all eval batch results
         uses: actions/download-artifact@v4
         with:
@@ -356,6 +411,16 @@ jobs:
               f.write(f"| **Resolved rate** | **{rate:.1f}%** |\n")
           PYEOF
 
+      - name: Aggregate official-verifier receipts
+        env:
+          EXPECTED_TASKS_JSON: ${{ needs.prepare.outputs.task_ids }}
+        run: |
+          python scripts/benchmark_progress.py aggregate \
+            --root /tmp/all_eval \
+            --expected-tasks-json "$EXPECTED_TASKS_JSON" \
+            --finalize-missing \
+            --output /tmp/final_eval/official-progress.json
+
       - name: Upload aggregated eval results
         uses: actions/upload-artifact@v4
         if: always()
@@ -363,3 +428,17 @@ jobs:
           name: eval-results-${{ inputs.run_id }}
           path: /tmp/final_eval/
           retention-days: 90
+
+      - name: Require an official grade for every prediction
+        run: |
+          python - <<'PYEOF'
+          import json, sys
+          path = "/tmp/final_eval/official-progress.json"
+          receipt = json.load(open(path, encoding="utf-8"))
+          tasks = receipt.get("tasks") or []
+          graded = [task for task in tasks if task.get("official_verifier") is True]
+          if len(graded) != len(tasks):
+              print(f"::error::official grades incomplete: {len(graded)}/{len(tasks)}")
+              sys.exit(1)
+          print(f"official grades complete: {len(graded)}/{len(tasks)}")
+          PYEOF
