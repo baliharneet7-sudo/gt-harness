@@ -2253,6 +2253,55 @@ jobs:
           [ "$BRIDGED" = "$REWARD" ] || { echo "::error::REWARD_BRIDGE_MISMATCH bridged=$BRIDGED reward=$REWARD"; exit 1; }
           echo "[GT_META] official-eval reward bridged to $BRIDGE_DIR/verifier/reward.json (reward=$REWARD)"
 
+      - name: Create official-verifier progress receipt
+        if: always()
+        env:
+          TASK_ID: ${{ matrix.task }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          task_id = os.environ["TASK_ID"]
+          grade_path = Path("trial_results/official_grade.json")
+          if grade_path.is_file():
+              grade = json.loads(grade_path.read_text(encoding="utf-8"))
+          else:
+              grade = {}
+          reward = grade.get("reward")
+          if grade.get("official_report_present") is True and reward in (0, 1):
+              task = {
+                  "task_id": task_id,
+                  "state": "passed" if reward == 1 else "verifier_failed",
+                  "official_verifier": True,
+                  "reward": int(reward),
+                  "failure_class": "graded",
+                  "error_code": "",
+              }
+          else:
+              task = {
+                  "task_id": task_id,
+                  "state": "infrastructure_failed",
+                  "official_verifier": False,
+                  "reward": None,
+                  "failure_class": "missing_result",
+                  "error_code": str(grade.get("reason") or "official_report_missing"),
+              }
+          Path("benchmark-progress.json").write_text(json.dumps({
+              "schema": "gt.benchmark_progress.v1",
+              "benchmark_suite": "swe-bench-live-lite",
+              "tasks": [task],
+          }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload official-verifier progress receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-progress-live-${{ github.run_id }}-${{ matrix.task }}
+          path: benchmark-progress.json
+          if-no-files-found: error
+
       - name: Collect results
         if: always()
         env:
