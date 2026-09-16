@@ -34,13 +34,13 @@ runs:
           /opt/hostedtoolcache/Python/3.12.*/x64/lib/python3.12/site-packages
           /opt/hostedtoolcache/Python/3.12.*/x64/bin
         # FINAL_ARCH_V2 Track-A B-1: include Go source hash in the cache key.
-        # If anything under gt-index/**.go changes, invalidate the Python
+        # If anything under vendor/gt-index-src/**.go changes, invalidate the Python
         # cache so any installed groundtruth import paths that reference the
         # new schema are not served from a stale wheel.
         # Include the editable package and OpenHands wrapper sources. Changes
         # to either must invalidate the environment instead of reusing stale
         # installed code from an earlier benchmark run.
-        key: eval-env-oh054v3-pip-${{ hashFiles('pyproject.toml', 'gt-index/**/*.go', 'src/groundtruth/**', 'scripts/swebench/oh_gt_full_wrapper.py') }}
+        key: eval-env-oh054v4-pip-${{ hashFiles('pyproject.toml', 'vendor/gt-index-src/**/*.go', 'src/groundtruth/**', 'scripts/swebench/oh_gt_full_wrapper.py') }}
 
     - name: Install Python packages (skip if cached)
       shell: bash
@@ -216,14 +216,14 @@ runs:
         echo "g++: $(command -v g++)"
         # `-fts5` recipe marker busts the cached binary once: the hash is over .go
         # files only, so adding the build tag would otherwise reuse a tagless binary.
-        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/gt-index -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5
+        GT_SRC_HASH=$(find $GITHUB_WORKSPACE/vendor/gt-index-src -name '*.go' -exec sha256sum {} + | sort | sha256sum | cut -c1-12)-fts5
         EXISTING_HASH=""
         [ -f /tmp/gt-index.sha ] && EXISTING_HASH=$(cat /tmp/gt-index.sha)
         if [ "$GT_SRC_HASH" = "$EXISTING_HASH" ] && [ -f /tmp/gt-index ]; then
           echo "gt-index binary up-to-date (hash=$GT_SRC_HASH)"
         else
           echo "Building gt-index (src_hash=$GT_SRC_HASH, old=$EXISTING_HASH)..."
-          cd $GITHUB_WORKSPACE/gt-index
+          cd $GITHUB_WORKSPACE/vendor/gt-index-src
           # -tags sqlite_fts5: compile FTS5 into the go-sqlite3 driver so gt-index
           # can build the nodes_fts index (localizer pipeline STAGE 1). Without it,
           # CREATE VIRTUAL TABLE … fts5 is silently rejected and every run falls back
