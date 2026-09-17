@@ -45,6 +45,8 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "needs: [plan, provider_free]" in text
     assert "needs: [plan, pre_spend]" in text
     assert "Run the real official verifier without a model" in text
+    assert "Prove the exact treatment agent is importable by Harbor" in text
+    assert "PYTHONPATH: ${{ github.workspace }}" in text
     assert "-a nop" in text
     assert '"model_requests": 0' in text
     assert "Save the verifier-canary image for paid task reuse" in text

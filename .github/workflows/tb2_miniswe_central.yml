@@ -131,6 +131,7 @@ jobs:
     timeout-minutes: 45
     env:
       TASK: extract-elf
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,6 +144,22 @@ jobs:
 
       - name: Install the official Harbor runtime
         run: python -m pip install --disable-pip-version-check "harbor==0.20.0"
+
+      - name: Prove the exact treatment agent is importable by Harbor
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from harbor.agents.base import BaseAgent
+          from harbor.utils.import_path import import_class
+
+          agent = import_class(
+              "eval.miniswe_agent:MiniSweGtAgent",
+              base=BaseAgent,
+              label="agent",
+          )
+          assert agent.__module__ == "eval.miniswe_agent"
+          assert agent.__name__ == "MiniSweGtAgent"
+          PY
 
       - name: Restore the existing verifier-canary image cache
         id: restore
@@ -249,6 +266,7 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       TASK: ${{ matrix.task }}
+      PYTHONPATH: ${{ github.workspace }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
       OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW }}
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
