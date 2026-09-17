@@ -75,6 +75,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_NEW || secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_NEW }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
       GH_TOKEN: ${{ github.token }}
@@ -246,6 +247,7 @@ jobs:
     env:
       ANTHROPIC_API_KEY: ${{ inputs.api_key || secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_NEW || secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ inputs.api_key || secrets.OPENROUTER_NEW }}
       OPENAI_BASE_URL: ${{ inputs.base_url != '' && inputs.base_url || secrets.OPENAI_BASE_URL }}
       PYTHONUTF8: "1"
       GT_INDEX_BINARY: ${{ github.workspace }}/vendor/gt-index-linux-amd64
