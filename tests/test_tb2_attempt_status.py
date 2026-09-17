@@ -12,6 +12,7 @@ def _attempt(
     exception_message="",
     assistant=False,
     trajectory=True,
+    artifact_reward=None,
 ) -> None:
     trial = root / "job" / "task__trial"
     (trial / "agent").mkdir(parents=True)
@@ -24,6 +25,11 @@ def _attempt(
             if exception
             else None
         ),
+        "verifier": (
+            {"started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:00Z"}
+            if artifact_reward is not None
+            else None
+        ),
     }
     (trial / "result.json").write_text(json.dumps(payload), encoding="utf-8")
     messages = [{"role": "user", "content": "task"}]
@@ -32,6 +38,24 @@ def _attempt(
     if trajectory:
         (trial / "agent" / "miniswe_trajectory.json").write_text(
             json.dumps({"messages": messages}), encoding="utf-8"
+        )
+    if artifact_reward is not None:
+        verifier = trial / "verifier"
+        verifier.mkdir()
+        (verifier / "reward.txt").write_text(f"{artifact_reward}\n", encoding="utf-8")
+        (verifier / "ctrf.json").write_text(
+            json.dumps(
+                {
+                    "results": {
+                        "summary": {
+                            "tests": 1,
+                            "passed": int(artifact_reward == 1),
+                            "failed": int(artifact_reward == 0),
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
         )
 
 
@@ -47,6 +71,15 @@ def test_official_zero_reward_is_final(tmp_path: Path) -> None:
     result = classify_attempt(tmp_path, "task")
     assert result["state"] == "graded"
     assert result["reward"] == 0
+    assert result["retryable"] is False
+
+
+def test_completed_official_artifact_reward_is_final(tmp_path: Path) -> None:
+    _attempt(tmp_path, exception="NonZeroAgentExitCodeError", assistant=True, artifact_reward=1)
+    result = classify_attempt(tmp_path, "task")
+    assert result["state"] == "graded"
+    assert result["reward"] == 1
+    assert result["reason"] == "official_verifier_artifact"
     assert result["retryable"] is False
 
 

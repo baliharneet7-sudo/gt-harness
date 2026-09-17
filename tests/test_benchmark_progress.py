@@ -45,22 +45,61 @@ def test_live_receipt_conserves_pass_fail_and_missing(tmp_path: Path) -> None:
     results.write_text(json.dumps({"a": {"reward": 1}, "b": {"reward": 0}}), encoding="utf-8")
     receipt = emit_live("a,b,c", results)
     assert [row["state"] for row in receipt["tasks"]] == [
-        "passed", "verifier_failed", "infrastructure_failed"
+        "passed",
+        "verifier_failed",
+        "infrastructure_failed",
     ]
 
 
 def test_harbor_uses_nested_official_verifier_reward(tmp_path: Path) -> None:
     trial = tmp_path / "job" / "task-a__trial" / "result.json"
     trial.parent.mkdir(parents=True)
-    trial.write_text(json.dumps({
-        "task_name": "terminal-bench/task-a",
-        "trial_name": "task-a__trial",
-        "verifier_result": {"rewards": {"reward": 0}},
-        "exception_info": None,
-    }), encoding="utf-8")
+    trial.write_text(
+        json.dumps(
+            {
+                "task_name": "terminal-bench/task-a",
+                "trial_name": "task-a__trial",
+                "verifier_result": {"rewards": {"reward": 0}},
+                "exception_info": None,
+            }
+        ),
+        encoding="utf-8",
+    )
     receipt = emit_harbor(tmp_path, "task-a")
     assert receipt["tasks"][0]["state"] == "verifier_failed"
     assert receipt["tasks"][0]["official_verifier"] is True
+
+
+def test_harbor_uses_completed_official_verifier_artifacts_when_summary_is_null(
+    tmp_path: Path,
+) -> None:
+    trial = tmp_path / "job" / "task-a__trial"
+    verifier = trial / "verifier"
+    verifier.mkdir(parents=True)
+    (trial / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "terminal-bench/task-a",
+                "trial_name": "task-a__trial",
+                "verifier_result": None,
+                "verifier": {
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "finished_at": "2026-01-01T00:01:00Z",
+                },
+                "exception_info": {"exception_type": "NonZeroAgentExitCodeError"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (verifier / "reward.txt").write_text("1\n", encoding="utf-8")
+    (verifier / "ctrf.json").write_text(
+        json.dumps({"results": {"summary": {"tests": 1, "passed": 1, "failed": 0}}}),
+        encoding="utf-8",
+    )
+    receipt = emit_harbor(tmp_path, "task-a")
+    assert receipt["tasks"][0]["state"] == "passed"
+    assert receipt["tasks"][0]["official_verifier"] is True
+    assert receipt["tasks"][0]["reward_source"] == "official_verifier_artifact"
 
 
 def test_aggregate_conserves_all_expected_tasks(tmp_path: Path) -> None:
@@ -109,5 +148,9 @@ def test_tb2_workflow_publishes_harbor_verifier_receipts_to_live_monitor() -> No
     assert "expected_tasks_json: ${{ needs.plan.outputs.tasks }}" in workflow
     assert "Passed (official reward 1)" in monitor
     assert "Successful task jobs" not in monitor
-    assert workflow.index("Pull task image before agent execution on cache miss") < workflow.index("Run harbor - task")
-    assert workflow.index("Require the task image before Harbor starts") < workflow.index("Run harbor - task")
+    assert workflow.index("Pull task image before agent execution on cache miss") < workflow.index(
+        "Run harbor - task"
+    )
+    assert workflow.index("Require the task image before Harbor starts") < workflow.index(
+        "Run harbor - task"
+    )

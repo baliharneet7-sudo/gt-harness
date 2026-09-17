@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from scripts.benchmark_progress import official_harbor_reward
+
 TRANSIENT_PROVIDER_EXCEPTIONS = frozenset(
     {
         "APIConnectionError",
@@ -31,12 +33,12 @@ def _object(path: Path) -> dict[str, Any]:
 
 
 def classify_attempt(root: Path, task_id: str) -> dict[str, Any]:
-    trials: list[dict[str, Any]] = []
+    trials: list[tuple[Path, dict[str, Any]]] = []
     for path in sorted(root.rglob("result.json")) if root.exists() else []:
         payload = _object(path)
         runner_task = str(payload.get("task_name") or "").rsplit("/", 1)[-1]
         if runner_task == task_id and payload.get("trial_name"):
-            trials.append(payload)
+            trials.append((path, payload))
 
     if len(trials) != 1:
         return {
@@ -48,17 +50,15 @@ def classify_attempt(root: Path, task_id: str) -> dict[str, Any]:
             "trial_results": len(trials),
         }
 
-    trial = trials[0]
-    verifier = trial.get("verifier_result")
-    rewards = verifier.get("rewards") if isinstance(verifier, dict) else None
-    reward = rewards.get("reward") if isinstance(rewards, dict) else None
-    if type(reward) in (int, float) and reward in (0, 1):
+    result_path, trial = trials[0]
+    reward, reward_source = official_harbor_reward(result_path, trial)
+    if reward is not None:
         return {
             "schema": "gt.tb2_attempt_status.v1",
             "task_id": task_id,
             "state": "graded",
             "retryable": False,
-            "reason": "official_verifier_reward",
+            "reason": reward_source,
             "reward": int(reward),
             "trial_results": 1,
         }
