@@ -117,7 +117,6 @@ jobs:
           # central-runtime tests that do not exist on the certified 921bec20
           # tree, causing a planner-only failure before any task was dispatched.
           requested_tests=(
-            tests/test_gt_repository_intelligence.py
             tests/test_gt_central_agent.py
             tests/test_gt_progress.py
             tests/test_provider_preflight.py
