@@ -8,6 +8,7 @@ from scripts.build_swelive_smoke_tasks import DIGESTS, build
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/swelive_gt_harness_paid.yaml"
+DISPATCHER = ROOT / ".github/workflows/swebench_live_lite_full.yml"
 
 
 def test_frozen_five_task_packages_rebuild_exactly(tmp_path: Path) -> None:
@@ -36,3 +37,10 @@ def test_paid_workflow_is_exact_miniswe_union_alpha_and_officially_graded() -> N
     pre = text.index("Prove the official SWE-bench evaluator before any model request")
     paid = text.index("Run SWE-bench-Live through the released gt-harness run boundary")
     assert pre < paid
+
+
+def test_registered_workflow_dispatches_the_certified_workflow() -> None:
+    text = DISPATCHER.read_text(encoding="utf-8")
+    assert "uses: ./.github/workflows/swelive_gt_harness_paid.yaml" in text
+    assert "secrets: inherit" in text
+    assert "cohort_stage: ${{ inputs.cohort_stage }}" in text

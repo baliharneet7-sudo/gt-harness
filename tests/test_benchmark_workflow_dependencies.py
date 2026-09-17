@@ -55,21 +55,24 @@ def test_live_prediction_builder_imports_and_preserves_expected_denominator(
 
 
 def test_live_gt_smoke_is_miniswe_official_and_bound_to_the_imported_source() -> None:
-    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    dispatcher = WORKFLOWS[1].read_text(encoding="utf-8")
+    workflow = (
+        ROOT / ".github" / "workflows" / "swelive_gt_harness_paid.yaml"
+    ).read_text(encoding="utf-8")
     manifest = json.loads(
         (ROOT / "config" / "tb2_gt_import_manifest.json").read_text(encoding="utf-8-sig")
     )
     assert manifest["gt_source_commit"] == (
         "921bec20d3dbabd12e4b442936d9259c24cdcc74"
     )
-    assert "SWE-Live-GT-${{ inputs.mode }} | ${{ inputs.model }}" in workflow
-    assert "secrets.OPENROUTER_NEW || secrets.OPENROUTER_API_KEY" in workflow
-    assert 'MODE_LIMITS = {"smoke": 5, "pilot": 20, "pilot100": 100, "full": 300}' in workflow
+    assert "uses: ./.github/workflows/swelive_gt_harness_paid.yaml" in dispatcher
+    assert "secrets: inherit" in dispatcher
+    assert "secrets.OPENROUTER_NEW" in workflow
     assert "max-parallel: 20" in workflow
-    assert "mini-swe-agent==2.4.5" in workflow
+    assert "mini-swe-agent\"))')\" = \"2.4.6\"" in workflow
     assert "openhands" not in workflow.lower()
-    assert "python3 -m swebench.harness.run_evaluation" in workflow
-    assert "official-verifier progress receipt" in workflow.lower()
-    assert "ref: ${{ inputs.gt_ref || 'gt-trial' }}" in workflow
+    assert "python -m swebench.harness.run_evaluation" in workflow
+    assert "official evaluator disagrees with Pier verifier" in workflow
+    assert 'gt_source_commit != "921bec20d3dbabd12e4b442936d9259c24cdcc74"' in workflow
     assert "uses: ./.github/workflows/deepswe_gt_harness_product.yml" in workflow
-    assert "needs: [prepare, provider_free]" in workflow
+    assert "needs: [plan, readiness, readiness_binding]" in workflow
