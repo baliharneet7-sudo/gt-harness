@@ -47,6 +47,8 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert "Run the real official verifier without a model" in text
     assert "-a nop" in text
     assert '"model_requests": 0' in text
+    assert "Save the verifier-canary image for paid task reuse" in text
+    assert "actions/cache/save@v4" in text
 
 
 def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:

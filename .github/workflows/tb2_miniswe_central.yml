@@ -165,6 +165,14 @@ jobs:
             --username "${{ github.actor }}" --password-stdin
           docker pull "$mirror"
           docker tag "$mirror" "$canonical"
+          docker save "$canonical" | gzip -1 > "${{ runner.temp }}/tb2-img.tar.gz"
+
+      - name: Save the verifier-canary image for paid task reuse
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/tb2-img.tar.gz
+          key: tb2-img-${{ env.TASK }}-${{ env.IMAGE_TAG }}
 
       - name: Run the real official verifier without a model
         shell: bash
