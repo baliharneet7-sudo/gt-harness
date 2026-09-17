@@ -129,8 +129,6 @@ jobs:
           done
           ((${#existing_tests[@]} > 0))
           python -m pytest "${existing_tests[@]}" -q
-          python scripts/central_feature_census.py \
-            --output provider-free-central-census.json >/dev/null
 
       - name: Sanitize API keys (strip BOM / stray whitespace)
         run: |

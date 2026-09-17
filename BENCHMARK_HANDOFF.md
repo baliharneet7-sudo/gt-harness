@@ -40,7 +40,7 @@ new series identifier.
 
 ### TB2
 
-- Attempts `35256152140` and `35257234010` failed in `plan` before task dispatch. The first referenced test files absent from the checked-out tree. After that was fixed, `tests/test_gt_repository_intelligence.py` failed because it asserts a different producer digest and historical commits. No TB2 task was graded and no TB2 image was pulled.
+- Attempts `35256152140`, `35257234010`, and `35257606223` failed in `plan` before task dispatch. The first referenced test files absent from the checked-out tree; the second selected a test tied to a different producer digest and historical commits; the third invoked an absent `scripts/central_feature_census.py` after all selected tests passed. No TB2 task was graded and no TB2 image was pulled.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
 - Retry with the exact branch, model `openrouter/stealth/union-alpha`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
 
