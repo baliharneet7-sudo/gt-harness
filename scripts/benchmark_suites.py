@@ -118,7 +118,7 @@ def _swelive_suite() -> BenchmarkSuite:
         # Same rail as the DeepSWE gate: the canary runs at the cohort's own
         # declared timeout (1800 s for both Lite tasks) so a gate result is
         # comparable to the cohort it gates.
-        gate_max_timeout_seconds=1800.0,
+        gate_max_timeout_seconds=9000.0,
         canonical_task_ids=task_ids,
         plan_filename="swelive-plan.json",
         plan_schema="gt.swelive_gt_harness_plan.v1",

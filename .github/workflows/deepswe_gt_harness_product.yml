@@ -69,10 +69,13 @@ jobs:
           set -euo pipefail
           python scripts/verify/workflow_lint.py \
             .github/workflows/tb2_miniswe_central.yml \
-            .github/workflows/swebench_live_lite_full.yml
+            .github/workflows/swebench_live_lite_full.yml \
+            .github/workflows/swelive_gt_harness_paid.yaml
           python -m pytest -q \
             tests/test_benchmark_progress.py \
             tests/test_tb2_gt_smoke_workflow.py \
+            tests/test_swelive_gt_smoke_workflow.py \
+            tests/test_benchmark_suites.py \
             tests/test_benchmark_workflow_dependencies.py
 
       - name: Prove GT product and Mini-SWE integration

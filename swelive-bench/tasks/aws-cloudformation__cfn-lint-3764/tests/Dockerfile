@@ -1,0 +1,4 @@
+FROM starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3764@sha256:3a1787a94d8589771a6306984fb0826498eb1a63e14ca87c4826e6382f092cc4
+WORKDIR /testbed
+COPY test.sh run_tests.sh grade.py spec.json test_patch.diff /tests/
+RUN chmod +x /tests/test.sh /tests/run_tests.sh

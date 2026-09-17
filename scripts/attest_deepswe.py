@@ -290,9 +290,12 @@ def attest_deepswe(
         or plan.get("treatment") != "groundtruth"
     ):
         errors.append("planned_execution_contract_mismatch")
-    trusted_route, trusted_route_digest = load_route(
-        ROOT / "config" / "provider_route.v1.json"
+    route_name = (
+        "provider_route_union_alpha.v1.json"
+        if suite.suite_id == "swelive"
+        else "provider_route.v1.json"
     )
+    trusted_route, trusted_route_digest = load_route(ROOT / "config" / route_name)
     if (
         plan.get("provider_route_id") != trusted_route.get("route_id")
         or plan.get("provider_route_sha256") != trusted_route_digest

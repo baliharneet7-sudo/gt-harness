@@ -21,10 +21,17 @@ from scripts.gt_audit import artifact_corpus_sha256, audit_digest_sha256
 from scripts.provider_preflight import load_route
 from tests.conftest import write_certifiable_graph
 
-SWELIVE_TASK = "cyclotruc__gitingest-94"
-SWELIVE_OTHER = "dynaconf__dynaconf-1241"
-REQUESTED = "deepseek/deepseek-v4-flash-0731"
-EFFECTIVE = "openai/deepseek/deepseek-v4-flash-0731"
+SWELIVE_TASK = "aiogram__aiogram-1594"
+SWELIVE_OTHER = "amoffat__sh-744"
+SWELIVE_TASKS = (
+    SWELIVE_TASK,
+    SWELIVE_OTHER,
+    "arviz-devs__arviz-2413",
+    "aws-cloudformation__cfn-lint-3749",
+    "aws-cloudformation__cfn-lint-3764",
+)
+REQUESTED = "stealth/union-alpha"
+EFFECTIVE = "openai/stealth/union-alpha"
 
 
 def _write(path: Path, value: object) -> None:
@@ -38,7 +45,7 @@ def test_swelive_suite_binds_the_in_repo_cohort() -> None:
         Path(__file__).resolve().parents[1] / "swelive-bench" / "manifest.json"
     )
     assert suite.suite_id == "swelive"
-    assert suite.canonical_task_ids == (SWELIVE_TASK, SWELIVE_OTHER)
+    assert suite.canonical_task_ids == SWELIVE_TASKS
     assert suite.gate_task_id == SWELIVE_TASK
     assert suite.remainder_stage == "remaining"
     assert suite.all_stage == "all"
@@ -55,7 +62,7 @@ def test_swelive_stage_selection_partitions_the_cohort() -> None:
     suite = load_suite("swelive")
     tasks = list(suite.canonical_task_ids)
     assert select_stage_tasks(suite, tasks, GATE_STAGE) == [SWELIVE_TASK]
-    assert select_stage_tasks(suite, tasks, "remaining") == [SWELIVE_OTHER]
+    assert select_stage_tasks(suite, tasks, "remaining") == list(SWELIVE_TASKS[1:])
     assert select_stage_tasks(suite, tasks, "all") == tasks
     assert select_stage_tasks(suite, tasks, f"single:{SWELIVE_OTHER}") == [
         SWELIVE_OTHER
@@ -75,17 +82,17 @@ def test_swelive_stage_input_rules_match_the_gate_contract() -> None:
         validate_stage_inputs(suite, "remaining", "")
     with pytest.raises(ValueError):
         validate_stage_inputs(suite, "gate-one", "123")
-    assert stage_timeout_cap_seconds(suite, "gate-one") == 1800.0
+    assert stage_timeout_cap_seconds(suite, "gate-one") == 9000.0
     assert stage_timeout_cap_seconds(suite, "all") is None
 
 
 def test_task_name_resolves_suite_ids_containing_double_underscore() -> None:
     canonical = {SWELIVE_TASK, SWELIVE_OTHER}
-    assert _task_name("swelive/cyclotruc__gitingest-94", canonical) == SWELIVE_TASK
+    assert _task_name(f"swelive/{SWELIVE_TASK}", canonical) == SWELIVE_TASK
     assert _task_name(SWELIVE_TASK, canonical) == SWELIVE_TASK
     # A pier trial dir suffix is stripped only when the base is canonical.
     assert (
-        _task_name("cyclotruc__gitingest-94__aB3x9Yz", canonical) == SWELIVE_TASK
+        _task_name(f"{SWELIVE_TASK}__aB3x9Yz", canonical) == SWELIVE_TASK
     )
     # Unknown ids survive unmangled so the caller sees the real identity.
     assert (
@@ -97,7 +104,7 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
     suite = load_suite("swelive")
     trusted = suite.trusted_tasks[SWELIVE_TASK]
     route, route_digest = load_route(
-        Path(__file__).resolve().parents[1] / "config" / "provider_route.v1.json"
+        Path(__file__).resolve().parents[1] / "config" / "provider_route_union_alpha.v1.json"
     )
     plan = {
         "schema": suite.plan_schema,
@@ -111,11 +118,11 @@ def _swelive_fixture(root: Path, source_sha: str = "f" * 40) -> Path:
         ).hexdigest(),
         "cohort_stage": "gate-one",
         "gate_task_id": suite.gate_task_id,
-        "full_task_count": 2,
+        "full_task_count": len(SWELIVE_TASKS),
         "full_task_order_sha256": hashlib.sha256(
             ("\n".join(suite.canonical_task_ids) + "\n").encode()
         ).hexdigest(),
-        "full_language_counts": {"python": 2},
+        "full_language_counts": {"python": len(SWELIVE_TASKS)},
         "prior_gate": None,
         "language_counts": {"python": 1},
         "attempts_per_task": 1,

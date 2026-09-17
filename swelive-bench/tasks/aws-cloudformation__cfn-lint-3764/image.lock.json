@@ -1,0 +1,7 @@
+{
+  "schema": "swelive-bench.image-lock/v1",
+  "instance_id": "aws-cloudformation__cfn-lint-3764",
+  "container_image": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3764",
+  "container_digest": "sha256:3a1787a94d8589771a6306984fb0826498eb1a63e14ca87c4826e6382f092cc4",
+  "docker_image_ref_used_in_task_toml": "starryzhang/sweb.eval.x86_64.aws-cloudformation_1776_cfn-lint-3764@sha256:3a1787a94d8589771a6306984fb0826498eb1a63e14ca87c4826e6382f092cc4"
+}
