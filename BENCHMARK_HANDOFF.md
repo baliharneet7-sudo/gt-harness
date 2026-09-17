@@ -6,7 +6,21 @@ free of API keys, account emails, project IDs, and other credentials.
 
 ## Fixed experiment contract
 
-- Model: `stealth/union-alpha` through OpenRouter (`https://openrouter.ai/api/v1`).
+- Model: `unbiased/pareto` through OpenRouter (`https://openrouter.ai/api/v1`),
+  provider-pinned to the `unbiased` tag. **`stealth/union-alpha` is retired** -
+  OpenRouter ended the Stealth Union Alpha preview on 2026-09-17 and now serves
+  the deployment under its revealed name. Run `35283782651` died at agent turn 2
+  with `litellm.NotFoundError` carrying the provider's own notice. Any dispatch
+  against the old id 404s. Do not route the new id to the `stealth` tag.
+- Comparability warning: `unbiased/pareto` has NO GT-off baseline. The three
+  TB2 GT-off baselines are (A) `D:\gt_runsull89_2026-07-29` nano-harness
+  45/88, self-labelled an orientation baseline and not a paired reference;
+  (B) `D:\gt_runs\miniswe_tb2_gtoff_20260731` mini-swe-agent 2.2.8, **66/89**,
+  the frozen paired reference; (C) `D:\gt_runs	b2_gtoff_oxalpha_20260821`
+  stealth/ox-alpha 48/82. A and B are `deepseek-v4-flash`. Pareto results are a
+  standalone arm plus harness validation, not baseline-comparable.
+  `scripts/provider_preflight.py` records that `deepseek-v4-flash-0731/relace`
+  is the only route whose results may be cited against the frozen baselines.
 - GT source: `921bec20d3dbabd12e4b442936d9259c24cdcc74`.
 - The object IDs in `config/tb2_gt_import_manifest.json` must remain unchanged.
 - Official SWE-Live grader: Microsoft SWE-bench-Live verifier.
@@ -20,7 +34,7 @@ free of API keys, account emails, project IDs, and other credentials.
 
 For each benchmark, report exactly:
 
-`Model: stealth/union-alpha | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
+`Model: unbiased/pareto | Tasks completed: N | Tasks left: N | Tasks success: N | Tasks failed (incorrect): N | Tasks failed (infrastructure): N`
 
 Only an official verifier result counts as completed. An incorrect patch is a
 graded failure. Missing setup, image, provider, parser, verifier, or artifact
@@ -44,7 +58,7 @@ new series identifier.
 - TB2 now sets both `OPENAI_API_KEY` and `OPENROUTER_API_KEY` from `secrets.OPENROUTER_NEW` in its plan and task environments, matching the proven SWE-Live route.
 - The TB2 infrastructure count exceeded five in this first series, so that series is closed. The Snowflake hashes are now bound in both plan and task jobs. The next dispatch starts a fresh TB2 series with infrastructure count 0.
 - The planner list is now limited to source-compatible central-agent, progress, provider-preflight, budget, and outcome tests in `.github/workflows/tb2_miniswe_engine.yml`. Push this fix to both benchmark accounts before retrying TB2.
-- Retry with the exact branch, model `openrouter/stealth/union-alpha`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
+- Retry with the exact branch, model `unbiased/pareto`, `parallel=20`, `arm=certified_full`, and the documented smoke task list.
 
 ### TB2 root cause, corrected 2026-09-17
 

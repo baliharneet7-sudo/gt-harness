@@ -55,7 +55,7 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert '"exact_pier_environment_executed": "PASS"' in text
     assert "-a nop" in text
     assert '"task_model_requests": 0' in text
-    assert "config/provider_route_union_alpha.v1.json" in text
+    assert "config/provider_route_unbiased_pareto.v1.json" in text
     assert "scripts.provider_preflight" in text
     assert '"provider_route_live_canary": "PASS"' in text
     assert "GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}" in text
@@ -71,8 +71,8 @@ def test_gt_smoke_uses_official_harbor_grades_and_retains_evidence() -> None:
     assert "pier run" in text
     assert "Run one official Pier TB2 trial" in text
     assert 'DATASET: terminal-bench@2.0' in text
-    assert 'MODEL: stealth/union-alpha' in text
-    assert '--effective-model "openai/stealth/union-alpha"' in text
+    assert 'MODEL: unbiased/pareto' in text
+    assert '--effective-model "openai/unbiased/pareto"' in text
     assert "secrets.OPENROUTER_NEW" in text
     assert "scripts.benchmark_progress emit-harbor" in text
     assert '"official_verifier": True' in parser
