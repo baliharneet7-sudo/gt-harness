@@ -76,3 +76,11 @@ def test_workflow_uses_one_pull_and_retains_image_by_id():
         "--agent-import-path "
         "eval.pier_gt_harness_adapter:PierGtHarnessMiniSwe246Agent"
     ) in text
+
+
+def test_prewarm_bounds_dense_work_before_the_provider():
+    text = (ROOT / "benchmarks/swelive_harness/prewarm_graph.py").read_text(
+        encoding="utf-8"
+    )
+    assert "embedding_budget_seconds=1.0" in text
+    assert '"dense_refresh_deferred_to_runtime": True' in text

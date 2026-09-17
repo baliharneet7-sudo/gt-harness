@@ -49,6 +49,11 @@ def main() -> int:
         excluded_roots=layout.excluded_roots,
         contract_store_path=layout.contract_store_path,
         source_revision=source_revision,
+        # Pre-spend exists only to close the graph-publication/edit race.  A
+        # cold dense sidecar can take many minutes and is a cache, so give its
+        # planner a deliberately impossible budget here.  The normal runtime
+        # refreshes it asynchronously after the provider session starts.
+        embedding_budget_seconds=1.0,
     )
     if not receipt.success or not receipt.graph_db:
         raise RuntimeError(
@@ -64,6 +69,7 @@ def main() -> int:
             "state_root": str(state_root),
             "source_revision": source_revision,
             "ready_before_provider": True,
+            "dense_refresh_deferred_to_runtime": True,
             "status": "ready",
         }
     )
