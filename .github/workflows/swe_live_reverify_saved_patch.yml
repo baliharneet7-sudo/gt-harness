@@ -1,0 +1,186 @@
+name: "SWE-Live: Reverify saved patch"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Completed workflow run containing the ll-full task artifact"
+        required: true
+        type: string
+      task_id:
+        description: "Exact SWE-bench Live instance ID"
+        required: true
+        type: string
+      verifier_timeout_seconds:
+        description: "Official harness per-instance timeout"
+        required: true
+        default: "3600"
+        type: string
+      image_owner:
+        description: "GHCR owner containing the public Live task image"
+        required: true
+        default: "hbali-stack"
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+
+jobs:
+  reverify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HF_DATASETS_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_OFFLINE: "1"
+      TASK_ID: ${{ inputs.task_id }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      VERIFIER_TIMEOUT_SECONDS: ${{ inputs.verifier_timeout_seconds }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download the original task artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ll-full-${{ inputs.task_id }}
+          path: /tmp/source
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Validate saved patch and source grade
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s /tmp/source/agent_patch.diff
+          test -s /tmp/source/official_grade.json
+          python3 - <<'PY'
+          import json, os
+          grade = json.load(open("/tmp/source/official_grade.json", encoding="utf-8"))
+          if grade.get("instance_id") != os.environ["TASK_ID"]:
+              raise SystemExit(f"source task mismatch: {grade.get('instance_id')!r}")
+          if grade.get("status") != "infrastructure" or grade.get("reward") is not None:
+              raise SystemExit(f"source grade is not an unresolved infrastructure result: {grade}")
+          PY
+          PATCH_SHA=$(sha256sum /tmp/source/agent_patch.diff | cut -d' ' -f1)
+          echo "patch_sha256=$PATCH_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Install official SWE-bench-Live evaluator
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
+          python -m pip install -q /tmp/SWE-bench-Live
+
+      - name: Fetch the full local Lite dataset without Git LFS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p benchmarks/data
+          gh release download pipeline-assets-v1 \
+            -p swebench_live_lite.jsonl \
+            -O /tmp/swebench_live_lite.jsonl
+          mv /tmp/swebench_live_lite.jsonl benchmarks/data/swebench_live_lite.jsonl
+          python3 - <<'PY'
+          import json, os
+          task = os.environ["TASK_ID"]
+          found = False
+          with open("benchmarks/data/swebench_live_lite.jsonl", encoding="utf-8") as stream:
+              for line in stream:
+                  if line.strip() and json.loads(line).get("instance_id") == task:
+                      found = True
+                      break
+          if not found:
+              raise SystemExit(f"task {task!r} absent from official local dataset")
+          PY
+
+      - name: Pull the public cached task image and tag it for the harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO=$(echo "$TASK_ID" | cut -d'_' -f1)
+          REST=$(echo "$TASK_ID" | sed "s/^${REPO}__//")
+          BASENAME="sweb.eval.x86_64.${REPO}_1776_${REST}"
+          SOURCE_IMAGE="ghcr.io/${{ inputs.image_owner }}/${BASENAME}:latest"
+          docker pull "$SOURCE_IMAGE"
+          docker tag "$SOURCE_IMAGE" "starryzhang/${BASENAME}:latest"
+          echo "SOURCE_IMAGE=$SOURCE_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run the official evaluator on the exact saved patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/reverify
+          python3 - <<'PY'
+          import json, os
+          patch = open("/tmp/source/agent_patch.diff", encoding="utf-8").read()
+          prediction = {
+              "instance_id": os.environ["TASK_ID"],
+              "model_patch": patch,
+              "model_name_or_path": "mini-swe-agent + stealth/union-alpha (baseline; saved-patch reverify)",
+          }
+          with open("/tmp/reverify/prediction.jsonl", "w", encoding="utf-8") as stream:
+              stream.write(json.dumps(prediction) + "\n")
+          PY
+          python3 -m swebench.harness.run_evaluation \
+            --dataset_name benchmarks/data/swebench_live_lite.jsonl \
+            --predictions_path /tmp/reverify/prediction.jsonl \
+            --instance_ids "$TASK_ID" \
+            --namespace starryzhang \
+            --run_id "reverify_${TASK_ID}" \
+            --max_workers 1 \
+            --timeout "$VERIFIER_TIMEOUT_SECONDS" \
+            --cache_level env 2>&1 | tee /tmp/reverify/evaluator.log
+
+      - name: Seal official result and provenance
+        env:
+          PATCH_SHA256: ${{ steps.source.outputs.patch_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPORT=$(find "logs/run_evaluation/reverify_${TASK_ID}" -name report.json -print -quit)
+          test -n "$REPORT"
+          cp "$REPORT" /tmp/reverify/report.json
+          python3 - <<'PY'
+          import hashlib, json, os
+          report_path = "/tmp/reverify/report.json"
+          report = json.load(open(report_path, encoding="utf-8"))
+          value = (list(report.values())[0] if report else {}) or {}
+          reward = 1 if value.get("resolved") else 0
+          receipt = {
+              "schema": "gt.swebench_live.saved_patch_reverification.v1",
+              "instance_id": os.environ["TASK_ID"],
+              "source_run_id": os.environ["SOURCE_RUN_ID"],
+              "source_patch_sha256": os.environ["PATCH_SHA256"],
+              "verifier_timeout_seconds": int(os.environ["VERIFIER_TIMEOUT_SECONDS"]),
+              "official_verifier": True,
+              "reward": reward,
+              "state": "passed" if reward == 1 else "verifier_failed",
+              "report_sha256": hashlib.sha256(open(report_path, "rb").read()).hexdigest(),
+              "model": "stealth/union-alpha",
+              "model_rerun": False,
+          }
+          with open("/tmp/reverify/reverification.json", "w", encoding="utf-8") as stream:
+              json.dump(receipt, stream, indent=2)
+              stream.write("\n")
+          print(json.dumps(receipt, indent=2))
+          PY
+
+      - name: Upload re-verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swe-live-reverify-${{ inputs.source_run_id }}-${{ inputs.task_id }}
+          path: /tmp/reverify/
+          if-no-files-found: error
+          retention-days: 90
