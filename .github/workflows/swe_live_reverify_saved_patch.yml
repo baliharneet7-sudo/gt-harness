@@ -80,26 +80,25 @@ jobs:
           git clone --depth 1 --branch python-only https://github.com/microsoft/SWE-bench-Live.git /tmp/SWE-bench-Live
           python -m pip install -q /tmp/SWE-bench-Live
 
-      - name: Fetch the full local Lite dataset without Git LFS
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Validate the checked-in full local Lite dataset
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p benchmarks/data
-          gh release download pipeline-assets-v1 \
-            -p swebench_live_lite.jsonl \
-            -O /tmp/swebench_live_lite.jsonl
-          mv /tmp/swebench_live_lite.jsonl benchmarks/data/swebench_live_lite.jsonl
           python3 - <<'PY'
           import json, os
+          dataset = "benchmarks/data/swebench_live_lite.jsonl"
           task = os.environ["TASK_ID"]
           found = False
-          with open("benchmarks/data/swebench_live_lite.jsonl", encoding="utf-8") as stream:
+          rows = 0
+          with open(dataset, encoding="utf-8") as stream:
               for line in stream:
-                  if line.strip() and json.loads(line).get("instance_id") == task:
+                  if not line.strip():
+                      continue
+                  rows += 1
+                  if json.loads(line).get("instance_id") == task:
                       found = True
-                      break
+          if rows != 300:
+              raise SystemExit(f"expected 300 checked-in Lite rows, found {rows}")
           if not found:
               raise SystemExit(f"task {task!r} absent from official local dataset")
           PY
