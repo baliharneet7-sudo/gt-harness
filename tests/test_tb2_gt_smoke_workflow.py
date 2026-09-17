@@ -54,7 +54,12 @@ def test_gt_smoke_keeps_the_frozen_execution_envelope() -> None:
     assert 'm.version("datacurve-pier")' in text
     assert '"exact_pier_environment_executed": "PASS"' in text
     assert "-a nop" in text
-    assert '"model_requests": 0' in text
+    assert '"task_model_requests": 0' in text
+    assert "config/provider_route_union_alpha.v1.json" in text
+    assert "scripts.provider_preflight" in text
+    assert '"provider_route_live_canary": "PASS"' in text
+    assert "GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}" in text
+    assert "GT_PROVIDER_ROUTING_JSON: ${{ needs.pre_spend.outputs.provider_routing_json }}" in text
     assert "Save the verifier-canary image for paid task reuse" in text
     assert "actions/cache/save@v4" in text
 

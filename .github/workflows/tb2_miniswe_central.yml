@@ -149,9 +149,15 @@ jobs:
     needs: [plan, provider_free]
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      context_window_tokens: ${{ steps.provider.outputs.context_window_tokens }}
+      reserved_output_tokens: ${{ steps.provider.outputs.reserved_output_tokens }}
+      context_window_source: ${{ steps.provider.outputs.context_window_source }}
+      provider_routing_json: ${{ steps.provider.outputs.provider_routing_json }}
     env:
       TASK: extract-elf
       PYTHONPATH: ${{ github.workspace }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -236,7 +242,7 @@ jobs:
             -n 1 -l 1 -y \
             -i "$TASK"
 
-      - name: Parse and certify official-verifier evidence
+      - name: Parse and validate official-verifier evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -258,6 +264,67 @@ jobs:
           assert task["official_verifier"] is True
           assert task["state"] in {"passed", "verifier_failed"}
           assert task["reward"] in {0, 1}
+          PY
+
+      - name: Sanitize the OpenRouter key before the live route gate
+        run: |
+          python - <<'PY'
+          import os
+          clean = os.environ.get("OPENROUTER_API_KEY", "").replace("\ufeff", "").strip()
+          if not clean or not clean.isascii():
+              raise SystemExit("OPENROUTER_API_KEY is missing or invalid")
+          print(f"::add-mask::{clean}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"OPENROUTER_API_KEY={clean}\n")
+          PY
+
+      - name: Prove the locked Union Alpha route with a live canary
+        id: provider
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m scripts.provider_preflight \
+            --manifest config/provider_route_union_alpha.v1.json \
+            --output provider-preflight.json \
+            --source-sha "$TREATMENT_SHA" \
+            --live
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          receipt = json.loads(Path("provider-preflight.json").read_text(encoding="utf-8"))
+          assert receipt["status"] == "PASS"
+          assert receipt["provider_ready"] is True
+          assert receipt["model"] == "stealth/union-alpha"
+          assert receipt["provider_routing"] == {
+              "only": ["stealth"],
+              "allow_fallbacks": False,
+              "require_parameters": True,
+          }
+          values = {
+              "context_window_tokens": receipt["context_window_tokens"],
+              "reserved_output_tokens": receipt["reserved_output_tokens"],
+              "context_window_source": receipt["context_window_source"],
+              "provider_routing_json": json.dumps(
+                  receipt["provider_routing"], separators=(",", ":")
+              ),
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for name, value in values.items():
+                  out.write(f"{name}={value}\n")
+          PY
+
+      - name: Seal the complete pre-spend certification
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          progress = json.loads(Path("pre-spend-progress.json").read_text(encoding="utf-8"))
+          task = progress["tasks"][0]
+          provider = json.loads(Path("provider-preflight.json").read_text(encoding="utf-8"))
           receipt = {
               "schema": "gt.benchmark_pre_spend.v1",
               "status": "PASS",
@@ -270,8 +337,11 @@ jobs:
                   "official_verifier_executed": "PASS",
                   "parser_accepted_official_evidence": "PASS",
                   "infrastructure_classification": "PASS",
-                  "model_requests": 0,
+                  "provider_route_live_canary": "PASS",
+                  "provider_canary_requests": provider["provider_inference_calls"],
+                  "task_model_requests": 0,
               },
+              "provider_preflight": provider,
           }
           Path("pre-spend-certification.json").write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -285,6 +355,7 @@ jobs:
           path: |
             pre-spend-certification.json
             pre-spend-progress.json
+            provider-preflight.json
             results/pre-spend/
           if-no-files-found: error
           retention-days: 90
@@ -303,6 +374,10 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_NEW }}
       OPENAI_API_KEY: ${{ secrets.OPENROUTER_NEW }}
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
+      GT_PROVIDER_CONTEXT_WINDOW_TOKENS: ${{ needs.pre_spend.outputs.context_window_tokens }}
+      GT_PROVIDER_RESERVED_OUTPUT_TOKENS: ${{ needs.pre_spend.outputs.reserved_output_tokens }}
+      GT_PROVIDER_CONTEXT_WINDOW_SOURCE: ${{ needs.pre_spend.outputs.context_window_source }}
+      GT_PROVIDER_ROUTING_JSON: ${{ needs.pre_spend.outputs.provider_routing_json }}
       GT_RETRIEVAL_MODE: hybrid_required
       GT_TREATMENT: groundtruth
       GT_JOURNAL_TEE: "1"
